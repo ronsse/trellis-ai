@@ -5089,19 +5089,51 @@ valid: `external` is accepted only as `read,external`, and
 - **No MCP tool mints a key.** A token is a credential, and a mint tool would
   give an agent a way to widen its own access. Mint from the CLI, the REST route
   or the UI.
-- **Errors.** An unknown key id answers 404, an already-revoked one 409, and an
-  invalid scope list 400; the CLI exits 2 for all three, as before.
+- **Mint and revoke need an identified admin credential, in every auth mode.**
+  The REST routes and `revoke_api_key` refuse a caller that is not a stored key
+  holding `admin`, or the shared `TRELLIS_API_KEY` secret (which the server
+  treats as admin; the audit event names it `shared-secret`). That includes the
+  anonymous caller of `TRELLIS_AUTH_MODE=off` or `optional`, which otherwise
+  holds every scope: it answers 403 and points at `trellis admin api-keys`. This
+  is a change for those modes, where an anonymous caller could not be told apart
+  from an admin. Listing is unchanged. The Keys tab says so when no key is
+  stored in the browser. Because a live admin is required and a caller cannot
+  revoke its own key, REST and MCP can never remove the last admin; only the CLI
+  can.
+- **Errors.** An unknown key id answers 404, an already-revoked one 409, an
+  invalid scope list or name 400, and a policy that denies the operation 400 (as
+  the other write routes do). A store that is degraded or stale, a corrupt
+  `policies.json` and a duplicate answer 409. A server fault answers 500 with a
+  fixed message and no exception text. The CLI exits 2 for the first three, as
+  before, and 5 for a corrupt `policies.json`.
+- **Names** are 1 to 120 characters with no control character (NUL, newline,
+  ESC and the rest of Unicode category `C`, plus line and paragraph
+  separators), on every surface including the CLI. A name stored before the rule
+  still lists, and the CLI table prints control characters escaped.
 - **A caller cannot revoke the key it is authenticated with.** The REST route and
   the MCP tool answer with a refusal (409 on REST) and the key stays live, so an
   admin cannot lock itself out by a misclick. The CLI has no authenticated key
-  and can revoke any key, which makes it the recovery path.
+  and can revoke any key, so it is the recovery path except in one case: a
+  corrupt `policies.json` fails Stage 2 closed (CLI exit 5, REST 409, the message
+  names the file), and until that file is fixed or removed no surface, the CLI
+  included, can mint or revoke.
 - **Audit events.** A mint emits `api_key.minted` and a revoke emits
   `api_key.revoked`, from whichever surface did the work, the CLI included. The
   payload is `key_id`, `name`, `scopes`, `minted_by` / `revoked_by` and, when the
   caller was an API key, `actor_key_id` and `actor_key_name`. It never holds the
   token, the secret or its hash. A refused attempt emits `mutation.rejected`
   instead. The generic `execute_mutation` tool and `POST /commands/batch` have no
-  handler for these operations, so neither can mint or revoke a key.
+  handler for these operations, so neither can mint or revoke a key. Key
+  operations are neither an accept nor a reject for capture health: refusals do
+  not raise the banner and a mint does not clear one.
+- **A failed audit write never changes the outcome.** If the key store write
+  succeeded and the event cannot be recorded, the operation answers success with
+  the warning `audit_event_not_recorded` (a mint still returns its token), and an
+  error log names the command, key id and operation, never a secret. Warnings
+  (this one and any `warn`-verdict policy) are in the REST body, the CLI's text
+  and JSON, the MCP result and the Keys tab. The CLI also succeeds and warns when
+  the event log cannot be opened at all, so a corrupt `events.db` cannot keep a
+  compromised key live.
 - Not covered: expiry, a last-used stamp, editing a key's scopes, per-key domain
   limits.
 

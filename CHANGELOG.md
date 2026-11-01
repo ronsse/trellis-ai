@@ -18,6 +18,24 @@ All notable changes to Trellis will be documented in this file.
   everywhere. A caller cannot revoke the key it is authenticated with (the CLI still can). An
   `external` key is refused on all of it. No change to the `trellis_api_keys` table.
 
+  **Behaviour to know before deploying.** (1) REST mint and revoke, and the MCP
+  `revoke_api_key`, need an identified credential that holds `admin` in every auth mode, or
+  the shared secret; the anonymous caller of `TRELLIS_AUTH_MODE=off` or `optional`, which
+  otherwise holds every scope, now gets 403 pointing at `trellis admin api-keys`. With that
+  and the self-revoke refusal, REST and MCP cannot remove the last admin; the CLI can.
+  (2) A failed audit write never changes the outcome: the key operation answers success with
+  the warning `audit_event_not_recorded` (a mint still returns its token), and warnings now
+  reach the REST body, the CLI text and JSON, MCP and the UI. A true server fault answers 500
+  with no exception text. (3) The CLI succeeds and warns when `events.db` is corrupt, so a
+  compromised key can still be revoked. A corrupt `policies.json` is the exception: it fails
+  closed (CLI exit 5, REST 409, the message names the file), and until that file is fixed
+  no surface can mint or revoke. (4) A key name is 1 to 120 characters with no control
+  character, on every surface. (5) Key operations are neither an accept nor a reject for
+  capture health. (6) **Deploy order:** once an `api_key.*` event exists, an older build's
+  `GET /api/v1/events` answers 500 on the unknown event type; redeploy every server before
+  minting or revoking through the new build. A policy denial answers 400, like the other
+  write routes.
+
 - **An `external` key reads only what someone labelled `public`.** `trellis admin api-keys
   create --scopes read,external` mints a key whose clearance is a new lowest rung, `public`.
   A pack, search, `GET /documents` or `get_items` serves it only a stored document labelled

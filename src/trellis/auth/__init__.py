@@ -6,6 +6,7 @@ semantics, and ``trellis_api.auth`` for the FastAPI dependency layer.
 
 from trellis.auth.api_keys import (
     ALL_SCOPES,
+    API_KEY_NAME_MAX_CHARS,
     KEY_PRESETS,
     KEY_SCOPES,
     SCOPE_ADMIN,
@@ -17,6 +18,7 @@ from trellis.auth.api_keys import (
     SCOPE_RESTRICTED,
     SHOWN_ONCE_WARNING,
     TOKEN_PREFIX,
+    api_key_name_refusal,
     api_key_public_row,
     clearance_of,
     external_scope_refusal,
@@ -40,7 +42,9 @@ __all__ = [
     "SCOPE_READ",
     "SCOPE_RESTRICTED",
     "TOKEN_PREFIX",
+    "API_KEY_NAME_MAX_CHARS",
     "SHOWN_ONCE_WARNING",
+    "api_key_name_refusal",
     "api_key_public_row",
     "clearance_of",
     "external_scope_refusal",

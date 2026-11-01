@@ -80,7 +80,10 @@ class TestListApiKeys:
 
 
 class TestRevokeApiKey:
-    def test_revokes_and_emits_an_event(self, temp_registry: StoreRegistry) -> None:
+    def test_revokes_and_emits_an_event(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(server_mod, "current_principal_id", lambda: "aaaaaaaaaaaa")
         key_id = _seed(temp_registry, [SCOPE_READ], "victim")
         payload = json.loads(revoke_api_key(key_id=key_id))
         assert payload == {"status": "ok", "key_id": key_id}
@@ -91,8 +94,9 @@ class TestRevokeApiKey:
         assert events[0].payload["revoked_by"] == "mcp:revoke_api_key"
 
     def test_unknown_and_already_revoked_are_refused(
-        self, temp_registry: StoreRegistry
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        monkeypatch.setattr(server_mod, "current_principal_id", lambda: "aaaaaaaaaaaa")
         unknown = json.loads(revoke_api_key(key_id="ffffffffffff"))
         assert unknown["status"] == "rejected"
         assert unknown["reason"] == "unknown_key_id"
@@ -112,3 +116,35 @@ class TestRevokeApiKey:
         record = temp_registry.operational.api_key_store.get(key_id)
         assert record is not None
         assert record.revoked_at is None
+
+    def test_an_unidentified_caller_is_refused_and_pointed_at_the_cli(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        key_id = _seed(temp_registry, [SCOPE_ADMIN], "last-admin")
+        payload = json.loads(revoke_api_key(key_id=key_id))
+        assert payload["status"] == "rejected"
+        assert payload["reason"] == "unidentified_caller"
+        assert "trellis admin api-keys revoke" in payload["message"]
+        record = temp_registry.operational.api_key_store.get(key_id)
+        assert record is not None
+        assert record.revoked_at is None
+
+    def test_a_dead_event_log_still_revokes_and_warns(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import sqlite3
+
+        monkeypatch.setattr(server_mod, "current_principal_id", lambda: "aaaaaaaaaaaa")
+        key_id = _seed(temp_registry, [SCOPE_READ], "victim")
+
+        def boom(*_a: object, **_k: object) -> None:
+            msg = "disk I/O error"
+            raise sqlite3.OperationalError(msg)
+
+        monkeypatch.setattr(temp_registry.operational.event_log, "emit", boom)
+        payload = json.loads(revoke_api_key(key_id=key_id))
+        assert payload["status"] == "ok"
+        assert any("audit_event_not_recorded" in w for w in payload["warnings"])
+        record = temp_registry.operational.api_key_store.get(key_id)
+        assert record is not None
+        assert record.revoked_at is not None

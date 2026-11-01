@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import unicodedata
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -181,6 +182,38 @@ SHOWN_ONCE_WARNING = (
 )
 
 
+#: The longest key name any surface accepts, counted after surrounding
+#: whitespace is stripped. A stored name longer than this still lists: the
+#: bound is enforced on the way in, never on the way out.
+API_KEY_NAME_MAX_CHARS = 120
+
+
+def api_key_name_refusal(name: str) -> str | None:
+    """Why ``name`` cannot label a new key, or ``None`` when it can.
+
+    The one rule every mint surface applies (:func:`generate_api_key`, which the
+    CLI, the REST route and the UI reach, and the mint handler's own re-check):
+    non-empty, at most :data:`API_KEY_NAME_MAX_CHARS` characters, and no
+    control, format, separator-line or unassigned character (Unicode category
+    ``C*``, ``Zl``, ``Zp``). A name is echoed on a terminal, in a table and in an
+    audit event, so a newline or an escape sequence in one is a way to forge
+    what the reader sees.
+    """
+    if not name or not name.strip():
+        return "API key name must be a non-empty string"
+    if len(name) > API_KEY_NAME_MAX_CHARS:
+        return (
+            f"API key name is {len(name)} characters; "
+            f"the limit is {API_KEY_NAME_MAX_CHARS}"
+        )
+    if any(
+        unicodedata.category(c)[0] == "C" or unicodedata.category(c) in ("Zl", "Zp")
+        for c in name
+    ):
+        return "API key name must not contain control or non-printing characters"
+    return None
+
+
 def parse_scope_list(scopes: str | Iterable[str]) -> list[str]:
     """Split a comma-separated scope list and validate it; loud on unknowns.
 
@@ -242,9 +275,9 @@ def generate_api_key(name: str, scopes: Iterable[str]) -> tuple[str, ApiKeyRecor
     scope-dropping.
     """
     clean_name = name.strip()
-    if not clean_name:
-        msg = "API key name must be a non-empty string"
-        raise ValueError(msg)
+    name_refusal = api_key_name_refusal(clean_name)
+    if name_refusal is not None:
+        raise ValueError(name_refusal)
     scope_tuple = tuple(dict.fromkeys(scopes))  # de-dupe, keep order
     if not scope_tuple:
         msg = "API key must carry at least one scope"

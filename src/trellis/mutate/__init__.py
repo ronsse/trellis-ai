@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import structlog
+
 from trellis.mutate.commands import (
     BatchStrategy,
     Command,
@@ -45,7 +47,10 @@ from trellis.mutate.reserved_metadata import (
 
 if TYPE_CHECKING:
     from trellis.schemas.classification import Sensitivity
+    from trellis.stores.base.event_log import EventLog
     from trellis.stores.registry import StoreRegistry
+
+logger = structlog.get_logger(__name__)
 
 
 def build_curate_executor(
@@ -202,7 +207,9 @@ def build_classify_rules_executor(registry: StoreRegistry) -> MutationExecutor:
     )
 
 
-def build_api_keys_executor(registry: StoreRegistry) -> MutationExecutor:
+def build_api_keys_executor(
+    registry: StoreRegistry, *, tolerate_unopenable_event_log: bool = False
+) -> MutationExecutor:
     """Build a :class:`MutationExecutor` wired with ONLY the API-key handlers.
 
     Mirrors :func:`build_settings_executor`, and for a sharper reason:
@@ -212,15 +219,40 @@ def build_api_keys_executor(registry: StoreRegistry) -> MutationExecutor:
     cannot mint a credential through them. The admin REST routes, ``trellis
     admin api-keys`` and the MCP revoke tool build their executor here. Stage 2
     runs as everywhere (``tests/unit/test_policy_gate_rule.py``).
+
+    ``tolerate_unopenable_event_log`` is for ``trellis admin api-keys``, the
+    recovery path for a leaked key: with it set, an event log that cannot be
+    opened is replaced by a :class:`~trellis.stores.null.event_log.NullEventLog`
+    (logged at ``error``), so the key operation still runs and its result says
+    the audit record is missing. A corrupt ``policies.json`` is not tolerated:
+    Stage 2 stays fail-closed (``ConfigError``).
     """
     from trellis.mutate.handlers import create_api_key_handlers  # noqa: PLC0415
     from trellis.mutate.policy_source import build_policy_gate  # noqa: PLC0415
 
+    event_log = _open_event_log(registry, tolerate=tolerate_unopenable_event_log)
     return MutationExecutor(
-        event_log=registry.operational.event_log,
+        event_log=event_log,
         handlers=create_api_key_handlers(registry),
         policy_gate=build_policy_gate(registry),
     )
+
+
+def _open_event_log(registry: StoreRegistry, *, tolerate: bool) -> EventLog:
+    """The registry's event log, or a no-op one if ``tolerate`` and it will not open."""
+    try:
+        return registry.operational.event_log
+    # GRACEFUL-DEGRADATION: the caller opted in; the failure is logged at
+    # error here and stated on every result by the handlers' guarded emit.
+    except Exception as exc:
+        if not tolerate:
+            raise
+        from trellis.stores.null.event_log import NullEventLog  # noqa: PLC0415
+
+        logger.error(  # noqa: TRY400 -- no traceback: a driver's text can carry values
+            "api_keys_event_log_unopenable", error_type=type(exc).__name__
+        )
+        return NullEventLog()
 
 
 def redirect_unreachable_settings_update(result: CommandResult) -> CommandResult:

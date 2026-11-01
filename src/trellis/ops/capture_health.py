@@ -241,6 +241,24 @@ NON_CAPTURE_SURFACES: frozenset[str] = frozenset(
     {"mcp:record_feedback", "config:advisory_file", "config:classify_overrides"}
 )
 
+#: Governed operations that are not capture, whichever surface runs them.
+#:
+#: Minting or revoking an API key writes no experience, so one of these
+#: counts as neither a rejection nor an accept: three refused revokes must not
+#: raise "capture is failing", and one successful mint must not clear a real
+#: banner. A surface deny-list cannot say this, because REST stamps
+#: ``requested_by`` per key (``api:<key>``) and the same label also ingests; the
+#: filter is on the event's ``operation`` instead. The literals are spelled out
+#: (``ops`` does not import ``trellis.mutate``) and pinned equal to
+#: ``Operation.API_KEY_MINT`` / ``API_KEY_REVOKE`` by
+#: ``tests/unit/ops/test_capture_health_key_operations.py``.
+NON_CAPTURE_OPERATIONS: frozenset[str] = frozenset({"api_key.mint", "api_key.revoke"})
+
+#: How many of a surface's newest accepts are read when some may be key
+#: operations. Key operations are human-rate, so a few pages bound the walk.
+_ACCEPT_PAGE = 20
+_ACCEPT_MAX_PAGES = 5
+
 #: Accept events that clear a capture surface **in addition to** the
 #: executor's ``MUTATION_EXECUTED``, keyed by surface label (#461).
 #:
@@ -401,6 +419,8 @@ def _rejections_by_surface(
         for event in scan.events:
             if str(event.payload.get("reason") or "") == _REPLAY_REASON:
                 continue
+            if event.payload.get("operation") in NON_CAPTURE_OPERATIONS:
+                continue
             name = str(event.payload.get(payload_key) or "") or _UNKNOWN_SURFACE
             label = _surface_label(name, payload_key)
             counts[label] = counts.get(label, 0) + 1
@@ -444,6 +464,37 @@ def accept_events_for(label: str) -> tuple[EventType, ...]:
     return (EventType.MUTATION_EXECUTED, *_EXTRA_ACCEPT_EVENTS.get(label, ()))
 
 
+def _has_capture_accept(
+    event_log: EventLog,
+    event_type: EventType,
+    since: datetime,
+    payload_filters: dict[str, str] | None,
+) -> bool:
+    """Is there an ``event_type`` event since ``since`` that is not a key operation?
+
+    The backend cannot say "not this operation", so the newest events are read a
+    page at a time and the first one outside :data:`NON_CAPTURE_OPERATIONS`
+    answers yes. Running out of pages answers no: an unproven accept leaves a
+    banner standing, the noisy direction this module prefers over a silent one.
+    """
+    until: datetime | None = None
+    for _ in range(_ACCEPT_MAX_PAGES):
+        page = event_log.get_events(
+            event_type=event_type,
+            since=since,
+            until=until,
+            limit=_ACCEPT_PAGE,
+            order="desc",
+            payload_filters=payload_filters,
+        )
+        if any(e.payload.get("operation") not in NON_CAPTURE_OPERATIONS for e in page):
+            return True
+        if len(page) < _ACCEPT_PAGE:
+            return False
+        until = min(_as_utc(e.occurred_at) for e in page) - timedelta(microseconds=1)
+    return False
+
+
 def _surface_has_accepts(
     event_log: EventLog,
     label: str,
@@ -473,20 +524,11 @@ def _surface_has_accepts(
         # No surface to attribute an accept to; the rejections stand.
         return False
     if label.startswith(_GLOBAL_SURFACE_PREFIX):
-        return bool(
-            event_log.get_events(
-                event_type=EventType.MUTATION_EXECUTED,
-                since=last_rejection or since,
-                limit=1,
-            )
+        return _has_capture_accept(
+            event_log, EventType.MUTATION_EXECUTED, last_rejection or since, None
         )
     return any(
-        event_log.get_events(
-            event_type=event_type,
-            since=since,
-            limit=1,
-            payload_filters={"requested_by": label},
-        )
+        _has_capture_accept(event_log, event_type, since, {"requested_by": label})
         for event_type in accept_events_for(label)
     )
 

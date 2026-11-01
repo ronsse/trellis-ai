@@ -63,3 +63,29 @@ def test_a_403_dims_to_a_note_and_hides_the_mint_form() -> None:
 def test_the_token_is_never_written_into_an_attribute() -> None:
     mint = _body("mintApiKey")
     assert not re.search(r'="[^"]*\$\{[^}]*token[^}]*\}"', mint)
+
+
+def test_a_revoke_button_carries_the_id_escaped_in_data_id() -> None:
+    row = _body("renderKeyRow")
+    assert 'data-action="confirmRevokeApiKey" data-id="${escHtml(k.key_id)}"' in row
+
+
+def test_dismissing_the_token_drops_the_value_and_empties_the_panel() -> None:
+    body = _body("dismissMintedKey")
+    assert "mintedToken = null;" in body
+    assert "getElementById('keys-token-panel').innerHTML = ''" in body
+
+
+def test_a_failed_mint_or_revoke_re_lists_so_no_stale_live_row_stays() -> None:
+    mint_failure = _body("mintApiKey").split("catch (err)")[1]
+    assert "await loadKeys();" in mint_failure
+    revoke = _body("revokeApiKey")
+    assert revoke.index("await loadKeys();") > revoke.index("catch (err)")
+
+
+def test_a_refusal_is_explained_rather_than_shown_bare() -> None:
+    text = _body("keyWriteFailureText")
+    assert "identified admin API key" in text
+    assert "trellis admin api-keys" in text
+    assert 'id="keys-identity-note"' in PAGE
+    assert "keys-identity-note').hidden = !!getApiKey()" in _body("loadKeys")

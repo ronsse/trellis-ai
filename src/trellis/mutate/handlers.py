@@ -57,6 +57,7 @@ from trellis.learning.candidate_auto_promote import AUTO_PROMOTE_REQUESTED_BY
 from trellis.learning.tag_evolution import MIN_TAG_KEYWORD_LENGTH
 from trellis.mutate.commands import Command, Operation
 from trellis.mutate.evidence_ingest import EvidenceEmbedMode
+from trellis.mutate.executor import guarded_audit_emit
 from trellis.mutate.retention import (
     ARCHIVED_STATE,
     CURRENT_STATE,
@@ -4964,13 +4965,22 @@ class ApiKeyMintHandler:
         self._registry = registry
 
     def handle(self, command: Command) -> tuple[str | None, str]:
-        from trellis.auth import KEY_SCOPES, external_scope_refusal  # noqa: PLC0415
+        from trellis.auth import (  # noqa: PLC0415
+            KEY_SCOPES,
+            api_key_name_refusal,
+            external_scope_refusal,
+        )
         from trellis.stores.base.api_key import ApiKeyRecord  # noqa: PLC0415
 
         record = command.args["record"]
         if not isinstance(record, ApiKeyRecord):
             msg = "api_key.mint requires args['record'] to be an ApiKeyRecord"
             raise ValidationError(msg, errors=[msg], code="invalid_record")
+        name_refusal = api_key_name_refusal(record.name)
+        if name_refusal is not None:
+            raise ValidationError(
+                name_refusal, errors=[name_refusal], code="invalid_name"
+            )
         if not record.scopes:
             msg = "API key must carry at least one scope"
             raise ValidationError(msg, errors=[msg], code="invalid_scopes")
@@ -4980,18 +4990,25 @@ class ApiKeyMintHandler:
             msg = refusal or f"Unknown scope(s) {unknown!r}"
             raise ValidationError(msg, errors=[msg], code="invalid_scopes")
         self._registry.operational.api_key_store.create(record)
-        self._registry.operational.event_log.emit(
+        # The key is stored: from here the mint has happened, so a dead event
+        # log is a warning on the result and never a failure (the token the
+        # caller holds is for a key that exists).
+        guarded_audit_emit(
+            command,
             EventType.API_KEY_MINTED,
-            source="mutation_executor",
-            entity_id=record.key_id,
-            entity_type="api_key",
-            payload={
-                "key_id": record.key_id,
-                "name": record.name,
-                "scopes": list(record.scopes),
-                "minted_by": command.requested_by,
-                **_api_key_actor(command),
-            },
+            lambda: self._registry.operational.event_log.emit(
+                EventType.API_KEY_MINTED,
+                source="mutation_executor",
+                entity_id=record.key_id,
+                entity_type="api_key",
+                payload={
+                    "key_id": record.key_id,
+                    "name": record.name,
+                    "scopes": list(record.scopes),
+                    "minted_by": command.requested_by,
+                    **_api_key_actor(command),
+                },
+            ),
         )
         return record.key_id, f"API key {record.key_id} minted"
 
@@ -5034,18 +5051,22 @@ class ApiKeyRevokeHandler:
         if not store.revoke(key_id):
             msg = f"Cannot revoke {key_id!r}: already revoked."
             raise ValidationError(msg, errors=[msg], code="already_revoked")
-        self._registry.operational.event_log.emit(
+        guarded_audit_emit(
+            command,
             EventType.API_KEY_REVOKED,
-            source="mutation_executor",
-            entity_id=key_id,
-            entity_type="api_key",
-            payload={
-                "key_id": key_id,
-                "name": existing.name,
-                "scopes": list(existing.scopes),
-                "revoked_by": command.requested_by,
-                **_api_key_actor(command),
-            },
+            lambda: self._registry.operational.event_log.emit(
+                EventType.API_KEY_REVOKED,
+                source="mutation_executor",
+                entity_id=key_id,
+                entity_type="api_key",
+                payload={
+                    "key_id": key_id,
+                    "name": existing.name,
+                    "scopes": list(existing.scopes),
+                    "revoked_by": command.requested_by,
+                    **_api_key_actor(command),
+                },
+            ),
         )
         return key_id, f"API key {key_id} revoked"
 

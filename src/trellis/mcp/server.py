@@ -5373,20 +5373,38 @@ def revoke_api_key(key_id: str) -> str:
     """Revoke a live API key, through the governed mutation pipeline.
 
     An unknown or already-revoked key id is refused, and so is revoking the
-    key this session is authenticated with.
+    key this session is authenticated with. A caller the server cannot
+    identify (a stdio session, or HTTP with enforcement off) is refused too,
+    and pointed at ``trellis admin api-keys revoke``: revoking a credential
+    needs a named actor on the audit event.
 
     Args:
         key_id: The 12-hex-char key id (see ``list_api_keys``).
 
     Returns:
         A JSON object with ``status`` (``ok`` on success), ``key_id``, and
-        ``message`` plus ``reason`` when refused. This tool never raises to MCP.
+        ``message`` plus ``reason`` when refused, and ``warnings`` when the
+        revoke took effect but its audit event was not recorded. This tool
+        never raises to MCP.
     """
+    principal = current_principal_id()
+    if principal is None:
+        return json.dumps(
+            {
+                "status": "rejected",
+                "reason": "unidentified_caller",
+                "message": (
+                    "Revoking an API key needs an identified admin credential, "
+                    "and this session has none. Use "
+                    "'trellis admin api-keys revoke <key_id>' on the server host."
+                ),
+            }
+        )
     try:
         command = build_revoke_command(
             key_id,
             requested_by="mcp:revoke_api_key",
-            actor_key_id=current_principal_id(),
+            actor_key_id=principal,
         )
         result = build_api_keys_executor(_get_registry()).execute(command)
     # GRACEFUL-DEGRADATION: MCP tool surface -- never raises to the client.
@@ -5395,7 +5413,7 @@ def revoke_api_key(key_id: str) -> str:
         detail = _exception_detail(exc)
         return json.dumps({"status": "error", "message": f"Revoke failed: {detail}"})
 
-    if result.status not in (CommandStatus.SUCCESS, CommandStatus.DUPLICATE):
+    if result.status != CommandStatus.SUCCESS:
         return json.dumps(
             {
                 "status": result.status.value,
@@ -5403,7 +5421,13 @@ def revoke_api_key(key_id: str) -> str:
                 "reason": result.metadata.get("rejection_reason"),
             }
         )
-    return json.dumps({"status": "ok", "key_id": key_id})
+    return json.dumps(
+        {
+            "status": "ok",
+            "key_id": key_id,
+            **({"warnings": list(result.warnings)} if result.warnings else {}),
+        }
+    )
 
 
 #: ``trellis_cli.exit_codes.EXIT_STORE``, the code the CLI gives a typed

@@ -2723,7 +2723,15 @@
                 labelled public. You cannot revoke the key this page is using; do that from
                 another key or the CLI.
             </p>
+            <p class="field-hint" id="keys-identity-note" hidden>
+                No API key is stored in this browser. Minting and revoking need an
+                identified admin key, whatever the server&rsquo;s auth mode, so both will be
+                refused from this page until you save one (Save key, above). To bootstrap
+                the first key or remove the last admin, use
+                <code>trellis admin api-keys</code> on the server host.
+            </p>
             <div id="keys-token-panel"></div>
+            <p class="field-hint" id="keys-notice" role="status"></p>
             <div class="status-section" id="keys-mint-panel">
                 <h3>Mint a key</h3>
                 <div class="key-form">
@@ -8479,6 +8487,7 @@
             try {
                 const data = await fetchJSON('/api-keys');
                 mintPanel.style.display = '';
+                document.getElementById('keys-identity-note').hidden = !!getApiKey();
                 populateKeyPresets(data.presets || []);
                 const rows = data.keys || [];
                 keysCache = {};
@@ -8520,12 +8529,26 @@
                 `</tr>`;
         }
 
+        function setKeysNotice(text) {
+            document.getElementById('keys-notice').textContent = text || '';
+        }
+
+        // A refusal for want of an admin key is explained, not shown bare; any
+        // other failure is shown as the server worded it.
+        function keyWriteFailureText(err, verb) {
+            if (isAdminScopeError(err)) {
+                return `${verb} refused: it needs an identified admin API key stored in this browser (Save key, above). Without one, use 'trellis admin api-keys' on the server host.`;
+            }
+            return `${verb} failed: ${err.message}`;
+        }
+
         async function mintApiKey() {
             const nameEl = document.getElementById('keys-name');
             const scopesEl = document.getElementById('keys-scopes');
             const errEl = document.getElementById('keys-mint-error');
             const btn = document.getElementById('keys-mint-btn');
             errEl.textContent = '';
+            setKeysNotice('');
             const name = nameEl.value.trim();
             const scopes = scopesEl.value.trim();
             if (!name) { errEl.textContent = 'Give the key a name.'; return; }
@@ -8538,6 +8561,7 @@
                     `<span class="degraded-title">Key ${escHtml(out.key_id)} (${escHtml(out.name)}) minted. ` +
                     `You will not see this token again &mdash; copy it now.</span>` +
                     `<code class="key-token" id="keys-token-value">${escHtml(out.token)}</code>` +
+                    ((out.warnings || []).length ? `<span class="degraded-detail">Warning: ${escHtml(out.warnings.join(' '))}</span>` : '') +
                     `<div class="degraded-actions">` +
                     `<button class="btn btn-sm" onclick="copyMintedKey()">Copy token</button> ` +
                     `<button class="btn btn-sm btn-ghost" onclick="dismissMintedKey()">I have stored it</button>` +
@@ -8545,7 +8569,10 @@
                 nameEl.value = '';
                 await loadKeys();
             } catch (err) {
-                errEl.textContent = isAdminScopeError(err) ? 'Minting needs an admin-scoped key.' : `Mint failed: ${err.message}`;
+                // The outcome of a failed mint can be unknown (a server fault),
+                // so re-list: the page must not show a row the server disagrees with.
+                errEl.textContent = keyWriteFailureText(err, 'Mint');
+                await loadKeys();
             } finally {
                 btn.disabled = false;
             }
@@ -8579,15 +8606,19 @@
         async function revokeApiKey(id) {
             const cell = document.getElementById('key-actions-' + id);
             if (cell) cell.innerHTML = loadingHtml('Revoking...');
+            setKeysNotice('');
+            let notice = '';
             try {
-                await classifyRuleWriteJSON('DELETE', `/api-keys/${encodeURIComponent(id)}`);
-                await loadKeys();
+                const out = await classifyRuleWriteJSON('DELETE', `/api-keys/${encodeURIComponent(id)}`);
+                if ((out.warnings || []).length) notice = `Key ${id} revoked. Warning: ${out.warnings.join(' ')}`;
             } catch (err) {
-                if (cell) {
-                    cell.innerHTML = `<span class="text-danger">Revoke failed: ${escHtml(err.message)}</span> ` +
-                        `<button class="btn btn-sm btn-danger" data-action="confirmRevokeApiKey" data-id="${escHtml(id)}">Retry</button>`;
-                }
+                notice = keyWriteFailureText(err, 'Revoke');
             }
+            // Re-list on success and on failure alike: a failed revoke may or may
+            // not have taken effect, and the row must say which. The Revoke
+            // button on a still-live row is the retry.
+            await loadKeys();
+            setKeysNotice(notice);
         }
 
         // === Runtime panel ===
