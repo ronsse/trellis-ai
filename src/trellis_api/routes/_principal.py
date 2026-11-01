@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException
 
 from trellis.auth import clearance_of
 from trellis.core.elision import elide_text
@@ -26,10 +26,11 @@ from trellis.retrieve.sensitivity import (
     DocumentClearance,
     OverwriteRefusedError,
     SensitivityLabelError,
+    is_public_only,
     refuse_overwrite,
     stamp_sensitivity,
 )
-from trellis_api.auth import AuthContext
+from trellis_api.auth import AuthContext, authenticate
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -109,9 +110,38 @@ def request_clearance(ctx: AuthContext) -> Sensitivity:
     From the principal's scopes. Auth mode ``off`` (and the legacy shared
     secret) grant ``ALL_SCOPES``, so a trusted-local deployment reads
     everything; a key without ``confidential``/``restricted`` reads up to
-    ``internal``.
+    ``internal``, and an ``external`` key reads only what is labelled ``public``.
     """
     return clearance_of(ctx.scopes)
+
+
+#: The 403 detail a refused route gives a public-only caller. Fixed text Trellis
+#: wrote: it states the reason and names no content.
+PUBLIC_CALLER_REFUSAL = (
+    "this route is not available to an external key: it reads content that "
+    "cannot carry a public label. An external key can use search, packs, "
+    "sectioned packs and documents, and sees only documents labelled public."
+)
+
+
+def refuse_public_caller(
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> None:
+    """Dependency: 403 a public-only caller (an ``external`` key) with a stated reason.
+
+    For a read route over something with no sensitivity label (graph nodes,
+    traces, precedents, observations, policies, rules). Such a route cannot say
+    which of its rows are public, so a public-only caller is refused it rather
+    than shown a silently emptied answer. A caller above ``public`` passes
+    untouched.
+    """
+    if is_public_only(request_clearance(ctx)):
+        raise HTTPException(status_code=403, detail=PUBLIC_CALLER_REFUSAL)
+
+
+#: ``dependencies=`` value for a route that refuses a public-only caller.
+#: ``tests/unit/test_sensitivity_rest_roster_rule.py`` finds it by this name.
+NOT_FOR_PUBLIC_CALLERS = [Depends(refuse_public_caller)]
 
 
 def refuse_document_overwrite(

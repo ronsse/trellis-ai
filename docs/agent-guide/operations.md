@@ -4214,9 +4214,11 @@ migrating to scoped keys.
 
 ### Scopes
 
-Six scopes: `read`, `ingest`, `mutate`, `admin`, plus the two read-clearance
-scopes `confidential` and `restricted` (see [Sensitivity](#sensitivity-clearance)).
-`admin` implies all others. The router → scope map:
+Seven scopes: `read`, `ingest`, `mutate`, `admin`, plus the two read-clearance
+scopes `confidential` and `restricted` and the narrowing scope `external` (see
+[Sensitivity](#sensitivity-clearance)). `admin` implies all others except
+`external`, which grants nothing by itself and is only minted as `read,external`.
+The router → scope map:
 
 | Router (`/api/v1`) | Required scope |
 |--------------------|----------------|
@@ -4262,6 +4264,7 @@ key holds the matching scope:
 | `read` (and `ingest`, `mutate`) | `internal` |
 | `confidential` | `confidential` |
 | `restricted`, `admin` | `restricted` |
+| `read,external` | `public` |
 
 An unlabelled document reads as `internal`, so a store with no labels behaves
 exactly as before. A key can only label up to its own clearance. Withheld items
@@ -4269,6 +4272,33 @@ appear in a pack's withholding note as `sensitivity N`, as counts only. MCP over
 stdio, auth mode `off`, and the CLI are unrestricted. A document labelled above
 `internal` is not memory-extracted, and the `save_memory` reply says so.
 Graph nodes and entities carry no label.
+
+**An `external` key** (`trellis admin api-keys create --name <n> --scopes read,external`)
+is the one key that inverts that default. It reads at `public`, so a pack, a
+search, `GET /documents` and `get_items` serve it only a stored document someone
+labelled `public`: an unlabelled document reads `internal` and is withheld, and a
+chunk is served only when its own row and its parent are both labelled `public`.
+Anything that cannot carry a label is refused to it. Over REST these answer
+403 with the reason: `/graph/search`, `/graph/search/facets`, `/entities/{id}`,
+`/traces`, `/traces/domains`, `/traces/{id}`, `/precedents`, `/precedents/domains`,
+`/graph/history`, `/observations`, `/measurements`, `/policies`, `/policies/{id}`
+and `/classify/rules`. Over MCP `get_graph`, `get_lessons`, `get_file_context` and
+`query_observations` raise a policy-denied error with the same reason, and
+`get_items` answers a graph or trace id exactly as it answers a missing one. A
+pack to an `external` key carries no advisory and no capture-health banner, and
+`/readyz` returns the status line an anonymous probe gets. It can write nothing:
+the scope satisfies `read` and no other scope, and minting it beside `ingest`,
+`mutate`, `admin`, `confidential` or `restricted` is refused. If a stored key
+somehow holds both, the lower clearance wins and the key stays read-only. A label
+is judged on the stored document row, never on the metadata a pack item carries.
+
+What this does **not** guard: a `read` key, and every key that existed before,
+still reads everything unlabelled. Nothing labels a document `public`
+automatically; that is a human act (`save_memory`/`save_knowledge`
+`sensitivity`, or `curate classify-sensitivity`), and a document whose label is
+missing or malformed is never served to an `external` key. The key does not
+bound what an operator labels `public`, does not limit domains, and the `/ui`
+page and other routes that need no credential are unchanged.
 
 Two answers no longer reveal a document the caller cannot read. A superseded
 document whose declared successor the caller may not read is served, as it would

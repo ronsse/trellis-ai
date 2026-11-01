@@ -260,8 +260,12 @@ to protect data that has no label. The posture that replaces it:
   store with no labels serves every caller exactly what it served before, so
   there is nothing to switch on and nothing retroactively hidden. A document is
   withheld only when someone labelled it `confidential` or `restricted` and the
-  caller lacks the scope. There is no `public` clearance tier: `public` is a
-  label a document may carry, not a ceiling a caller is held to.
+  caller lacks the scope. Keys minted with the scopes above reach `internal` at
+  the lowest. The one exception is the opt-in `external` scope (below the
+  `public` rung of the label vocabulary): a key minted `read,external` reads at
+  `public`, so it is served only a stored document someone labelled `public`,
+  and nothing that cannot carry a label (see the operations guide's
+  [Sensitivity clearance](../agent-guide/operations.md#sensitivity-clearance)).
 - **Clearance comes from existing key scopes.** `confidential` and `restricted`
   are two new scopes (`restricted` implies `confidential`; `admin` implies both),
   and `trellis.auth.clearance_of(scopes)` maps a scope set to its ceiling. No

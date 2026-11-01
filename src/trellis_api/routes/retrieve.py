@@ -30,7 +30,7 @@ from trellis.stores.base.graph import NODE_SEARCH_SORTS
 from trellis.stores.settings_store import load_settings_values
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
-from trellis_api.routes._principal import request_clearance
+from trellis_api.routes._principal import NOT_FOR_PUBLIC_CALLERS, request_clearance
 from trellis_wire.dtos import (
     AxisReportResponse,
     DefaultValidationError,
@@ -395,7 +395,11 @@ def assemble_sectioned_pack(
     )
 
 
-@router.get("/graph/search", summary="Search graph entities")
+@router.get(
+    "/graph/search",
+    summary="Search graph entities",
+    dependencies=NOT_FOR_PUBLIC_CALLERS,
+)
 def search_entities(
     q: str | None = Query(
         None,
@@ -451,7 +455,11 @@ def search_entities(
     }
 
 
-@router.get("/graph/search/facets", summary="Count graph search matches per node type")
+@router.get(
+    "/graph/search/facets",
+    summary="Count graph search matches per node type",
+    dependencies=NOT_FOR_PUBLIC_CALLERS,
+)
 def search_entity_facets(
     q: str | None = Query(
         None,
@@ -477,7 +485,7 @@ def search_entity_facets(
     return {"status": "ok", "total": sum(counts.values()), "node_types": node_types}
 
 
-@router.get("/entities/{entity_id:path}")
+@router.get("/entities/{entity_id:path}", dependencies=NOT_FOR_PUBLIC_CALLERS)
 def get_entity(
     entity_id: str,
     depth: int = Query(1, description="Subgraph traversal depth"),
@@ -515,7 +523,7 @@ def get_entity(
     }
 
 
-@router.get("/traces")
+@router.get("/traces", dependencies=NOT_FOR_PUBLIC_CALLERS)
 def list_traces(
     domain: str | None = Query(None),
     agent: str | None = Query(None, alias="agent_id"),
@@ -543,7 +551,11 @@ def list_traces(
     return {"status": "ok", "total": total, "count": len(items), "traces": items}
 
 
-@router.get("/traces/domains", summary="Count traces per domain")
+@router.get(
+    "/traces/domains",
+    summary="Count traces per domain",
+    dependencies=NOT_FOR_PUBLIC_CALLERS,
+)
 def list_trace_domains() -> dict[str, Any]:
     """Count all stored traces per ``domain``, for a domain filter's options.
 
@@ -559,7 +571,7 @@ def list_trace_domains() -> dict[str, Any]:
     return {"status": "ok", "total": sum(counts.values()), "domains": domains}
 
 
-@router.get("/traces/{trace_id}")
+@router.get("/traces/{trace_id}", dependencies=NOT_FOR_PUBLIC_CALLERS)
 def get_trace(
     trace_id: str,
     ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
@@ -624,7 +636,7 @@ def _evidence_links(
     return links
 
 
-@router.get("/precedents")
+@router.get("/precedents", dependencies=NOT_FOR_PUBLIC_CALLERS)
 def list_precedents(
     domain: str | None = Query(None),
     limit: int = Query(20, ge=1, le=500, description="Max results"),
@@ -650,7 +662,11 @@ def list_precedents(
     return {"status": "ok", "count": len(items), "precedents": items}
 
 
-@router.get("/precedents/domains", summary="Count promoted precedents per domain")
+@router.get(
+    "/precedents/domains",
+    summary="Count promoted precedents per domain",
+    dependencies=NOT_FOR_PUBLIC_CALLERS,
+)
 def list_precedent_domains() -> dict[str, Any]:
     """Count promoted precedents per ``domain``, for a domain filter's options.
 

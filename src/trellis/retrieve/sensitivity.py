@@ -9,11 +9,21 @@ caller's: ``clearance_of(scopes)`` on a credentialed surface, ``"restricted"``
 on a trusted-local one (stdio, auth off, the CLI).
 
 **Transparent by default.** A missing label reads ``internal`` and the lowest
-clearance is ``internal``, so a store with no labels serves every caller
-exactly what it served before this gate existed. Only a document someone
-labelled ``confidential`` or ``restricted`` is withheld, and only from a caller
-who lacks the scope. A *malformed* label reads ``restricted``
-(:func:`sensitivity_of`): unparseable is withheld, never served.
+clearance a key reaches without opting in is ``internal``, so a store with no
+labels serves every such caller exactly what it served before this gate
+existed. Only a document someone labelled ``confidential`` or ``restricted`` is
+withheld, and only from a caller who lacks the scope. A *malformed* label reads
+``restricted`` (:func:`sensitivity_of`): unparseable is withheld, never served.
+
+**The one opt-in is a ``public`` caller** (an ``external`` key,
+:func:`is_public_only`), and it inverts the default: an unlabelled document
+reads ``internal``, so it is withheld. It is also shown only what *can* carry a
+label. A graph item, trace, precedent or observation has none, and its metadata
+is free-form, so :func:`item_readable` serves a ``public`` caller only a pack
+item that is a stored document row (judged on that row, never on the metadata
+the item carries) labelled ``public``. An error while looking the row up
+withholds, and a clearance outside the vocabulary ranks as ``public``, not above
+it.
 
 **Enforced where PackBuilder collects, not per strategy**, for the reason in
 :mod:`trellis.retrieve.lifecycle`: the strategy set is open. It runs over the
@@ -41,6 +51,7 @@ read of a withheld document answers exactly as not-found.
 Graph nodes, entities, precedents, advisories and observations carry no label
 in this slice; ``tests/unit/test_sensitivity_surface_rule.py`` rosters every MCP
 tool as gated or free of document content so a new one cannot slip in unread.
+A ``public`` caller is refused those surfaces outright instead.
 """
 
 from __future__ import annotations
@@ -82,9 +93,79 @@ SENSITIVITY_REJECTION_REASON = "sensitivity"
 SENSITIVITY_WITHHELD_IDS_KEY = "sensitivity_withheld_ids"
 
 
+#: The clearances a caller holds without being public-only. Spelled out so that
+#: a value outside it (a typo, a future rung, ``None`` from a bug) lands on the
+#: narrow side of :func:`is_public_only` rather than the wide one.
+_NON_PUBLIC_CLEARANCES = frozenset({"internal", "confidential", "restricted"})
+
+
+def is_public_only(clearance: Sensitivity) -> bool:
+    """Whether ``clearance`` reads only stored documents labelled ``public``.
+
+    ``True`` for ``public`` and for anything that is not one of the three higher
+    rungs, so an unknown clearance fails closed.
+    """
+    return clearance not in _NON_PUBLIC_CLEARANCES
+
+
 def permits(clearance: Sensitivity, sensitivity: Sensitivity) -> bool:
-    """Whether a caller holding ``clearance`` may read ``sensitivity`` content."""
-    return sensitivity_rank(sensitivity) <= sensitivity_rank(clearance)
+    """Whether a caller holding ``clearance`` may read ``sensitivity`` content.
+
+    A ``clearance`` outside the vocabulary ranks as ``public``, the lowest, so an
+    unrecognised value never reads above it.
+    """
+    try:
+        ceiling = sensitivity_rank(clearance)
+    except ValueError:
+        ceiling = sensitivity_rank("public")
+    return sensitivity_rank(sensitivity) <= ceiling
+
+
+#: The ``PackItem.item_type`` values that can be a stored document row: the
+#: keyword axis emits ``document``, the semantic axis ``vector``. Anything else
+#: (``entity``, ``observation``, and a trace or precedent as the graph axis
+#: carries them) has no label to compare.
+_PUBLIC_ITEM_TYPES = frozenset({"document", "vector"})
+
+
+def _public_document_label(
+    item: PackItem, parent_verdict_cache: ParentVerdictCache | None
+) -> Sensitivity | None:
+    """The label of the stored document ``item`` stands for, or ``None``.
+
+    ``None`` when ``item`` is not something a ``public`` caller may be shown at
+    all: not a document or vector row, no cache to look the row up with, no
+    stored row under its id, or a failed lookup. The label is read off the
+    stored row (raised to its parent's for a chunk), never off ``item.metadata``.
+    """
+    if item.item_type not in _PUBLIC_ITEM_TYPES or parent_verdict_cache is None:
+        return None
+    stored = parent_verdict_cache.stored_metadata(item.item_id)
+    if stored is None:
+        return None
+    return effective_sensitivity(
+        item.model_copy(update={"metadata": stored}), parent_verdict_cache
+    )
+
+
+def item_readable(
+    clearance: Sensitivity,
+    item: PackItem,
+    parent_verdict_cache: ParentVerdictCache | None,
+) -> bool:
+    """Whether a caller at ``clearance`` may be served ``item``.
+
+    The one predicate every pack gate asks. Above ``public`` it is exactly
+    ``permits(clearance, effective_sensitivity(item, cache))``. For a public-only
+    caller (:func:`is_public_only`) the item must also be a stored document row
+    (:func:`_public_document_label`) whose own label, and its parent's for a
+    chunk, is ``public``: an unlabelled document reads ``internal`` and is
+    withheld, and an item that cannot carry a label is withheld.
+    """
+    if not is_public_only(clearance):
+        return permits(clearance, effective_sensitivity(item, parent_verdict_cache))
+    label = _public_document_label(item, parent_verdict_cache)
+    return label is not None and permits("public", label)
 
 
 def effective_sensitivity(
@@ -116,7 +197,7 @@ def partition_by_clearance(
     kept: list[PackItem] = []
     withheld: list[PackItem] = []
     for item in items:
-        if permits(clearance, effective_sensitivity(item, parent_verdict_cache)):
+        if item_readable(clearance, item, parent_verdict_cache):
             kept.append(item)
         else:
             withheld.append(item)
@@ -137,7 +218,7 @@ def reader_for(
         return None
 
     def _readable(item: PackItem) -> bool:
-        return permits(clearance, effective_sensitivity(item, parent_verdict_cache))
+        return item_readable(clearance, item, parent_verdict_cache)
 
     return _readable
 
@@ -146,7 +227,9 @@ class DocumentClearance:
     """:func:`partition_by_clearance`'s predicate over a stored document.
 
     For the read surfaces that fetch documents directly rather than through a
-    pack. One instance per request: it carries a per-request parent cache.
+    pack. One instance per request: it carries a per-request parent cache. For a
+    public-only clearance an unlabelled document reads ``internal`` and so is not
+    permitted, and so is an id with no stored row (``metadata`` is ``None``).
     """
 
     def __init__(self, document_store: DocumentStore, clearance: Sensitivity) -> None:
@@ -749,7 +832,7 @@ def unreadable_rejected_ids(
         if row.item_id in ids:
             continue
         if any(
-            not permits(clearance, effective_sensitivity(item, parent_verdict_cache))
+            not item_readable(clearance, item, parent_verdict_cache)
             for item in candidates.get(row.item_id)
         ):
             ids.add(row.item_id)
@@ -864,6 +947,8 @@ __all__ = [
     "conceal_unreadable_successors",
     "concealed_ids_metadata",
     "effective_sensitivity",
+    "is_public_only",
+    "item_readable",
     "partition_by_clearance",
     "permits",
     "readable_ids",

@@ -6,6 +6,25 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **An `external` key reads only what someone labelled `public`.** `trellis admin api-keys
+  create --scopes read,external` mints a key whose clearance is a new lowest rung, `public`.
+  A pack, search, `GET /documents` or `get_items` serves it only a stored document labelled
+  `public`; an unlabelled document reads `internal` and is withheld, so the default inverts
+  for this one key. A graph node, trace, precedent, observation, advisory or capture banner
+  cannot carry a label and is never shown to it: those REST routes answer 403 with the
+  reason, the matching MCP tools raise a policy-denied error saying the same, and `get_items`
+  answers a graph or trace id as it answers a missing one. The label is judged on the stored
+  document row, not on the metadata a pack item carries. `external` grants no write, is only
+  valid as `read,external` (the CLI refuses it beside any other scope and stores nothing),
+  and a stored key that holds it beside a higher clearance reads at `public`. No other
+  caller changes: a fixture test compares the flat pack, the sectioned pack and the
+  `PACK_ASSEMBLED` payload, served and held-out, against the code without the new branch.
+  It does not protect anything an existing key reads, nothing labels a document `public`
+  for you, and a `public` label is still a human decision. `tests/unit/test_sensitivity_rest_roster_rule.py`
+  and `tests/unit/test_sensitivity_surface_rule.py` now fail a new read route or tool that
+  is neither refused nor listed as answering to this key. The ADR sentence saying there is
+  no `public` clearance tier is corrected.
+
 - **`trellis analyze learning-candidates` says what its candidates are.** `--format json`
   reported only `candidate_count`, which includes every `investigate_noise` row, so a long
   list could not be told apart from a backlog of promotable knowledge. The JSON now also

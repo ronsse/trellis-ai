@@ -29,7 +29,7 @@ from trellis.retrieve.sensitivity import (
 from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, Event, EventType
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate, require_scope
-from trellis_api.routes._principal import request_clearance
+from trellis_api.routes._principal import NOT_FOR_PUBLIC_CALLERS, request_clearance
 from trellis_wire.dtos import DefaultValidationError, StringDetailError
 
 router = APIRouter()
@@ -576,7 +576,7 @@ def get_pack(pack_id: str) -> dict[str, Any]:
     }
 
 
-@router.get("/graph/history")
+@router.get("/graph/history", dependencies=NOT_FOR_PUBLIC_CALLERS)
 def get_node_history(
     entity_id: str = Query(..., description="Node ID to fetch SCD-2 history for"),
     ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom

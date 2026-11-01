@@ -109,6 +109,39 @@ class ParentVerdictCache:
         #: an absence, which the sensitivity gate must tell apart: it fails
         #: closed on an unreadable parent and open on a missing one.
         self.failed_parent_ids: set[str] = set()
+        #: Memo for :meth:`stored_metadata`, kept apart from ``_cache`` because
+        #: that one is keyed by *parent* id and answers a different question.
+        self._rows: dict[str, dict[str, Any] | None] = {}
+
+    def stored_metadata(self, item_id: str) -> dict[str, Any] | None:
+        """The metadata of the document row stored under ``item_id``, or ``None``.
+
+        For the one gate that must not trust the metadata an item carries: a
+        public-clearance read (:func:`trellis.retrieve.sensitivity.item_readable`)
+        judges the stored document, because a graph item's metadata is its
+        node's free-form properties and a vector row's is an embed-time
+        snapshot. ``None`` covers a missing row, a non-dict ``metadata``, no
+        document store at all and a store error alike (the last logged once and
+        marking :attr:`degraded`); the caller treats every one as "not a
+        document it may serve".
+        """
+        if self._document_store is None:
+            return None
+        if item_id in self._rows:
+            return self._rows[item_id]
+        try:
+            doc = self._document_store.get(item_id)
+        except Exception:
+            # GRACEFUL-DEGRADATION: fail closed. The only caller withholds on
+            # None, so an outage here serves nothing rather than everything.
+            logger.warning("stored_metadata_fetch_failed", item_id=item_id)
+            self.degraded = True
+            self._rows[item_id] = None
+            return None
+        metadata = doc.get("metadata") if doc else None
+        resolved = metadata if isinstance(metadata, dict) else None
+        self._rows[item_id] = resolved
+        return resolved
 
     def resolve(self, item: PackItem) -> dict[str, Any] | None:
         """The parent document's metadata for ``item``, or ``None``.

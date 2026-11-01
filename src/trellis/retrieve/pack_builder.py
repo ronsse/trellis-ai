@@ -96,6 +96,7 @@ from trellis.retrieve.sensitivity import (
     CandidateIndex,
     conceal_unreadable_successors,
     concealed_ids_metadata,
+    is_public_only,
     partition_by_clearance,
     reader_for,
 )
@@ -1416,7 +1417,7 @@ class PackBuilder:
             advisories_matched,
             advisories_explored,
             advisories_filtered_legacy,
-        ) = self._select_advisories(domain)
+        ) = self._advisories_for(clearance, domain)
         selected = self._attach_advisory_provenance(selected, advisories)
 
         # What this build removed and did not serve (#404). Computed from
@@ -1887,7 +1888,7 @@ class PackBuilder:
             advisories_matched,
             advisories_explored,
             advisories_filtered_legacy,
-        ) = self._select_advisories(domain)
+        ) = self._advisories_for(clearance, domain)
 
         # Stamp per-item advisory provenance across all sections
         # (Unit C1, foundation for D1 axis C semantic tightening).
@@ -2862,6 +2863,19 @@ class PackBuilder:
             # advisories and the failure is logged for follow-up.
             logger.exception("advisory_retrieval_failed")
             return []
+
+    def _advisories_for(
+        self, clearance: Sensitivity, domain: str | None
+    ) -> tuple[list[Any], int, list[str], int]:
+        """:meth:`_select_advisories`, except for a public-only caller.
+
+        An advisory names the entities it was mined from and carries no label, so
+        a ``public`` caller (an ``external`` key) is served none and is not told
+        how many matched. Every other clearance gets the selection untouched.
+        """
+        if is_public_only(clearance):
+            return [], 0, [], 0
+        return self._select_advisories(domain)
 
     def _select_advisories(
         self, domain: str | None

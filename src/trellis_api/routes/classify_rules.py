@@ -84,6 +84,7 @@ from trellis.stores.classify_overrides_store import (
 from trellis.stores.registry import StoreRegistry
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate, require_scope
+from trellis_api.routes._principal import NOT_FOR_PUBLIC_CALLERS
 from trellis_api.routes._results import command_response
 from trellis_wire.dtos import (
     ClassifyCandidate,
@@ -769,7 +770,7 @@ def dismiss_classify_candidate(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/classify/rules")
+@router.get("/classify/rules", dependencies=NOT_FOR_PUBLIC_CALLERS)
 def list_classify_rules() -> ClassifyRuleListResponse:
     """Every effective tag-keyword / domain-alias rule, badged by source.
 
