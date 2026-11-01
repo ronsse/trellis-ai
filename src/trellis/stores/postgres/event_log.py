@@ -12,6 +12,7 @@ import structlog
 from trellis.core.text_safety import scrub_jsonb_unsafe
 from trellis.errors import StoreError
 from trellis.stores.base.event_log import Event, EventLog, EventOrder, EventType
+from trellis.stores.base.trace import as_utc
 from trellis.stores.postgres.base import PostgresStoreBase
 
 if TYPE_CHECKING:
@@ -71,6 +72,20 @@ _CREATE_INDEXES = [
 ]
 
 
+def _bound_instant(moment: datetime) -> datetime:
+    """Return *moment* in the form psycopg should bind it: naive means UTC.
+
+    psycopg binds a naive ``datetime`` as ``timestamp``, which the server
+    converts to ``timestamptz`` in the *session's* time zone, so the same naive
+    value named different instants under different sessions, while SQLite and
+    the trace store read it as UTC. An aware value is returned untouched, the
+    very object it was, so a caller passing aware datetimes sees no change;
+    :func:`~trellis.stores.base.trace.as_utc` is not applied to it, because it
+    clamps a stamp that sits at the edge of ``datetime``'s range.
+    """
+    return as_utc(moment) if moment.tzinfo is None else moment
+
+
 class PostgresEventLog(PostgresStoreBase, EventLog):
     """Postgres-backed append-only event log using psycopg v3 (sync)."""
 
@@ -126,8 +141,8 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
                     event.source,
                     event.entity_id,
                     event.entity_type,
-                    event.occurred_at,
-                    event.recorded_at,
+                    _bound_instant(event.occurred_at),
+                    _bound_instant(event.recorded_at),
                     json.dumps(event.payload, allow_nan=False),
                     json.dumps(event.metadata, allow_nan=False),
                     event.schema_version,
@@ -203,10 +218,10 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
             params.append(scrub_jsonb_unsafe(source))
         if since is not None:
             clauses.append("occurred_at >= %s")
-            params.append(since)
+            params.append(_bound_instant(since))
         if until is not None:
             clauses.append("occurred_at <= %s")
-            params.append(until)
+            params.append(_bound_instant(until))
         if payload_filters:
             for key, value in payload_filters.items():
                 # ``payload->>'k' = 'v'`` returns TEXT; callers comparing
@@ -246,7 +261,7 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
             params.append(str(event_type))
         if since is not None:
             clauses.append("occurred_at >= %s")
-            params.append(since)
+            params.append(_bound_instant(since))
 
         where = " AND ".join(clauses) if clauses else "1=1"
         sql = f"SELECT COUNT(*) FROM events WHERE {where}"
