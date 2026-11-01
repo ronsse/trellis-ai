@@ -117,8 +117,10 @@ class EventType(StrEnum):
     #: The access-log step failed (``trellis.core.access_log``). The step is
     #: advisory and wrapped whole, so a failure never fails the read; this row
     #: is how an operator learns reads went unrecorded. At most one per
-    #: minute per process. Payload: ``{surface, error_type}``, the exception
-    #: class name only (a message can carry a DSN).
+    #: minute per process. Payload: ``{surface, error_type, dropped_reads,
+    #: failed_reads}``: the exception class name only (a message can carry a
+    #: DSN), and how many reads the writer's queue refused and how many emits
+    #: raised since the last signal that was written.
     ACCESS_LOG_FAILED = "access.log_failed"
 
     # Graph

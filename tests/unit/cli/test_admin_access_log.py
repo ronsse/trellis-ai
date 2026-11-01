@@ -57,7 +57,10 @@ def test_json_reports_reads_and_last_used_per_key(seeded: dict) -> None:
     assert row["items_returned"] == 3
     assert row["by_surface"] == {"mcp": 1, "rest": 1}
     assert row["last_read_at"]
-    assert payload["log_failures"] == 0
+    assert payload["failure_signals"] == 0
+    assert payload["dropped_reads"] == 0
+    assert payload["failed_reads"] == 0
+    assert "log_failures" not in payload
 
 
 def test_text_names_the_key_and_its_counts(seeded: dict) -> None:
@@ -88,8 +91,19 @@ def test_failed_log_steps_are_counted_beside_the_keys(seeded: dict) -> None:
     get_event_log().emit(
         EventType.ACCESS_LOG_FAILED,
         "access_log",
-        payload={"surface": "rest", "error_type": "RuntimeError"},
+        payload={
+            "surface": "rest",
+            "error_type": "RuntimeError",
+            "dropped_reads": 2,
+            "failed_reads": 1,
+        },
     )
     payload = json.loads(_invoke(["access-log", "--format", "json"]).stdout)
-    assert payload["log_failures"] == 1
-    assert "were not recorded" in plain(_invoke(["access-log"]).output)
+    assert payload["failure_signals"] == 1
+    assert payload["dropped_reads"] == 2
+    assert payload["failed_reads"] == 1
+    text = " ".join(plain(_invoke(["access-log"]).output).split())
+    assert "1 access.log_failed signals" in text
+    assert "a count of signals, not of reads" in text
+    assert "at least 2 dropped" in text
+    assert "at least 1 failed" in text

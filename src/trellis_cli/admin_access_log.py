@@ -47,15 +47,24 @@ def _render_text(payload: dict[str, object], hours: float) -> None:
             row["last_read_at"],
         )
     console.print(table)
-    if payload["log_failures"]:
+    _render_notes(payload)
+
+
+def _render_notes(payload: dict[str, object]) -> None:
+    """What the table does not cover, said in the words of what each number counts."""
+    if payload["failure_signals"]:
         console.print(
-            f"[yellow]{payload['log_failures']} reads were not recorded "
-            "(access.log_failed).[/yellow]"
+            f"[yellow]{payload['failure_signals']} access.log_failed signals in "
+            "the window (one a minute per process at most, so a count of "
+            f"signals, not of reads). Reads not recorded: at least "
+            f"{payload['dropped_reads']} dropped (queue full), at least "
+            f"{payload['failed_reads']} failed (store error).[/yellow]"
         )
     if payload["truncated"]:
         console.print(
             "[yellow]Scan cap reached: reads before "
-            f"{escape(str(payload['covered_since']))} are missing.[/yellow]"
+            f"{escape(str(payload['covered_since']))} are missing. "
+            f"{escape(str(payload['note']))}[/yellow]"
         )
 
 

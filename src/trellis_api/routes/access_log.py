@@ -35,8 +35,12 @@ def key_reads(
     """Per key: reads, items returned and last read inside the window.
 
     A key last used before the window is absent. ``truncated`` says the scan
-    cap bit and older reads in the window are missing; ``log_failures`` counts
-    reads the log failed to record.
+    cap bit and older reads in the window are missing (``note`` says what that
+    means: in an all-keys answer a key absent from the list may still have been
+    used; ask for one key and its own rows are scanned). ``failure_signals``
+    counts ``access.log_failed`` rows, which are rate limited and so not a count
+    of reads; ``dropped_reads`` and ``failed_reads`` are lower bounds on reads
+    the log did not record (queue full, store error).
     """
     registry = get_registry()
     return summarize_key_reads(

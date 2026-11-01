@@ -582,14 +582,18 @@ _SPECS: tuple[SettingSpec, ...] = (
         name="access_log",
         label="Per-key access log",
         type="bool",
-        default=True,
+        default=False,
         description=(
             "Records one access.key_read event for every read an API key "
             "makes over REST or MCP: the key id, the route or tool, how "
-            "many items came back and the first few ids. It holds no "
-            "document text, no query text and no secret. On by default. "
-            "Off writes no row at all. Calls with no key record nothing "
-            "either way, and what a read returns is the same on or off."
+            "many items came back (when the route names them) and the "
+            "first few ids. It holds no document text, no query text and "
+            "no secret. Off by default, because these rows have no "
+            "retention path: the event log has no prune or delete, and a "
+            "row is about 1.6 KB on SQLite (1,000 reads a day is roughly "
+            "590 MB a year). Off writes no row at all. Calls with no key "
+            "record nothing either way, and what a read returns is the "
+            "same on or off."
         ),
         surfaces=("mcp", "api"),
         restart_required=False,

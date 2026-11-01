@@ -1,20 +1,26 @@
 """REST side of the per-key access log (:mod:`trellis.core.access_log`).
 
 A pure ASGI middleware, outside every route and outside ``trellis.retrieve``:
-it watches the response a keyed read already produced, then records one
-``access.key_read`` row after the last byte has gone out, off the event loop.
+it watches the response a keyed read already produced, then hands one entry to
+the access-log writer thread after the last byte has gone out. Nothing here
+runs a store call, parses a body or waits on a lock held by one.
 
 * **Who.** ``require_scope`` stamps ``request.state.access_key_id`` once a real
   key has passed its scope check. The legacy shared secret, auth mode ``off``
   and an anonymous call stamp nothing, so they buffer nothing and record nothing.
 * **Which reads.** A ``GET`` under ``/api/v1``, plus the two pack routes
   (:data:`READ_POST_ROUTES`), answered ``200``. A refused or failed call
-  returned nothing, so it records nothing.
-* **What.** The route template, and the ids the JSON answer carries
-  (:func:`extract_returned_items`): the id of every row in a top-level list of
-  rows, one nested level down for sectioned packs. Only the ids are kept. A body
-  over :data:`MAX_BODY_BYTES`, or one that is not a JSON object, records
-  ``item_count: null``.
+  (403, 404, 422, ...) returned nothing, so it records nothing.
+* **Off is a pass-through.** The knob is read when the response starts, before
+  a single body chunk is looked at, so an off process buffers nothing.
+* **What.** The route template (never the raw path) and the ids the answer
+  carries. The ids come from an allowlist of item-serving routes
+  (:data:`ITEM_ROUTES`), each with an exact path to its id field, keyed on the
+  matched route template so an id in the URL cannot select an entry. Every
+  other route records ``item_count: null`` and no ids: a route that does not
+  name its items is not guessed at, and nothing else in a body is read. A
+  body over :data:`MAX_BODY_BYTES`, one that is not JSON, or one that does not
+  have the allowlisted shape also records ``item_count: null``.
 """
 
 from __future__ import annotations
@@ -23,13 +29,20 @@ import json
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
-import anyio.to_thread
 import structlog
 
-from trellis.core.access_log import SURFACE_REST, record_key_read, signal_failure
+from trellis.core.access_log import (
+    ENTRY_OVERHEAD_BYTES,
+    SURFACE_REST,
+    access_log_enabled,
+    enqueue_key_read,
+    signal_failure,
+)
 
 if TYPE_CHECKING:
     from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+    from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
 
@@ -38,60 +51,67 @@ API_PREFIX = "/api/v1/"
 READ_POST_ROUTES = frozenset({"/api/v1/packs", "/api/v1/packs/sectioned"})
 #: A larger answer is not buffered; its row records ``item_count: null``.
 MAX_BODY_BYTES = 1_048_576
-_ID_KEYS = ("item_id", "doc_id", "node_id", "trace_id", "entity_id", "id")
-#: Top-level lists that are not rows the key was served.
-_NOT_ROWS = frozenset({"advisories"})
+
+#: The routes whose answer is a set of items the key was served, as
+#: ``"METHOD route-template" -> (path into the JSON, id field)``. ``"*"`` in a
+#: path walks every element of a list; a path that ends on one object counts
+#: that object as one item. Hand-read from each route's response; a route
+#: absent here records ``item_count: null``.
+ITEM_ROUTES: dict[str, tuple[tuple[str, ...], str]] = {
+    "GET /api/v1/search": (("results", "*"), "doc_id"),
+    "POST /api/v1/packs": (("items", "*"), "item_id"),
+    "POST /api/v1/packs/sectioned": (("sections", "*", "items", "*"), "item_id"),
+    "GET /api/v1/documents/{doc_id:path}": (("document",), "doc_id"),
+    "GET /api/v1/graph/search": (("results", "*"), "entity_id"),
+    "GET /api/v1/entities/{entity_id:path}": (("entity",), "node_id"),
+    "GET /api/v1/traces": (("traces", "*"), "trace_id"),
+    "GET /api/v1/traces/{trace_id}": (("trace",), "trace_id"),
+}
 
 
-def _row_id(row: Any) -> str | None:
-    if isinstance(row, dict):
-        for key in _ID_KEYS:
-            value = row.get(key)
-            if isinstance(value, str) and value:
-                return value
-    return None
+def extract_ids(
+    payload: Any, path: tuple[str, ...], field: str
+) -> tuple[list[str], int | None]:
+    """``(ids, true count)`` at ``path`` in ``payload``; ``None`` if the shape differs.
 
-
-def extract_returned_items(payload: Any) -> tuple[list[str], int | None]:
-    """``(ids, true count)`` of the rows a JSON answer carries.
-
-    Rows are the dicts in a top-level list (``items``, ``results``, ...); a
-    row with no id of its own is searched one level down, for ``sections``.
-    A single record with an id of its own (a document read) is one item.
-    ``None`` for a count only when the payload is not a JSON object.
+    The count is the number of objects the path reaches, so an empty list is a
+    real zero. A shape that is not the one the route is allowlisted for (a key
+    missing, a non-list where a list belongs, an object without the id field)
+    is unknown, not zero.
     """
-    if not isinstance(payload, dict):
-        return [], None
+    nodes: list[Any] = [payload]
+    for step in path:
+        walked: list[Any] = []
+        for node in nodes:
+            if step == "*":
+                if not isinstance(node, list):
+                    return [], None
+                walked.extend(node)
+            elif isinstance(node, dict) and step in node:
+                walked.append(node[step])
+            else:
+                return [], None
+        nodes = walked
     ids: list[str] = []
-    for key, value in payload.items():
-        if key in _NOT_ROWS or not isinstance(value, list):
-            continue
-        for row in value:
-            row_id = _row_id(row)
-            if row_id is not None:
-                ids.append(row_id)
-            elif isinstance(row, dict):
-                ids.extend(
-                    nested_id
-                    for inner in row.values()
-                    if isinstance(inner, list)
-                    for nested_id in (_row_id(r) for r in inner)
-                    if nested_id is not None
-                )
-    if not ids:
-        # A single record: its own id, or the id of the one record it wraps
-        # (``{"status": "ok", "document": {...}}``).
-        single = _row_id(payload) or next(
-            (
-                row_id
-                for value in payload.values()
-                if (row_id := _row_id(value)) is not None
-            ),
-            None,
-        )
-        if single is not None:
-            ids.append(single)
+    for node in nodes:
+        value = node.get(field) if isinstance(node, dict) else None
+        if not isinstance(value, str) or not value:
+            return [], None
+        ids.append(value)
     return ids, len(ids)
+
+
+def items_from_body(
+    body: bytes | None, spec: tuple[tuple[str, ...], str] | None
+) -> tuple[list[str], int | None]:
+    """The ids an allowlisted route's body carries. Runs on the writer thread."""
+    if spec is None or not body:
+        return [], None
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return [], None
+    return extract_ids(payload, *spec)
 
 
 def is_read(method: str, path: str) -> bool:
@@ -113,29 +133,10 @@ def route_template(scope: Scope) -> str:
     return tail if tail.startswith(API_PREFIX) else API_PREFIX.rstrip("/") + tail
 
 
-def _record(scope: Scope, key_id: str, body: bytes | None) -> None:
-    """Runs in a worker thread. Never raises."""
-    registry = None
-    try:
-        from trellis_api.app import get_registry  # noqa: PLC0415
+def _registry() -> StoreRegistry:
+    from trellis_api.app import get_registry  # noqa: PLC0415
 
-        registry = get_registry()
-        route = route_template(scope)
-
-        def items() -> tuple[list[str], int | None]:
-            if body is None:
-                return [], None
-            return extract_returned_items(json.loads(body))
-
-        record_key_read(
-            registry,
-            key_id=key_id,
-            surface=SURFACE_REST,
-            route=f"{scope['method']} {route}",
-            items=items,
-        )
-    except Exception as exc:  # advisory step; never fail the read
-        signal_failure(registry, SURFACE_REST, exc)
+    return get_registry()
 
 
 class AccessLogMiddleware:
@@ -150,15 +151,42 @@ class AccessLogMiddleware:
             return
 
         chunks: list[bytes] = []
-        state: dict[str, Any] = {"ok": False, "size": 0, "over": False, "key_id": None}
+        state: dict[str, Any] = {
+            "ok": False,
+            "size": 0,
+            "over": False,
+            "key_id": None,
+            "registry": None,
+            "route": "",
+            "spec": None,
+        }
+
+        def begin(message: Message) -> None:
+            key_id = (scope.get("state") or {}).get("access_key_id")
+            if not key_id or message["status"] != HTTPStatus.OK:
+                return
+            registry = _registry()
+            if not access_log_enabled(registry):
+                return
+            template = route_template(scope)
+            route = f"{scope['method']} {template}"
+            state.update(
+                ok=True,
+                key_id=key_id,
+                registry=registry,
+                route=route,
+                spec=ITEM_ROUTES.get(route),
+            )
 
         async def send_wrapper(message: Message) -> None:
             try:
                 if message["type"] == "http.response.start":
-                    key_id = (scope.get("state") or {}).get("access_key_id")
-                    state["key_id"] = key_id
-                    state["ok"] = bool(key_id) and message["status"] == HTTPStatus.OK
-                elif message["type"] == "http.response.body" and state["ok"]:
+                    begin(message)
+                elif (
+                    message["type"] == "http.response.body"
+                    and state["ok"]
+                    and state["spec"] is not None
+                ):
                     body = message.get("body", b"")
                     state["size"] += len(body)
                     if state["size"] > MAX_BODY_BYTES:
@@ -166,14 +194,24 @@ class AccessLogMiddleware:
                         chunks.clear()
                     elif not state["over"]:
                         chunks.append(body)
-            except Exception:  # advisory; the answer must still go out
+            except Exception as exc:  # advisory; the answer must still go out
                 state["ok"] = False
+                signal_failure(None, SURFACE_REST, exc)
             await send(message)
 
         await self.app(scope, receive, send_wrapper)
-        if state["ok"]:
-            try:
-                body = None if state["over"] else b"".join(chunks)
-                await anyio.to_thread.run_sync(_record, scope, state["key_id"], body)
-            except Exception as exc:  # advisory step; never fail the read
-                signal_failure(None, SURFACE_REST, exc)
+        if not state["ok"]:
+            return
+        try:
+            spec = state["spec"]
+            body = None if state["over"] or spec is None else b"".join(chunks)
+            enqueue_key_read(
+                state["registry"],
+                key_id=state["key_id"],
+                surface=SURFACE_REST,
+                route=state["route"],
+                items=lambda: items_from_body(body, spec),
+                size=ENTRY_OVERHEAD_BYTES + (len(body) if body else 0),
+            )
+        except Exception as exc:  # advisory step; never fail the read
+            signal_failure(state["registry"], SURFACE_REST, exc)

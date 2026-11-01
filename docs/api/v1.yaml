@@ -1821,14 +1821,24 @@ components:
         covered_since:
           title: Covered Since
           type: string
+        dropped_reads:
+          title: Dropped Reads
+          type: integer
+        failed_reads:
+          title: Failed Reads
+          type: integer
+        failure_signals:
+          title: Failure Signals
+          type: integer
         keys:
           items:
             $ref: '#/components/schemas/KeyReadSummary'
           title: Keys
           type: array
-        log_failures:
-          title: Log Failures
-          type: integer
+        note:
+          default: ''
+          title: Note
+          type: string
         since:
           title: Since
           type: string
@@ -1842,7 +1852,9 @@ components:
       - since
       - window_hours
       - keys
-      - log_failures
+      - failure_signals
+      - dropped_reads
+      - failed_reads
       - truncated
       - covered_since
       title: KeyReadReport
@@ -3482,9 +3494,17 @@ paths:
 
         A key last used before the window is absent. ``truncated`` says the scan
 
-        cap bit and older reads in the window are missing; ``log_failures`` counts
+        cap bit and older reads in the window are missing (``note`` says what that
 
-        reads the log failed to record.'
+        means: in an all-keys answer a key absent from the list may still have been
+
+        used; ask for one key and its own rows are scanned). ``failure_signals``
+
+        counts ``access.log_failed`` rows, which are rate limited and so not a count
+
+        of reads; ``dropped_reads`` and ``failed_reads`` are lower bounds on reads
+
+        the log did not record (queue full, store error).'
       operationId: key_reads_api_v1_access_log_keys_get
       parameters:
       - description: Window, hours

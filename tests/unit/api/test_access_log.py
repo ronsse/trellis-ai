@@ -25,7 +25,7 @@ from trellis.ops.write_health import summarize_write_health
 from trellis.retrieve.effectiveness import analyze_effectiveness
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
-from trellis_api.access_log import extract_returned_items
+from trellis_api.access_log import ITEM_ROUTES, items_from_body
 from trellis_api.app import create_app
 
 
@@ -55,6 +55,7 @@ class World:
             self.key_ids[name] = record.key_id
 
     def rows(self, event_type: EventType = EventType.KEY_READ) -> list[Any]:
+        assert access_log.get_writer().wait_idle(5), "the writer did not drain"
         return self.registry.operational.event_log.get_events(
             event_type=event_type, limit=1000
         )
@@ -73,13 +74,15 @@ def world(tmp_path, monkeypatch):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
     monkeypatch.setenv("TRELLIS_EMBEDDING_FN", EMBED_FN_PATH)
-    monkeypatch.setattr(access_log, "_last_failure_signal", [])
+    monkeypatch.setenv("TRELLIS_ACCESS_LOG", "1")
+    access_log.reset_failure_state()
     reg = StoreRegistry(stores_dir=tmp_path / "stores")
     app_module._registry = reg
     build_world(reg, "full")
     try:
         yield World(reg)
     finally:
+        access_log.get_writer().wait_idle(5)
         reg.close()
         app_module._registry = None
 
@@ -141,19 +144,34 @@ class TestRecorded:
         assert last.payload["item_ids"] == [doc_id]
 
     def test_ids_are_capped_and_the_true_count_stays(self) -> None:
-        rows = [{"item_id": f"d{n}"} for n in range(60)]
-        ids, count = extract_returned_items(
-            {"items": rows, "advisories": [{"id": "a"}]}
-        )
+        ids = [f"d{n}" for n in range(60)]
         payload = access_log.build_payload(
-            key_id="k", surface="rest", route="GET /x", item_ids=ids, item_count=count
+            key_id="k", surface="rest", route="GET /x", item_ids=ids, item_count=60
         )
         assert payload["item_count"] == 60
         assert len(payload["item_ids"]) == access_log.MAX_LOGGED_ITEM_IDS
         assert payload["item_ids_truncated"] is True
 
-    def test_an_answer_that_is_not_an_object_has_no_count(self) -> None:
-        assert extract_returned_items([{"item_id": "a"}]) == ([], None)
+    def test_an_answer_that_is_not_the_expected_shape_has_no_count(self) -> None:
+        spec = ITEM_ROUTES["POST /api/v1/packs"]
+        assert items_from_body(b'[{"item_id": "a"}]', spec) == ([], None)
+        assert items_from_body(b'{"items": [{"id": "a"}]}', spec) == ([], None)
+        assert items_from_body(b"not json", spec) == ([], None)
+        assert items_from_body(b"", spec) == ([], None)
+        assert items_from_body(b'{"items": []}', spec) == ([], 0)
+
+    def test_a_route_off_the_allowlist_records_no_ids_and_no_count(
+        self, world: World
+    ) -> None:
+        # The events answer is full of entity ids; none of them is an item.
+        world.pack()
+        resp = world.client.get("/api/v1/events", headers=world.headers["admin"])
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["events"], "control: the answer carries event rows"
+        last = world.rows()[-1]
+        assert last.payload["route"] == "GET /api/v1/events"
+        assert last.payload["item_count"] is None
+        assert last.payload["item_ids"] == []
 
 
 class TestNotRecorded:
@@ -182,11 +200,27 @@ class TestNotRecorded:
         )
         assert world.rows() == []
 
-    def test_off_means_no_row_of_any_type(self, world: World, monkeypatch) -> None:
-        monkeypatch.setenv("TRELLIS_ACCESS_LOG", "false")
+    @pytest.mark.parametrize(
+        "value", [None, "", "0", "false", "nonsense", "n", "f", "disabled", "none"]
+    )
+    def test_off_is_the_default_and_an_unrecognised_value_is_off(
+        self, world: World, monkeypatch, value: str | None
+    ) -> None:
+        if value is None:
+            monkeypatch.delenv("TRELLIS_ACCESS_LOG")
+        else:
+            monkeypatch.setenv("TRELLIS_ACCESS_LOG", value)
         world.pack()
         assert world.rows() == []
         assert world.rows(EventType.ACCESS_LOG_FAILED) == []
+
+    @pytest.mark.parametrize("value", ["1", "true", "yes", "on", "ON"])
+    def test_only_the_truthy_spellings_turn_it_on(
+        self, world: World, monkeypatch, value: str
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_ACCESS_LOG", value)
+        world.pack()
+        assert len(world.rows()) == 1
 
     def test_a_write_is_not_a_read(self, world: World) -> None:
         world.client.post(
@@ -217,22 +251,36 @@ class TestAdvisory:
         assert resp.status_code == 200
         assert resp.json()["results"]
         (failed,) = world.rows(EventType.ACCESS_LOG_FAILED)
-        assert failed.payload == {"surface": "rest", "error_type": "RuntimeError"}
+        assert failed.payload == {
+            "surface": "rest",
+            "error_type": "RuntimeError",
+            "dropped_reads": 0,
+            "failed_reads": 1,
+        }
         assert "hunter2" not in json.dumps(failed.payload)
 
     def test_the_failure_signal_is_rate_limited(
         self, world: World, monkeypatch
     ) -> None:
-        monkeypatch.setattr(
-            world.registry.operational.event_log,
-            "emit",
-            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")),
-        )
+        log = world.registry.operational.event_log
+        real_emit = log.emit
+
+        def emit(event_type, *args, **kwargs):
+            if event_type == EventType.KEY_READ:
+                msg = "down"
+                raise RuntimeError(msg)
+            return real_emit(event_type, *args, **kwargs)
+
+        monkeypatch.setattr(log, "emit", emit)
         for _ in range(3):
             resp = world.client.get(
                 "/api/v1/search", params={"q": QUERY}, headers=world.headers["read"]
             )
             assert resp.status_code == 200
+        # Three reads failed; one signal row went out in the minute, and the
+        # other two reads are still counted for the next one.
+        assert len(world.rows(EventType.ACCESS_LOG_FAILED)) == 1
+        assert access_log.pending_unrecorded() == (0, 2)
 
 
 class TestUnchangedByTheLog:
@@ -301,7 +349,7 @@ class TestAggregateReadersAreUnaffected:
             ).total_packs
             == 3
         ), "control: the readers see the ordinary packs"
-        monkeypatch.delenv("TRELLIS_ACCESS_LOG")
+        monkeypatch.setenv("TRELLIS_ACCESS_LOG", "1")
         for _ in range(5):
             world.client.get(
                 "/api/v1/search", params={"q": QUERY}, headers=world.headers["read"]
@@ -343,8 +391,12 @@ class TestAdminRead:
         assert read["by_surface"] == {"rest": 2}
         assert read["items_returned"] > 0
         assert by_key[world.key_ids["external"]]["reads"] == 1
-        assert report["log_failures"] == 0
+        assert report["failure_signals"] == 0
+        assert report["dropped_reads"] == 0
+        assert report["failed_reads"] == 0
+        assert "log_failures" not in report
         assert report["truncated"] is False
+        assert report["note"] == ""
 
     def test_key_filter_and_window(self, world: World) -> None:
         world.pack()

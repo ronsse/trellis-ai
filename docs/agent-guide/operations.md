@@ -104,20 +104,35 @@ two keys are returned by `GET /api/v1/stats`, field for field.
 ### Per-key access log (`trellis admin access-log`, `GET /api/v1/access-log/keys`)
 
 Answers "what did this key read, and when did it last run?" from `access.key_read`
-events. One row is written per authenticated read by an API key:
+events. **Off by default**: set `TRELLIS_ACCESS_LOG=1` (or the `access_log` setting) to turn
+it on. Read the retention paragraph below first. When on, one row is written per
+authenticated read by an API key:
 
 - **REST:** any `GET` under `/api/v1/` and `POST /api/v1/packs` and `/api/v1/packs/sectioned`,
-  when the answer is 200.
+  when the answer is 200. A 403, 404 or 422 returned nothing and records nothing.
 - **MCP:** each tool registered at the `read` scope (`tests/unit/mcp/test_access_log.py`
-  pins the list against `server.py`).
+  pins the list against `server.py`). A tool that raises records nothing.
 
 Payload: `{key_id, surface, route, item_count, item_ids, item_ids_truncated}`. `route` is the
-matched route template (`GET /api/v1/documents/{doc_id:path}`) or the MCP tool name.
-`item_ids` keeps the first 25 ids; `item_count` is the true count, so a cut is visible
-(`item_ids_truncated`). `item_count` is `null` when the answer cannot be counted: an MCP tool
-whose markdown carries no item lines, or a REST answer over 1 MiB. REST ids come from the
-JSON answer and MCP ids from the item lines of the markdown, so retrieval is not touched. A row
-carries no document text, no query or intent text and no secret.
+matched route template (`GET /api/v1/documents/{doc_id:path}`) or the MCP tool name, never
+the raw path. `item_ids` keeps the first 25 ids; `item_count` is the true count, so a cut is
+visible (`item_ids_truncated`). A row carries no document text, no query or intent text and
+no secret.
+
+**Which ids, and where they come from.** Nothing is parsed out of an answer's text.
+
+- *REST* reads ids from an allowlist of item-serving routes, each with an exact path to its
+  id field, keyed on the route template (`ITEM_ROUTES` in `trellis_api/access_log.py`):
+  `GET /search` (`results[].doc_id`), `POST /packs` (`items[].item_id`),
+  `POST /packs/sectioned` (`sections[].items[].item_id`), `GET /documents/{doc_id:path}`
+  (`document.doc_id`), `GET /graph/search` (`results[].entity_id`),
+  `GET /entities/{entity_id:path}` (`entity.node_id`), `GET /traces` (`traces[].trace_id`) and
+  `GET /traces/{trace_id}` (`trace.trace_id`). Every other route records `item_count: null`
+  and no ids, as does an allowlisted route whose answer is over 1 MiB, is not JSON, or does
+  not have the expected shape. An empty list is a real `0`; `null` means unknown.
+- *MCP* tools name the ids they served from the structured pack or items they already hold,
+  before formatting (`note_served_items`), so no tool's output changes. `get_file_context`,
+  `get_lessons`, `get_graph` and `query_observations` do not name ids and record `item_count: null`.
 
 A call with no key id records nothing: auth mode `off`, an anonymous call, the legacy shared
 secret, and stdio.
@@ -129,22 +144,47 @@ trellis admin access-log --key-id <id>
 
 One entry per key that read inside the window: `reads`, `items_returned`, `by_surface`,
 `last_read_at`, plus the key's current `name` and `revoked` flag read from the key store (the
-store is never written). A key with no read inside the window is absent. `log_failures` counts
-`access.log_failed` events in the window and `truncated` is `true` when the scan cap hid older
-reads. Exit codes: 0, 2 for `--hours` outside (0, 2160], 5 for a store failure, in both formats.
+store is never written). A key with no read inside the window is absent. Exit codes: 0, 2 for
+`--hours` outside (0, 2160], 5 for a store failure, in both formats.
 
-`GET /api/v1/access-log/keys?hours=&key_id=` returns the same document; it needs the `admin`
-scope and an `external` key is refused. A read through it is itself logged for the key that made it.
+The scan reads at most 5000 rows. `truncated` is `true` when it bit and `note` says what that
+means. In an all-keys answer a key missing from the list **may still have been used** in the
+window; `--key-id` asks the store for that key's own rows, so a quiet key is not hidden behind
+a noisy one. `GET /api/v1/access-log/keys?hours=&key_id=` returns the same document; it needs
+the `admin` scope and an `external` key is refused. A read through it is itself logged for the
+key that made it.
 
-**Off switch.** `TRELLIS_ACCESS_LOG=0` (also `false`, `no`, `off`; settings key `access_log`,
-default on) writes no row of any type.
+**How rows are written.** A read never waits for its row. After the response has been sent
+(REST) or the tool has returned (MCP), one entry is put on a bounded in-process queue that a
+single daemon thread drains; the thread does the parsing and the store write. The queue holds
+at most 1024 entries and 16 MiB (an entry is charged its answer size plus 512 bytes, the
+cost of its row), and a full queue drops the read and counts it. Shutdown drains for at most 2
+seconds and never holds up exit. A slow or hung store therefore delays rows, not reads.
 
 **It is advisory.** The step is wrapped whole, so a read never fails because it could not be
-logged. A failure emits `access.log_failed` (`{surface, error_type}`, the class name only) and
-a `warning` log line, at most once a minute per process, and the report above counts them.
+logged. When reads go unrecorded (the queue was full, or the store write raised) the process
+emits one `access.log_failed` event as soon as the store can next take a write, at most once a
+minute, carrying `{surface, error_type, dropped_reads, failed_reads}` and a `warning` log
+line. The report shows `failure_signals`, the count of those events (rate limited, so not a
+count of reads), and `dropped_reads` / `failed_reads`, the sums of the counts they carry: lower
+bounds on the reads that went unrecorded, since a process that died first never wrote its count.
 
-**Retention.** Nothing in this repository deletes events, `RETENTION_PRUNED` archives documents,
-so `access.key_read` rows accrue like every other type. Size is one row per keyed read.
+**Retention: there is none.** Nothing in this repository deletes events (the event log has no
+prune; `RETENTION_PRUNED` archives documents). Rows accrue without bound. Measured on SQLite a
+row is about 1.6 KB, so 1,000 keyed reads a day is about 590 MB a year. This is why the log is
+off by default; turn it on knowing the volume you will keep.
+
+**Not covered.** The UI events tab (`list_events`, `trellis_api/routes/explore.py`) and the
+base `EventLog.get_event` read events without a type filter: with the log on, the events tab's
+newest rows include access rows, and viewing it adds rows for the key that views it. Neither
+was changed. Every aggregate event reader elsewhere filters by type, and
+`tests/unit/test_access_log_event_readers_rule.py` pins that.
+
+**Knob parsing.** `access_log` follows the `write_config` convention for a default-off flag:
+only `1`, `true`, `yes` and `on` (any case) turn it on; `0`, an empty value, `n`, `f`,
+`disabled` or any other spelling reads off. Like every `write_config` field it is stamped into
+`write_provenance.env_flags` on every event, so `env_flags_digest` changes once for every
+process after the build that adds it, whatever the flag's value.
 
 ### `trellis admin backup`
 

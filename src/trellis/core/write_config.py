@@ -176,13 +176,15 @@ MINHASH_SEED_MAX_DOCS_ENV = "TRELLIS_MINHASH_SEED_MAX_DOCS"
 PACK_HOLDOUT_RATE_ENV = "TRELLIS_PACK_HOLDOUT_RATE"
 
 #: Record one ``access.key_read`` event per authenticated read by an API key
-#: (REST and MCP; :mod:`trellis.core.access_log`).  **Default on**, unlike
-#: every flag above: it adds one row per keyed read and changes nothing a
-#: caller is served.  Set to a falsy spelling (``0``/``false``/``no``/``off``)
-#: and no row is written at all -- the step is skipped before it reads
-#: anything.  Any other value reads as on.
+#: (REST and MCP; :mod:`trellis.core.access_log`).  **Default off**, like the
+#: other behaviour-adding flags above, and read with the shared ``TRUTHY``
+#: spellings (``1``/``true``/``yes``/``on``): an unset, blank or unrecognised
+#: value leaves it off, so a typo can never start writing rows.  It adds one
+#: event per keyed read and changes nothing a caller is served, but **those
+#: rows have no retention path** -- the event log has no prune or delete --
+#: which is why it is opt-in.  Off writes no row at all and the step reads
+#: nothing.
 ACCESS_LOG_ENV = "TRELLIS_ACCESS_LOG"
-_FALSY = frozenset({"0", "false", "no", "off"})
 
 # ---------------------------------------------------------------------------
 # Defaults.  Unchanged from the per-module values they were lifted from.
@@ -426,7 +428,7 @@ class WriteBehaviourConfig:
     pack_holdout_rate: float = 0.0
     reconcile_model: str = DEFAULT_RECONCILE_MODEL
     reconcile_timeout_s: float = DEFAULT_RECONCILE_TIMEOUT_S
-    access_log: bool = True
+    access_log: bool = False
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> WriteBehaviourConfig:
@@ -446,7 +448,7 @@ class WriteBehaviourConfig:
             reconcile_model=src.get(RECONCILE_MODEL_ENV, "").strip()
             or DEFAULT_RECONCILE_MODEL,
             reconcile_timeout_s=_reconcile_timeout(src),
-            access_log=src.get(ACCESS_LOG_ENV, "").strip().lower() not in _FALSY,
+            access_log=_truthy(src, ACCESS_LOG_ENV),
         )
 
     @classmethod
