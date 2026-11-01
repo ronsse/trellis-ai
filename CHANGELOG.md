@@ -6,6 +6,18 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **The Memories tab shows a document's sensitivity label and relabels it.** The list has a
+  Label column and the detail view a badge and a "Relabel as" control that calls the existing
+  `POST /documents/{id}/sensitivity`, showing the server's refusal text (a key without the
+  `mutate` scope, a label above the key's clearance, a store fault). An unlabelled document is
+  badged "unlabelled (internal)" with a title saying an `external` key cannot read it, and a
+  bare `{"sensitivity": "public"}` that an `external` key does not read is badged as such.
+  Lowering a label, or making a document readable by `external` keys, asks first and names who
+  can read it before and after; raising applies at once. To make that possible for every key,
+  `GET /documents` rows and `GET /documents/{id}` carry `label` (`sensitivity`, `stored`,
+  `external_readable`), computed from the stored row before an `external` key's metadata is cut
+  down, for rows the caller may already read. No pack, search or write route changes.
+
 - **An `external` key reads only what someone labelled `public`.** `trellis admin api-keys
   create --scopes read,external` mints a key whose clearance is a new lowest rung, `public`.
   A pack, search, `GET /documents` or `get_items` serves it only a stored document labelled

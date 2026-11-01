@@ -290,7 +290,9 @@ class TestAServedLoserNamesNoUnreadableSuccessor:
             f"/api/v1/documents/{doc_id}", headers=_headers(registry, scopes)
         )
         stored = registry.knowledge.document_store.get(doc_id)
-        assert resp.json()["document"] == stored
+        # ``label`` rides beside the stored record; every stored field is as stored.
+        served = {k: v for k, v in resp.json()["document"].items() if k != "label"}
+        assert served == stored
         assert stored["metadata"]["lifecycle"]["superseded_by"] == successor
 
     def test_a_readable_successor_is_still_named_by_id(self, client, registry):

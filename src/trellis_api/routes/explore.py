@@ -29,6 +29,7 @@ from trellis.retrieve.sensitivity import (
     is_public_only,
     read_document_row,
 )
+from trellis.schemas.classification import DATA_CLASSIFICATION_KEY, is_public_label
 from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, Event, EventType
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate, require_scope
@@ -85,6 +86,26 @@ _SEARCH_GROWTH_CAP = 32
 #: grows with the offset; a ``restricted`` or admin key is served by the store
 #: directly and has no such ceiling.
 _MAX_FILTERED_OFFSET = 10_000
+
+
+def _document_label(gate: DocumentClearance, doc: dict[str, Any]) -> dict[str, Any]:
+    """How a stored document is labelled, read off the row before it is concealed.
+
+    A public-only caller's metadata is cut down to a title and a form
+    (``public_metadata``), so the page could not tell a document an ``external``
+    key reads from one nobody labelled. ``sensitivity`` is the effective label
+    (``DocumentClearance.sensitivity``: an unlabelled row reads ``internal``, a
+    chunk reads its parent's), ``stored`` whether a label is on the row at all,
+    and ``external_readable`` whether it is the one record an ``external`` key
+    reads. Only rows the caller already passed the read gate for come here, so
+    each answer is about a document the caller may read.
+    """
+    metadata = doc.get("metadata")
+    return {
+        "sensitivity": gate.sensitivity(str(doc.get("doc_id")), metadata),
+        "stored": isinstance(metadata, dict) and DATA_CLASSIFICATION_KEY in metadata,
+        "external_readable": is_public_label(metadata),
+    }
 
 
 def _document_row(doc: dict[str, Any], *, with_rank: bool) -> dict[str, Any]:
@@ -181,6 +202,11 @@ def list_documents(
     ``updates_doc_id`` names a document the key may not read is served without
     that id.
 
+    Each row carries ``label`` (``sensitivity``, ``stored``,
+    ``external_readable``), computed from the stored row before a public-only
+    caller's metadata is cut down, so the label is shown whoever asks and is
+    only ever about a row the caller may read.
+
     ``<parent>#chunk-N`` fragment rows are excluded by default; pass
     ``include_chunks=true`` for the unfiltered listing. ``total`` is
     counted under the same filter as the rows, and the applied setting is
@@ -253,8 +279,12 @@ def list_documents(
         total = store.count(include_chunks=include_chunks)
         total_exact = True
     with_rank = gate.clearance == "restricted"
+    labels = [_document_label(gate, d) for d in docs]
     docs = conceal_document_rows(docs, store, gate.clearance)
-    rows = [_document_row(d, with_rank=with_rank) for d in docs]
+    rows = [
+        {**_document_row(d, with_rank=with_rank), "label": label}
+        for d, label in zip(docs, labels, strict=True)
+    ]
     return {
         "status": "ok",
         "total": total,
@@ -364,9 +394,11 @@ def get_document(
     """Get a single document with full content and metadata.
 
     A document labelled above the caller's clearance answers 404, exactly
-    as a missing one does. A document whose ``lifecycle.superseded_by``,
-    ``supersedes_doc_id`` or ``updates_doc_id`` names a document the caller may
-    not read is served without that id.
+    as a missing one does. ``document.label`` says how the row is labelled
+    (``sensitivity``, ``stored``, ``external_readable``), for a public-only
+    caller too, whose ``metadata`` carries no label. A document whose
+    ``lifecycle.superseded_by``, ``supersedes_doc_id`` or ``updates_doc_id``
+    names a document the caller may not read is served without that id.
     """
     registry = get_registry()
     store = registry.knowledge.document_store
@@ -378,9 +410,13 @@ def get_document(
         doc = None
     if doc is None:
         raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}")
+    label = _document_label(DocumentClearance(store, clearance), doc)
     return {
         "status": "ok",
-        "document": conceal_document_successor(doc, store, clearance),
+        "document": {
+            **conceal_document_successor(doc, store, clearance),
+            "label": label,
+        },
     }
 
 
