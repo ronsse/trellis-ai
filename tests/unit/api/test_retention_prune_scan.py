@@ -77,7 +77,7 @@ def _prune(client: TestClient) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize(("cap", "named"), [(2, True), (10, False)])
-def test_the_message_names_a_cap_only_when_one_ended_the_scan(
+def test_the_message_says_the_scan_stopped_early_only_when_it_did(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, cap: int, named: bool
 ) -> None:
     monkeypatch.setattr(retention_module, "MAX_ENTITIES_SCANNED", cap)
@@ -87,4 +87,7 @@ def test_the_message_names_a_cap_only_when_one_ended_the_scan(
     result = _prune(client)
 
     assert result["status"] == "success"
-    assert ("scan capped at 2 entities" in result["message"]) is named
+    assert (
+        "entity scan stopped early (the 2-entity cap," in result["message"]
+    ) is named
+    assert "scan capped" not in result["message"]

@@ -56,7 +56,7 @@ def _cap(monkeypatch: pytest.MonkeyPatch, cap: int) -> None:
     monkeypatch.setattr(retention_module, "_SCAN_PAGE", 2)
 
 
-def test_json_names_the_cap_and_exits_zero(
+def test_json_says_the_scan_stopped_early_and_exits_zero(
     stores_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _cap(monkeypatch, 2)
@@ -64,23 +64,24 @@ def test_json_names_the_cap_and_exits_zero(
     assert result.exit_code == 0, result.output
     data = json.loads(result.output.strip())
     assert data["status"] == "success"
-    assert "scan capped at 2 entities" in data["message"]
+    assert "entity scan stopped early (the 2-entity cap," in data["message"]
 
 
-def test_text_names_the_cap_and_exits_zero(
+def test_text_says_the_scan_stopped_early_and_exits_zero(
     stores_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _cap(monkeypatch, 2)
     result = runner.invoke(app, _ARGV)
     assert result.exit_code == 0, result.output
-    assert "scan capped at 2 entities" in " ".join(plain(result.output).split())
+    text = " ".join(plain(result.output).split())
+    assert "entity scan stopped early (the 2-entity cap," in text
 
 
 @pytest.mark.parametrize("fmt", ["json", "text"])
-def test_a_complete_scan_says_nothing_about_a_cap(
+def test_a_complete_scan_says_nothing_about_stopping_early(
     stores_dir: Path, monkeypatch: pytest.MonkeyPatch, fmt: str
 ) -> None:
     _cap(monkeypatch, 10)
     result = runner.invoke(app, [*_ARGV, "--format", fmt])
     assert result.exit_code == 0, result.output
-    assert "scan capped" not in " ".join(plain(result.output).split())
+    assert "stopped early" not in " ".join(plain(result.output).split())
