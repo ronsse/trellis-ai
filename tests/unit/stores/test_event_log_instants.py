@@ -44,6 +44,7 @@ _OLD_SCHEMA = """
 """
 
 _INDEX = "idx_events_occurred_at_utc"
+_TYPE_INDEX = "idx_events_type_occurred_at_utc"
 
 #: ``source`` -> the text an earlier build stored, in the order they happened.
 _OLD_TEXTS = {
@@ -192,7 +193,7 @@ def test_a_new_file_gets_the_same_column_and_index(tmp_path: Path) -> None:
             )
         }
         # The old index stays, because an earlier build expects it.
-        assert {"idx_events_occurred_at", _INDEX} <= indexes
+        assert {"idx_events_occurred_at", _INDEX, _TYPE_INDEX} <= indexes
     finally:
         store.close()
 
@@ -232,26 +233,172 @@ def test_append_writes_the_text_it_was_given_and_get_event_returns_it(
 
 def test_queries_use_the_index_on_the_instant(tmp_path: Path) -> None:
     """The plan of each statement the store sends searches an index on the
-    time, as the plain ``occurred_at`` statements did before."""
+    time, as the plain ``occurred_at`` statements did before, and no statement
+    sorts: a read that names an event type is served by the index led by it."""
     store = SQLiteEventLog(tmp_path / "plans.db")
     try:
         for hour in range(3):
             store.emit(EventType.TRACE_INGESTED, "src", entity_id=f"e{hour}")
         sent: list[str] = []
         store._conn.set_trace_callback(sent.append)
-        store.get_events(since=_NOON, until=_NOON + timedelta(days=9000), limit=5)
-        store.get_events(since=_NOON, order="desc", limit=5)
+        kind = EventType.TRACE_INGESTED
         store.get_events(limit=5)
+        store.get_events(since=_NOON, limit=5)
+        store.get_events(since=_NOON, until=_NOON + timedelta(days=9000), limit=5)
+        store.get_events(event_type=kind, since=_NOON, order="desc", limit=1)
+        store.get_events(event_type=kind, source="src", order="desc", limit=5)
         store.count(since=_NOON)
+        store.count(event_type=kind, since=_NOON)
         store._conn.set_trace_callback(None)
         selects = [s for s in sent if s.startswith("SELECT") and "FROM events" in s]
-        assert len(selects) == 4
+        assert len(selects) == 7
         for sql in selects:
             plan = " | ".join(
                 r[3] for r in store._conn.execute("EXPLAIN QUERY PLAN " + sql)
             )
-            assert _INDEX in plan, (sql, plan)
+            assert _INDEX in plan or _TYPE_INDEX in plan, (sql, plan)
             assert "TEMP B-TREE" not in plan, (sql, plan)
+            if "event_type = " in sql:
+                assert _TYPE_INDEX in plan, (sql, plan)
+    finally:
+        store.close()
+
+
+def test_the_migration_adds_the_index_led_by_event_type(old_file: Path) -> None:
+    """A file from before the column gets the type-led index with it, and a file
+    that has the column but not that index gets it on the next open."""
+    store = SQLiteEventLog(old_file)
+    try:
+        assert _TYPE_INDEX in {
+            r["name"]
+            for r in store._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            )
+        }
+    finally:
+        store.close()
+    # A raw connection and ``executescript``, as the trace store's test does: the
+    # Postgres scratch-database rule is scoped to DB-API ``execute`` and this is
+    # a SQLite file under ``tmp_path``.
+    raw = sqlite3.connect(old_file)
+    raw.executescript(f"DROP INDEX {_TYPE_INDEX}")
+    raw.commit()
+    raw.close()
+    reopened = SQLiteEventLog(old_file)
+    try:
+        names = {
+            r["name"]
+            for r in reopened._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            )
+        }
+        assert {_INDEX, _TYPE_INDEX} <= names
+    finally:
+        reopened.close()
+
+
+def _tied_corpus(store: SQLiteEventLog) -> list[Event]:
+    """30 events on 5 instants (whole and fractional seconds, all UTC), written
+    out of instant order, two types, so every ``limit`` below cuts inside a tie."""
+    instants = [
+        _NOON + timedelta(seconds=2),
+        _NOON,
+        _NOON + timedelta(seconds=3, microseconds=500000),
+        _NOON + timedelta(seconds=1),
+        _NOON + timedelta(seconds=3),
+    ]
+    written = []
+    for i in range(30):
+        event = Event(
+            event_type=EventType.TRACE_INGESTED if i % 3 else EventType.PACK_ASSEMBLED,
+            source="src",
+            entity_id=f"e{i}",
+            occurred_at=instants[i * 7 % 5],
+        )
+        store.append(event)
+        written.append(event)
+    return written
+
+
+def test_every_plan_cuts_a_tie_the_same_way_in_both_directions(
+    tmp_path: Path,
+) -> None:
+    """Events at one instant come back in insertion order (reversed for
+    ``desc``) whether the indexes, the inline expression, or the statement the
+    store sent before the column existed does the work, so ``limit`` cuts the
+    same rows whichever plan runs."""
+    store = SQLiteEventLog(tmp_path / "ties.db")
+    try:
+        written = _tied_corpus(store)
+        shapes: list[dict] = [
+            {},
+            {"since": _NOON + timedelta(seconds=1)},
+            {"event_type": EventType.TRACE_INGESTED},
+            {
+                "event_type": EventType.PACK_ASSEMBLED,
+                "since": _NOON + timedelta(seconds=1),
+            },
+        ]
+        checked = 0
+        for shape in shapes:
+            kept = [
+                e
+                for e in written
+                if shape.get("event_type") in (None, e.event_type)
+                and shape.get("since", e.occurred_at) <= e.occurred_at
+            ]
+            by_instant = sorted(kept, key=lambda e: e.occurred_at)  # stable
+            clauses = ["1=1"]
+            params: list = []
+            if "event_type" in shape:
+                clauses.append("event_type = ?")
+                params.append(str(shape["event_type"]))
+            if "since" in shape:
+                clauses.append("occurred_at >= ?")
+                params.append(shape["since"].isoformat())
+            for order in ("asc", "desc"):
+                ordered = by_instant if order == "asc" else by_instant[::-1]
+                for limit in (1, 4, 7, 100):
+                    want = [e.event_id for e in ordered[:limit]]
+                    indexed = [
+                        e.event_id
+                        for e in store.get_events(**shape, order=order, limit=limit)
+                    ]
+                    store._has_occurred_at_utc = False
+                    try:
+                        inline = [
+                            e.event_id
+                            for e in store.get_events(**shape, order=order, limit=limit)
+                        ]
+                    finally:
+                        store._has_occurred_at_utc = True
+                    base_sql = (
+                        "SELECT event_id, occurred_at FROM events WHERE "  # noqa: S608
+                        + " AND ".join(clauses)
+                        + f" ORDER BY occurred_at {order.upper()} LIMIT ?"
+                    )
+                    base_rows = store._conn.execute(
+                        base_sql, [*params, limit]
+                    ).fetchall()
+                    assert indexed == inline == want, (shape, order, limit)
+                    # The statement sent before the column existed. Where it
+                    # walked the index on ``occurred_at`` its ties came back in
+                    # ``rowid`` order, as now. Where it sorted (a named event
+                    # type) SQLite's sorter kept scan order within a tie, so a
+                    # ``desc`` ``limit`` that cuts a tie differs from ``rowid``
+                    # order; the instants always agree.
+                    assert [r[1] for r in base_rows] == [
+                        e.occurred_at.isoformat() for e in ordered[:limit]
+                    ], ("base instants", shape, order, limit)
+                    if "event_type" not in shape or order == "asc":
+                        assert [r[0] for r in base_rows] == want, (
+                            "base",
+                            shape,
+                            order,
+                            limit,
+                        )
+                    checked += 1
+        assert checked == 32
     finally:
         store.close()
 

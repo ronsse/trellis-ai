@@ -22,7 +22,15 @@ logger = structlog.get_logger(__name__)
 
 #: The instant of a row's ``created_at`` text as fixed-width UTC; the expression,
 #: its limits and the migration that indexes it are shared with the event log
-#: (:mod:`trellis.stores.sqlite.instant`).
+#: (:mod:`trellis.stores.sqlite.instant`). Two of that module's limits read
+#: differently here. ``append`` clamps a stamp past what ``datetime`` can name in
+#: UTC before writing it, so only old rows have a key outside the edge ``as_utc``
+#: clamps a bound to. And one limit belongs to this store alone: the embed walk
+#: reads ``trace_json``, which keeps an offset only to the minute (as it always
+#: has), while this key keeps the second, so an offset with seconds can make the
+#: walk skip a row within a minute of it. Whole-minute offsets, past 14:00
+#: included, are unaffected. The trace schema rejects an offset with seconds as a
+#: string; only an in-process ``datetime`` with such a ``tzinfo`` writes one.
 _CREATED_AT_UTC_SQL = instant_key_sql("created_at")
 
 _CREATED_AT_UTC_INDEX = "idx_traces_created_at_utc"

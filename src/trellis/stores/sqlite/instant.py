@@ -12,7 +12,7 @@ such a column.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
@@ -64,7 +64,9 @@ def instant_key_sql(column: str) -> str:
     ``00.5+5:00``. An old row past what ``datetime`` can name in UTC
     (``0001-01-01T00:00+05:30``, ``9999-12-31T23:00-05:00``) has a key outside
     the edge ``as_utc`` clamps a bound to, so a query bounded by its own stamp
-    can miss it.
+    can miss it. A store whose ``append`` does not clamp such a stamp (the
+    event log's) can miss a new row the same way; the trace store's does clamp,
+    so only its old rows are affected.
 
     The ``GLOB`` keeps text that does not start with a year away from
     ``strftime``: ``strftime`` reads ``now`` as the current time, which a
@@ -115,6 +117,7 @@ def migrate_instant_column(
     index: str,
     columns: Callable[[], set[str]],
     events: MigrationEvents,
+    also_indexes: Sequence[tuple[str, str]] = (),
 ) -> bool:
     """Additive migration: index ``source_column`` by instant, not by text.
 
@@ -130,16 +133,32 @@ def migrate_instant_column(
     otherwise stop a reader that opened fine before. A statement that fails with
     ``OperationalError`` logs a warning and the next open tries again. Returns
     whether the column exists afterwards; when it does not, the caller evaluates
-    :func:`instant_key_sql` inline, which returns the same rows and is merely
-    unindexed. ``columns`` lists the table's columns, generated ones included
+    :func:`instant_key_sql` inline, which returns the same rows, in the same
+    order when the caller breaks ties on ``rowid``, and is merely unindexed.
+    ``columns`` lists the table's columns, generated ones included
     (``PRAGMA table_xinfo``; ``table_info`` hides them).
+
+    ``also_indexes`` are further ``(name, column list)`` indexes over the
+    column, such as one led by a filter column. They are built in the same
+    window, after the main index, and the first one that cannot be built ends
+    the attempt: a lock or a read-only file refuses them all, and waiting out
+    each in turn would only lengthen the open. A virtual column is computed
+    per row wherever no index covers the read, so a read that filters on
+    another column and then compares or orders the instant is slower than the
+    text comparison it replaced unless an index leads with that column.
+
+    Each ``CREATE INDEX`` holds the write lock for its whole run, so the first
+    open of a file of millions of rows blocks every other writer for the build
+    (seconds per million rows), longer than their own busy timeout on a large
+    enough file. The 250 ms above bounds only the wait for the lock.
     """
     present = columns()
-    indexed = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
-        (index,),
-    ).fetchone()
-    if instant_column in present and indexed:
+    wanted = ((index, instant_column), *also_indexes)
+    built = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+    }
+    if instant_column in present and all(name in built for name, _ in wanted):
         return True
 
     (prior_timeout_ms,) = conn.execute("PRAGMA busy_timeout").fetchone()
@@ -168,16 +187,19 @@ def migrate_instant_column(
                         error=str(exc),
                     )
                     return False
-        try:
-            conn.execute(
-                f"CREATE INDEX IF NOT EXISTS {index} ON {table}({instant_column})"
-            )
-        except sqlite3.OperationalError as exc:
-            logger.warning(
-                events.index_skipped,
-                db_path=str(db_path),
-                error=str(exc),
-            )
+        for name, index_columns in wanted:
+            try:
+                conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {name} ON {table}({index_columns})"
+                )
+            except sqlite3.OperationalError as exc:
+                logger.warning(
+                    events.index_skipped,
+                    db_path=str(db_path),
+                    index=name,
+                    error=str(exc),
+                )
+                break
         conn.commit()
         return True
     finally:

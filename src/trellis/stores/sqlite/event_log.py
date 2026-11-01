@@ -87,6 +87,14 @@ _OCCURRED_AT_UTC_SQL = instant_key_sql("occurred_at")
 
 _OCCURRED_AT_UTC_INDEX = "idx_events_occurred_at_utc"
 
+#: Led by ``event_type``, so a read that names a type and then compares or
+#: orders the instant (the session dedup and feedback lookups, ``count`` for a
+#: type) is a range scan, not an evaluation of the expression per matching row.
+_TYPE_OCCURRED_AT_UTC_INDEX = (
+    "idx_events_type_occurred_at_utc",
+    "event_type, occurred_at_utc",
+)
+
 _MIGRATION_EVENTS = MigrationEvents(
     migrating="migrating_event_log_schema_add_occurred_at_utc",
     skipped="event_log_schema_migration_skipped",
@@ -137,6 +145,7 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
             index=_OCCURRED_AT_UTC_INDEX,
             columns=self._event_columns,
             events=_MIGRATION_EVENTS,
+            also_indexes=(_TYPE_OCCURRED_AT_UTC_INDEX,),
         )
 
     def _instant(self) -> str:
@@ -277,8 +286,13 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
 
         where = " AND ".join(clauses) if clauses else "1=1"
         direction = "DESC" if order == "desc" else "ASC"
+        # ``rowid`` in the same direction breaks ties among events at one
+        # instant, so ``limit`` cuts the same rows whichever plan runs (the
+        # indexes, or the inline expression on a file that could not migrate).
+        # Every index on the instant carries ``rowid`` last, so it adds no sort.
         sql = (
-            f"SELECT * FROM events WHERE {where} ORDER BY {instant} {direction} LIMIT ?"
+            f"SELECT * FROM events WHERE {where} "
+            f"ORDER BY {instant} {direction}, rowid {direction} LIMIT ?"
         )
         params.append(limit)
 

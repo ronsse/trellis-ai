@@ -814,10 +814,13 @@ class EventLog(ABC):
         ``since`` and ``until`` are inclusive and compare by instant: an event
         stored with a ``-11:00`` or ``+14:00`` offset is found by the moment it
         happened, not by the wall-clock digits it was written with, and results
-        are ordered by instant. A naive bound or a naive stored ``occurred_at``
-        is read as UTC. The returned event keeps the ``occurred_at`` it was
-        appended with, so a caller that compares or sorts them across events
-        must normalise (see ``_as_utc`` below) first. ``count(since=...)``
+        are ordered by instant, events at one instant in insertion order (SQLite).
+        On SQLite a naive bound or a naive stored ``occurred_at`` is read as
+        UTC; Postgres reads a naive bound in the session's time zone, so pass an
+        aware datetime to get the same answer from both. The returned event
+        keeps the ``occurred_at`` it was appended with, so a caller that
+        compares or sorts them across events must normalise (see ``_as_utc``
+        below) first. ``count(since=...)``
         reads its bound the same way.
 
         ``order`` controls truncation semantics when ``limit`` is hit:
