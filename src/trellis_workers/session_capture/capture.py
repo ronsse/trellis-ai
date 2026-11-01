@@ -57,7 +57,7 @@ from trellis.core.hashing import content_hash
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.ingest_corpus.models import SyncRecord
 from trellis.ingest_corpus.sync import sync_records
-from trellis.llm.egress import EgressGate, EgressVerdict
+from trellis.llm.egress import EgressGate, EgressVerdict, failed_read_verdict
 from trellis.llm.routing import LLMConsumer
 from trellis.mcp.reconcile import (
     RECONCILIATION_KEY,
@@ -759,11 +759,13 @@ def _session_egress_verdict(
                     if verdict is EgressVerdict.WITHHELD:
                         return verdict
                     unreadable = unreadable or verdict is EgressVerdict.UNREADABLE
-    except Exception:
+    except Exception as exc:
         # GRACEFUL-DEGRADATION: fail closed. A pack that cannot be read must
-        # not read as permission to send the transcript off the host; the
-        # sweep counts the skip under ``sessions_skipped_egress_unreadable``.
-        return EgressVerdict.UNREADABLE
+        # not read as permission to send the transcript off the host. An event
+        # row whose own bytes do not parse never will, so it is withheld; an
+        # event log that could not answer is counted under
+        # ``sessions_skipped_egress_unreadable``, which strict mode fails on.
+        return failed_read_verdict(exc)
     return EgressVerdict.UNREADABLE if unreadable else EgressVerdict.PERMITTED
 
 

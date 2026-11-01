@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -19,6 +20,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 import trellis.mcp.server as server_mod
 from tests.llm_routes import per_consumer_config, route_from
@@ -27,6 +29,7 @@ from trellis.llm.egress import (
     EGRESS_WITHHELD_REASON,
     EgressGate,
     EgressVerdict,
+    failed_read_verdict,
     may_reach_route,
 )
 from trellis.llm.routing import (
@@ -678,6 +681,66 @@ class TestStoredVerdict:
         assert (
             gate.stored_verdict(chunk_doc_id("parent", 0)) is EgressVerdict.UNREADABLE
         )
+
+    def test_a_chunk_whose_parent_row_does_not_parse_is_withheld_like_the_parent(
+        self, store: SQLiteDocumentStore
+    ) -> None:
+        store.put("parent", "body", {})
+        store.put(chunk_doc_id("parent", 0), "c", {})
+        store._conn.execute(
+            "UPDATE documents SET metadata_json = ? WHERE doc_id = ?",
+            ("{broken", "parent"),
+        )
+        store._conn.commit()
+        gate = EgressGate(store, local=False)
+        assert gate.stored_verdict("parent") is EgressVerdict.WITHHELD
+        assert gate.stored_verdict(chunk_doc_id("parent", 0)) is EgressVerdict.WITHHELD
+        # Asked again by a fresh gate, and for a second chunk of the same parent.
+        store.put(chunk_doc_id("parent", 1), "d", {})
+        again = EgressGate(store, local=False)
+        assert again.stored_verdict(chunk_doc_id("parent", 1)) is EgressVerdict.WITHHELD
+        assert again.stored_verdict(chunk_doc_id("parent", 0)) is EgressVerdict.WITHHELD
+
+    def test_a_chunk_whose_parent_store_is_down_stays_unreadable_on_every_ask(
+        self, store: SQLiteDocumentStore
+    ) -> None:
+        store.put(chunk_doc_id("parent", 0), "c", {})
+        flaky = _FlakyStore(
+            store, {"parent": sqlite3.OperationalError("database is locked")}
+        )
+        gate = EgressGate(flaky, local=False)  # type: ignore[arg-type]
+        for _ in range(2):
+            assert (
+                gate.stored_verdict(chunk_doc_id("parent", 0))
+                is EgressVerdict.UNREADABLE
+            )
+
+    @pytest.mark.parametrize(
+        ("failure", "expected"),
+        [
+            pytest.param(
+                json.JSONDecodeError("bad", "{", 0),
+                EgressVerdict.WITHHELD,
+                id="json-decode",
+            ),
+            pytest.param(RecursionError(), EgressVerdict.WITHHELD, id="recursion"),
+            pytest.param(
+                ValidationError.from_exception_data("Event", []),
+                EgressVerdict.WITHHELD,
+                id="validation-error",
+            ),
+            pytest.param(
+                sqlite3.OperationalError("database is locked"),
+                EgressVerdict.UNREADABLE,
+                id="db-locked",
+            ),
+            pytest.param(RuntimeError("down"), EgressVerdict.UNREADABLE, id="runtime"),
+        ],
+    )
+    def test_failed_read_verdict_splits_a_row_that_will_not_parse_from_an_outage(
+        self, failure: Exception, expected: EgressVerdict
+    ) -> None:
+        assert failed_read_verdict(failure) is expected
 
     def test_a_store_that_cannot_answer_is_unreadable_not_withheld(self) -> None:
         broken = MagicMock()

@@ -411,6 +411,30 @@ def test_a_store_outage_is_partial_and_strict_fails_it_in_either_format(
     assert as_json.exit_code == as_text.exit_code == expected
 
 
+@pytest.mark.parametrize("output_format", ["json", "text"])
+def test_a_run_that_only_withheld_traces_is_ok_and_strict_exits_zero(
+    cli_stores: None,
+    monkeypatch: pytest.MonkeyPatch,
+    output_format: str,
+) -> None:
+    """A label doing its job is not a failed run, so strict must not fail it."""
+    get_document_store().put("ev-secret", "body", _SECRET)
+    _seed_cli({"alpha": [], "bravo": ["ev-secret"], "charlie": [], "delta": []})
+    _stub_llm(monkeypatch, _CountingLLM(_MOCK_JSON))
+
+    result = runner.invoke(
+        app,
+        ["worker", "mine-precedents", "--format", output_format, "--strict"],
+    )
+
+    assert result.exit_code == 0, result.output
+    if output_format == "json":
+        data = json.loads(result.output)
+        assert data["status"] == "ok"
+        assert data["skipped_egress_withheld"] == 1
+        assert data["skipped_egress_unreadable"] == 0
+
+
 def test_the_gate_and_the_client_are_built_from_the_same_route(
     cli_stores: None,
     monkeypatch: pytest.MonkeyPatch,

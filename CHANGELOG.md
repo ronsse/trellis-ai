@@ -224,7 +224,10 @@ All notable changes to Trellis will be documented in this file.
   section ids); an event that records none of them, or whose lists are malformed, is a
   permanent fact of an immutable event, so the session is withheld (counted as withheld, never
   failing a strict run) and not reported as an outage. A pack that truly served nothing
-  (`injected_item_ids: []`) is permitted. `CaptureFunnel`
+  (`injected_item_ids: []`) is permitted. A row whose stored bytes do not parse (a pack
+  event's payload that is not a JSON object, a document's metadata that is not JSON) is
+  withheld too, as is a chunk whose parent row does not parse, because none of them parses on
+  a retry. `CaptureFunnel`
   gains the two counts, so `analyze health` reports sessions kept off the route instead of
   calling them sampled out (two zero-valued keys appear in the funnel payload even when
   nothing is withheld; no existing value or text changes). A trace or transcript carries no

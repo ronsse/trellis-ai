@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -106,8 +107,15 @@ def _two_pack_session(root: Path) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "outage",
+    [
+        pytest.param(RuntimeError("log down"), id="runtime-error"),
+        pytest.param(sqlite3.OperationalError("database is locked"), id="db-locked"),
+    ],
+)
 def test_a_pack_that_cannot_be_read_is_unreadable_not_withheld(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outage: Exception
 ) -> None:
     registry = _registry(tmp_path)
     log = registry.operational.event_log
@@ -115,8 +123,7 @@ def test_a_pack_that_cannot_be_read_is_unreadable_not_withheld(
 
     def get_events(*args: Any, **kwargs: Any) -> Any:
         if kwargs.get("event_type") is EventType.PACK_ASSEMBLED:
-            msg = "log down"
-            raise RuntimeError(msg)
+            raise outage
         return real(*args, **kwargs)
 
     monkeypatch.setattr(log, "get_events", get_events)
@@ -218,6 +225,9 @@ def test_a_sectioned_pack_is_judged_by_its_item_rows(tmp_path: Path) -> None:
         pytest.param({}, id="no-item-record"),
         pytest.param({"injected_item_ids": "doc-secret"}, id="ids-not-a-list"),
         pytest.param({"injected_item_ids": [None]}, id="id-not-a-string"),
+        pytest.param({"injected_item_ids": [""]}, id="id-is-empty"),
+        pytest.param({"injected_items": [{"item_id": ""}]}, id="row-id-is-empty"),
+        pytest.param({"sections": [{"item_ids": [""]}]}, id="section-id-is-empty"),
         pytest.param({"injected_items": [{"rank": 1}]}, id="row-without-an-id"),
         pytest.param({"injected_items": "doc-secret"}, id="rows-not-a-list"),
         pytest.param({"sections": "background"}, id="sections-not-a-list"),
@@ -243,6 +253,40 @@ def test_a_pack_with_no_readable_item_record_is_withheld_and_never_sent(
     assert report.sessions_skipped_egress_withheld == 1
     assert report.sessions_skipped_egress_unreadable == 0
     assert report.warnings == []
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        pytest.param("{broken", id="not-json"),
+        pytest.param("[1,2]", id="a-list"),
+        pytest.param("null", id="null"),
+    ],
+)
+def test_a_pack_event_whose_stored_payload_does_not_parse_is_withheld_every_sweep(
+    tmp_path: Path, stored: str
+) -> None:
+    """A row that will not parse never will: withheld, so strict mode stays green.
+
+    Read as an outage it would count as unreadable on every sweep and keep a
+    strict run red until someone repaired an immutable event by hand.
+    """
+    registry = _registry(tmp_path)
+    _serve(registry, A, "doc-ok")
+    conn = registry.operational.event_log._conn
+    conn.execute("UPDATE events SET payload_json = ? WHERE entity_id = ?", (stored, A))
+    conn.commit()
+    root, judge = tmp_path / "projects", _Recorder()
+    _session(root, A)
+
+    for _ in range(3):
+        report = _sweep(registry, root, tmp_path / "wm.json", judge)
+
+        assert judge.prompts == []
+        assert report.sessions_skipped_egress_withheld == 1
+        assert report.sessions_skipped_egress_unreadable == 0
+        assert report.sessions_errored == 0
+        assert report.warnings == []
 
 
 # The shape every sectioned pack carried from the first release until

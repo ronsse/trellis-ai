@@ -19,8 +19,11 @@ content to an LLM goes through one of them:
   row is absent, answers "no" (retrieval judges that last case by the chunk's
   own label; egress does not, because an unlabelled orphan is exactly what a
   deleted labelled parent leaves behind). ``stored_verdict`` keeps two kinds
-  of "no" apart, :class:`EgressVerdict`: ``WITHHELD`` is a fact about the row
-  and holds on a retry, ``UNREADABLE`` is a store that could not answer.
+  of "no" apart, :class:`EgressVerdict`: ``WITHHELD`` is a permanent fact about
+  what is stored (a label, a row that will not parse, an orphan chunk, a pack
+  event with no readable item list) and holds on a retry; ``UNREADABLE`` is a
+  failure to read that a later run can clear (a store that could not answer, or
+  a gate given no store), plus an exception nobody anticipated, which stays loud.
   A gate over a local route reads nothing and answers "yes" for everything, so
   a declared-local route behaves as it always did.
 
@@ -53,6 +56,8 @@ from collections.abc import Callable, Mapping
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from pydantic import ValidationError
+
 from trellis.llm.routing import LLMRoutingError
 from trellis.schemas.classification import sensitivity_of, sensitivity_rank
 from trellis.schemas.pack import PackItem
@@ -67,6 +72,7 @@ __all__ = [
     "EGRESS_WITHHELD_REASON",
     "EgressGate",
     "EgressVerdict",
+    "failed_read_verdict",
     "may_reach_route",
 ]
 
@@ -82,11 +88,12 @@ class EgressVerdict(StrEnum):
 
     ``WITHHELD`` and ``UNREADABLE`` both keep the content off the route, and
     they are not the same fact. ``WITHHELD`` is a permanent fact about what is
-    stored: a label above ``internal``, a label that is malformed, a chunk id
-    whose parent row is gone, or (for a served pack, judged by the capture
-    sweep) an immutable event that records no readable item list. It holds
-    until someone edits the row, so a job counting it must not read as a
-    fault. ``UNREADABLE`` is a failure to read that a later run can clear: a
+    stored: a label above ``internal``, a label that is malformed, a row whose
+    own bytes do not parse, a chunk id whose parent row is gone or does not
+    parse, or (for a served pack, judged by the capture sweep) an immutable
+    event that records no readable item list or whose payload does not parse.
+    It holds until someone edits the row, so a job counting it must not read as
+    a fault. ``UNREADABLE`` is a failure to read that a later run can clear: a
     store that could not answer, or a gate that was given no document store to
     ask. An operator must see it, and a retry may pass.
     """
@@ -100,12 +107,20 @@ def _verdict(permitted: bool) -> EgressVerdict:
     return EgressVerdict.PERMITTED if permitted else EgressVerdict.WITHHELD
 
 
-def _failed_read(exc: Exception) -> EgressVerdict:
-    """``WITHHELD`` when ``exc`` is the stored row's own bytes, else ``UNREADABLE``."""
+def failed_read_verdict(exc: Exception) -> EgressVerdict:
+    """``WITHHELD`` when ``exc`` is a stored row's own bytes, else ``UNREADABLE``.
+
+    A row whose bytes do not parse does not parse on a retry, so it is a fact
+    about what is stored. That covers a document row (``JSONDecodeError``,
+    ``RecursionError``, an undecodable SQLite text column) and an event row
+    whose payload is valid JSON but not an object, which the event model
+    refuses with a ``ValidationError``. Any other exception is a store that
+    could not answer, or a defect, and is ``UNREADABLE``.
+    """
     # Deferred for the reason given in ``EgressGate.__init__``.
     from trellis.retrieve.sensitivity import _row_cannot_be_parsed  # noqa: PLC0415
 
-    if _row_cannot_be_parsed(exc):
+    if isinstance(exc, ValidationError) or _row_cannot_be_parsed(exc):
         return EgressVerdict.WITHHELD
     return EgressVerdict.UNREADABLE
 
@@ -236,18 +251,21 @@ class EgressGate:
         except Exception as exc:
             # GRACEFUL-DEGRADATION: fail closed, as in ``permits``, and say which
             # kind of closed.
-            return _failed_read(exc)
+            return failed_read_verdict(exc)
 
     def _chunk_verdict(
         self, doc_id: str, metadata: Mapping[str, Any] | None
     ) -> EgressVerdict:
         """``PERMITTED`` unless ``doc_id`` is a chunk whose parent cannot be read.
 
-        ``WITHHELD`` when the parent row is absent, ``UNREADABLE`` when the
-        parent fetch raised (the cache records which). The shape is the only
-        signal, as in retrieval: a plain document whose id merely resembles a
-        chunk id is treated as one. The parent lookup goes through the
-        clearance's own cache, so it costs no extra read.
+        ``WITHHELD`` when the parent row is absent. When the parent fetch
+        raised (the cache records which), the parent is asked again directly
+        through :meth:`stored_verdict`, so a parent whose own bytes do not parse
+        is ``WITHHELD`` for its chunk as it is for the parent, and a store that
+        could not answer is ``UNREADABLE``. The shape is the only signal, as in
+        retrieval: a plain document whose id merely resembles a chunk id is
+        treated as one. A parent that reads costs no extra read, because the
+        lookup goes through the clearance's own cache.
         """
         # Deferred for the reason given in ``__init__``.
         from trellis.ingest_corpus.models import is_chunk_doc_id  # noqa: PLC0415
@@ -263,8 +281,9 @@ class EgressGate:
         cache = self._clearance._cache
         if cache.resolve(item) is not None:
             return EgressVerdict.PERMITTED
-        if resolve_parent_id(item) in cache.failed_parent_ids:
-            return EgressVerdict.UNREADABLE
+        parent_id = resolve_parent_id(item)
+        if parent_id in cache.failed_parent_ids:
+            return self.stored_verdict(parent_id)
         return EgressVerdict.WITHHELD
 
     def _is_orphan_chunk(self, doc_id: str, metadata: Mapping[str, Any] | None) -> bool:
