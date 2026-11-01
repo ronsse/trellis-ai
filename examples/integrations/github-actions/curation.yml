@@ -61,7 +61,7 @@ jobs:
         run: trellis admin init --format json
 
       - name: Reconcile feedback log into the EventLog
-        run: trellis admin reconcile-feedback --log-dir "$TRELLIS_DATA_DIR" --format json
+        run: trellis admin reconcile-feedback --format json
 
       - name: Run curation cycle (Tier 0 demote + Tier 2 prepare)
         run: |

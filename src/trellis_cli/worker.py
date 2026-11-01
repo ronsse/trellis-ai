@@ -1413,7 +1413,7 @@ def curate_cmd(
         "--reconcile-first",
         help=(
             "Backfill pack_feedback.jsonl into the EventLog before the cycle "
-            "(runs reconcile_feedback_log_to_event_log against the data dir). "
+            "(scans <stores_dir>/feedback and the data dir). "
             "Refused with --dry-run."
         ),
     ),
@@ -1453,8 +1453,7 @@ def curate_cmd(
     if dry_run and reconcile_first:
         msg = (
             "--reconcile-first writes events, so --dry-run refuses it; preview "
-            "the backfill with 'trellis admin reconcile-feedback --log-dir DIR "
-            "--dry-run'"
+            "the backfill with 'trellis admin reconcile-feedback --dry-run'"
         )
         raise typer.BadParameter(msg)
 

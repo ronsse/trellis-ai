@@ -7,8 +7,10 @@ import os
 import shlex
 import shutil
 import sqlite3
+import stat
 import time
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from http import HTTPStatus
 from pathlib import Path
@@ -312,31 +314,68 @@ _HEALTH_STORES = (
 _DAMAGED_NOT_A_DATABASE = "not a valid SQLite database"
 _DAMAGED_UNREADABLE = "could not be opened read-only"
 
+#: How many times the probe opens a file before it reports it damaged, and the
+#: pause between tries. The read holds no lock, so a checkpoint or a VACUUM
+#: rewriting pages mid-read can make a healthy file fail once; the same file
+#: reads clean a moment later. A healthy file costs one attempt.
+_PROBE_ATTEMPTS = 3
+_PROBE_RETRY_SLEEP_SECONDS = 0.1
 
-def _probe_sqlite_file(path: Path) -> str | None:
-    """Why the file at ``path`` is not a readable SQLite database, else ``None``.
 
-    Opened ``immutable=1``: no lock and no ``-wal``/``-shm`` file (a plain
-    ``mode=ro`` open of a WAL database leaves both behind), and never created,
-    which a plain ``connect`` would do for an absent path. The one read is a
-    scan of ``sqlite_master``, which parses the header and the first page, so
-    random bytes, a truncated file and a mangled first page all fail while a
-    healthy store of any size answers at once. An empty file is a valid empty
-    database and passes: stores create their files on first use.
+def _probe_sqlite_once(path: Path) -> str | None:
+    """One read-only open of ``path``: why it is not a readable database, else ``None``.
+
+    ``mode=ro`` with ``immutable=1``: ``mode=ro`` is what stops SQLite from
+    creating the file (a dangling symlink would otherwise gain an empty
+    target, and read as healthy), and ``immutable=1`` takes no lock and writes
+    no ``-wal``/``-shm`` file (``mode=ro`` alone leaves both behind on a WAL
+    database).
     """
     try:
-        conn = sqlite3.connect(path.absolute().as_uri() + "?immutable=1", uri=True)
+        conn = sqlite3.connect(
+            path.absolute().as_uri() + "?mode=ro&immutable=1", uri=True
+        )
     except sqlite3.Error:
         return _DAMAGED_UNREADABLE
     try:
         conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
     except sqlite3.OperationalError:
         return _DAMAGED_UNREADABLE
-    except sqlite3.DatabaseError:
+    except (sqlite3.DatabaseError, UnicodeDecodeError):
+        # The second is a schema row whose name is not valid text: the
+        # driver raises it while reading the row, not a ``sqlite3`` error.
         return _DAMAGED_NOT_A_DATABASE
     finally:
         conn.close()
     return None
+
+
+def _probe_sqlite_file(
+    path: Path, *, sleep: Callable[[float], None] = time.sleep
+) -> str | None:
+    """Why the file at ``path`` is not a readable SQLite database, else ``None``.
+
+    Opened read-only, never created, with no lock and no side file (see
+    :func:`_probe_sqlite_once`). The one read is a scan of ``sqlite_master``,
+    which parses the header and the first page, so random bytes, a truncated
+    file and a mangled first page all fail while a healthy store of any size
+    answers at once. An empty file is a valid empty database and passes:
+    stores create their files on first use.
+
+    A failure is retried up to ``_PROBE_ATTEMPTS`` times, and damage is
+    reported only if every attempt fails. Holding no lock is what keeps the
+    probe from touching a live store, and it is also why the answer is not
+    guaranteed: a read that overlaps a writer can still be wrong in
+    principle, retries make that rare, and a second run settles it.
+    """
+    reason: str | None = None
+    for attempt in range(_PROBE_ATTEMPTS):
+        if attempt:
+            sleep(_PROBE_RETRY_SLEEP_SECONDS)
+        reason = _probe_sqlite_once(path)
+        if reason is None:
+            return None
+    return reason
 
 
 def _check_store_files(
@@ -719,6 +758,79 @@ def stats(
         console.print(table)
 
 
+def _feedback_log_unreadable_reason(log_path: Path) -> str | None:
+    """Why a feedback log that is present cannot be read as a file, else ``None``.
+
+    "Present" is ``path_is_present``: a dangling symlink, a loop, a directory
+    and a file this user cannot open all count, and the reader's own
+    ``exists()`` would call the first two absent and raise on the others. The
+    check follows links, wants a regular file (opening a FIFO would block), and
+    opens it once. The reason is the OS's own phrase, never a path.
+    """
+    try:
+        if not stat.S_ISREG(log_path.stat().st_mode):
+            return "it is not a regular file"
+        with log_path.open("rb"):
+            pass
+    except OSError as exc:
+        return exc.strerror or type(exc).__name__
+    return None
+
+
+def _unscannable_feedback_log_report(
+    log_path: Path, *, explicit_dir: bool, legacy_log: Path | None, dry_run: bool
+) -> tuple[dict[str, Any], int] | None:
+    """The report and exit code for a log that cannot be scanned, else ``None``.
+
+    No row is scanned in either case, so neither reads ``ok``. ``no_log`` is
+    nothing at the path: exit 2 for a ``--log-dir`` the operator named (usually
+    the wrong directory), 0 for the default (a fresh install has no log).
+    ``unreadable`` is something there that this process cannot read: exit 5 for
+    both, since a monitor reads it.
+    """
+    from trellis.ops.backup import FEEDBACK_LOG_NAME  # noqa: PLC0415
+
+    unreadable = (
+        _feedback_log_unreadable_reason(log_path) if path_is_present(log_path) else None
+    )
+    if unreadable is not None:
+        status = "unreadable"
+        exit_code = EXIT_STORE
+        message = (
+            f"{FEEDBACK_LOG_NAME} at {log_path} is there but cannot be read"
+            f" ({unreadable}), so nothing was scanned."
+        )
+    elif not path_is_present(log_path):
+        status = "no_log"
+        exit_code = EXIT_VALIDATION if explicit_dir else EXIT_OK
+        message = f"No {FEEDBACK_LOG_NAME} at {log_path}, so nothing was scanned."
+        if explicit_dir:
+            message += (
+                " The log is written under <stores_dir>/feedback; omit"
+                " --log-dir to use it."
+            )
+        elif legacy_log is not None and path_is_present(legacy_log):
+            message += (
+                f" A {FEEDBACK_LOG_NAME} does exist at {legacy_log};"
+                f" --log-dir {legacy_log.parent} reads it."
+            )
+    else:
+        return None
+    payload = {
+        "status": status,
+        "dry_run": dry_run,
+        "log_path": str(log_path),
+        "scanned": 0,
+        "already_present": 0,
+        "emitted": 0,
+        "would_emit": 0,
+        "failed": 0,
+        "missing_feedback_ids": [],
+        "message": message,
+    }
+    return payload, exit_code
+
+
 @admin_app.command("reconcile-feedback")
 def reconcile_feedback(
     log_dir: Path | None = typer.Option(  # noqa: B008 - typer option default
@@ -753,9 +865,11 @@ def reconcile_feedback(
     The directory defaults to ``<stores_dir>/feedback``, the one place the
     log is written. A directory with no ``pack_feedback.jsonl`` is never a
     clean pass: the report says ``no_log`` and names the file looked for. With
-    the default directory that is exit 0 (nothing has been recorded yet); with
-    ``--log-dir`` it is exit 2, since a directory named on purpose that lacks
-    the file is usually the wrong one.
+    the default directory that is exit 0, since a fresh install has no log;
+    with ``--log-dir`` it is exit 2, since a directory named on purpose that
+    lacks the file is usually the wrong one. A log that is there but cannot be
+    read (a dangling symlink or a loop, a directory, a file this user cannot
+    open) reports ``unreadable`` and exits 5 (``EXIT_STORE``) in both formats.
 
     ``--dry-run`` scans the log and reports how many rows *would* be
     emitted without touching the EventLog.
@@ -768,37 +882,22 @@ def reconcile_feedback(
     from trellis.ops.backup import FEEDBACK_LOG_NAME  # noqa: PLC0415
 
     explicit_dir = log_dir is not None
+    legacy_log: Path | None = None
     if log_dir is None:
         stores_dir = _get_registry().stores_dir
         assert stores_dir is not None  # from_config_dir always sets it
         log_dir = feedback_log_dir(stores_dir)
+        # Where earlier ad-hoc runs kept the log; not read by default.
+        legacy_log = stores_dir.parent / FEEDBACK_LOG_NAME
     log_path = log_dir / FEEDBACK_LOG_NAME
 
     payload: dict[str, Any]
     exit_code = EXIT_OK
-    if not path_is_present(log_path):
-        # The file is absent, so no row was scanned: say that, not "ok".
-        exit_code = EXIT_VALIDATION if explicit_dir else EXIT_OK
-        payload = {
-            "status": "no_log",
-            "dry_run": dry_run,
-            "log_path": str(log_path),
-            "scanned": 0,
-            "already_present": 0,
-            "emitted": 0,
-            "would_emit": 0,
-            "failed": 0,
-            "missing_feedback_ids": [],
-            "message": (
-                f"No {FEEDBACK_LOG_NAME} at {log_path}, so nothing was scanned."
-                + (
-                    " The log is written under <stores_dir>/feedback; omit"
-                    " --log-dir to use it."
-                    if explicit_dir
-                    else " Nothing has been recorded yet."
-                )
-            ),
-        }
+    unscannable = _unscannable_feedback_log_report(
+        log_path, explicit_dir=explicit_dir, legacy_log=legacy_log, dry_run=dry_run
+    )
+    if unscannable is not None:
+        payload, exit_code = unscannable
     elif dry_run:
         signals = load_feedback_log(log_dir)
         event_log = get_event_log()
@@ -834,10 +933,11 @@ def reconcile_feedback(
 
     if output_format == "json":
         print(json.dumps(payload))
-    elif payload["status"] == "no_log":
+    elif payload["status"] in {"no_log", "unreadable"}:
         console.print(f"[bold]Reconcile Feedback[/bold] ({escape(str(log_dir))})")
+        label = "No log" if payload["status"] == "no_log" else "Unreadable log"
         # Unwrapped: a path folded across lines is not one a reader can copy.
-        console.print(f"  No log: {escape(payload['message'])}", soft_wrap=True)
+        console.print(f"  {label}: {escape(payload['message'])}", soft_wrap=True)
     else:
         console.print(f"[bold]Reconcile Feedback[/bold] ({escape(str(log_dir))})")
         console.print(f"  Scanned: {payload['scanned']}")
