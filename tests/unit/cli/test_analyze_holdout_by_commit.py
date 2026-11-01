@@ -17,7 +17,13 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
-from tests.unit.analyze._holdout_fixture import MONDAY, HoldoutLog, provenance
+from tests.unit.analyze._holdout_fixture import (
+    MONDAY,
+    SETTLING_SWEEP_HOURS_AFTER_UNTIL,
+    UNTIL,
+    HoldoutLog,
+    provenance,
+)
 from trellis.ops.serving_builds import NO_PROVENANCE_LABEL, build_label
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.exit_codes import EXIT_OK
@@ -164,11 +170,13 @@ def test_a_build_name_is_never_read_as_console_markup(log: HoldoutLog) -> None:
 def test_the_flag_without_tasks_prints_an_empty_table_and_exits_alike(
     log: HoldoutLog,
 ) -> None:
-    log.sweep()
+    for hours in SETTLING_SWEEP_HOURS_AFTER_UNTIL:
+        log.sweep(at=UNTIL + timedelta(hours=hours))
 
     text, machine = _run("--by-commit")
 
     assert text.exit_code == machine.exit_code
+    assert _payload(machine)["settled_window"]["settled"] is True
     assert _payload(machine)["by_commit"]["rows"] == []
     assert "no analysed task" in _flat(text)
 

@@ -409,6 +409,8 @@ def test_a_read_before_any_sweep_past_until_is_incomplete(log: HoldoutLog) -> No
     assert row.withheld.n is None
     assert row.difference is None
     assert row.served.outcome_mean is None
+    # Which tasks span builds is read off the analysed set, so it is withheld too.
+    assert report.by_commit.units_spanning_builds is None
 
 
 def test_an_incomplete_read_refuses_every_adjusted_estimate_too(
