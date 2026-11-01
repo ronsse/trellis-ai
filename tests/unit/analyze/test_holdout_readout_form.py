@@ -386,6 +386,47 @@ def test_a_read_before_any_sweep_past_until_is_incomplete(log: HoldoutLog) -> No
     assert row.served.outcome_mean is None
 
 
+def test_an_incomplete_read_refuses_every_adjusted_estimate_too(
+    log: HoldoutLog,
+) -> None:
+    for i in range(12):
+        log.task(
+            start=MONDAY + timedelta(hours=i),
+            arms=[i % 3 == 0],
+            commits=i,
+            covariates=covariates_payload(
+                brief_chars=400 + 25 * i, agent_type="general" if i % 2 else "plan"
+            ),
+        )
+    log.sweep(at=MONDAY + timedelta(days=1))
+
+    block = _analyze(log).covariate_adjusted
+
+    assert [a.name for a in block.adjustments] == [
+        "brief_length",
+        "brief_length_and_agent_type",
+    ]
+    for adjustment in block.adjustments:
+        # The fit ran, so the adjustment's own status is its fit's; the
+        # estimates it would report are what the unsettled window refuses.
+        assert adjustment.status == "ok"
+        for result in (adjustment.inference, adjustment.unadjusted_same_subset):
+            assert result is not None
+            assert result.status == WINDOW_NOT_SETTLED
+            assert result.difference is None
+            assert result.p_value is None
+            assert result.ci_low is None
+            assert result.mean_served is None
+            assert result.mean_residual_served is None
+
+    log.sweep(at=UNTIL + timedelta(hours=1))
+    log.sweep(at=UNTIL + timedelta(hours=4))
+    settled = _analyze(log).covariate_adjusted.adjustments[0]
+    assert settled.inference is not None
+    assert settled.inference.status == "ok"
+    assert settled.inference.difference is not None
+
+
 def test_one_sweep_after_until_is_not_enough_it_must_settle(log: HoldoutLog) -> None:
     _one_task_log(log)
     first = UNTIL + timedelta(hours=1)

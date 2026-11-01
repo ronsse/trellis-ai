@@ -3716,14 +3716,17 @@ trellis analyze holdout --until 2026-12-23T22:47:00Z --days 60 --rate 0.2 --by-c
 `--until` is joined by the first completed capture sweep at or after it, and counts as finished
 only when a later sweep ran `--settle-hours` after that join. Until then `settled_window.settled`
 is `false`, `needs_sweep_after` names the time a completed sweep must reach, `reason` says why, the
-text prints an `INCOMPLETE READ` line, `inference.status` (and each adjustment's) reads
-`window not settled` with no estimate, p-value, interval or arm mean, and `by_commit` keeps its
-counts but drops its means and differences. The exit code is `0` either way and does not depend on
-`--format`. Without `--until` the check does not run (`checked: false`). With daily sweeps at
-10:00Z and `--until 2026-12-23T22:47:00Z`, the first sweep at or after the horizon is 2026-12-24
-10:00Z and the earliest complete read follows the 2026-12-25 10:00Z sweep. The descriptive and
-guardrail blocks still print on an incomplete read, and a source system whose sweeps have stopped
-keeps the read incomplete.
+text prints an `INCOMPLETE READ` line, `inference.status` reads `window not settled` with no
+estimate, p-value, interval or arm mean, and `by_commit` keeps its counts but drops its means and
+differences. Each covariate adjustment's `inference.status` and `unadjusted_same_subset.status`
+read the same, while the adjustment's own `status` still reports whether its fit ran. The exit code
+is `0` either way and does not depend on `--format`. Without `--until` the check does not run
+(`checked: false`). With daily sweeps at 10:00Z and `--until 2026-12-23T22:47:00Z`, the first
+sweep at or after the horizon is 2026-12-24 10:00Z and the earliest complete read follows the
+2026-12-25 10:00Z sweep. Only the primary, its adjustments and the by-build figures are refused:
+the `descriptive` block (spreads, counts, sizing and the guardrails' per-arm figures) and the
+`power` block still print on an incomplete read. A source system whose sweeps have stopped keeps
+the read incomplete.
 
 A later run of the same command reads the same window: the window is bounded by `--until`, and
 `--limit 20000` is the per-event-type scan cap. The scan reads newest first from now and the cap
