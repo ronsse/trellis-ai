@@ -27,10 +27,13 @@ All notable changes to Trellis will be documented in this file.
   secret. A stored admin key cannot revoke itself; that is the whole last-admin guard,
   so the shared secret and the CLI can remove the last admin, unsetting the secret
   afterwards leaves no REST or MCP admin, and two admins revoking each other at once can
-  reach zero (read, not reproduced). (2) A failed audit write never changes the outcome:
-  the key operation answers success with the warning `audit_event_not_recorded` (a mint
-  still returns its token), and warnings now reach the REST body, the CLI text and JSON,
-  MCP and the UI. A true server fault answers 500 with no exception text. (3) The CLI
+  reach zero. (2) A store failure on the audit write does not change the outcome: the key
+  operation answers success with the warning `audit_event_not_recorded` (a mint still
+  returns its token), and warnings now reach the REST body, the CLI text and JSON, MCP
+  and the UI. A failure the executor's emit guard does not list, such as a broken import,
+  still answers an error after the write has committed, so a mint can leave a live key
+  with no token returned; list and revoke it. A true server fault answers 500 with no
+  exception text. (3) The CLI
   succeeds and warns when `events.db` is corrupt, so a compromised key can still be
   revoked. A corrupt `policies.json` is the exception: it fails closed (CLI exit 5, REST
   409, the message names the file), and until that file is fixed no surface can mint or

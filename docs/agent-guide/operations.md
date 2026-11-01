@@ -5134,16 +5134,25 @@ valid: `external` is accepted only as `read,external`, and
   operations, so neither can mint or revoke a key. Key operations are neither an accept
   nor a reject for capture health: refusals do not raise the banner and a mint does not
   clear one.
-- **A failed audit write never changes the outcome.** If the key store write
-  succeeded and the event cannot be recorded, the operation answers success with
-  the warning `audit_event_not_recorded` (a mint still returns its token), and an
-  error log names the command, key id and operation, never a secret. Warnings
-  (this one and any `warn`-verdict policy) are in the REST body, the CLI's text
-  and JSON, the MCP result and the Keys tab. The CLI also succeeds and warns when
-  the event log cannot be opened at all, so a corrupt `events.db` cannot keep a
-  compromised key live. A run that tolerated a failed open always carries the
-  warning, even if a later `api_key.*` write landed, because the executor's own
-  `mutation.executed` record is missing in that case.
+- **A store failure on the audit write does not change the outcome.** If the key
+  store write succeeded and the event cannot be recorded because of a failure the
+  executor's emit guard lists, which is what both shipped event logs raise, the
+  operation answers success with the warning `audit_event_not_recorded` (a mint
+  still returns its token), and an error log names the command, key id and
+  operation, never a secret. Warnings (this one and any `warn`-verdict policy) are
+  in the REST body, the CLI's text and JSON, the MCP result and the Keys tab. The
+  CLI also succeeds and warns when the event log cannot be opened at all, so a
+  corrupt `events.db` cannot keep a compromised key live. A successful run that
+  tolerated a failed open always carries the warning, even if a later `api_key.*`
+  write landed, because the executor's own `mutation.executed` record is missing in
+  that case; a CLI refusal (`already_revoked`, `unknown_key_id`) changed nothing and
+  does not print it.
+- **Outside that list the operation reports a failure after the write.** An
+  environment-level failure the guard does not list, such as a broken import or
+  running out of memory, on the executor's `mutation.executed` emit answers REST 500
+  or CLI `store_error` although the key store write has committed. A mint then
+  returns no token and leaves a live key nobody holds; a revoke has taken effect.
+  Run `trellis admin api-keys list`, then revoke the orphan.
 - Not covered: expiry, a last-used stamp, editing a key's scopes, per-key domain
   limits.
 

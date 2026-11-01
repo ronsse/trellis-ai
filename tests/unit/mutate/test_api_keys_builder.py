@@ -1,9 +1,10 @@
 """``build_api_keys_executor``: who tolerates a failed event-log open, and what it says.
 
 Only the CLI recovery path passes ``tolerate_unopenable_event_log=True``. A
-tolerated run swaps in a no-op log, so the executor's own ``mutation.executed``
-record is gone even when the handler's later access to the real log works; the
-result must say so rather than report success with ``warnings: []``.
+tolerated run swaps in a log that refuses writes, so the executor's own
+``mutation.executed`` record is gone even when the handler's later access to the
+real log works; the result must say so rather than report success with
+``warnings: []``.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
 from trellis.auth import SCOPE_READ, generate_api_key
 from trellis.mutate import CommandStatus, build_api_keys_executor
@@ -80,3 +82,25 @@ def test_a_log_that_stays_dead_warns_too(registry: StoreRegistry) -> None:
     record = registry.operational.api_key_store.get(key_id)
     assert record is not None
     assert record.revoked_at is not None
+
+
+def test_a_non_sqlite_open_failure_is_tolerated_too(registry: StoreRegistry) -> None:
+    # Postgres raises its own classes; recovery must not hang on SQLite's.
+    key_id = _victim(registry)
+    flaky = FlakyRegistry(registry, fail_first=10**6, error=RuntimeError)
+    executor = build_api_keys_executor(flaky, tolerate_unopenable_event_log=True)
+    result = executor.execute(build_revoke_command(key_id, requested_by="cli:admin"))
+    assert result.status == CommandStatus.SUCCESS
+    assert any("audit_event_not_recorded" in w for w in result.warnings)
+
+
+def test_the_failed_open_is_logged_at_error_by_class_only(
+    registry: StoreRegistry,
+) -> None:
+    flaky = FlakyRegistry(registry, fail_first=1)
+    with capture_logs() as logs:
+        build_api_keys_executor(flaky, tolerate_unopenable_event_log=True)
+    entry = next(e for e in logs if e["event"] == "api_keys_event_log_unopenable")
+    assert entry["log_level"] == "error"
+    assert entry["error_type"] == "OperationalError"
+    assert "SECRET-DRIVER-TEXT" not in repr(entry)
