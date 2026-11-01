@@ -15,6 +15,7 @@ from trellis.core.ids import generate_ulid
 from trellis.schemas.classification import LIST_FACETS
 from trellis.stores.base.document import (
     DocumentStore,
+    ReadableMatch,
     chunk_exclusion_clause,
     chunk_id_like_pattern,
     encode_filter_value,
@@ -162,6 +163,42 @@ def _metadata_matches(metadata_json: str, key: str, expected_json: str) -> bool:
     return bool(json.loads(metadata_json).get(key) == json.loads(expected_json))
 
 
+#: Name of the SQL function :func:`_metadata_matches_closed` is registered under.
+_METADATA_MATCH_CLOSED_FN = "trellis_metadata_matches_closed"
+
+
+def _metadata_matches_closed(
+    readable: bytes | None, doc_id: str, key: str, expected_json: str
+) -> bool:
+    """SQL callback for a :class:`ReadableMatch` filter: unreadable never matches.
+
+    ``readable`` is the row's metadata as UTF-8 bytes when the stored column is
+    valid JSON *and* an object, and NULL otherwise (the caller's ``CASE`` makes
+    it so, because SQLite's own ``json_extract`` raises ``malformed JSON`` on the
+    column before any callback runs). Bytes, not text, because a column that is
+    JSON but not UTF-8 cannot be handed to a callback as text: CPython raises
+    while converting the argument, before this runs.
+
+    A row that is NULL here, does not decode, or does not parse is a row whose
+    label cannot be read, so it is withheld and recorded; a readable row is judged
+    exactly as :func:`_metadata_matches` judges it. Recorded under the event
+    :func:`~trellis.retrieve.sensitivity.read_document_row` uses for a by-id read
+    of the same row, so a corrupt row is one signal on every surface. Never an
+    exception: one raised here reaches the caller as an opaque ``OperationalError``
+    and fails every read that scans the row.
+    """
+    try:
+        if readable is None:
+            error = "unreadable_metadata"
+        else:
+            return _metadata_matches(readable.decode("utf-8"), key, expected_json)
+    except (ValueError, RecursionError) as exc:
+        # ``UnicodeDecodeError`` and ``json.JSONDecodeError`` are both ValueErrors.
+        error = type(exc).__name__
+    logger.warning("public_read_unparseable_row", doc_id=doc_id, error=error)
+    return False
+
+
 def _bindable_json_path(key: str) -> str | None:
     r"""``$."key"`` for *key*, or ``None`` if *key* holds a ``"`` or a ``\``.
 
@@ -224,6 +261,12 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         if conn is not existing:
             conn.create_function(
                 _METADATA_MATCH_FN, 3, _metadata_matches, deterministic=True
+            )
+            conn.create_function(
+                _METADATA_MATCH_CLOSED_FN,
+                4,
+                _metadata_matches_closed,
+                deterministic=True,
             )
         return conn
 
@@ -386,8 +429,26 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         filter_params: list[Any] = []
 
         if filters:
-            for key, value in filters.items():
-                if key == "content_tags" and isinstance(value, dict):
+            # A ``ReadableMatch`` goes first: it is the term that must not let
+            # an unreadable row reach a later one (``json_extract`` raises on
+            # a column that is not JSON), and SQLite evaluates a ``WHERE`` in
+            # the order it is written. The sort is stable, so every other
+            # filter keeps its order.
+            for key, value in sorted(
+                filters.items(), key=lambda kv: not isinstance(kv[1], ReadableMatch)
+            ):
+                if isinstance(value, ReadableMatch):
+                    doc_id = column.removesuffix("metadata_json") + "doc_id"
+                    filter_conditions.append(
+                        f"{_METADATA_MATCH_CLOSED_FN}("
+                        f"CASE WHEN json_valid({column}) THEN"
+                        f" CASE WHEN json_type({column}) = 'object'"
+                        f" THEN CAST(json_extract({column}, '$') AS BLOB)"
+                        " END END,"
+                        f" {doc_id}, ?, ?)"
+                    )
+                    filter_params.extend([key, encode_filter_value(key, value)])
+                elif key == "content_tags" and isinstance(value, dict):
                     tag_conds, tag_params = _build_tag_conditions(value)
                     filter_conditions.extend(tag_conds)
                     filter_params.extend(tag_params)

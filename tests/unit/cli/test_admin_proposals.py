@@ -15,12 +15,9 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+import pytest
 from typer.testing import CliRunner
-
-if TYPE_CHECKING:
-    import pytest
 
 from tests.cli_output import plain
 from trellis.core.error_sanitize import SUPPRESSED_MARKER
@@ -288,6 +285,35 @@ class TestListProposals:
 # ---------------------------------------------------------------------------
 # show-proposal
 # ---------------------------------------------------------------------------
+
+
+class TestRefusedRequestsExitTwo:
+    """A request that is refused as malformed exits 2 in both formats."""
+
+    @pytest.mark.parametrize("fmt", ["text", "json"])
+    def test_list_proposals_limit_below_one_exits_two(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fmt: str
+    ) -> None:
+        """Typer's ``min=1`` refuses it before the command body runs."""
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(["list-proposals", "--limit", "0", "--format", fmt])
+        assert result.exit_code == EXIT_VALIDATION, result.output
+
+    @pytest.mark.parametrize("fmt", ["text", "json"])
+    def test_show_proposal_blank_id_exits_two(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fmt: str
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(["show-proposal", "", "--format", fmt])
+        assert result.exit_code == EXIT_VALIDATION, result.output
+
+    def test_an_id_that_names_no_proposal_stays_exit_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Not a malformed request: the lookup ran and found nothing."""
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(["show-proposal", "deadbeef"])
+        assert result.exit_code == EXIT_INTERNAL, result.output
 
 
 class TestShowProposal:

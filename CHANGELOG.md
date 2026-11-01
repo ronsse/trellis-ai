@@ -94,10 +94,9 @@ All notable changes to Trellis will be documented in this file.
   so the semantic axis cannot read them (`axes.semantic` reads `ran`); the keyword axis still
   finds them. The ceiling is the newest 2000 public documents, a function of public rows alone;
   above it older public documents are out of reach of both axes and `total_exact` is `false`.
-  A stored row whose `metadata_json` is not JSON, or is JSON that is not an object, makes the
-  SQLite store's filtered listing fail, so every public read answers 500 for every external key
-  whoever the row belongs to and whatever it holds (the same for every query word, a word nobody
-  holds included): a caller can tell such a row exists and nothing about it. One
+  A stored row whose `metadata_json` is not JSON, or is JSON that is not an object, is withheld
+  from a public read and every other row is served; the SQLite store records it as a
+  `public_read_unparseable_row` warning, the event a by-id read of the same row uses. One
   `VectorStore.get` per public document on a networked backend is reasoned, not measured.
   A by-id read (`GET /documents/{id}`, `get_items`) of a row whose metadata cannot be parsed
   answers a public-only key exactly as a missing id (a hidden corrupt row cannot confirm a
@@ -364,6 +363,26 @@ All notable changes to Trellis will be documented in this file.
   siblings it raises on a failed read, so that `None` keeps meaning "no such pack".
 
 ### Fixed
+
+- **One unreadable document row no longer fails every read by an `external`
+  key on SQLite.** The label predicate the public path runs through
+  `DocumentStore.list_documents` raised on a row whose `metadata_json` is not
+  JSON, is JSON that is not an object (`[1]`, `null`, `"str"`, `5`), is not
+  UTF-8, or is nested past the parser's limit, so a pack, `GET /search` and
+  `GET /documents` answered 500 for every external key while one such row
+  existed, whoever it belonged to. It also read a JSON string whose text is the
+  public label record as that record, so such a row matched the filter (the
+  later per-row gate withheld it). The public filter is now a
+  `trellis.stores.base.document.ReadableMatch`, a dict that only a readable row
+  can match: the SQLite store withholds the row, serves every other row, and
+  records it as a `public_read_unparseable_row` warning (the event a by-id read
+  of the same row already uses). Postgres needed no change: its predicate is
+  `metadata -> key = value`, which is NULL, not an error, on a row that is not
+  an object. Every other read is unchanged, row by row: a plain dict filter, a
+  scalar filter, no filter and every call by a key above `public` answer as
+  before, including the malformed row. `ReadableMatch` is a `dict`, so a store
+  that does not know it behaves as it did.
+
 
 - **`trellis admin draft-promotion-adr` no longer reads a broken `--output` as
   free.** The overwrite check used `Path.exists()`, which answers absent for a
@@ -815,6 +834,18 @@ All notable changes to Trellis will be documented in this file.
   archives.
 
 ### Changed
+
+- **BREAKING: `trellis admin list-proposals` (a `--limit` below 1, reached by a
+  direct call of the command body) and `trellis admin show-proposal` (a blank
+  id) exit 2, not 1.** Both are a refused request, as `generate-proposals
+  --dry-run` is, so they now answer with `EXIT_VALIDATION` in both formats (the
+  JSON payload is unchanged: `{"status": "error", "error": "validation_error",
+  ...}`). `list-proposals --limit 0` on the command line already exited 2
+  (Typer's `min=1` refuses it before the command runs), so for a shell caller
+  only `show-proposal ""` moves. An id that names no proposal still exits 1: the
+  lookup ran and found nothing. A script that treated exit 1 from either call
+  as "the request was refused" must read 2; none in this repository does.
+
 
 - **BREAKING: `trellis admin generate-proposals --dry-run` exits 2 and answers
   as an error.** The generator has no dry-run mode, so the flag was refused with

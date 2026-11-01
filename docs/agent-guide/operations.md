@@ -4713,6 +4713,12 @@ SQLite not valid UTF-8, and on Postgres a JSONB string that is not JSON): on RES
 fault (an outage, a failed query) still answers 500, because it does not depend on
 the id, and a key above `public` still sees the 500 for such a row.
 
+In a list, a search page or a pack the same row is withheld, not failed: the public label
+filter does not match a row whose metadata is not a JSON object, whatever is stored there,
+so every other row is still served. SQLite records it as a `public_read_unparseable_row`
+warning (the event the by-id read uses); on Postgres a JSONB value that is not an object
+never matches the filter, so there is nothing to record. A key above `public` is unchanged.
+
 Status and body do not depend on hidden rows apart from a store fault; response time
 does. On SQLite, `/documents?limit=5` over 200 public rows took 6.2 ms with no hidden
 row, 90.3 ms with 20,000 and 432.3 ms with 100,000, because the label filter scans
