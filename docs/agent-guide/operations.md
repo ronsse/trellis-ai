@@ -1070,6 +1070,12 @@ label is the owner's decision, made through the existing route:
 trellis curate classify-sensitivity <doc_id> --sensitivity <level>
 ```
 
+The Memories tab of the UI (`/ui/`) shows the same label and relabels through
+`POST /api/v1/documents/{id}/sensitivity`; `GET /documents` rows and
+`GET /documents/{id}` carry it as `label` (`sensitivity`, `stored`, `corrupt`,
+`external_readable`). Its "readable by" lines hold when auth is required: with
+auth off every caller holds every scope and reads every label.
+
 This is a `classify` command, beside the other propose-for-a-human commands
 (`tag-candidates`, `domain-candidates`), rather than a `curate` command, because
 `curate` is where governed writes happen and this one makes none. The group's
