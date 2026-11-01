@@ -1028,6 +1028,82 @@ Two properties of `KeywordDomainClassifier` shape the safety story. It matches k
 {"status": "ok", "facet": "domain", "emitted": true, "candidates": [{"candidate_id": "3f2a...", "facet": "domain", "keyword": "todoist", "tag": "task-management", "support": 40, "keyword_documents": 41, "tag_documents": 44, "corpus_documents": 964, "precision": 0.976, "recall": 0.909, "lift": 21.4, "has_write_target": true, "example_item_ids": ["doc-1"], "recurrence_count": 0, "notes": ["gated on agreement with the LLM, not on retrieval outcome — this shows the rule imitates the model, not that either helped", "domain hard-excludes on mismatch: a wrong keyword hides documents from domain-scoped queries rather than re-ranking them — human approval required"]}], "domain_keywords_fragment": {"task-management": ["todoist"]}}
 ```
 
+### `trellis classify label-candidates`
+
+Point a person at documents they may want to label. A read-only scan counts how
+often four plain patterns match in each document's text and reports **which
+document, which rule, how many times**. Nothing in the store sets a sensitivity
+label for you, and in a large store nobody finds every sensitive document by
+reading; this narrows the search.
+
+```bash
+trellis classify label-candidates [--limit <n>] [--page-size <n>] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--limit` | `5000` | Cap on documents read. The report says whether the scan stopped at it. |
+| `--page-size` | `100` | Documents fetched per page. |
+
+| Rule | Fires on |
+|------|----------|
+| `email_address` | an email-address shape (`local@domain.tld`) |
+| `phone_number` | a US/Canada phone number with separators, such as `(212) 555-0123` |
+| `us_ssn_shape` | a US SSN or ITIN shape (3-2-4 digits); shape only, not a validity check |
+| `card_number_luhn` | a 13-19 digit run, optionally split by spaces or hyphens, that passes the Luhn check |
+
+The rules live in `LABEL_RULES` in `trellis/classify/label_proposer.py`, the one
+place to read or change them. Each has a match test and a near-miss test.
+
+**It never prints the value it matched.** A finding is a document id, a rule
+name and a count. There is no excerpt, no text around the match and no matched
+string, in JSON, in text or in logs (the scan logs counts only). A report that
+quoted the value would be a copy of what the label protects, with no label on
+it.
+
+**It writes nothing.** No label, no tag, no event, no queue row. Applying a
+label is the owner's decision, made through the existing route:
+
+```bash
+trellis curate classify-sensitivity <doc_id> --sensitivity <level>
+```
+
+This is a `classify` command, beside the other propose-for-a-human commands
+(`tag-candidates`, `domain-candidates`), rather than a `curate` command, because
+`curate` is where governed writes happen and this one makes none. The group's
+other commands tag *content*; the label this command points at is the access
+label (`DataClassification`), a different schema, so a finding is a prompt to run
+`classify-sensitivity`, not a content tag. The command does not touch
+`regulatory_tags` and implies no floor for any finding.
+
+**A miss proves nothing, and this is not a PII guarantee.** The rules are four
+fixed shapes. They do not read medical, financial or other content that has no
+fixed shape, and they do not read names. They also over-report: an asset named
+`icon@2x.png` reads as an email address, and a 13-digit millisecond timestamp
+passes a Luhn check about one time in ten. A card number followed by a space and
+a three-digit code can be missed, and an address with a non-ASCII local part is
+not matched. Precision on a real store has not been
+measured. Both the text and the JSON output carry this notice.
+
+**What it reads and skips.** Chunk rows are not read: a chunk takes its parent's
+label and the parent holds the same text. A document that already carries a
+`data_classification` record, of any value and including a malformed one, is
+skipped and counted in `skipped_labelled`, since a person has decided about it. A
+document with no text is counted in `skipped_unscannable`. `documents_read`
+counts every row fetched, which is what `--limit` caps.
+
+**A scan that stopped at `--limit`** reports `stopped_at_limit: true` and
+`status: "partial"` and still exits `0`, as `classify backfill` does; the text
+output says the result is not the whole store. `stopped_at_limit` is `false`
+only when nothing followed the last document read. The exit code is the same for
+`--format text` and `--format json`.
+
+**JSON output:**
+
+```json
+{"status": "ok", "limit": 5000, "stopped_at_limit": false, "documents_read": 3, "documents_scanned": 2, "skipped_labelled": 1, "skipped_unscannable": 0, "documents_flagged": 1, "rules": ["email_address", "phone_number", "us_ssn_shape", "card_number_luhn"], "findings": [{"doc_id": "doc-1", "rule": "email_address", "matches": 2}], "notice": "A miss proves nothing: ..."}
+```
+
 ### Classify rule review — Apply / Revoke 
 
 `tag-candidates` / `domain-candidates` (above) only *propose*: their text
@@ -4495,7 +4571,13 @@ in the same position.
 With `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on,
 MCP `record_feedback` names, and counts, only the served ids the caller may
 read; a pack that served none reads as an unknown pack and the call is
-recorded. A trusted-local caller sees every id.
+recorded. A trusted-local caller sees every id. The ids a refusal names are in
+its message text, capped at 20 with the count of the rest stated, because
+the error's `data` does not reach an MCP client; the same list is what the
+clearance rule above applies to. Each id is clipped to 100 characters and shown
+with any non-printable character or backtick replaced by `?`, so a stored item
+id cannot lengthen the text or write a line of its own. The pack id the refusal
+names is echoed as given.
 
 The same clearance governs writes, under one rule: **a key cannot write a label
 above its own clearance, and cannot touch a document it may not read.**
@@ -5059,6 +5141,31 @@ When an agent finishes the task, it calls `record_feedback` with the copied IDs:
 These element-level signals land in the `FEEDBACK_RECORDED` event payload so the fitness loops (`trellis analyze apply-noise-tags`, `trellis analyze advisory-effectiveness`) can attribute outcomes more precisely than pack-level success alone.
 
 The cited ids are *not* written as `items_served` — they are what the agent referenced, not what the pack contained. The payload leaves `items_served` empty so the reference-rate metric keeps joining against the pack's own `PACK_ASSEMBLED` `injected_item_ids`; synthesizing it from the citations would report a 100% reference rate for every attributed pack.
+
+**What the MCP reply says about the ids you cited.** The reply's first line is unchanged. When the
+call names a `pack_id`, a further line starting `note:` can follow it, written after the feedback is
+recorded and changing neither the event, the `pack_feedback.jsonl` row, the exit nor whether the
+call is refused:
+
+- Ids in `helpful_item_ids` or `unhelpful_item_ids` that the pack did not serve are listed (the
+  first ten, with the count of the rest, each clipped and made safe as in a refusal), and their
+  credit is stated as not confirmed: the learning join still credits a served id the caller may not
+  read, and strips a padded one. They are still recorded as cited. `ignored_item_ids` and `followed_advisory_ids`
+  are not checked: the learning join never credits either.
+- A `pack_id` with no assembled-pack record gets a note that the pack is unknown and the feedback
+  cannot be confirmed to join any item. It is recorded as before, and the attribution refusals still fail open for it.
+  The id is read stripped of surrounding whitespace, as the learning join reads a recorded one.
+- A pack whose record holds no served ids (assembled empty, or recorded before served ids were
+  written) gets no note, so a citation on it reads like any other reply.
+- An id the pack served but the caller may not read is treated as unserved, and a pack whose served
+  ids are all unreadable reads as unknown whether or not the call cites anything, so two calls
+  cannot tell "above my clearance" from "no such pack". A trusted-local caller is not restricted.
+- A read that failed says nothing about the pack, so there is no note when the event log cannot be
+  read or when the readability check of a served id fails; the reply is then the first line alone,
+  or the first line and the audit-row notice.
+
+The note reads only a pack's served ids, never anything held back from it, so it is the same on any
+pack that serves nothing.
 
 The MCP tool and `POST /api/v1/packs/{pack_id}/feedback` share both the mapping (`PackFeedback.from_agent_signal`) and the writer (`trellis.feedback.recording.record_feedback`), so identical inputs mean the same thing on either surface: one call appends the durable `pack_feedback.jsonl` row under `<stores_dir>/feedback/` **and** emits the authoritative `FEEDBACK_RECORDED` event. The emit fails soft — when the event sink is down the tool still returns, the audit row is on disk, and `trellis admin reconcile-feedback` (which reads `<stores_dir>/feedback` by default; or `worker curate --reconcile-first`, which scans that directory) replays it.
 

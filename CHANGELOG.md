@@ -35,6 +35,20 @@ All notable changes to Trellis will be documented in this file.
   are unchanged). The primary estimator, strata, exclusions, assignment and
   serving are untouched; `--operational` prints none of the new figures.
 
+- **`trellis classify label-candidates` points a person at documents they may
+  want to label.** A read-only scan counts matches of four plain patterns (an email
+  address, a US/Canada phone number with separators, a US SSN shape and a
+  Luhn-passing card number) and reports the document id, the rule and a count per
+  finding. It never prints the matched value, an excerpt or the text around it, in
+  JSON, text or logs, and it writes no label, tag, event or queue row; the label is
+  applied through `trellis curate classify-sensitivity`. Documents that already
+  carry a `data_classification` record are skipped and counted, chunk rows are not
+  read, and `--limit` (default 5000) bounds the scan, with `stopped_at_limit` and
+  `status: "partial"` saying so. A miss proves nothing and this is not a PII
+  guarantee: the rules over-report on shapes such as `icon@2x.png` and 13-digit
+  millisecond timestamps, and their precision on a real store is unmeasured.
+  `regulatory_tags` is not read or written. No dependency was added.
+
 - **`scripts/upgrade_check.sh` and `.github/workflows/upgrade-check.yml` test
   upgrading and rolling back a SQLite store.** The script installs the previous
   release (the newest release tag that is an ancestor of HEAD and not HEAD
@@ -117,7 +131,34 @@ All notable changes to Trellis will be documented in this file.
   table is eligible-task counts per build and arm. Default output and exit codes
   are unchanged, and there is no REST or OpenAPI surface for the flag yet.
 
+- **MCP `record_feedback` says when a cited id's credit cannot be confirmed.** The reply keeps its first
+  line and gains a further `note:` line when the call names a pack and cites an id in
+  `helpful_item_ids` or `unhelpful_item_ids` that the pack did not serve (the first ten, the rest
+  counted), or names a pack with no assembled-pack record. `ignored_item_ids` are not checked,
+  because the learning join never credits them. The ids are
+  still recorded as cited. The event, the `pack_feedback.jsonl` row, the exit status and the
+  attribution refusals (flag on or off, unknown packs still failing open) are unchanged. A pack
+  that records no served ids gets no note, and the note reads no item a pack held back, so a
+  held-out pack answers as an empty one does. A served id the caller may not read counts as
+  unserved, and a pack whose served ids are all unreadable reads as unknown to a caller who cites
+  nothing as to one who cites. A read that failed says nothing: with the event log unreadable, or
+  a served id's readability check failing, there is no note. Ids in the note are clipped to 100
+  characters and shown with non-printable characters and backticks replaced by `?`.
+  `trellis.feedback.attribution.lookup_pack_membership` is the lookup behind it; unlike its
+  siblings it raises on a failed read, so that `None` keeps meaning "no such pack".
+
 ### Fixed
+
+- **An attribution refusal now puts the ids it promises in the text the client receives.**
+  With `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on, MCP
+  `record_feedback` refused an uncited call and said the served ids were available, but they
+  rode only the error's `data`, which FastMCP drops before a client sees the result. The message
+  now ends with the ids (`Served ids:` for the pack gate, `Ids still owed a verdict:` for the
+  bodied gate), capped at 20 with the count of the rest stated. They are the ids the caller may
+  read, so a pack's items above its clearance are neither listed nor counted. Each id is
+  clipped to 100 characters, and a non-printable character or backtick in one becomes `?`,
+  so a stored item id can neither lengthen the text nor write a line of its own; the pack id
+  the refusal names is echoed as given. `data` and its 60-id cap are unchanged, and no refusal is added or removed.
 
 - **The Review tab reads a fresh deployment as an empty queue, and a real failure there shows
   its reason.** `GET /learning/candidates` answers `status: "error"` when no writer has
