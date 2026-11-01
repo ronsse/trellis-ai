@@ -71,6 +71,7 @@ from trellis.learning.tuners import (
     resolve_auto_promote_overrides,
     run_auto_promotion,
 )
+from trellis.llm.egress import EGRESS_WITHHELD_REASON, EgressGate
 from trellis.llm.routing import LLMConsumer
 from trellis.ops.write_health import record_write_rejection
 from trellis.retrieve.advisory_generator import (
@@ -1581,11 +1582,17 @@ class EnrichmentSelection:
     tombstones. ``capped`` is true when the scan stopped at its row cap with
     fewer than ``limit`` candidates and the last page full, so older documents
     were not examined; a store of exactly ``scan_cap`` rows reads as capped.
+
+    ``egress_withheld`` counts documents that would otherwise be candidates but
+    are labelled above ``internal`` while the enrichment route is not declared
+    local (:mod:`trellis.llm.egress`). They are never sent, and they do not
+    take a seat under ``--limit``.
     """
 
     candidates: list[dict[str, Any]]
     scanned: int
     capped: bool
+    egress_withheld: int = 0
 
 
 @worker_app.command("enrich")
@@ -1651,9 +1658,16 @@ def enrich_cmd(
     """
     document_store = get_document_store()
     llm = _require_llm_client_or_exit(LLMConsumer.ENRICHMENT, command="worker enrich")
+    egress = EgressGate.for_route(
+        _get_registry(), LLMConsumer.ENRICHMENT, document_store
+    )
 
     selection = _scan_enrichment_candidates(
-        document_store, limit=limit, reenrich=reenrich, scan_cap=scan_cap
+        document_store,
+        limit=limit,
+        reenrich=reenrich,
+        scan_cap=scan_cap,
+        egress=egress,
     )
     candidates = selection.candidates
 
@@ -1666,6 +1680,7 @@ def enrich_cmd(
                     "selected": len(candidates),
                     "scanned": selection.scanned,
                     "scan_capped": selection.capped,
+                    "skipped_egress_withheld": selection.egress_withheld,
                     "doc_ids": [c["doc_id"] for c in candidates],
                 }
             )
@@ -1675,6 +1690,7 @@ def enrich_cmd(
                 f"[bold]worker enrich[/bold] DRY-RUN — "
                 f"{len(candidates)} candidate(s) selected"
             )
+            _print_egress_withheld(selection.egress_withheld)
             for cand in candidates:
                 console.print(f"  - {escape(cand['doc_id'])}")
         return
@@ -1686,7 +1702,9 @@ def enrich_cmd(
         concurrency=concurrency,
         event_log=get_event_log(),
         vector_store=resolve_vector_store(_get_registry()),
+        egress=egress,
     )
+    egress_withheld = selection.egress_withheld + summary.egress_withheld
 
     if output_format == "json":
         emit_json(
@@ -1696,6 +1714,7 @@ def enrich_cmd(
                 "selected": len(candidates),
                 "scanned": selection.scanned,
                 "scan_capped": selection.capped,
+                "skipped_egress_withheld": egress_withheld,
                 "enriched": summary.enriched,
                 "failed": summary.failed,
                 # #421: concurrent writes seen inside the LLM window. Not a
@@ -1716,12 +1735,23 @@ def enrich_cmd(
         f"[bold]worker enrich[/bold] — {summary.enriched}/{len(candidates)} "
         f"document(s) enriched"
     )
+    _print_egress_withheld(egress_withheld)
     if summary.stale_snapshot or summary.vanished or summary.skipped_redacted:
         console.print(
             f"  [yellow]concurrent writes during the LLM window:[/yellow] "
             f"{summary.stale_snapshot} document(s) changed (enriched onto "
             f"current content), {summary.vanished} deleted (skipped), "
             f"{summary.skipped_redacted} redacted (skipped)"
+        )
+
+
+def _print_egress_withheld(count: int) -> None:
+    """Say how many documents were not sent because the route is not local."""
+    if count:
+        console.print(
+            f"  [yellow]{EGRESS_WITHHELD_REASON}:[/yellow] {count} document(s) "
+            f"labelled above internal were not sent; the enrichment route is "
+            f"not declared local"
         )
 
 
@@ -1783,6 +1813,7 @@ def _select_enrichment_candidates(
     *,
     limit: int,
     reenrich: bool = False,
+    egress: EgressGate | None = None,
 ) -> list[dict[str, Any]]:
     """Return documents that have not been through the enrichment path.
 
@@ -1790,7 +1821,7 @@ def _select_enrichment_candidates(
     cap, without the account of how far it read.
     """
     return _scan_enrichment_candidates(
-        document_store, limit=limit, reenrich=reenrich
+        document_store, limit=limit, reenrich=reenrich, egress=egress
     ).candidates
 
 
@@ -1800,6 +1831,7 @@ def _scan_enrichment_candidates(
     limit: int,
     reenrich: bool = False,
     scan_cap: int = _ENRICH_SCAN_CAP_DEFAULT,
+    egress: EgressGate | None = None,
 ) -> EnrichmentSelection:
     """Page newest-first for documents not yet through the enrichment path.
 
@@ -1812,7 +1844,15 @@ def _scan_enrichment_candidates(
     ``limit`` candidates reports ``capped``: older documents were not examined.
     A store of exactly ``scan_cap`` rows reads as capped, because a full last
     page cannot tell "ended here" from "more behind it".
+
+    ``egress`` decides whether a would-be candidate may be sent to the model
+    (:mod:`trellis.llm.egress`); a caller that passes none gets the gate for a
+    route that is not declared local, so the omission fails closed. A withheld
+    document is counted in ``egress_withheld`` and takes no seat under
+    ``limit``.
     """
+    gate = egress if egress is not None else EgressGate(document_store, local=False)
+    egress_withheld = 0
     page = max(limit * 5, _ENRICH_SCAN_PAGE_FLOOR)
     candidates: list[dict[str, Any]] = []
     # An OFFSET page is not a snapshot: a row written between two pages shifts
@@ -1859,6 +1899,9 @@ def _scan_enrichment_candidates(
                 or reenrich
                 or content_tags.get("classified_mode") != "enrichment"
             ):
+                if not gate.permits(doc["doc_id"], doc.get("metadata")):
+                    egress_withheld += 1
+                    continue
                 candidates.append(doc)
                 if len(candidates) >= limit:
                     break
@@ -1866,7 +1909,12 @@ def _scan_enrichment_candidates(
             break
         if len(candidates) < limit and scanned >= scan_cap:
             capped = True
-    return EnrichmentSelection(candidates=candidates, scanned=scanned, capped=capped)
+    return EnrichmentSelection(
+        candidates=candidates,
+        scanned=scanned,
+        capped=capped,
+        egress_withheld=egress_withheld,
+    )
 
 
 def _enriched_content_tags(
@@ -1973,6 +2021,9 @@ class BatchEnrichmentResult:
     written, because the derived tags came from text that no longer exists,
     and not counted as ``enriched`` or ``vanished`` (the row is still there,
     blank). They emit no judged event either.
+    ``egress_withheld`` counts candidates the send-time gate refused: the scan
+    already withholds labelled documents, so this is non-zero only when a
+    caller hands over candidates the scan did not see.
     """
 
     enriched: int = 0
@@ -1981,6 +2032,7 @@ class BatchEnrichmentResult:
     vanished: int = 0
     skipped_redacted: int = 0
     vector_rows_synced: int = 0
+    egress_withheld: int = 0
 
 
 def _run_batch_enrichment(
@@ -1991,8 +2043,14 @@ def _run_batch_enrichment(
     concurrency: int,
     event_log: EventLog,
     vector_store: VectorStore | None,
+    egress: EgressGate | None = None,
 ) -> BatchEnrichmentResult:
     """Enrich candidates and write successful results back via the tag path.
+
+    Only candidates ``egress`` permits reach the model
+    (:mod:`trellis.llm.egress`); the rest are counted in
+    :attr:`BatchEnrichmentResult.egress_withheld`. A caller that passes no
+    gate gets the one for a route that is not declared local.
 
     ``enriched`` counts the documents whose tags were updated **in the
     document store** — the authoritative count, unchanged by whether a
@@ -2020,6 +2078,10 @@ def _run_batch_enrichment(
     """
     from trellis_workers.enrichment.service import EnrichmentService  # noqa: PLC0415
 
+    gate = egress if egress is not None else EgressGate(document_store, local=False)
+    sendable = [
+        doc for doc in candidates if gate.permits(doc["doc_id"], doc.get("metadata"))
+    ]
     service = EnrichmentService(llm, event_log=event_log)
     items = [
         {
@@ -2029,13 +2091,13 @@ def _run_batch_enrichment(
                 ((doc.get("metadata") or {}).get("content_tags") or {}).get("tags", [])
             ),
         }
-        for doc in candidates
+        for doc in sendable
     ]
     results = asyncio.run(service.batch_enrich(items, concurrency=concurrency))
 
     stamp = datetime.now(UTC)
-    summary = BatchEnrichmentResult()
-    for doc, result in zip(candidates, results, strict=True):
+    summary = BatchEnrichmentResult(egress_withheld=len(candidates) - len(sendable))
+    for doc, result in zip(sendable, results, strict=True):
         if not result.success:
             summary.failed += 1
             logger.warning(
@@ -2496,6 +2558,13 @@ def _render_capture_text(payload: dict[str, Any]) -> None:
             f"  reconcile: {payload['candidates_reconciled_noop']} noop  "
             f"{payload['candidates_reconciled_supersede']} supersede"
         )
+        if payload["candidates_skipped_egress_withheld"]:
+            console.print(
+                f"  [yellow]{EGRESS_WITHHELD_REASON}:[/yellow] "
+                f"{payload['candidates_skipped_egress_withheld']} candidate(s) not "
+                f"judged; their nearest stored capture is labelled above "
+                f"internal and the session_capture route is not declared local"
+            )
     if payload["supersessions_failed"]:
         # Never folded into the reconcile line above: a supersession the
         # judge decided and the store could not apply is a defect, not a

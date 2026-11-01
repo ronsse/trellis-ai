@@ -86,7 +86,9 @@ from trellis.ingest_corpus.models import (
     is_chunk_doc_id,
 )
 from trellis.ingest_corpus.walker import walk_corpus
+from trellis.llm.egress import may_reach_route
 from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
+from trellis.schemas.classification import sensitivity_of
 from trellis.schemas.document_metadata import DocumentMetadata
 from trellis.stores.base.event_log import EventType
 
@@ -702,7 +704,14 @@ def _apply_record(
         requested_by=requested_by,
     )
 
-    if extractor is not None:
+    if extractor is not None and not may_reach_route(
+        sensitivity_of(metadata), local=False
+    ):
+        # Not on a labelled document, as in ``save_memory``: the entity names
+        # it would mint land in the graph, which carries no label, so
+        # ``local=False`` whatever the route is declared. Counted, not logged.
+        report.extraction_skipped_labelled += 1
+    elif extractor is not None:
         # Mine entity/edge drafts from the full document text (not chunks)
         # and route them through the governed executor. Fully fail-soft —
         # the document is already durably stored.

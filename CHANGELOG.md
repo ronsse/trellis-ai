@@ -6,6 +6,33 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **Content labelled above `internal` no longer reaches an LLM route that is not
+  declared local.** One predicate, `trellis.llm.egress` (`may_reach_route` for a
+  label, `EgressGate` for a stored document, a chunk judged by its parent's
+  label as retrieval judges it), answers "may this content reach this route?"
+  and every path that sends stored content to a model asks it: `trellis worker
+  enrich`, `trellis classify shadow` (`shadow_classify_stale`), the MCP
+  reconcile-on-write judge, the session-capture reconcile pass, and memory
+  extraction in `save_memory`, `trellis ingest-corpus` and
+  `trellis ingest-conversations`. A route is cloud unless it says otherwise:
+  set `local: true` in the `llm:` block, or in a tier under `llm.tiers`
+  (a tier that keeps the parent's endpoint inherits the parent's declaration; a
+  tier that moves `provider` or `base_url` does not). `local` is on the route,
+  not a write-behaviour knob, and `trellis admin llm-routes --format json`
+  reports it. A document whose label cannot be read is skipped, not sent.
+  Skips are counted under the named reason `egress_withheld`, never only
+  logged: `skipped_egress_withheld` in the JSON report of `worker enrich` and
+  `classify shadow`, `candidates_skipped_egress_withheld` in the session-capture
+  report, `egress_withheld` as a reconcile fallback reason (not a judge
+  failure), and `extraction_skipped_labelled` in the corpus and conversation
+  sync reports; each text report prints a matching line when the count is
+  non-zero. Unlabelled and `internal` documents are sent exactly as before,
+  prompt included. `tests/unit/test_llm_egress_rule.py` derives every
+  `<client>.generate(messages=...)` site off `src/` and requires each to be
+  rostered behind the predicate or exempt with a reason. **One retrieval-adjacent
+  effect:** enrichment and shadow tags on a labelled document stop updating on a
+  route that is not declared local; whatever tags it already carries keep being
+  served unchanged, and nothing in `trellis.retrieve` changed.
 - **`scripts/upgrade_check.sh` and `.github/workflows/upgrade-check.yml` test
   upgrading and rolling back a SQLite store.** The script installs the previous
   release (the newest release tag that is an ancestor of HEAD and not HEAD

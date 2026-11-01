@@ -78,6 +78,8 @@ from trellis.learning.tag_evolution import (
     analyze_tag_keyword_candidates,
     apply_promotion,
 )
+from trellis.llm.egress import EGRESS_WITHHELD_REASON, EgressGate
+from trellis.llm.routing import LLMConsumer
 from trellis.mutate import (
     Command,
     CommandStatus,
@@ -288,7 +290,6 @@ def _require_llm_facet_classifier() -> Classifier:
     from trellis.classify.classifiers.llm import (  # noqa: PLC0415
         build_llm_facet_classifier,
     )
-    from trellis.llm.routing import LLMConsumer  # noqa: PLC0415
     from trellis.stores.registry import (  # noqa: PLC0415
         BackendNotInstalledError,
     )
@@ -385,6 +386,9 @@ def shadow(
         page_size=page_size,
         model_id=model_id,
         dry_run=dry_run,
+        egress=EgressGate.for_route(
+            registry, LLMConsumer.CLASSIFY_SHADOW, registry.knowledge.document_store
+        ),
     )
 
     summary = {
@@ -397,6 +401,9 @@ def shadow(
         # Documents redacted while the model was judging them: the verdict is
         # dropped, not written onto the blank row, and is not an error.
         "skipped_redacted": result.skipped_redacted,
+        # Documents labelled above internal, not sent to a classifier whose
+        # route is not declared local (``trellis.llm.egress``).
+        "skipped_egress_withheld": result.skipped_egress_withheld,
         "errors": result.errors,
         # #421: documents whose content changed while the model was judging
         # them. A subset of ``written`` — the record landed on the *current*
@@ -422,6 +429,13 @@ def shadow(
             console.print(
                 f"[yellow]  {result.skipped_redacted} document(s) were redacted "
                 f"while being judged — no shadow record was written.[/yellow]"
+            )
+        if result.skipped_egress_withheld:
+            console.print(
+                f"[yellow]  {EGRESS_WITHHELD_REASON}: "
+                f"{result.skipped_egress_withheld} document(s) labelled above "
+                f"internal were not sent; the classify_shadow route is not "
+                f"declared local.[/yellow]"
             )
         if result.errors:
             console.print(

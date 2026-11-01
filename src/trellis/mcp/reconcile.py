@@ -177,18 +177,27 @@ class ReconcileFallbackReason(StrEnum):
     #: not. The reason implies the verdict (``supersede``); the event's
     #: ``decision`` is still the fallback ADD.
     TARGET_PROTECTED = "target_protected"
+    #: **Not a judge failure: a policy.** The incoming memory or the stored
+    #: candidate is labelled above ``internal`` and the reconcile route is not
+    #: declared local (:mod:`trellis.llm.egress`), so neither text was sent to
+    #: the model. The memory is stored as a plain ADD; nothing is lost and
+    #: nothing degraded.
+    EGRESS_WITHHELD = "egress_withheld"
 
 
 #: The reasons that mean *the judge did not answer usably*. The complement is
 #: deliberate and is the whole reason this set is written down rather than
 #: derived as "every reason": see :attr:`ReconcileFallbackReason.STALE_RECHECK`
 #: and :attr:`ReconcileFallbackReason.TARGET_PROTECTED`, both of which are a
-#: usable verdict that was not applied.
+#: usable verdict that was not applied, and
+#: :attr:`ReconcileFallbackReason.EGRESS_WITHHELD`, where the judge was never
+#: asked.
 JUDGE_FAILURE_REASONS: frozenset[ReconcileFallbackReason] = frozenset(
     ReconcileFallbackReason
 ) - {
     ReconcileFallbackReason.STALE_RECHECK,
     ReconcileFallbackReason.TARGET_PROTECTED,
+    ReconcileFallbackReason.EGRESS_WITHHELD,
 }
 
 

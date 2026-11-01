@@ -346,6 +346,7 @@ class TestDescribe:
             "provider": "openai",
             "model": "deep",
             "base_url": "http://localhost:4000/v1",
+            "local": False,
             "api_key_env": "LITELLM_API_KEY",
             "credential_source": None,
         }
@@ -408,3 +409,69 @@ class TestCredentialSource:
             {"provider": "openai", "api_key_env": "TRELLIS_TEST_ROUTING_KEY"}, None
         )
         assert route.credential_source() == "env"
+
+
+class TestLocalDeclaration:
+    """``local`` is declared, never inferred; a route that says nothing is cloud."""
+
+    @pytest.mark.parametrize("consumer", [None, *LLMConsumer])
+    def test_an_undeclared_route_is_not_local(self, consumer):
+        assert resolve_llm_route(_config(), consumer).local is False
+
+    def test_a_localhost_url_is_not_a_declaration(self):
+        route = resolve_llm_route(_config(), LLMConsumer.ENRICHMENT)
+        assert route.base_url == "http://localhost:11434/v1"
+        assert route.local is False
+
+    def test_the_parent_block_declares_for_the_unrouted(self):
+        route = resolve_llm_route(_config(local=True), LLMConsumer.ENRICHMENT)
+        assert route.local is True
+        assert route.describe(environ={})["local"] is True
+
+    def test_a_tier_that_keeps_the_parent_endpoint_inherits_the_declaration(self):
+        config = _config(
+            local=True,
+            tiers={"deep": {"model": "bigger"}},
+            routes={"enrichment": "deep"},
+        )
+        assert resolve_llm_route(config, LLMConsumer.ENRICHMENT).local is True
+
+    def test_a_tier_that_moves_the_endpoint_does_not_inherit_it(self):
+        config = _config(
+            local=True,
+            tiers={"deep": _DEEP},
+            routes={"enrichment": "deep"},
+        )
+        assert resolve_llm_route(config, LLMConsumer.ENRICHMENT).local is False
+
+    def test_a_tier_that_moves_the_endpoint_may_declare_for_itself(self):
+        config = _config(
+            tiers={"deep": {**_DEEP, "local": True}},
+            routes={"enrichment": "deep"},
+        )
+        assert resolve_llm_route(config, LLMConsumer.ENRICHMENT).local is True
+
+    def test_a_tier_may_withdraw_the_parents_declaration(self):
+        config = _config(
+            local=True,
+            tiers={"cloud": {"local": False}},
+            routes={"enrichment": "cloud"},
+        )
+        assert resolve_llm_route(config, LLMConsumer.ENRICHMENT).local is False
+
+    def test_local_is_not_a_block_key_and_does_not_enter_the_built_block(self):
+        config = _config(
+            local=True, tiers={"deep": {"local": True}}, routes={"enrichment": "deep"}
+        )
+        route = resolve_llm_route(config, LLMConsumer.ENRICHMENT)
+        assert "local" not in LLM_BLOCK_KEYS
+        assert "local" not in route.block
+
+    @pytest.mark.parametrize("value", ["true", 1, None, ["yes"]])
+    def test_a_non_boolean_declaration_raises_rather_than_reading_as_cloud(self, value):
+        parent = _raises(_config(local=value))
+        assert parent.setting == "llm.local"
+        assert "must be true or false" in parent.message
+        tier = _raises(_config(tiers={"t": {"local": value}}))
+        assert tier.setting == "llm.tiers.t.local"
+        assert "must be true or false" in tier.message

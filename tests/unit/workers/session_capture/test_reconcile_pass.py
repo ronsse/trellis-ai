@@ -467,3 +467,88 @@ class TestApplySupersessions:
 
         assert report.supersessions_failed == 0
         assert report.warnings == []
+
+
+# ---------------------------------------------------------------------------
+# Egress: a labelled stored capture is never shown to a judge that is not local
+# ---------------------------------------------------------------------------
+
+
+class TestAdjudicateEgress:
+    def _labelled_seed(self, tmp_path: Path, *, local: bool = False) -> tuple[Any, str]:
+        registry = _registry(tmp_path)
+        registry.llm_route.side_effect = None
+        registry.llm_route.return_value.local = local
+        docs = registry.knowledge.document_store
+        seed_id = _seed_one_memory(
+            registry, tmp_path / "projects", tmp_path / "wm.json"
+        )
+        stored = docs.get(seed_id)
+        docs.put(
+            seed_id,
+            stored["content"],
+            {
+                **stored["metadata"],
+                "data_classification": {"sensitivity": "confidential"},
+            },
+        )
+        return registry, seed_id
+
+    def _adjudicate(
+        self, registry: Any, seed_id: str, client: Any
+    ) -> tuple[CaptureReport, CandidateMemory, list[CandidateMemory]]:
+        content = registry.knowledge.document_store.get(seed_id)["content"]
+        candidate = _candidate(
+            "capture:claude-code:deadbeefdeadbeef",
+            content=content.replace("boots", "starts"),
+        )
+        report = CaptureReport(transcripts_root="/nowhere")
+        survivors = reconcile_pass.adjudicate(
+            registry,
+            [candidate],
+            client=client,
+            id_prefix="capture:claude-code:",
+            report=report,
+            dry_run=False,
+        )
+        return report, candidate, survivors
+
+    def test_a_labelled_match_is_not_judged_and_is_counted(
+        self, tmp_path: Path
+    ) -> None:
+        registry, seed_id = self._labelled_seed(tmp_path)
+        client = FakeLLMClient([_SUPERSEDE])
+
+        report, candidate, survivors = self._adjudicate(registry, seed_id, client)
+
+        assert client.calls == []
+        assert survivors == [candidate]
+        assert candidate.supersedes_doc_id is None
+        assert report.candidates_skipped_egress_withheld == 1
+        assert report.candidates_reconciled_supersede == 0
+        assert report.to_payload()["candidates_skipped_egress_withheld"] == 1
+
+    def test_a_route_declared_local_judges_the_labelled_match(
+        self, tmp_path: Path
+    ) -> None:
+        registry, seed_id = self._labelled_seed(tmp_path, local=True)
+        client = FakeLLMClient([_SUPERSEDE])
+
+        report, candidate, _survivors = self._adjudicate(registry, seed_id, client)
+
+        assert len(client.calls) == 1
+        assert report.candidates_skipped_egress_withheld == 0
+        assert candidate.supersedes_doc_id == seed_id
+
+    def test_an_unlabelled_match_is_judged_as_before(self, tmp_path: Path) -> None:
+        registry = _registry(tmp_path)
+        seed_id = _seed_one_memory(
+            registry, tmp_path / "projects", tmp_path / "wm.json"
+        )
+        client = FakeLLMClient([_SUPERSEDE])
+
+        report, candidate, _survivors = self._adjudicate(registry, seed_id, client)
+
+        assert len(client.calls) == 1
+        assert report.candidates_skipped_egress_withheld == 0
+        assert candidate.supersedes_doc_id == seed_id

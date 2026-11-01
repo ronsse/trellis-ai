@@ -940,6 +940,8 @@ trellis classify shadow [--limit <n>] [--max-age-days <n>] [--page-size <n>] [--
 
 Requires an `llm:` block in `config.yaml`; without one the command exits `1` naming what is missing rather than silently shadowing nothing. A **local** model is the intended configuration — the pass is ~1.6 s per document against a whole corpus, which is free and private on-host and expensive anywhere else.
 
+**Labelled documents are not sent to a route that is not declared local.** A document labelled above `internal` (`confidential` or `restricted`), or whose label cannot be read, is skipped and counted: `skipped_egress_withheld` in the JSON report, and an `egress_withheld:` line in the text report when the count is non-zero. It is never an error and does not change the exit code. Declare the `classify_shadow` route local with `local: true` in the `llm:` block (or its tier) to classify them; see [Keeping labelled content off a hosted model](#keeping-labelled-content-off-a-hosted-model).
+
 **Why a separate key.** Verdicts are written to `metadata.content_tags_shadow`, never to `content_tags`. Two things follow, and both are the point:
 
 - **Retrieval does not move.** No pack ranking changes while the corpus accrues, so this is safe to run against a production store. The guarantee is enforced in two independent places: tag filters address the JSON path `$.content_tags.<facet>`, so a sibling top-level key is structurally unaddressable; and `trellis.retrieve.servable.strip_non_servable` runs where `PackBuilder` collects every strategy's results, so it covers strategies added later and out of tree, not just the built-ins. Note the scope of that claim — shadow tags never reach a *pack*; they are not confidential. `GET /api/v1/documents` returns them to a read-scoped caller, correctly, since that is the same access path as the content they describe.
@@ -4092,6 +4094,8 @@ trellis worker enrich [--concurrency N] [--limit N] \
 
 **Requires an LLM extra.** Enrichment needs a configured `llm:` block plus the matching `[llm-openai]` / `[llm-anthropic]` extra. With no buildable client the command **exits non-zero with an actionable message** naming the missing config/extra — it never silently no-ops.
 
+**Labelled documents are not sent.** A document labelled above `internal`, or whose label cannot be read, is not a candidate while the `enrichment` route is not declared local. It takes no seat under `--limit`, and it is counted as `skipped_egress_withheld` in the JSON report (dry run and live run) with a matching `egress_withheld:` line in the text report. Its enrichment tags stop updating; the tags it already has keep being served as they are. Unlabelled and `internal` documents are enriched exactly as before. See [Keeping labelled content off a hosted model](#keeping-labelled-content-off-a-hosted-model).
+
 ### `trellis worker mine-precedents`
 
 Mine precedent candidates from failure / partial traces (wraps `PrecedentMiner.mine`; `generate_precedent_candidates` is the same run returning only the candidates).
@@ -5123,3 +5127,35 @@ Because the SDK is HTTP-only, the hooks require a running `trellis-api`
 server. For tests and examples without a network listener, construct the
 hooks against the in-process client from `trellis.testing.in_memory_client`.
 A runnable end-to-end demo lives at `examples/hooks_generic_workflow.py`.
+
+## Keeping labelled content off a hosted model
+
+Content labelled above `internal` (`DataClassification.sensitivity` of `confidential` or `restricted`) does not reach an LLM route unless the route is declared local. A route that says nothing is treated as cloud; a `localhost` `base_url` is not a declaration. Declare it in `config.yaml`:
+
+```yaml
+llm:
+  provider: openai
+  base_url: http://localhost:11434/v1
+  model: local-model
+  local: true          # this endpoint keeps content on the host
+  tiers:
+    hosted:
+      base_url: https://api.example.com/v1
+      model: hosted-model    # moves base_url, so it does not inherit local: true
+  routes:
+    enrichment: hosted
+```
+
+`local` must be a boolean (a malformed value is an `llm.local` routing error, `EXIT_STORE`). A tier that keeps the parent's `provider` and `base_url` inherits the parent's declaration; a tier that moves either inherits nothing and can set its own `local`. `trellis admin llm-routes --format json` reports the resolved value per consumer.
+
+Every path that sends stored content to a model asks the same predicate, `trellis.llm.egress`, and reports what it skipped under the reason `egress_withheld`:
+
+| Path | Where the skip is counted |
+|---|---|
+| `trellis worker enrich` | `skipped_egress_withheld` (JSON) / `egress_withheld:` line (text) |
+| `trellis classify shadow` | `skipped_egress_withheld` / `egress_withheld:` line |
+| MCP reconcile-on-write | `fallback_reason: egress_withheld` on the reconcile outcome; the memory is stored as a plain ADD and the reason is not a judge failure |
+| Session-capture reconcile pass | `candidates_skipped_egress_withheld` in the capture report and text line |
+| Memory extraction (`save_memory`, `ingest-corpus`, `ingest-conversations`) | skipped whatever the route, because the entity names it mints land in an unlabelled graph: the `save_memory` note, and `extraction_skipped_labelled` in the sync reports |
+
+A skip never carries document text, a title or an id into a report beyond what the report already printed. Unlabelled and `internal` documents behave exactly as they did before.

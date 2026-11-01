@@ -71,6 +71,12 @@ def _render_report(report: CorpusSyncReport) -> None:
             f"entities={counts['entities_extracted']} "
             f"edges={counts['edges_extracted']}"
         )
+    if counts["extraction_skipped_labelled"]:
+        console.print(
+            f"  [yellow]extraction skipped[/yellow] "
+            f"labelled={counts['extraction_skipped_labelled']} "
+            f"(labelled above internal; the entities would carry no label)"
+        )
     for warning in report.warnings:
         detail = " ".join(
             f"{k}={v}" for k, v in warning.items() if k != "kind" and v is not None
