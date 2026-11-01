@@ -38,7 +38,7 @@ import sys
 import threading
 import time
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import structlog
 from fastmcp import FastMCP
@@ -74,6 +74,7 @@ from trellis.extract.trace_ingest_hook import (
     trace_already_ingested,
 )
 from trellis.feedback.attribution import (
+    cited_item_ids,
     lookup_pack_bodied_item_ids,
     lookup_pack_item_ids,
     lookup_pack_membership,
@@ -3659,20 +3660,35 @@ _MAX_CITABLE_IDS_IN_ERROR = 60
 _MAX_CITABLE_IDS_IN_MESSAGE = 20
 
 #: Most ids named in the note on a feedback reply, and the longest one echoed.
-#: These are the caller's own strings, so the cap bounds the reply and says
-#: nothing about the pack.
+#: Ids reach the reply and the refusal text from the caller or from a stored
+#: pack, so :func:`_echo_id` bounds each one; the caps say nothing about the pack.
 _MAX_UNSERVED_IDS_IN_NOTE = 10
 _MAX_ECHOED_ID_CHARS = 100
+
+
+def _echo_id(item_id: str) -> str:
+    """An id for a line of text: clipped, and safe to put between backticks.
+
+    An id is an arbitrary string, and FastMCP logs a refusal's message through
+    Rich, so an unbounded one can cost minutes. It is clipped first, so the
+    cost is the clip's, then each character that is not printable (a newline,
+    ESC, a line separator, a bidi mark) or is a backtick becomes ``?``: an id
+    cannot close its own span, start a second line or move the cursor.
+    """
+    clipped = item_id[:_MAX_ECHOED_ID_CHARS]
+    safe = "".join(c if c.isprintable() and c != "`" else "?" for c in clipped)
+    return safe + "…" if len(item_id) > _MAX_ECHOED_ID_CHARS else safe
 
 
 def _id_list_clause(label: str, item_ids: list[str]) -> str:
     """`` <label>: `a`, `b`, ...`` for a refusal's text, capped, rest counted.
 
     ``item_ids`` must already be the ones this caller may read
-    (:func:`_readable_served_ids`); nothing here re-checks clearance.
+    (:func:`_readable_served_ids`); nothing here re-checks clearance. Each id
+    goes through :func:`_echo_id`, so a stored id cannot bloat or forge the text.
     """
     shown = item_ids[:_MAX_CITABLE_IDS_IN_MESSAGE]
-    listed = ", ".join(f"`{item_id}`" for item_id in shown)
+    listed = ", ".join(f"`{_echo_id(item_id)}`" for item_id in shown)
     clause = f" {label}: {listed}"
     if len(item_ids) > len(shown):
         clause += f" (and {len(item_ids) - len(shown)} more not listed)"
@@ -3695,6 +3711,39 @@ def _readable_served_ids(registry: StoreRegistry, item_ids: list[str]) -> list[s
     return readable_ids(
         registry.knowledge.document_store, item_ids, current_clearance()
     )
+
+
+class _FailureNotingStore:
+    """A document-store view that remembers whether any read raised.
+
+    ``readable_ids`` fails closed on a store error, so an outage reads the same
+    as "nothing the caller may read". The note has to tell the two apart, so it
+    hands ``readable_ids`` this view: every read still raises into it as before.
+    """
+
+    def __init__(self, store: DocumentStore) -> None:
+        self._store = store
+        self.failed = False
+
+    def get(self, doc_id: str) -> dict[str, Any] | None:
+        try:
+            return self._store.get(doc_id)
+        except Exception:
+            self.failed = True
+            raise
+
+
+def _readable_ids_if_checked(
+    registry: StoreRegistry, item_ids: list[str]
+) -> list[str] | None:
+    """:func:`_readable_served_ids`, or ``None`` when a read of it failed.
+
+    ``[]`` means the store answered and the caller may read none of them;
+    ``None`` means it could not be established, which is no answer at all.
+    """
+    view = _FailureNotingStore(registry.knowledge.document_store)
+    readable = readable_ids(cast("DocumentStore", view), item_ids, current_clearance())
+    return None if view.failed else readable
 
 
 def _require_pack_attribution(
@@ -3788,16 +3837,9 @@ def _require_pack_attribution(
 
 
 _UNKNOWN_PACK_NOTE = (
-    "note: pack {pack_id} is unknown (no assembled pack with that id was "
-    "found), so this feedback joins to no item and earns no credit"
+    "note: pack {pack_id} is unknown (no assembled pack with that id is visible "
+    "to this caller), so this feedback joins to no item and earns no credit"
 )
-
-
-def _echo_id(item_id: str) -> str:
-    """A caller's own id, clipped so a pasted blob cannot bloat the reply."""
-    if len(item_id) <= _MAX_ECHOED_ID_CHARS:
-        return item_id
-    return item_id[:_MAX_ECHOED_ID_CHARS] + "…"
 
 
 def _unserved_citation_note(
@@ -3806,10 +3848,15 @@ def _unserved_citation_note(
     """A line for the reply saying which cited ids the pack did not serve.
 
     Advisory only: it is read after the feedback is written and changes
-    neither the event, the JSONL row nor whether the call is refused. It is
-    the same stray test the learning join applies
-    (:func:`~trellis.feedback.attribution.stray_citations`), moved to the
-    moment the caller can still fix the id.
+    neither the event, the JSONL row nor whether the call is refused. ``cited``
+    is what the learning join reads
+    (:func:`~trellis.feedback.attribution.cited_item_ids`), tested for
+    membership as :func:`~trellis.feedback.attribution.stray_citations` tests
+    it, at the moment the caller can still fix the id.
+
+    The note is optional, so a sentence the code cannot establish is left out:
+    a failed event-log read or a failed readability check gives no note, since
+    neither says whether the pack exists or what it served.
 
     * An **unknown pack** (no assembled-pack record) says so; the call was
       recorded as it always was.
@@ -3819,39 +3866,38 @@ def _unserved_citation_note(
       would-be items, and an empty membership is never subtracted from.
     * Clearance: an id the pack served that this caller may not read counts as
       unserved, the way :func:`_readable_served_ids` leaves it out of a
-      refusal, and a pack whose served ids are all unreadable reads as unknown.
-      The note never confirms that an id the caller cannot read is in the pack.
+      refusal, and a pack whose served ids are all unreadable reads as unknown,
+      whether or not the call cites anything, so two calls cannot tell
+      "above my clearance" from "no such pack". The note never confirms that
+      an id the caller cannot read is in the pack.
 
     Wrapped whole. It runs on the write path and an escaped exception would
     fail a call whose feedback is already recorded.
     """
     try:
+        unknown = _UNKNOWN_PACK_NOTE.format(pack_id=_echo_id(pack_id.strip()))
         served = lookup_pack_membership(registry.operational.event_log, pack_id)
         if served is None:
-            return _UNKNOWN_PACK_NOTE.format(pack_id=_echo_id(pack_id))
+            return unknown
         if not served:
             return None
-        # An id the pack served but this caller may not read is a stray to
-        # them: neither named as served nor told apart from one never served.
-        in_pack = [item_id for item_id in cited if item_id in served]
-        unreadable = set(in_pack) - set(_readable_served_ids(registry, in_pack))
-        strays = [
-            item_id
-            for item_id in cited
-            if item_id not in served or item_id in unreadable
-        ]
+        readable = _readable_ids_if_checked(registry, sorted(served))
+        if readable is None:
+            return None
+        if not readable:
+            return unknown
+        strays = [item_id for item_id in cited if item_id not in set(readable)]
         if not strays:
             return None
-        if not _readable_served_ids(registry, sorted(served)):
-            return _UNKNOWN_PACK_NOTE.format(pack_id=_echo_id(pack_id))
         shown = strays[:_MAX_UNSERVED_IDS_IN_NOTE]
         listed = ", ".join(f"`{_echo_id(item_id)}`" for item_id in shown)
         rest = len(strays) - len(shown)
         more = f" (and {rest} more)" if rest else ""
         noun = "id was" if len(strays) == 1 else "ids were"
+        verb = "earns" if len(strays) == 1 else "earn"
         return (
             f"note: {len(strays)} cited {noun} not among the items this pack "
-            f"served and earn no credit: {listed}{more}"
+            f"served and {verb} no credit: {listed}{more}"
         )
     except Exception:
         # GRACEFUL-DEGRADATION: wrapped whole, not by exception type. The
@@ -4142,15 +4188,12 @@ def record_feedback(
         # ids joined to nothing.
         note = _unserved_citation_note(
             registry,
-            pack_id.strip(),
-            list(
-                dict.fromkeys(
-                    (
-                        *(helpful_item_ids or ()),
-                        *(unhelpful_item_ids or ()),
-                        *(ignored_item_ids or ()),
-                    )
-                )
+            pack_id,
+            cited_item_ids(
+                {
+                    "helpful_item_ids": list(helpful_item_ids or ()),
+                    "unhelpful_item_ids": list(unhelpful_item_ids or ()),
+                }
             ),
         )
         if note is not None:

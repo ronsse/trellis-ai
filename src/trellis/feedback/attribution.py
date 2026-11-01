@@ -167,8 +167,8 @@ def lookup_pack_membership(event_log: EventLog, pack_id: str) -> set[str] | None
 
     The one lookup that tells an unknown pack from one with no recorded
     membership, which :func:`lookup_pack_item_ids` cannot: both are ``[]``
-    there. ``None`` means no ``PACK_ASSEMBLED`` event was found (an unknown id,
-    or an event-log outage, which this read cannot tell apart). An **empty
+    there. ``None`` means the event log answered and holds no
+    ``PACK_ASSEMBLED`` event for the id (or the id is blank). An **empty
     set** means the pack is known and records no served ids, so a caller must
     not read it as "every cited id is a stray": a withheld pack, a pack that
     was assembled empty, one older than the payload key and a sectioned pack
@@ -176,9 +176,19 @@ def lookup_pack_membership(event_log: EventLog, pack_id: str) -> set[str] | None
     :func:`served_item_ids` of the same event, so a flat and a sectioned pack
     both answer, and the learning join and this lookup agree on membership.
     Reads only the *served* keys: a withheld pack's would-be items are never
-    consulted.
+    consulted. The id is stripped, as its siblings strip it and as the learning
+    join strips a recorded ``pack_id``; the readers that do not strip are not
+    the join, and a note that says only what holds under every reading never
+    claims a padded id is unknown when the join would find it.
+
+    **Unlike its siblings this does not fail soft.** A failed event-log read
+    raises, because ``None`` must keep meaning "no such pack": a caller that
+    tells a reader a pack is unknown has to know the read succeeded. The one
+    caller wraps the whole call, and a failed read is a reason to say nothing.
     """
-    payload = _pack_payload(event_log, pack_id)
+    if not pack_id or not pack_id.strip():
+        return None
+    payload = _read_pack_payload(event_log, pack_id.strip())
     if payload is None:
         return None
     return served_item_ids(payload)
@@ -295,18 +305,13 @@ def _pack_payload(event_log: EventLog, pack_id: str) -> dict[str, Any] | None:
 
     One read behind both membership questions, so a change to how a pack
     is located cannot answer "served" and "bodied" from two different
-    events.
+    events. Fails soft: a failed read is ``None``, the same as no pack.
     """
     if not pack_id or not pack_id.strip():
         return None
 
     try:
-        events = event_log.get_events(
-            event_type=EventType.PACK_ASSEMBLED,
-            entity_id=pack_id.strip(),
-            limit=1,
-            order="desc",
-        )
+        return _read_pack_payload(event_log, pack_id.strip())
     except Exception:
         # GRACEFUL-DEGRADATION: this is a convenience lookup on a write
         # path. A store outage must not turn a recordable feedback signal
@@ -314,6 +319,15 @@ def _pack_payload(event_log: EventLog, pack_id: str) -> dict[str, Any] | None:
         logger.exception("pack_item_lookup_failed", pack_id=pack_id)
         return None
 
+
+def _read_pack_payload(event_log: EventLog, entity_id: str) -> dict[str, Any] | None:
+    """The one event-log read. ``None`` is "no such pack"; a failure raises."""
+    events = event_log.get_events(
+        event_type=EventType.PACK_ASSEMBLED,
+        entity_id=entity_id,
+        limit=1,
+        order="desc",
+    )
     if not events:
         return None
     return events[0].payload or {}

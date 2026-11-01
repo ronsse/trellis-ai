@@ -4405,7 +4405,9 @@ read; a pack that served none reads as an unknown pack and the call is
 recorded. A trusted-local caller sees every id. The ids a refusal names are in
 its message text, capped at 20 with the count of the rest stated, because
 the error's `data` does not reach an MCP client; the same list is what the
-clearance rule above applies to.
+clearance rule above applies to. Each id is clipped to 100 characters and shown
+with any non-printable character or backtick replaced by `?`, so a stored id
+cannot lengthen the text or write a line of its own.
 
 The same clearance governs writes, under one rule: **a key cannot write a label
 above its own clearance, and cannot touch a document it may not read.**
@@ -4975,16 +4977,21 @@ call names a `pack_id`, a further line starting `note:` can follow it, written a
 recorded and changing neither the event, the `pack_feedback.jsonl` row, the exit nor whether the
 call is refused:
 
-- Ids in `helpful_item_ids`, `unhelpful_item_ids` or `ignored_item_ids` that the pack did not serve
-  are listed (the first ten, with the count of the rest) and stated to earn no credit. They are
-  still recorded as cited. `followed_advisory_ids` is not checked.
+- Ids in `helpful_item_ids` or `unhelpful_item_ids` that the pack did not serve are listed (the
+  first ten, with the count of the rest, each clipped and made safe as in a refusal) and stated to
+  earn no credit. They are still recorded as cited. `ignored_item_ids` and `followed_advisory_ids`
+  are not checked: the learning join never credits either.
 - A `pack_id` with no assembled-pack record gets a note that the pack is unknown and the feedback
   joins to no item. It is recorded as before, and the attribution refusals still fail open for it.
+  The id is read stripped of surrounding whitespace, as the learning join reads a recorded one.
 - A pack whose record holds no served ids (assembled empty, or recorded before served ids were
   written) gets no note, so a citation on it reads like any other reply.
 - An id the pack served but the caller may not read is treated as unserved, and a pack whose served
-  ids are all unreadable reads as unknown, so the note never confirms an id the caller cannot read.
-  A trusted-local caller is not restricted.
+  ids are all unreadable reads as unknown whether or not the call cites anything, so two calls
+  cannot tell "above my clearance" from "no such pack". A trusted-local caller is not restricted.
+- A read that failed says nothing about the pack, so there is no note when the event log cannot be
+  read or when the readability check of a served id fails; the reply is then the first line alone,
+  or the first line and the audit-row notice.
 
 The note reads only a pack's served ids, never anything held back from it, so it is the same on any
 pack that serves nothing.
