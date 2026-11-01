@@ -510,6 +510,17 @@ class EventType(StrEnum):
     #: Consumed by :func:`trellis.ops.write_health.summarize_write_health`.
     WRITE_RECOVERED = "write.recovered"
 
+    #: A write tool returned success without writing, because what it was
+    #: asked to store already exists (an exact or near duplicate of a stored
+    #: memory). No ``MUTATION_EXECUTED`` accompanies such a reply, so without
+    #: this row the call is missing from the attempts a rejection rate is
+    #: divided by. Payload: ``tool`` and ``reason``, a closed slug (see
+    #: ``trellis.ops.write_health.NOOP_REASONS``). Carries no content and no
+    #: id. Rows from before this event existed are simply absent, so a rate
+    #: read over a window that still holds them overstates.
+    #: Consumed by :func:`trellis.ops.write_health.summarize_write_health`.
+    WRITE_NOOP = "write.noop"
+
     #: Emitted by the API Review-queue endpoints (WP10) whenever a human
     #: operator acts on a governance surface from the UI inbox — approving
     #: or rejecting a tuner proposal, promoting learning candidates, or

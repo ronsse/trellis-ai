@@ -163,7 +163,8 @@ _REJECTION_RATE_WARN = 0.10
 #: one trace with many bad steps cross the line alone.
 _REPEAT_COLLISION_WARN = 3
 #: A repeated payload rejection also has to be a real share of its tool's
-#: attempts: ``count / (accepted + rejected)`` for that tool must exceed this.
+#: attempts: ``count / attempts`` for that tool (accepted, no-op and rejected
+#: calls, see :func:`_call_attempts`) must exceed this.
 #: An absolute count has no denominator, so a busy healthy tool crosses it
 #: by volume alone and the signal sits at ``warn`` permanently.
 _COLLISION_RATE_WARN = 0.05
@@ -177,6 +178,14 @@ _MIN_ATTEMPTS_FOR_COLLISION_RATE = 10
 #: collision also needs ``_REPEAT_COLLISION_WARN`` rejections to exist. Tune
 #: them from the ``rate`` and ``tool_attempts`` every ``repeated_collisions``
 #: row now carries.
+#:
+#: The floor has a blind spot, and it is the price of not warning on three
+#: rejections out of seven. A tool that fails every call at low volume (nine
+#: of nine ``save_knowledge`` calls rejected, one under the floor) reads ok
+#: while other tools' traffic keeps the overall rate under its threshold, and
+#: one mistake spread over many ``loc`` values, each under 5% of the tool's
+#: attempts, reads ok too, because a collision is keyed by ``(kind, loc)``.
+#: ``by_tool`` and ``boundary_kinds`` still carry those counts.
 
 #: A rejection is counted as *recovered* when a call to the same tool was
 #: accepted within this many seconds after it (see
@@ -186,22 +195,36 @@ _MIN_ATTEMPTS_FOR_COLLISION_RATE = 10
 RECOVERY_WINDOW_SECONDS = 120
 
 #: Said beside the recovered share, because the number cannot be read
-#: without it. See :class:`RejectionRecoveryTracker` for why there is no
-#: per-caller pairing to offer instead.
+#: without it. See :class:`RejectionRecoveryTracker` for what the pairing
+#: keeps and what it cannot know.
 RECOVERY_APPROXIMATION_NOTE = (
-    "approximate: a rejection counts as recovered when any call to the same "
-    "tool was accepted within {window}s after it, by whichever caller (the "
-    "server is stateless over HTTP, so there is no per-caller token, and none "
-    "is stored). Concurrent callers make this an upper bound, and an accepted "
-    "call is not shown to carry the rejected content."
+    "approximate, and it can sit on either side of the truth. A rejection "
+    "counts as recovered when any call to the same tool was accepted within "
+    "{window}s after it, by whichever caller; keying per tool is a choice "
+    "(stdio serves one process per client, and an authenticated HTTP request "
+    "carries a key id that this does not use). It overstates when another "
+    "caller's accepted call stands in for the retry. It understates when the "
+    "retry arrives after the window, goes through another tool or process, or "
+    "follows a server restart, which drops the in-memory pairing. Accepted "
+    "means the call returned without raising: a duplicate reply that wrote "
+    "nothing, or feedback reported as recorded while the event log was "
+    "unavailable, counts. Rejections still inside the window when this was "
+    "read are pending and are left out of the share."
 )
 
-#: Operation whose accepted count is the number of accepted *calls*, for a
-#: tool whose one call fans out to several commands (see
-#: :class:`ToolWriteStats`). Rating a collision against every fanned-out
-#: command would divide by a number that grows with the payload and dilute
-#: the rate. A tool absent here is rated against its ``accepted`` total,
-#: which can only understate the rate.
+#: Operation that stands for one *call*, for a tool whose one call fans out
+#: to several commands (see :class:`ToolWriteStats`). Rating a collision
+#: against every fanned-out command would divide by a number that grows with
+#: the payload and dilute the rate, and the same fan-out dilutes it from the
+#: other side when a rejected extraction command is counted as a rejected
+#: call, so for such a tool only that operation's accepts **and** rejections
+#: count. A tool absent here is rated against its totals, and those can miss
+#: the truth in either direction: a call that runs several commands counts
+#: several times (the rate understates), and a call that returned success
+#: without running one counts not at all (the rate overstates) unless it
+#: left a ``WRITE_NOOP`` row, which :func:`_call_attempts` adds back. Rows
+#: written before that event existed are not there to add, so a window that
+#: still holds them overstates until it rolls past them.
 _CALL_LEVEL_OPERATION = {"mcp:save_experience": "trace.ingest"}
 
 #: What a recurrence *means*, per :data:`RejectionKind` — a ``(label,
@@ -223,8 +246,8 @@ _CALL_LEVEL_OPERATION = {"mcp:save_experience": "trace.ingest"}
 #: gets a sentence of its own: ``config_unreadable`` needs a human to look
 #: at a damaged file, ``stale_write`` needs two writers separated. They are
 #: also not rated: their recurrence is the whole signal (a single stale
-#: refusal needs nobody at all), and their surface has no accepted side to
-#: divide by.
+#: refusal needs nobody at all), and a refused file is a condition of the
+#: file, not a share of any tool's calls.
 #:
 #: Kinds absent here take the default; that is the safe direction, since
 #: every kind but these two is a payload problem. The recovery advice the
@@ -885,13 +908,29 @@ class RejectionRecoveryTracker:
     The pairing that says a rejected write was retried and accepted. It holds
     a tool name, a count and a monotonic timestamp, and nothing else: no
     payload, intent, session or caller identifier, and none of it is
-    persisted. Keying by tool is an **approximation**. The MCP server runs
-    stateless over HTTP, where every request is a fresh session, so no
-    per-connection token exists to pair a rejection with its own retry, and
-    a caller's identity is exactly what must not be stored. So any accepted
-    call to the same tool within ``window_seconds`` of the last rejection
-    counts, whoever made it. Under concurrent callers that overstates
-    recovery, which makes the reported share an upper bound.
+    persisted. Keying by tool is an **approximation**, and a chosen one. A
+    stdio server is one process per client, so its tracker sees a single
+    caller, but the HTTP server is stateless, every request is a fresh
+    session, and its caller's identity is exactly what must not be stored.
+    (Under enforced auth a request does carry a key id, ``current_principal_id``
+    in ``trellis.mcp.auth``; it is deliberately not used here.) So any
+    accepted call to the same tool within ``window_seconds`` of the last
+    rejection counts, whoever made it.
+
+    The reported share can therefore sit on either side of the truth, so it
+    is not an upper bound. It **overstates** when concurrent callers share a
+    tool and one caller's accepted call stands in for another's retry. It
+    **understates** when the retry comes after the window, goes through
+    another tool or another process (a second server worker holds its own
+    tracker), or follows a restart, which empties this dict. "Accepted"
+    means the call returned without raising, so a duplicate reply that wrote
+    nothing, and a feedback reply reporting that the event log was
+    unavailable, both count.
+
+    A count is only valid while it is fresh: a rejection noted after the
+    previous one has aged past the window starts a new count rather than
+    adding to a stale one, so a lone acceptance cannot recover a rejection
+    from long before.
 
     Bounded by the tool labels the code itself passes in, not by caller
     input. Thread-safe, since tool bodies may run on worker threads.
@@ -912,8 +951,13 @@ class RejectionRecoveryTracker:
     def note_rejection(self, label: str) -> None:
         """Record one rejected attempt on ``label``."""
         with self._lock:
-            count, _ = self._pending.get(label, (0, 0.0))
-            self._pending[label] = (count + 1, self._clock())
+            now = self._clock()
+            count, at = self._pending.get(label, (0, now))
+            if now - at > self.window_seconds:
+                # The previous rejection can no longer be recovered by the
+                # acceptance this one is waiting for; do not carry it over.
+                count = 0
+            self._pending[label] = (count + 1, now)
 
     def claim_recovery(self, label: str) -> int:
         """Rejected attempts on ``label`` that this acceptance recovers.
@@ -1016,14 +1060,45 @@ def record_write_recovery(
         logger.warning("write_health.recovery_emit_failed", tool=tool, exc_info=True)
 
 
-#: Write surfaces whose writes never reach ``MutationExecutor``, so
-#: ``ToolWriteStats.accepted`` is structurally ``0`` for them rather than a
-#: reflection of zero activity. Hand-kept, like ``_NARRATION_KEYS`` above:
-#: a surface is added here only once its bypass is confirmed, not guessed
-#: from an observed zero. ``mcp:record_feedback`` is the only member today
-#: (see :class:`ServeAttributionReport` for where its signal is reported
-#: instead).
-_EXECUTOR_BYPASS_SURFACES = frozenset({"mcp:record_feedback"})
+#: Why a write tool answered success without writing. Closed, so a reader
+#: never has to interpret free text and the payload cannot carry content.
+NoopReason = Literal["exact_duplicate", "fuzzy_duplicate", "judged_covered"]
+
+#: The ``mcp:record_feedback`` surface and the ``source`` its accepted
+#: ``FEEDBACK_RECORDED`` events carry (``record_feedback`` in
+#: ``trellis.mcp.server``). The REST route and the reconcile command stamp a
+#: different source, so filtering on it isolates the MCP tool. The tool never
+#: reaches ``MutationExecutor``, so its accepted side is that event rather
+#: than ``MUTATION_EXECUTED``; ``tests/unit/mcp/test_write_recovery.py``
+#: drives the real tool, so a change of source breaks a test rather than the
+#: count.
+FEEDBACK_SURFACE = "mcp:record_feedback"
+_FEEDBACK_EVENT_SOURCE = "mcp"
+
+
+def record_write_noop(
+    event_log: EventLog | None, *, tool: str, reason: NoopReason
+) -> None:
+    """Emit ``WRITE_NOOP``: ``tool`` returned success without writing, fail-soft.
+
+    A duplicate reply stores nothing and so leaves no ``MUTATION_EXECUTED``;
+    without this row the call is missing from the attempts a rejection rate
+    divides by, and a healthy tool answering mostly duplicates reads as
+    mostly failing. The payload is the tool and a closed ``reason``: no
+    content, no document id, nothing about the caller. Fail-soft for the same
+    reason as :func:`record_write_rejection`: a broken event log must not
+    change the reply of a call that already succeeded.
+    """
+    if event_log is None:
+        return
+    try:
+        event_log.emit(
+            EventType.WRITE_NOOP,
+            f"mcp:{tool}",
+            payload={"tool": tool, "reason": reason},
+        )
+    except Exception:
+        logger.warning("write_health.noop_emit_failed", tool=tool, exc_info=True)
 
 
 class ToolWriteStats(TrellisModel):
@@ -1035,19 +1110,31 @@ class ToolWriteStats(TrellisModel):
     inflates ``accepted`` by exactly that fan-out. ``accepted_by_operation``
     breaks the same total down by ``Operation`` name, so a reader can
     answer "how many traces" instead of only "how many writes" — empty
-    for a tool whose writes never reached the executor (e.g.
-    ``mcp:record_feedback``, which bypasses it; see
-    :class:`ServeAttributionReport` for that signal).
+    for a tool whose writes never reached the executor. The one such tool,
+    ``mcp:record_feedback``, counts an accepted call as a ``FEEDBACK_RECORDED``
+    event the tool itself emitted (``source="mcp"``), so its ``accepted`` is
+    calls and it has no operation breakdown.
+
+    ``noop`` counts calls that returned success without writing (a
+    duplicate ``save_memory``), from ``WRITE_NOOP``. They are attempts that
+    no command accounts for, so they sit beside ``accepted`` rather than in
+    it. ``executor_rejected_by_operation`` breaks the executor-stage
+    rejections down the same way ``accepted_by_operation`` does, so a
+    fan-out tool can be rated on its call-level operation alone.
     """
 
     accepted: int = 0
     accepted_by_operation: dict[str, int] = Field(default_factory=dict)
     boundary_rejected: int = 0
     executor_rejected: int = 0
+    executor_rejected_by_operation: dict[str, int] = Field(default_factory=dict)
+    noop: int = 0
 
     @property
     def attempts(self) -> int:
-        return self.accepted + self.boundary_rejected + self.executor_rejected
+        return (
+            self.accepted + self.noop + self.boundary_rejected + self.executor_rejected
+        )
 
 
 class ToolRecovery(TrellisModel):
@@ -1055,7 +1142,12 @@ class ToolRecovery(TrellisModel):
 
     tracked: int = 0
     recovered: int = 0
-    #: ``recovered / tracked``; ``None`` when nothing was tracked.
+    #: Tracked rejections still inside their recovery window when the report
+    #: was read, with no recovery after them. They can still be recovered, so
+    #: they are not in ``share``'s denominator.
+    pending: int = 0
+    #: ``recovered / (tracked - pending)``; ``None`` when nothing is left to
+    #: rate, whether because nothing was tracked or all of it is pending.
     share: float | None = None
 
 
@@ -1068,13 +1160,29 @@ class RecoveryReport(TrellisModel):
     is left out of both sides, so ``recovered_share`` is ``None`` (not
     measured) rather than ``0.0`` (measured, none recovered) for a window
     holding only old rows. ``recovered`` is capped at ``tracked`` per tool,
-    so a rejection just outside the window cannot push a share past 100%.
-    The pairing is by tool within a short window, not by caller; read
-    :attr:`note` for what that does to the number.
+    and that cap is the only way it can exceed what was tracked: a recovery
+    event in the window whose rejection row fell outside it (before the
+    window opened, or past the scan cap). Every other recovery was counted
+    after its rejection row was written, and a stale count is expired
+    rather than carried (see :class:`RejectionRecoveryTracker`).
+
+    ``pending`` counts tracked rejections whose window had not closed when
+    the report was read and that no recovery followed. The read has no end
+    time of its own, so its end is the moment it runs; a pending row is
+    therefore one that might still be recovered, and it is excluded from the
+    share rather than counted as a failure to recover. The server's clock
+    stamps the rows and the reader's clock decides what is pending, so a few
+    seconds of skew between them moves a row across that line.
+
+    The pairing is by tool within a short window, not by caller, and the
+    share can sit on either side of the truth; read :attr:`note` for why.
     """
 
     tracked_rejections: int = 0
     recovered_rejections: int = 0
+    #: Tracked rejections still inside the window and not yet recovered.
+    pending_rejections: int = 0
+    #: ``recovered / (tracked - pending)``; ``None`` when that is zero.
     recovered_share: float | None = None
     window_seconds: int | None = None
     by_tool: dict[str, ToolRecovery] = Field(default_factory=dict)
@@ -1090,6 +1198,11 @@ class WriteHealthReport(TrellisModel):
     accepted: int
     boundary_rejected: int
     executor_rejected: int
+    #: Calls that returned success without writing (``WRITE_NOOP``), already
+    #: counted in ``attempts``. Rows from before that event existed are
+    #: absent, so ``attempts`` is short by their number until the window
+    #: rolls past them.
+    noop: int = 0
     attempts: int
     rejection_rate: float
     by_tool: dict[str, ToolWriteStats] = Field(default_factory=dict)
@@ -1326,6 +1439,15 @@ class _BoundaryTally:
     #: Rejections per surface written by a build that tracks recovery.
     tracked: dict[str, int]
     tracked_windows: list[int]
+    #: ``(occurred_at, window_s)`` of each tracked rejection, per surface.
+    tracked_rows: dict[str, list[tuple[datetime, int]]]
+
+
+def _aware(moment: datetime) -> datetime:
+    """A stored timestamp as aware UTC (SQLite hands back a naive one)."""
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC)
 
 
 def _tally_boundary_rejections(
@@ -1333,7 +1455,11 @@ def _tally_boundary_rejections(
 ) -> _BoundaryTally:
     """Count each ``WRITE_REJECTED`` event once per tool and once per key."""
     tally = _BoundaryTally(
-        kinds={}, collision_attempts={}, tracked={}, tracked_windows=[]
+        kinds={},
+        collision_attempts={},
+        tracked={},
+        tracked_windows=[],
+        tracked_rows={},
     )
     for event in events:
         surface = surface_label(str(event.payload.get("tool") or "")) or "(unknown)"
@@ -1342,6 +1468,9 @@ def _tally_boundary_rejections(
         if isinstance(window, int) and not isinstance(window, bool) and window > 0:
             tally.tracked[surface] = tally.tracked.get(surface, 0) + 1
             tally.tracked_windows.append(window)
+            tally.tracked_rows.setdefault(surface, []).append(
+                (_aware(event.occurred_at), window)
+            )
         in_this_attempt: set[tuple[str, str]] = set()
         for row in event.payload.get("rejections") or []:
             kind = str(row.get("kind", "other"))
@@ -1360,17 +1489,55 @@ def _tally_boundary_rejections(
     return tally
 
 
-def _tally_recoveries(events: Iterable[Event]) -> dict[str, int]:
+@dataclass
+class _RecoveryTally:
+    """What one pass over ``WRITE_RECOVERED`` events yields."""
+
+    #: Rejected attempts recovered, per surface.
+    recovered: dict[str, int]
+    #: When the latest recovery on each surface was written. A recovery
+    #: consumes every rejection noted before it, so a tracked rejection at or
+    #: before this time is not pending.
+    latest_at: dict[str, datetime]
+
+
+def _tally_recoveries(events: Iterable[Event]) -> _RecoveryTally:
     """Rejected attempts recovered, per surface, from ``WRITE_RECOVERED``."""
-    recovered: dict[str, int] = {}
+    tally = _RecoveryTally(recovered={}, latest_at={})
     for event in events:
         # One malformed event must not fail health: skip it.
         n = event.payload.get("rejected_attempts")
         if not isinstance(n, int) or isinstance(n, bool) or n < 1:
             continue
         surface = surface_label(str(event.payload.get("tool") or "")) or "(unknown)"
-        recovered[surface] = recovered.get(surface, 0) + n
-    return recovered
+        tally.recovered[surface] = tally.recovered.get(surface, 0) + n
+        at = _aware(event.occurred_at)
+        if surface not in tally.latest_at or at > tally.latest_at[surface]:
+            tally.latest_at[surface] = at
+    return tally
+
+
+def _pending_by_surface(
+    boundary: _BoundaryTally, recoveries: _RecoveryTally, now: datetime
+) -> dict[str, int]:
+    """Tracked rejections still inside their window at ``now`` and unrecovered.
+
+    A rejection is pending when its own window has not closed and no
+    ``WRITE_RECOVERED`` on its surface was written at or after it. Derived
+    from row timestamps only, so it needs nothing the store does not hold.
+    """
+    pending: dict[str, int] = {}
+    for surface, rows in boundary.tracked_rows.items():
+        claimed_at = recoveries.latest_at.get(surface)
+        count = sum(
+            1
+            for at, window in rows
+            if (now - at).total_seconds() <= window
+            and (claimed_at is None or at > claimed_at)
+        )
+        if count:
+            pending[surface] = count
+    return pending
 
 
 def _rate_clause(item: Mapping[str, Any]) -> str:
@@ -1385,16 +1552,20 @@ def _rate_clause(item: Mapping[str, Any]) -> str:
 def _call_attempts(surface: str, tool_stats: ToolWriteStats) -> int:
     """Attempts on ``surface``: accepted calls plus rejected ones.
 
-    Accepted comes from :data:`_CALL_LEVEL_OPERATION` where the tool fans out,
-    else from the ``accepted`` total (see :class:`ToolWriteStats`).
+    For a tool that fans out (:data:`_CALL_LEVEL_OPERATION`) both sides are
+    that operation's: its accepts and its executor rejections, so a rejected
+    extraction command is not counted as a rejected call. Any other tool uses
+    its totals. Calls that returned success without writing (``WRITE_NOOP``)
+    are attempts too. See :class:`ToolWriteStats`.
     """
     operation = _CALL_LEVEL_OPERATION.get(surface)
-    accepted = (
-        tool_stats.accepted_by_operation.get(operation, 0)
-        if operation
-        else tool_stats.accepted
-    )
-    return accepted + tool_stats.boundary_rejected + tool_stats.executor_rejected
+    if operation:
+        accepted = tool_stats.accepted_by_operation.get(operation, 0)
+        executor_rejected = tool_stats.executor_rejected_by_operation.get(operation, 0)
+    else:
+        accepted = tool_stats.accepted
+        executor_rejected = tool_stats.executor_rejected
+    return accepted + tool_stats.noop + tool_stats.boundary_rejected + executor_rejected
 
 
 def _repeated_collisions(
@@ -1406,11 +1577,9 @@ def _repeated_collisions(
     A file condition (:data:`_COLLISION_REASONS`) is warned on distinct
     attempts alone. Any other kind must also be a share of its tool's
     attempts above :data:`_COLLISION_RATE_WARN`, with at least
-    :data:`_MIN_ATTEMPTS_FOR_COLLISION_RATE` attempts to rate. A surface
-    that never reaches the executor (:data:`_EXECUTOR_BYPASS_SURFACES`) has
-    no accepted count at all, so its rate would read 100% whatever it did;
-    it is not rated and not warned here, and stays in ``by_tool`` and
-    ``boundary_kinds``.
+    :data:`_MIN_ATTEMPTS_FOR_COLLISION_RATE` attempts to rate. The floor
+    hides a low-volume total failure and a kind spread over many ``loc``
+    values; see the note at :data:`_MIN_ATTEMPTS_FOR_COLLISION_RATE`.
     """
     rows: list[dict[str, Any]] = []
     for (surface, kind, loc), count in collision_attempts.items():
@@ -1429,7 +1598,7 @@ def _repeated_collisions(
             )
             continue
         tool_stats = by_tool.get(surface)
-        if tool_stats is None or surface in _EXECUTOR_BYPASS_SURFACES:
+        if tool_stats is None:
             continue
         tool_attempts = _call_attempts(surface, tool_stats)
         if tool_attempts < _MIN_ATTEMPTS_FOR_COLLISION_RATE:
@@ -1453,24 +1622,36 @@ def _repeated_collisions(
 def _recovery_report(
     tracked: Mapping[str, int],
     recovered: Mapping[str, int],
+    pending: Mapping[str, int],
     windows: list[int],
 ) -> RecoveryReport:
-    """Pair tracked rejections with the recoveries emitted for the same tool."""
-    by_tool = {
-        surface: ToolRecovery(
+    """Pair tracked rejections with the recoveries emitted for the same tool.
+
+    ``recovered`` is capped at ``tracked`` and ``pending`` at what is left
+    after it, so the three never add past what was tracked. The share's
+    denominator leaves pending rejections out: they have not had their window.
+    """
+    by_tool: dict[str, ToolRecovery] = {}
+    for surface, count in sorted(tracked.items()):
+        done = min(recovered.get(surface, 0), count)
+        waiting = min(pending.get(surface, 0), count - done)
+        settled = count - waiting
+        by_tool[surface] = ToolRecovery(
             tracked=count,
-            recovered=min(recovered.get(surface, 0), count),
-            share=round(min(recovered.get(surface, 0), count) / count, 4),
+            recovered=done,
+            pending=waiting,
+            share=round(done / settled, 4) if settled else None,
         )
-        for surface, count in sorted(tracked.items())
-    }
     total = sum(t.tracked for t in by_tool.values())
-    done = sum(t.recovered for t in by_tool.values())
+    done_total = sum(t.recovered for t in by_tool.values())
+    waiting_total = sum(t.pending for t in by_tool.values())
+    settled_total = total - waiting_total
     window = max(windows) if windows else None
     return RecoveryReport(
         tracked_rejections=total,
-        recovered_rejections=done,
-        recovered_share=round(done / total, 4) if total else None,
+        recovered_rejections=done_total,
+        pending_rejections=waiting_total,
+        recovered_share=round(done_total / settled_total, 4) if settled_total else None,
         window_seconds=window,
         by_tool=by_tool,
         note=RECOVERY_APPROXIMATION_NOTE.format(window=window) if total else "",
@@ -1499,8 +1680,17 @@ def summarize_write_health(
     ``ToolWriteStats.accepted_by_operation`` keys that same total by the
     ``operation`` name ``MUTATION_EXECUTED`` already carries, so a reader
     can recover the per-kind count the flat total hides.
+
+    Two surfaces count a call rather than a command. ``mcp:record_feedback``
+    never reaches the executor, so its accepted side is the
+    ``FEEDBACK_RECORDED`` events the tool emits itself (``source="mcp"``). And
+    a call that returned success without writing (a duplicate ``save_memory``)
+    leaves a ``WRITE_NOOP`` row, counted as an attempt beside ``accepted``.
+    Both are absent from windows written before their events existed, which
+    makes a rate read over such a window overstate.
     """
-    since = datetime.now(tz=UTC) - timedelta(days=days)
+    now = datetime.now(tz=UTC)
+    since = now - timedelta(days=days)
     by_tool: dict[str, ToolWriteStats] = {}
 
     def stats(key: str) -> ToolWriteStats:
@@ -1517,12 +1707,30 @@ def summarize_write_health(
             tool_stats.accepted_by_operation.get(operation, 0) + 1
         )
 
+    feedback_scan = scan_events(
+        event_log, event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
+    )
+    for event in feedback_scan.events:
+        if event.source == _FEEDBACK_EVENT_SOURCE:
+            stats(FEEDBACK_SURFACE).accepted += 1
+
+    noop_scan = scan_events(
+        event_log, event_type=EventType.WRITE_NOOP, since=since, limit=limit
+    )
+    for event in noop_scan.events:
+        stats(surface_label(str(event.payload.get("tool") or ""))).noop += 1
+
     executor_reasons: dict[str, int] = {}
     rejected_scan = scan_events(
         event_log, event_type=EventType.MUTATION_REJECTED, since=since, limit=limit
     )
     for event in rejected_scan.events:
-        stats(str(event.payload.get("requested_by") or "")).executor_rejected += 1
+        tool_stats = stats(str(event.payload.get("requested_by") or ""))
+        tool_stats.executor_rejected += 1
+        operation = str(event.payload.get("operation") or "(unknown)")
+        tool_stats.executor_rejected_by_operation[operation] = (
+            tool_stats.executor_rejected_by_operation.get(operation, 0) + 1
+        )
         reason = str(event.payload.get("reason") or "failed")
         executor_reasons[reason] = executor_reasons.get(reason, 0) + 1
 
@@ -1533,21 +1741,27 @@ def summarize_write_health(
     recovered_scan = scan_events(
         event_log, event_type=EventType.WRITE_RECOVERED, since=since, limit=limit
     )
-    recovered_by_surface = _tally_recoveries(recovered_scan.events)
+    recoveries = _tally_recoveries(recovered_scan.events)
 
     accepted = sum(s.accepted for s in by_tool.values())
+    noop = sum(s.noop for s in by_tool.values())
     boundary_rejected = sum(s.boundary_rejected for s in by_tool.values())
     executor_rejected = sum(s.executor_rejected for s in by_tool.values())
-    attempts = accepted + boundary_rejected + executor_rejected
+    attempts = accepted + noop + boundary_rejected + executor_rejected
     rate = (boundary_rejected + executor_rejected) / attempts if attempts else 0.0
 
     repeated = _repeated_collisions(boundary.collision_attempts, by_tool)
     recovery = _recovery_report(
-        boundary.tracked, recovered_by_surface, boundary.tracked_windows
+        boundary.tracked,
+        recoveries.recovered,
+        _pending_by_surface(boundary, recoveries, now),
+        boundary.tracked_windows,
     )
 
     scan = merge_coverage(
         accepted_scan.coverage,
+        feedback_scan.coverage,
+        noop_scan.coverage,
         rejected_scan.coverage,
         boundary_scan.coverage,
         recovered_scan.coverage,
@@ -1574,7 +1788,7 @@ def summarize_write_health(
             f"repeated {label}: {item['kind']} at {loc} "
             f"x{item['count']}{_rate_clause(item)} — {explanation}"
         )
-    if boundary_rejected > 0 and accepted == 0:
+    if boundary_rejected > 0 and accepted + noop == 0:
         reasons.append(
             f"{boundary_rejected} boundary rejection(s) and zero accepted "
             "writes in window — every write attempt is failing"
@@ -1585,6 +1799,7 @@ def summarize_write_health(
         accepted=accepted,
         boundary_rejected=boundary_rejected,
         executor_rejected=executor_rejected,
+        noop=noop,
         attempts=attempts,
         rejection_rate=round(rate, 4),
         by_tool=by_tool,

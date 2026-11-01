@@ -7,9 +7,8 @@ same tool next returns without raising, emits ``WRITE_RECOVERED``.
 
 These drive the real dispatch through an in-memory ``fastmcp.Client``: the
 accepted-call hook lives in the middleware, so a direct call to a tool function
-never reaches it. The pairing is keyed by tool inside a window, because the
-server is stateless and offers no per-connection token; see
-``RejectionRecoveryTracker``.
+never reaches it. The pairing is keyed by tool inside a window, which is a
+choice and not a limit of the transport; see ``RejectionRecoveryTracker``.
 """
 
 from __future__ import annotations
@@ -117,8 +116,27 @@ async def test_another_tools_acceptance_does_not_recover_it(
     temp_registry: StoreRegistry, clock: list[float]
 ) -> None:
     await _call("record_feedback", _BAD)
-    await _call("get_context", {"query": "anything"})
+    # ``intent`` is the argument the tool takes. A misspelt one is itself a
+    # rejection, which would never reach the hook and leave this vacuous.
+    other = await _call("get_context", {"intent": "anything"})
+    assert not other.is_error
     assert _recoveries(temp_registry) == []
+
+
+async def test_the_tool_that_was_rejected_is_the_one_that_is_recovered(
+    temp_registry: StoreRegistry, clock: list[float]
+) -> None:
+    """An acceptance elsewhere leaves the rejection pending for its own tool."""
+    await _call("record_feedback", _BAD)
+    other = await _call("get_context", {"intent": "anything"})
+    assert not other.is_error
+    assert _recoveries(temp_registry) == []
+
+    await _call("record_feedback", _GOOD)
+
+    (event,) = _recoveries(temp_registry)
+    assert event.source == "mcp:record_feedback"
+    assert event.payload["rejected_attempts"] == 1
 
 
 async def test_an_acceptance_after_the_window_does_not_recover_it(
@@ -150,3 +168,54 @@ async def test_a_failing_pairing_does_not_fail_the_accepted_call(
     monkeypatch.setattr(server_mod._REJECTION_RECOVERY, "claim_recovery", _boom)
     accepted = await _call("record_feedback", _GOOD)
     assert not accepted.is_error
+
+
+async def test_a_stale_rejection_is_not_recovered_by_a_later_acceptance(
+    temp_registry: StoreRegistry, clock: list[float]
+) -> None:
+    """Reject, wait out the window, reject again, accept: one recovered, not two."""
+    await _call("record_feedback", _BAD)
+    clock[0] += 24 * 3600
+    await _call("record_feedback", _BAD)
+    await _call("record_feedback", _GOOD)
+
+    (event,) = _recoveries(temp_registry)
+    assert event.payload["rejected_attempts"] == 1
+
+
+async def test_a_recorded_feedback_is_an_accepted_call_in_the_health_report(
+    temp_registry: StoreRegistry, clock: list[float]
+) -> None:
+    """The tool's accept is the ``FEEDBACK_RECORDED`` row it writes as ``mcp``."""
+    await _call("record_feedback", _BAD)
+    await _call("record_feedback", _GOOD)
+
+    stats = summarize_write_health(temp_registry.operational.event_log, days=1).by_tool[
+        "mcp:record_feedback"
+    ]
+    assert (stats.accepted, stats.attempts) == (1, 2)
+
+
+async def test_a_duplicate_reply_that_wrote_nothing_still_counts_as_accepted(
+    temp_registry: StoreRegistry, clock: list[float]
+) -> None:
+    """Accepted means returned without raising.
+
+    A rejected ``save_memory`` followed by one that answers a duplicate stored
+    nothing, and still pairs with the rejection and still leaves a no-op row.
+    The report cannot tell it from a write that landed; the printed note says so.
+    """
+    memory = "a note about where the spare cables are kept on the second shelf"
+    first = await _call("save_memory", {"content": memory})
+    assert not first.is_error
+    rejected = await _call("save_memory", {"content": memory, "bogus_arg": 1})
+    assert rejected.is_error
+    again = await _call("save_memory", {"content": memory})
+    assert not again.is_error
+
+    (recovered,) = _recoveries(temp_registry)
+    assert recovered.source == "mcp:save_memory"
+    noops = temp_registry.operational.event_log.get_events(
+        event_type=EventType.WRITE_NOOP, limit=10
+    )
+    assert [e.payload["reason"] for e in noops] == ["exact_duplicate"]
