@@ -335,33 +335,111 @@ class TestADocIdThatIsNotUtf8:
         assert [e["doc_id"] for e in warned] == ["\ufffd"]
 
 
-class TestAParserLimitNeverFailsARowThePredicatePassed:
-    def test_a_read_never_raises_near_the_interpreters_depth_limit(
+#: How many nesting levels earlier than the plain read the predicate may withhold a
+#: row. On CPython 3.11 Python frames count against the parser's depth, and the one
+#: frame ``_parse_as_the_read_does`` adds puts the callback's parse exactly where the
+#: read's parse sits, so the two limits are the same level (measured: 0). From 3.12
+#: the limit is a C recursion count that Python frames do not touch, and entering
+#: the callback from C costs two levels (measured on 3.12.3: 2) that no Python code
+#: can give back; 8 leaves room for a build that counts a little more.
+_EARLIER_BY_AT_MOST = 0 if sys.version_info < (3, 12) else 8
+
+_ROW_HEAD = _LABEL[:-1] + ', "x": '
+
+
+def _nest(store: SQLiteDocumentStore, depth: int) -> None:
+    conn = store._get_conn()
+    conn.execute(
+        "UPDATE documents SET metadata_json = ? WHERE doc_id = 'z-corrupt'",
+        (_ROW_HEAD + "[" * depth + "]" * depth + "}",),
+    )
+    conn.commit()
+
+
+def _plain_read(store: SQLiteDocumentStore) -> str:
+    try:
+        store.list_documents(include_chunks=False)
+    except RecursionError:
+        return "raises"
+    return "served"
+
+
+def _public_read(store: SQLiteDocumentStore) -> str:
+    try:
+        rows = store.list_documents(include_chunks=False, filters=public_label_filter())
+    except RecursionError:
+        return "raises"
+    return "served" if "z-corrupt" in _ids(rows) else "withheld"
+
+
+def _depth_json_cannot_parse() -> int:
+    depth = 1_000
+    while True:
+        try:
+            json.loads("[" * depth + "]" * depth)
+        except RecursionError:
+            return depth
+        depth *= 2
+
+
+def _first_depth_not_served(
+    store: SQLiteDocumentStore, read: Any, hi: int
+) -> tuple[int, str]:
+    """Smallest nesting depth at which ``read`` stops serving the row, and how.
+
+    Found by bisecting. Both reads are called from here, one frame down, so they
+    sit at the same stack depth and the two boundaries are comparable; the state
+    at the boundary is taken here too, because a caller one frame shallower sees
+    a different limit.
+    """
+    lo = 1
+    _nest(store, lo)
+    assert read(store) == "served"
+    _nest(store, hi)
+    state = read(store)
+    assert state != "served"
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        _nest(store, mid)
+        got = read(store)
+        if got == "served":
+            lo = mid
+        else:
+            hi, state = mid, got
+    return hi, state
+
+
+class TestTheParserLimit:
+    """The predicate and the read after it hit the parser's limit together.
+
+    Neither bound is assumed: both are found on the running interpreter by
+    bisecting, so 3.11 (recursion depth) and 3.12 and later (C recursion) are
+    each exercised.
+    """
+
+    @staticmethod
+    def _boundaries(store: SQLiteDocumentStore) -> tuple[int, int, str]:
+        _seed(store, "{}")
+        hi = _depth_json_cannot_parse()
+        plain, _ = _first_depth_not_served(store, _plain_read, hi)
+        public, how = _first_depth_not_served(store, _public_read, hi)
+        return plain, public, how
+
+    def test_the_predicate_withholds_a_row_only_where_the_plain_read_raises(
         self, store: SQLiteDocumentStore
     ) -> None:
-        """The predicate and the read that follows parse the same bytes.
+        plain, public, how = self._boundaries(store)
+        assert how == "withheld", "the predicate passed a row the read then failed on"
+        assert public <= plain
+        assert plain - public <= _EARLIER_BY_AT_MOST, (plain, public)
 
-        A row nested to just under the limit is readable or not depending on how
-        many frames are on the stack, and the callback runs on a different stack
-        depth than the read after it. Whichever side of the limit a depth falls
-        on, the row is served whole or withheld; it never passes the predicate and
-        then raises while the page is built. The sweep covers every depth within
-        reach of the limit, 990 among them.
-        """
-        _seed(store, "{}")
-        conn = store._get_conn()
-        head = _LABEL[:-1] + ', "x": '
-        limit = sys.getrecursionlimit()
-        for depth in range(limit - 300, limit + 6):
-            conn.execute(
-                "UPDATE documents SET metadata_json = ? WHERE doc_id = 'z-corrupt'",
-                (head + "[" * depth + "]" * depth + "}",),
-            )
-            conn.commit()
-            rows = store.list_documents(
-                include_chunks=False, filters=public_label_filter()
-            )
-            assert {"a-public", "c-public"} <= set(_ids(rows)), depth
+    def test_no_depth_within_reach_of_the_limit_fails_a_public_read(
+        self, store: SQLiteDocumentStore
+    ) -> None:
+        plain, _, _ = self._boundaries(store)
+        for depth in range(plain - 12, plain + 12):
+            _nest(store, depth)
+            assert _public_read(store) != "raises", depth
 
     def test_a_shallow_nested_row_is_served(self, store: SQLiteDocumentStore) -> None:
         _seed(store, _LABEL[:-1] + ', "x": ' + "[" * 100 + "]" * 100 + "}")
@@ -377,3 +455,174 @@ class TestTheFilterValueIsNotTheRow:
         with structlog.testing.capture_logs() as logs, pytest.raises(ValueError):
             _metadata_matches_closed(b"{}", b"id", "key", "{not json")
         assert not logs
+
+
+#: ``(column, filter name) -> (WHERE terms, bound parameters)`` for every filter
+#: shape that is not a ``ReadableMatch``, copied from the commit before that
+#: marker existed. A change that moves any of it changes what a plain, scalar,
+#: list, null or tag filter reads on every surface, so it is a decision.
+PLAIN_FILTER_SQL: dict[tuple[str, str], tuple[tuple[str, ...], tuple[str, ...]]] = {
+    ("metadata_json", "plain-dict"): (
+        ("trellis_metadata_matches(json_extract(metadata_json, '$'), ?, ?)",),
+        (
+            "data_classification",
+            '{"sensitivity": "public"}',
+        ),
+    ),
+    ("metadata_json", "scalar"): (
+        (
+            (
+                "(json_extract(metadata_json, ?) = ? AND "
+                "json_type(metadata_json, ?) NOT IN ('object', 'array'))"
+            ),
+        ),
+        (
+            '$."content_type"',
+            "note",
+            '$."content_type"',
+        ),
+    ),
+    ("metadata_json", "bool"): (
+        (
+            (
+                "(json_extract(metadata_json, ?) = ? AND "
+                "json_type(metadata_json, ?) NOT IN ('object', 'array'))"
+            ),
+        ),
+        (
+            '$."flag"',
+            True,
+            '$."flag"',
+        ),
+    ),
+    ("metadata_json", "list"): (
+        ("trellis_metadata_matches(json_extract(metadata_json, '$'), ?, ?)",),
+        (
+            "tags",
+            '["a", "b"]',
+        ),
+    ),
+    ("metadata_json", "none"): (
+        ("trellis_metadata_matches(json_extract(metadata_json, '$'), ?, ?)",),
+        (
+            "owner",
+            "null",
+        ),
+    ),
+    ("metadata_json", "content-tags"): (
+        (
+            (
+                "(json_extract(d.metadata_json, ?) IS NULL OR "
+                "(json_type(d.metadata_json, ?) = 'array' AND "
+                "json_array_length(d.metadata_json, ?) = 0) OR EXISTS (SELECT "
+                "1 FROM json_each(d.metadata_json, ?) je WHERE je.value = ?))"
+            ),
+        ),
+        (
+            '$.content_tags."domain"',
+            '$.content_tags."domain"',
+            '$.content_tags."domain"',
+            '$.content_tags."domain"',
+            "x",
+        ),
+    ),
+    ("metadata_json", "quoted-key"): (
+        ("trellis_metadata_matches(json_extract(metadata_json, '$'), ?, ?)",),
+        (
+            'a"b',
+            "1",
+        ),
+    ),
+    ("d.metadata_json", "plain-dict"): (
+        ("trellis_metadata_matches(json_extract(d.metadata_json, '$'), ?, ?)",),
+        (
+            "data_classification",
+            '{"sensitivity": "public"}',
+        ),
+    ),
+    ("d.metadata_json", "scalar"): (
+        (
+            (
+                "(json_extract(d.metadata_json, ?) = ? AND "
+                "json_type(d.metadata_json, ?) NOT IN ('object', 'array'))"
+            ),
+        ),
+        (
+            '$."content_type"',
+            "note",
+            '$."content_type"',
+        ),
+    ),
+    ("d.metadata_json", "bool"): (
+        (
+            (
+                "(json_extract(d.metadata_json, ?) = ? AND "
+                "json_type(d.metadata_json, ?) NOT IN ('object', 'array'))"
+            ),
+        ),
+        (
+            '$."flag"',
+            True,
+            '$."flag"',
+        ),
+    ),
+    ("d.metadata_json", "list"): (
+        ("trellis_metadata_matches(json_extract(d.metadata_json, '$'), ?, ?)",),
+        (
+            "tags",
+            '["a", "b"]',
+        ),
+    ),
+    ("d.metadata_json", "none"): (
+        ("trellis_metadata_matches(json_extract(d.metadata_json, '$'), ?, ?)",),
+        (
+            "owner",
+            "null",
+        ),
+    ),
+    ("d.metadata_json", "content-tags"): (
+        (
+            (
+                "(json_extract(d.metadata_json, ?) IS NULL OR "
+                "(json_type(d.metadata_json, ?) = 'array' AND "
+                "json_array_length(d.metadata_json, ?) = 0) OR EXISTS (SELECT "
+                "1 FROM json_each(d.metadata_json, ?) je WHERE je.value = ?))"
+            ),
+        ),
+        (
+            '$.content_tags."domain"',
+            '$.content_tags."domain"',
+            '$.content_tags."domain"',
+            '$.content_tags."domain"',
+            "x",
+        ),
+    ),
+    ("d.metadata_json", "quoted-key"): (
+        ("trellis_metadata_matches(json_extract(d.metadata_json, '$'), ?, ?)",),
+        (
+            'a"b',
+            "1",
+        ),
+    ),
+}
+
+PLAIN_FILTERS: dict[str, dict[str, Any]] = {
+    "plain-dict": {"data_classification": {"sensitivity": "public"}},
+    "scalar": {"content_type": "note"},
+    "bool": {"flag": True},
+    "list": {"tags": ["a", "b"]},
+    "none": {"owner": None},
+    "content-tags": {"content_tags": {"domain": {"eq": "x"}}},
+    "quoted-key": {'a"b': 1},
+}
+
+
+@pytest.mark.parametrize(("column", "name"), sorted(PLAIN_FILTER_SQL))
+class TestThePlainFilterSqlIsUnchanged:
+    def test_the_sql_and_parameters_are_the_ones_before_readablematch(
+        self, column: str, name: str
+    ) -> None:
+        conds, params = SQLiteDocumentStore._filter_conditions(
+            PLAIN_FILTERS[name], column
+        )
+        assert (tuple(conds), tuple(params)) == PLAIN_FILTER_SQL[(column, name)]

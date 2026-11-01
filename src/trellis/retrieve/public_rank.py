@@ -7,9 +7,10 @@ outrank a public one, and a hidden row moves the corpus statistics (document
 frequency, vector width) every score is computed from. So the public path
 never ranks, matches or counts a hidden row, and does not search the store. The
 label filter still scans hidden rows, so the time a read takes grows with them, but
-status and body do not: a row the store cannot read does not match the filter
-(:class:`~trellis.stores.base.document.ReadableMatch`), is withheld and warned
-about, and never fails the read, whatever the query holds:
+status and body do not: a row whose metadata the store cannot read does not match
+the filter (:class:`~trellis.stores.base.document.ReadableMatch`), is withheld and
+warned about, and does not fail the read, whatever the query holds (a public row
+whose own text columns are not UTF-8 still does; see the operations guide):
 
 * **Which rows.** One read, :func:`read_public_documents`: the newest
   :data:`PUBLIC_ROW_CEILING` documents the label predicate selects

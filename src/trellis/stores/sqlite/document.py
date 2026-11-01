@@ -159,6 +159,10 @@ def _metadata_matches(metadata_json: str, key: str, expected_json: str) -> bool:
     opaque ``sqlite3.OperationalError: user-defined function raised
     exception``, with the original message discarded. Parsing in SQL keeps
     the one failure this can realistically hit legible.
+
+    The SQL this filter shape produces is pinned literally, with that of the
+    other plain shapes, by ``TestThePlainFilterSqlIsUnchanged`` in
+    ``tests/unit/stores/test_sqlite_readable_match.py``.
     """
     return bool(json.loads(metadata_json).get(key) == json.loads(expected_json))
 
@@ -167,23 +171,25 @@ def _metadata_matches(metadata_json: str, key: str, expected_json: str) -> bool:
 _METADATA_MATCH_CLOSED_FN = "trellis_metadata_matches_closed"
 
 
-#: Python frames the closed predicate sits below a plain read when it parses a
-#: row, so it hits the parser's depth limit first and never passes a row that
-#: :meth:`SQLiteDocumentStore._row_to_dict` then fails to parse.
-_PARSE_FRAME_MARGIN = 16
+def _parse_as_the_read_does(text: str) -> Any:
+    """``json.loads(text)``, one Python frame below the caller, as the read does.
 
-
-def _parse_with_margin(text: str, frames: int = _PARSE_FRAME_MARGIN) -> Any:
-    """``json.loads(text)``, ``frames`` Python frames deeper than the caller.
-
-    On CPython 3.11 the JSON parser's depth limit is the interpreter's remaining
-    recursion depth, and the SQL callback runs a frame or two shallower than the
-    list comprehension that later parses the same row. The margin makes the
-    callback the stricter of the two, so a row it passes is a row that parse
-    accepts (``tests/unit/stores/test_sqlite_readable_match.py``, depth sweep).
+    The one frame is the point: do not inline it. Where the parser's depth limit
+    is the interpreter's remaining recursion depth (CPython 3.11), a row nested to
+    the limit parses or fails by how many frames are on the stack, and the read
+    that follows (``list_documents`` -> ``<listcomp>`` -> ``_row_to_dict`` ->
+    ``json.loads``) sits one frame below where the callback would call
+    ``json.loads`` itself. Measured on 3.11.15, a direct call passes a row at one
+    nesting depth that the read then fails with ``RecursionError``; with this frame
+    the predicate withholds from the same depth the plain read raises from, and a
+    deeper margin withholds rows the read serves (16 frames withheld 16 levels
+    early). From 3.12 the limit is a C recursion count that Python frames do not
+    touch, and entering the callback from C costs about two levels (measured on
+    3.12.3: the predicate withholds two levels before the read would raise), which
+    no Python code can give back.
+    ``tests/unit/stores/test_sqlite_readable_match.py`` finds both boundaries on
+    the running interpreter and pins how far apart they may be.
     """
-    if frames:
-        return _parse_with_margin(text, frames - 1)
     return json.loads(text)
 
 
@@ -214,7 +220,7 @@ def _metadata_matches_closed(
     expected = json.loads(expected_json)
     error = "unreadable_metadata"
     try:
-        parsed = None if raw is None else _parse_with_margin(raw.decode("utf-8"))
+        parsed = None if raw is None else _parse_as_the_read_does(raw.decode("utf-8"))
     except (ValueError, RecursionError) as exc:
         # ``UnicodeDecodeError`` and ``json.JSONDecodeError`` are both ValueErrors.
         error = type(exc).__name__

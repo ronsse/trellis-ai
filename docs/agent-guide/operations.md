@@ -4719,8 +4719,8 @@ row is still served. SQLite records it as a `public_read_unparseable_row` warnin
 such row per read (the event the by-id read uses); on Postgres a JSONB value that is not an
 object never matches the filter, so there is nothing to record. A key above `public` is
 unchanged. This covers unreadable *metadata* only: a row labelled public whose `doc_id`,
-`content` or `created_at` is not valid UTF-8 cannot be decoded into a page, and still makes
-every external read answer 500 on SQLite while it exists.
+`content`, `content_hash`, `created_at` or `updated_at` is not valid UTF-8 cannot be decoded
+into a page, and still makes every external read answer 500 on SQLite while it exists.
 
 Status and body do not depend on hidden rows; response time does. On SQLite, `/documents?limit=5` over 200 public rows took 6.2 ms with no hidden
 row, 90.3 ms with 20,000 and 432.3 ms with 100,000, because the label filter scans
@@ -4789,9 +4789,9 @@ guard:
   does not match, and every other row is served. It is recorded as a
   `public_read_unparseable_row` warning, one per row per read. A row `json.loads` reads
   but SQLite's strict JSON check would not (`NaN`, `Infinity`) is a readable row and is
-  judged by its label. Not covered: a row labelled public whose `doc_id`, `content` or
-  `created_at` is not valid UTF-8 still makes every external read answer 500 while it
-  exists, because the page cannot be built. No `put` writes any of these; they are store
+  judged by its label. Not covered: a row labelled public whose `doc_id`, `content`,
+  `content_hash`, `created_at` or `updated_at` is not valid UTF-8 still makes every
+  external read answer 500 while it exists, because the page cannot be built. No `put` writes any of these; they are store
   faults. A key that reads more than `public` is unchanged: its unfiltered listing and
   `search` still read valid non-object JSON, while a row of non-JSON text fails an
   unfiltered listing and a `search` that matches it for every key, as before.

@@ -379,8 +379,9 @@ All notable changes to Trellis will be documented in this file.
   object, serves every other row (a row holding `NaN` is readable), and records
   each withheld row as a `public_read_unparseable_row` warning (the event a
   by-id read of the same row already uses). **Not covered:** a row labelled
-  public whose `doc_id`, `content` or `created_at` is not valid UTF-8 still
-  makes every external read answer 500 while it exists, on SQLite as before.
+  public whose `doc_id`, `content`, `content_hash`, `created_at` or
+  `updated_at` is not valid UTF-8 still makes every external read answer 500
+  while it exists, on SQLite as before.
   Postgres needed no change for unreadable metadata: its predicate is
   `metadata -> key = value`, which is NULL, not an error, on a row that is not
   an object. Every other read is unchanged, row by row: a plain dict filter, a
