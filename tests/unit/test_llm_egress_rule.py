@@ -75,7 +75,9 @@ from tests.ast_rules import (
 _SRC = Path(__file__).resolve().parents[2] / "src"
 
 #: Calls that answer "may this content reach this route?".
-_PREDICATE_NAMES = frozenset({"may_reach_route", "permits", "permits_metadata"})
+_PREDICATE_NAMES = frozenset(
+    {"may_reach_route", "permits", "permits_metadata", "permits_stored"}
+)
 
 #: The module that defines the predicate; it may build gates however it likes.
 _EGRESS_MODULE = "trellis/llm/egress.py"
@@ -108,6 +110,15 @@ _CAPTURE_RECONCILE = Entry(
     "adjudicate",
     via="_load_existing",
 )
+# ``plan`` picks the traces ``mine`` hands to ``_ask_llm``, so its helper is the gate.
+_MINER_PLAN = Entry(
+    "trellis_workers/learning/miner.py", "plan", via="_withhold_labelled"
+)
+_CAPTURE_DISTILL = Entry(
+    "trellis_workers/session_capture/capture.py",
+    "_capture_session",
+    via="_session_may_reach_route",
+)
 
 #: Inner sender -> the entry points that reach it. Hand-written.
 _GATED: dict[tuple[str, str], tuple[Entry, ...]] = {
@@ -117,27 +128,20 @@ _GATED: dict[tuple[str, str], tuple[Entry, ...]] = {
         _SERVER_RECONCILE,
         _CAPTURE_RECONCILE,
     ),
+    ("trellis_workers/session_capture/distill.py", "distill_session"): (
+        _CAPTURE_DISTILL,
+    ),
+    ("trellis_workers/learning/miner.py", "_ask_llm"): (_MINER_PLAN,),
 }
 
 #: Inner senders that do not send a stored, labelled document, each with why.
-_EXEMPT: dict[tuple[str, str], str] = {
-    ("trellis_workers/session_capture/distill.py", "distill_session"): (
-        "sends the session transcript digest, which is not a stored document "
-        "and carries no label of its own; a labelled document served to a "
-        "session can reach a transcript, be captured unlabelled and become an "
-        "enrichment candidate, and nothing here follows that path"
-    ),
-    ("trellis_workers/learning/miner.py", "_ask_llm"): (
-        "sends stored trace summaries, which carry no sensitivity label of "
-        "their own, so the predicate has nothing to read there; the path is not "
-        "gated and the operations guide names it as not covered"
-    ),
-}
+_EXEMPT: dict[tuple[str, str], str] = {}
 
 #: Functions that reach an inner sender; a call to one must sit in a roster entry.
 _SINK_NAMES = frozenset(
     {
         "judge_reconcile",
+        "distill_session",
         "run_memory_extraction",
         "EnrichmentService",
         "build_llm_facet_classifier",
@@ -166,11 +170,13 @@ _CONSTRUCT_ONLY: dict[tuple[str, str], str] = {
 
 #: Hand-read off ``src/``: extract, enrich, judge_reconcile, distill, _ask_llm.
 _SENDER_FLOOR = 5
-#: Hand-read: two extraction sites, enrich batch, shadow item, two reconcile.
-_ENTRY_FLOOR = 6
+#: Hand-read: two extraction sites, enrich batch, shadow item, two reconcile,
+#: the miner's plan, the capture distillation.
+_ENTRY_FLOOR = 8
 #: Hand-read: judge_reconcile x2, run_memory_extraction x2, EnrichmentService x2,
-#: build_llm_facet_classifier x1, LLMExtractor x1, LLMFacetClassifier x1.
-_SINK_CALL_FLOOR = 9
+#: build_llm_facet_classifier x1, LLMExtractor x1, LLMFacetClassifier x1,
+#: distill_session x1.
+_SINK_CALL_FLOOR = 10
 
 
 def _calls_with_scope(

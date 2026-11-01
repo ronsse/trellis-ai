@@ -199,6 +199,27 @@ All notable changes to Trellis will be documented in this file.
   are unchanged). The primary estimator, strata, exclusions, assignment and
   serving are untouched; `--operational` prints none of the new figures.
 
+- **Precedent mining and session distillation ask the egress predicate.** Two senders that
+  `trellis.llm.egress` rostered as exempt now go through it. `trellis worker mine-precedents`
+  leaves a failure trace out of what the model sees when any document in its `evidence_used`
+  is labelled above `internal` (or cannot be read) and the `precedent_mining` route is not
+  declared local; the skip is counted as `skipped_egress_withheld` in the JSON report (dry run
+  and live) with an `egress_withheld:` text line, and such traces take no seat among the 20
+  shown. Session capture does not distil a session whose served packs (the transcript's pack
+  ids, read through their `PACK_ASSEMBLED` events) named such a document while the
+  `session_capture` route is not declared local: `sessions_skipped_egress_withheld`, an
+  `egress_withheld:` line, the session left un-watermarked so a sweep over a local route
+  distils it, and not counted as a judge outage. A trace or transcript carries no label, so the
+  label is propagated from the documents it cites or was served; gating on the route alone
+  would have withheld unlabelled content too. `EgressGate.permits_stored(doc_id)` reads a
+  document's row by id and fails closed. **Unchanged when nothing is labelled, or the route is
+  declared local:** the prompts sent, the digest, the candidates and the mined events are
+  byte-identical (tests compare both against an ungated run), and a local gate reads nothing.
+  The rule test loses both exemptions (its exempt roster is now empty). **Not covered:** a
+  pack id the transcript parser could not read, a pack whose event the log no longer holds,
+  and a trace that summarises a labelled document without citing it are sent as before. No
+  file under `src/trellis/retrieve/` changed.
+
 - **Content labelled above `internal` no longer reaches a chat or generate LLM
   route that is not declared local, on the paths listed here.** One predicate, `trellis.llm.egress` (`may_reach_route` for a
   label, `EgressGate` for a stored document, a chunk judged by its parent's

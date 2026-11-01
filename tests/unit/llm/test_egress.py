@@ -598,3 +598,39 @@ class TestPerConsumerConfig:
         for member in LLMConsumer:
             route = resolve_llm_route(config, member)
             assert route.local is ((member is target) == local)
+
+
+class TestPermitsStored:
+    """``permits_stored``: a gate over a document named by id, failing closed."""
+
+    def test_the_label_on_the_stored_row_decides(
+        self, store: SQLiteDocumentStore
+    ) -> None:
+        store.put("secret", "body", _label("confidential"))
+        store.put("plain", "body", {})
+        store.put("shared", "body", _label("public"))
+        gate = EgressGate(store, local=False)
+        assert gate.permits_stored("secret") is False
+        assert gate.permits_stored("plain") is True
+        assert gate.permits_stored("shared") is True
+
+    def test_an_id_with_no_row_names_nothing_that_carries_a_label(
+        self, store: SQLiteDocumentStore
+    ) -> None:
+        assert EgressGate(store, local=False).permits_stored("entity:x") is True
+
+    def test_a_chunk_shaped_id_with_no_parent_row_is_withheld(
+        self, store: SQLiteDocumentStore
+    ) -> None:
+        orphan = chunk_doc_id("gone", 0)
+        assert EgressGate(store, local=False).permits_stored(orphan) is False
+
+    def test_a_row_that_cannot_be_read_is_withheld(self) -> None:
+        broken = MagicMock()
+        broken.get.side_effect = RuntimeError("store down")
+        assert EgressGate(broken, local=False).permits_stored("any") is False
+
+    def test_a_local_gate_reads_nothing(self) -> None:
+        untouched = MagicMock()
+        assert EgressGate(untouched, local=True).permits_stored("any") is True
+        untouched.get.assert_not_called()

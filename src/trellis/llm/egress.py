@@ -11,7 +11,8 @@ Two functions answer the question and every call site that sends stored
 content to an LLM goes through one of them:
 
 * :func:`may_reach_route` takes a label and a locality.
-* :class:`EgressGate` takes a stored document (id plus metadata), so a chunk is
+* :class:`EgressGate` takes a stored document (id plus metadata, or just the id
+  through :meth:`~EgressGate.permits_stored`), so a chunk is
   judged by its parent's label as the retrieval gate judges it, and fails
   closed: a label that cannot be read, a parent that cannot be fetched, or a
   chunk-shaped id whose parent row is absent, answers "no" (retrieval judges
@@ -24,6 +25,12 @@ content to an LLM goes through one of them:
 ``generate`` call. Embedding is not gated: stored content, labelled content
 included, still goes to the configured embedder, and an operator with a hosted
 embedder must treat that as egress.
+
+Content that is not itself a stored document but names some, a trace's
+evidence refs or the packs a session was served, is judged by the documents it
+names: one above ``internal`` withholds the whole trace or session. Neither
+carries a label of its own, so a trace or session that names no stored document
+reads as unlabelled and is sent as before.
 
 ``tests/unit/test_llm_egress_rule.py`` rosters the call sites and requires each
 to reference this module; it is a tripwire for the common shapes, and the
@@ -85,6 +92,7 @@ class EgressGate:
 
     def __init__(self, document_store: DocumentStore | None, *, local: bool) -> None:
         self.local = local is True
+        self._documents = document_store
         self._clearance: Any = None
         if not self.local and document_store is not None:
             # Deferred: ``trellis.retrieve`` is a heavy package and
@@ -136,6 +144,27 @@ class EgressGate:
             # not read as permission to send the content off the host; the
             # job counts the skip under EGRESS_WITHHELD_REASON.
             return False
+
+    def permits_stored(self, doc_id: str) -> bool:
+        """Whether the document stored under ``doc_id`` may be sent, by its row.
+
+        For content that names a document without carrying it: a trace's
+        evidence ref, or an item a context pack served to a session. An id
+        with no stored row names nothing that carries a label and is
+        permitted (a graph entity, a trace id), except a chunk-shaped id,
+        which :meth:`permits` withholds as an orphan. A row that cannot be
+        read is a refusal. A local gate answers before it reads anything.
+        """
+        if self.local:
+            return True
+        row = None
+        if self._documents is not None:
+            try:
+                row = self._documents.get(doc_id)
+            except Exception:
+                # GRACEFUL-DEGRADATION: fail closed, as in ``permits``.
+                return False
+        return self.permits(doc_id, row.get("metadata") if row else None)
 
     def _is_orphan_chunk(self, doc_id: str, metadata: Mapping[str, Any] | None) -> bool:
         """A chunk-shaped id whose parent row cannot be read back.

@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from trellis.llm import LLMClient
+    from trellis.llm.egress import EgressGate
     from trellis.stores.base.event_log import EventLog
     from trellis.stores.base.trace import TraceStore
 
@@ -191,6 +192,12 @@ class MiningReport:
     failures. ``analyzed`` is the (at most 20) newest of them, the ones the
     model is shown. ``read_to_end`` is true when the read reached the end of
     the store, so "the store holds no more" is only said when it is true.
+
+    ``egress_withheld`` counts failure traces left out of ``analyzed`` because
+    one of their evidence documents is labelled above ``internal`` and the
+    route is not declared local (:mod:`trellis.llm.egress`). They are not shown
+    to the model, take no seat among the analysed 20 and are not counted in
+    ``failures_in_scope``; no model was asked about them and nothing failed.
     """
 
     outcome: MiningOutcome
@@ -203,6 +210,7 @@ class MiningReport:
     candidates: tuple[Precedent, ...] = ()
     analyzed: tuple[Trace, ...] = ()
     read_to_end: bool = False
+    egress_withheld: int = 0
 
 
 class PrecedentMiner:
@@ -223,10 +231,16 @@ class PrecedentMiner:
         trace_store: TraceStore,
         event_log: EventLog | None = None,
         llm: LLMClient | None = None,
+        *,
+        egress: EgressGate | None = None,
     ) -> None:
         self._trace_store = trace_store
         self._event_log = event_log
         self._llm = llm
+        # ``None`` is no gate at all: a caller that sends to a route not
+        # declared local must pass ``EgressGate.for_route`` (``worker
+        # mine-precedents`` does).
+        self._egress = egress
 
     # ------------------------------------------------------------------
     # Deterministic extraction (no LLM)
@@ -291,6 +305,11 @@ class PrecedentMiner:
 
         Calls no LLM and writes nothing. ``would_mine`` means a run would;
         every other outcome says why it would not.
+
+        A failure trace naming an evidence document labelled above ``internal``
+        is withheld while the route is not declared local, and counted in
+        ``egress_withheld``. The ``min_traces`` check and the digest see only
+        what remains, so a run over unlabelled traces is unchanged.
         """
         scan = scan_failure_traces(
             self._trace_store,
@@ -299,7 +318,8 @@ class PrecedentMiner:
             scan_cap=scan_cap,
             min_traces=min_traces,
         )
-        found = len(scan.traces)
+        permitted, withheld = self._withhold_labelled(scan.traces)
+        found = len(permitted)
         report = MiningReport(
             outcome="no_failures",
             failures_in_scope=found,
@@ -307,6 +327,7 @@ class PrecedentMiner:
             scan_cap=scan_cap,
             read_bound_hit=scan.bound_hit,
             read_to_end=scan.exhausted,
+            egress_withheld=withheld,
         )
         # Nothing found is never "below the minimum", whatever the minimum is.
         if not found:
@@ -318,7 +339,7 @@ class PrecedentMiner:
                 return replace(report, outcome="read_bound_hit")
             return replace(report, outcome="below_min_traces")
 
-        analyzed = tuple(scan.traces[:_MAX_ANALYZED])
+        analyzed = tuple(permitted[:_MAX_ANALYZED])
         digest = compute_source_digest(analyzed, domain)
         already = self._earlier_run_over(digest)
         return replace(
@@ -480,6 +501,22 @@ class PrecedentMiner:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _withhold_labelled(self, traces: Sequence[Trace]) -> tuple[list[Trace], int]:
+        """``(traces the route may be shown, how many were withheld)``."""
+        gate = self._egress
+        if gate is None:
+            return list(traces), 0
+        kept = [
+            t
+            for t in traces
+            if all(
+                gate.permits_stored(ref.evidence_id)
+                for ref in t.evidence_used
+                if ref.evidence_id
+            )
+        ]
+        return kept, len(traces) - len(kept)
 
     def _earlier_run_over(self, digest: str) -> tuple[str, ...]:
         """Ids of the newest *complete* earlier run over exactly this input.

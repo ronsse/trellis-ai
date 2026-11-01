@@ -2348,7 +2348,16 @@ def mine_precedents_cmd(
         PrecedentMiner,
     )
 
-    miner = PrecedentMiner(trace_store, event_log=event_log, llm=llm)
+    miner = PrecedentMiner(
+        trace_store,
+        event_log=event_log,
+        llm=llm,
+        egress=EgressGate.for_route(
+            _get_registry(),
+            LLMConsumer.PRECEDENT_MINING,
+            get_document_store(),
+        ),
+    )
     cap = DEFAULT_TRACE_SCAN_CAP if scan_cap is None else scan_cap
 
     if dry_run:
@@ -2433,11 +2442,19 @@ def _mining_scan_fields(report: MiningReport) -> dict[str, Any]:
         "skipped_unchanged": report.outcome == "skipped_unchanged",
         "source_digest": report.source_digest,
         "already_mined_candidate_ids": list(report.already_mined),
+        "skipped_egress_withheld": report.egress_withheld,
     }
 
 
 def _print_mining_outcome(report: MiningReport, *, min_traces: int) -> None:
     """Say, for every outcome, why a mining run produced what it did."""
+    if report.egress_withheld:
+        console.print(
+            f"  [yellow]{EGRESS_WITHHELD_REASON}:[/yellow] {report.egress_withheld} "
+            f"failure trace(s) naming a document labelled above internal (or one "
+            f"that could not be read) were not shown to the model; the "
+            f"precedent_mining route is not declared local"
+        )
     outcome = report.outcome
     analysed = len(report.analyzed)
     if outcome == "mined":
@@ -2606,6 +2623,14 @@ def _render_capture_text(payload: dict[str, Any]) -> None:
             f"judged; their nearest stored capture was withheld (labelled above "
             f"internal, label unreadable, or an orphan chunk) and the "
             f"session_capture route is not declared local"
+        )
+    if payload["sessions_skipped_egress_withheld"]:
+        console.print(
+            f"  [yellow]{EGRESS_WITHHELD_REASON}:[/yellow] "
+            f"{payload['sessions_skipped_egress_withheld']} session(s) not "
+            f"distilled; they were served a document labelled above internal "
+            f"(or one that could not be read) and the session_capture route is "
+            f"not declared local; they stay un-watermarked"
         )
     if payload["supersessions_failed"]:
         # Never folded into the reconcile line above: a supersession the

@@ -54,8 +54,11 @@ import structlog
 from trellis.classify.dedup.minhash import MinHashIndex
 from trellis.core.hashing import content_hash
 from trellis.core.vector_metadata import resolve_vector_store
+from trellis.feedback.attribution import served_item_ids
 from trellis.ingest_corpus.models import SyncRecord
 from trellis.ingest_corpus.sync import sync_records
+from trellis.llm.egress import EgressGate
+from trellis.llm.routing import LLMConsumer
 from trellis.mcp.reconcile import (
     RECONCILIATION_KEY,
     SUPERSEDES_DOC_KEY,
@@ -683,6 +686,38 @@ def _emit_sweep_completed(
         logger.warning("capture_sweep_event_emit_failed", exc_info=True)
 
 
+def _session_may_reach_route(
+    registry: StoreRegistry, digest: SessionDigest, egress: EgressGate
+) -> bool:
+    """Whether the transcript digest may go to the route, by what the session read.
+
+    A transcript carries no label, but the packs its session was served name
+    documents that do, and the memory distilled from it is written unlabelled.
+    Any served document labelled above ``internal`` (:mod:`trellis.llm.egress`)
+    withholds the session. A pack whose event the log no longer holds names
+    nothing to read and does not; an event that cannot be read withholds,
+    as does a served document whose row cannot be read.
+    """
+    if egress.local or not digest.pack_ids:
+        return True
+    try:
+        for pack_id in digest.pack_ids:
+            for event in registry.operational.event_log.get_events(
+                event_type=EventType.PACK_ASSEMBLED, entity_id=pack_id, limit=1
+            ):
+                if not all(
+                    egress.permits_stored(item_id)
+                    for item_id in sorted(served_item_ids(event.payload))
+                ):
+                    return False
+    except Exception:
+        # GRACEFUL-DEGRADATION: fail closed. A pack that cannot be read must
+        # not read as permission to send the transcript off the host; the
+        # sweep counts the skip under EGRESS_WITHHELD_REASON.
+        return False
+    return True
+
+
 def _capture_session(
     registry: StoreRegistry,
     digest: SessionDigest,
@@ -704,6 +739,19 @@ def _capture_session(
     still computed and reported — the plan a dry run prints has to be the plan
     the live sweep would execute.
     """
+    # Nothing is sent with no client, so the no-client path is not gated.
+    if llm_client is not None and not _session_may_reach_route(
+        registry,
+        digest,
+        EgressGate.for_route(
+            registry, LLMConsumer.SESSION_CAPTURE, registry.knowledge.document_store
+        ),
+    ):
+        # Not a judge outage: nothing was asked and nothing failed. Returning
+        # ``None`` leaves the session un-watermarked, so a sweep over a route
+        # declared local distils it.
+        report.sessions_skipped_egress_withheld += 1
+        return None
     distill_result = distill.distill_session(llm_client, digest)
     if distill_result.outcome is distill.DistillOutcome.UNAVAILABLE:
         report.sessions_judge_unavailable += 1
