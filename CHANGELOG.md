@@ -4,7 +4,63 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`trellis analyze holdout --operational` reports the experiment's health
+  without reading an outcome.** A pack holdout needs a check that it is running
+  (arm counts and their ratio, the funnel, covariate coverage, per-build
+  counts) that does not expose the results it is meant to leave blind. The flag
+  emits a separate report model with no outcome-mean, estimate, interval,
+  p-value, power, MDE, guardrail or covariate-fit field, no cut-off, analysed or
+  post-hoc count, and no pack row count. It does not scan `PACK_ASSEMBLED`: it
+  reads the capture joins, the capture sweeps and, for each join, the one pack
+  row its first pack id names, fetched by id, so later packs, the number of
+  packs and the volume of pack rows never enter it. A test enforces that with
+  an event log that allows only the join and sweep events and a first pack by
+  id, and hands the report join and sweep payloads that serve only the keys
+  the report reads (`retrieval_results`, `retrieval_errors` and
+  `pack_ids_unparsed` only from a join that names no pack) and refuse the rest,
+  `len`, `repr` and `==` included. That bounds the fixtures' reads, not the
+  store: a reader of the events can still read them. Every figure depends only
+  on values fixed when a task's first pack was assembled (that pack's time, arm
+  draw, build and rate, and, from the session's anchor join, the earliest that
+  names a pack, the agent type, brief and the two timing flags set before the
+  first retrieval) and on capture sweep times. Nothing read is a later pack,
+  the pack count, a re-emitted join's contents, a session's length or an
+  outcome value, so reports over several windows, or stored nightly, do not
+  vary with them; they do vary with when a join was written, below. Joins and
+  sweeps are paged to completion,
+  so `--limit` with `--operational` is a usage error (exit 2). One exception is
+  disclosed: whether a join carries an outcome block (presence only; a join
+  without one is dropped before eligibility). Stated limits: a session with no
+  join that names a pack, or no first-pack row, is windowed on its join time
+  and counted pooled; a join that names no pack and is too close to a window's
+  end to have settled is missing from that night's report and skipped in the
+  next (the session has a join before its start), so a stored nightly series
+  undercounts it, by join time and not by any treatment value; a task whose
+  anchor join is written after its settling sweep (a retried parse error, a
+  failed join write, a `--rejoin-since` backfill) counts from the night the
+  join exists, and a night asked about again shows a larger `eligible` only if
+  a sweep ran between the first pack's settling time and the join's write; and
+  a page or more of joins stamped at one instant exits 2 where the full report
+  exits 0. A task is
+  admitted and windowed on its first pack, so operational `eligible` can differ
+  from the full report's on the same night.
+  The arm-ratio check runs on `assigned`, the first pack of each admitted join
+  at the rate. The inference options are validated as for the full report, so an
+  invalid one exits alike with and without the flag; the exit status differs
+  across modes for `--limit`, a later pack at another rate and a page of tied
+  joins, and is the same across `--format`. With `--by-commit` the
+  table is eligible-task counts per build and arm. Default output and exit codes
+  are unchanged, and there is no REST or OpenAPI surface for the flag yet.
+
 ### Fixed
+
+- **The `analyze holdout --by-commit` help and `holdout.py` docstring no longer
+  say the table has "no estimate".** It prints each arm's outcome mean per
+  build; what it omits is an interval and a p-value. `analyze value`'s help no
+  longer says the system has no withhold arm and points to `analyze holdout`.
+
 
 - **`worker mine-precedents` counts failures against `--limit` and no longer mints duplicates
   on a rerun.** The miner read the newest `--limit` traces and only then kept the
