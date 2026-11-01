@@ -6,6 +6,43 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **API keys can be listed, minted and revoked from the REST API, the UI and MCP.**
+  `GET`/`POST /api/v1/api-keys` and `DELETE /api/v1/api-keys/{key_id}` (admin scope), a
+  **Keys** tab in the web UI with scope presets, a one-time token display and a
+  typed-confirmation revoke, and the MCP tools `list_api_keys` and `revoke_api_key`. There is
+  deliberately no MCP tool that mints a key. Mint and revoke are governed operations
+  (`api_key.mint`, `api_key.revoke`), so a denying policy blocks every surface, and each emits
+  an `api_key.minted` / `api_key.revoked` event, the CLI's included; the payload names the key
+  id, name, scopes and actor and never the token, secret or hash. Scope validation is one shared
+  parser (`trellis.auth.parse_scope_list`), so `read,admin,external` is refused identically
+  everywhere. A caller cannot revoke the key it is authenticated with (the CLI still can). An
+  `external` key is refused on all of it. No change to the `trellis_api_keys` table.
+
+  **Behaviour to know before deploying.** (1) Mint and revoke over REST need an
+  identified admin credential: a stored key that holds `admin`, or the shared
+  `TRELLIS_API_KEY` secret. The anonymous caller of `optional` mode, which otherwise
+  holds every scope, gets 403 pointing at `trellis admin api-keys`; `off` mode ignores a
+  presented key, so there every REST caller is anonymous and the 403 points only at the
+  CLI. The MCP `revoke_api_key` needs a stored admin key and does not accept the shared
+  secret. A stored admin key cannot revoke itself; that is the whole last-admin guard,
+  so the shared secret and the CLI can remove the last admin, unsetting the secret
+  afterwards leaves no REST or MCP admin, and two admins revoking each other at once can
+  reach zero. (2) A store failure on the audit write does not change the outcome: the key
+  operation answers success with the warning `audit_event_not_recorded` (a mint still
+  returns its token), and warnings now reach the REST body, the CLI text and JSON, MCP
+  and the UI. A failure the executor's emit guard does not list, such as a broken import,
+  still answers an error after the write has committed, so a mint can leave a live key
+  with no token returned; list and revoke it. A true server fault answers 500 with no
+  exception text. (3) The CLI
+  succeeds and warns when `events.db` is corrupt, so a compromised key can still be
+  revoked. A corrupt `policies.json` is the exception: it fails closed (CLI exit 5, REST
+  409, the message names the file), and until that file is fixed no surface can mint or
+  revoke. (4) A key name is 1 to 120 characters with no control character, on every
+  surface. (5) Key operations are neither an accept nor a reject for capture health. (6)
+  **Deploy order:** once an `api_key.*` event exists, an older build's `GET /api/v1/events` answers 500 on the unknown event type; redeploy every server before
+  minting or revoking through the new build. A policy denial answers 400, like the other
+  write routes.
+
 - **Per-key access log: what did this key read, and when did it last run?** Off by
   default; `TRELLIS_ACCESS_LOG=1` (settings key `access_log`; only `1`, `true`, `yes`, `on`
   enable it) writes one `access.key_read` event per authenticated read by an API key, on REST
@@ -483,6 +520,17 @@ All notable changes to Trellis will be documented in this file.
   and by new cases in the live contract suite, which run against a real server only in
   the live-infra job.
 
+
+- **A flaky test: a session-dedup test compared two pack id lists in order.**
+  `TestSessionDedup` in `tests/unit/mcp/test_external_key_events.py` asserted that two
+  ordinary-key packs for the same query held identical id lists. The documents that rank
+  below the public ones tie on every axis, and what orders them is each row's own clock
+  reading in `_apply_recency_decay`, so a stall between two rows reorders them (and can
+  change which of the tied bulk documents is served). Two CI runs failed this way, on
+  Python 3.11 and 3.12, with the same three documents in a different order. The tests now
+  compare which documents were served, and the test about what an external pack records
+  compares the public documents only. Test-only: no change under `src/`, and no pack
+  changes.
 - **A document row whose metadata cannot be read no longer fails every read by
   an `external` key on SQLite.** The label predicate the public path runs
   through `DocumentStore.list_documents` raised on a row whose `metadata_json`

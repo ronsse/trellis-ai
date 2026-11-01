@@ -659,6 +659,20 @@ class EventType(StrEnum):
     #: operation (see the handler's own docstring for why).
     SETTINGS_UPDATED = "settings.updated"
 
+    #: Emitted by the governed API-key write path (``ApiKeyMintHandler`` /
+    #: ``Operation.API_KEY_MINT``) on every key minted, from the CLI, REST and
+    #: any other surface alike. Payload: ``{key_id, name, scopes, minted_by,
+    #: actor_key_id, actor_key_name}``. It never carries the token, the
+    #: secret half or its hash. ``actor_key_id`` / ``actor_key_name`` are
+    #: ``None`` where no authenticated key made the call (the CLI, auth mode
+    #: ``off``). ``entity_id`` is the new key id.
+    API_KEY_MINTED = "api_key.minted"
+    #: Emitted by the same path's revoke handler
+    #: (``ApiKeyRevokeHandler`` / ``Operation.API_KEY_REVOKE``) on every key
+    #: revoked. Payload: ``{key_id, name, scopes, revoked_by, actor_key_id,
+    #: actor_key_name}``. ``entity_id`` is the revoked key id.
+    API_KEY_REVOKED = "api_key.revoked"
+
     #: Emitted by ``trellis admin record-job-run`` at the start and end of
     #: one dispatcher-driven job execution (see
     #: ``trellis.stores.schedule_store.ScheduleStore`` and the schedule
