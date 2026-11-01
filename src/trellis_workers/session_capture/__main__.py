@@ -167,10 +167,18 @@ def main(argv: list[str] | None = None) -> int:
             "raised mid-sweep. They stay un-watermarked for retry; see "
             "capture_session_failed in the log.\n"
         )
+    if report.sessions_skipped_egress_unreadable:
+        sys.stderr.write(
+            f"trellis-session-capture: {report.sessions_skipped_egress_unreadable} "
+            "session(s) kept off the model because a store could not be asked "
+            "whether what they were served may leave the host. They stay "
+            "un-watermarked for retry; see capture_session_egress_unreadable "
+            "in the log.\n"
+        )
     if strict_mode(load_settings_values(registry.stores_dir)):
         if unjudged:
             return EXIT_JUDGE_UNAVAILABLE
-        if report.sessions_errored:
+        if report.sessions_errored or report.sessions_skipped_egress_unreadable:
             return EXIT_SESSIONS_ERRORED
     return EXIT_OK
 
