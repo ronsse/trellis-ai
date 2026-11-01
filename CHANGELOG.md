@@ -6,6 +6,24 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`scripts/upgrade_check.sh` and `.github/workflows/upgrade-check.yml` test
+  upgrading and rolling back a SQLite store.** The script installs the previous
+  release (the newest release tag that is an ancestor of HEAD and not HEAD
+  itself, read from git) and the candidate into separate fresh venvs, then, over
+  one set of scratch stores: the previous release writes a document, a trace,
+  two entities and an edge, a pack and pack feedback and reads them back; the
+  candidate reads them, writes a second set, reads both and runs
+  `trellis admin health`; the previous release reads both sets again. Fields the
+  script wrote are compared with what it wrote, and fields the build chose
+  (content hash, timestamps) must not change between reads by either build. The
+  first failure names its step and exits non-zero. The workflow runs on `v*`
+  tags, nightly and on demand, with no `pull_request` trigger, and does not gate
+  `publish.yml`. Postgres and the other cloud backends are not covered.
+  `docs/deployment/runbook.md` gains an "Upgrading" section, linked from
+  `RELEASING.md`, that states what the script proves, and that the only
+  compatibility refusal is the registry's schema fingerprint, which no release
+  has bumped and the script does not exercise.
+
 - **`trellis analyze learning-candidates` says what its candidates are.** `--format json`
   reported only `candidate_count`, which includes every `investigate_noise` row, so a long
   list could not be told apart from a backlog of promotable knowledge. The JSON now also
