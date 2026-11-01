@@ -237,7 +237,7 @@ With no `--output-dir`, the learning-candidate artifacts land in `<data_dir>/lea
 
 ### Verification checklist
 
-After both processes are up, confirm the substrate is live and the workers run clean. Use an isolated config dir while testing so you don't touch production data:
+After both processes are up, confirm the substrate is live and the workers run clean. Use an isolated config dir while testing so you don't touch production data. The config dir must be fresh: `init` writes the data directory into its `config.yaml` as `data_dir`, and a `data_dir` already in a `config.yaml` beats `TRELLIS_DATA_DIR`. A config copied from a deployment keeps pointing at that deployment's data however the variable is set; `trellis admin health` prints both directories when they disagree.
 
 ```bash
 export TRELLIS_CONFIG_DIR=/tmp/trellis-check/config

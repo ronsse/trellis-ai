@@ -24,6 +24,7 @@ from trellis.retrieve.formatters import (
 from trellis.retrieve.withholding import WithholdingSummary
 from trellis_workers.session_capture import transcripts
 from trellis_workers.session_capture.models import ToolUseRollup
+from trellis_workers.session_capture.outcome import trellis_tool_name
 from trellis_workers.session_capture.transcripts import (
     discover_sessions,
     is_ephemeral_project,
@@ -1674,6 +1675,144 @@ class TestSessionOutcome:
         assert outcome["assistant_turns"] == 2
         assert _tokens(outcome) == (11, 30, 0, 0)
 
+    def test_memory_tool_calls_are_the_calls_to_a_trellis_server(
+        self, tmp_path: Path
+    ) -> None:
+        """The server in the name decides, whatever the tool: the local
+        server, a connector or plugin with ``trellis`` inside a longer server
+        name, and a tool this list has never heard of. Another server's
+        same-named tool, a plain tool and a ``Bash`` call to the ``trellis``
+        CLI are calls, but not memory calls."""
+        outcome = self._parse(
+            tmp_path,
+            [
+                prompt("Fake task.", at=0),
+                assistant_tools(
+                    ("mcp__trellis__get_context", "t-1"),
+                    ("mcp__trellis__get_items", "t-2"),
+                    ("mcp__trellis__record_feedback", "t-3"),
+                    ("mcp__claude_ai_Fake-trellis__get_context", "t-4"),
+                    ("mcp__plugin_fake_trellis__brand_new_tool", "t-5"),
+                    ("mcp__other-memory__get_context", "t-6"),
+                    ("mcp__fake__shell", "t-7"),
+                    ("mcp__trellis", "t-8"),
+                    ("mcp__trellis__", "t-9"),
+                    ("trellis_get_context", "t-10"),
+                    ("Read", "t-11"),
+                ),
+                *api_message(
+                    "msg_fake_cli",
+                    bash_block("t-12", "trellis curate feedback --pack-id fake"),
+                    at=1,
+                ),
+            ],
+        )
+        assert (outcome["tool_calls"], outcome["memory_tool_calls"]) == (12, 5)
+
+    def test_memory_tool_calls_are_zero_when_none_were_made(
+        self, tmp_path: Path
+    ) -> None:
+        """A transcript that parsed and called no Trellis tool says ``0``,
+        which is an answer; a join with no key says nothing."""
+        outcome = self._parse(tmp_path, worked_session())
+        assert outcome["tool_calls"] > 0
+        assert outcome["memory_tool_calls"] == 0
+        assert type(outcome["memory_tool_calls"]) is int
+
+    def test_memory_tool_calls_count_each_parallel_call_and_each_message_block(
+        self, tmp_path: Path
+    ) -> None:
+        """Counted as ``tool_calls`` is: one per named ``tool_use`` block,
+        whether Claude Code wrote the blocks into one record or one each."""
+        outcome = self._parse(
+            tmp_path,
+            [
+                prompt("Fake task.", at=0),
+                assistant_tools(
+                    ("mcp__trellis__get_items", "t-1"),
+                    ("mcp__trellis__get_items", "t-2"),
+                ),
+                *api_message(
+                    "msg_fake_split",
+                    tool_use_block("t-3", "mcp__trellis__search", query="fake"),
+                    tool_use_block("t-4", "mcp__trellis__record_feedback"),
+                    tool_use_block("t-5", "Read", file_path="/fake/a.md"),
+                    at=1,
+                ),
+            ],
+        )
+        assert (outcome["tool_calls"], outcome["memory_tool_calls"]) == (5, 4)
+
+    def test_a_memory_call_written_again_counts_once(self, tmp_path: Path) -> None:
+        """A resumed session writes its history into the file again under
+        the ``uuid`` each record had; the copy is not a new call. A record
+        under a fresh ``uuid`` is, even one making the same call."""
+        history = [
+            prompt("Fake task.", at=0),
+            *api_message(
+                "msg_fake_m1",
+                tool_use_block("t-m1", "mcp__trellis__get_context", intent="fake"),
+                at=1,
+                usage=usage_block(5, 10),
+            ),
+            tool_results(result_block("t-m1", "fake result"), at=2),
+            *api_message(
+                "msg_fake_m2",
+                tool_use_block("t-m2", "mcp__trellis__get_items"),
+                tool_use_block("t-m3", "Read", file_path="/fake/a.md"),
+                at=3,
+                usage=usage_block(6, 20),
+            ),
+        ]
+        again = [{**record, "version": "2.0.1"} for record in history]
+        fresh = api_message(
+            "msg_fake_m3",
+            tool_use_block("t-m4", "mcp__trellis__get_items"),
+            at=4,
+            usage=usage_block(7, 30),
+        )
+
+        outcome = self._parse(tmp_path, [*history, *again, *fresh])
+
+        assert (outcome["tool_calls"], outcome["memory_tool_calls"]) == (4, 3)
+
+    def test_a_memory_call_is_counted_on_every_record_tool_calls_is(
+        self, tmp_path: Path
+    ) -> None:
+        """Held to ``tool_calls``'s own rule: a record Claude Code writes in
+        the model's place still counts the calls it names, in both."""
+        outcome = self._parse(
+            tmp_path,
+            [
+                prompt("Fake task.", at=0),
+                *api_message(
+                    "msg_fake_err",
+                    tool_use_block("t-e1", "mcp__trellis__get_context"),
+                    tool_use_block("t-e2", "Read", file_path="/fake/a.md"),
+                    at=1,
+                    api_error=True,
+                ),
+            ],
+        )
+        assert (outcome["tool_calls"], outcome["memory_tool_calls"]) == (2, 1)
+
+    def test_a_sub_agent_and_its_parent_count_their_own_memory_calls(
+        self, tmp_path: Path
+    ) -> None:
+        records = [
+            prompt("Fake task.", at=0),
+            assistant_tools(("mcp__trellis__get_context", "t-1")),
+        ]
+        root = tmp_path / "projects"
+        parent_path = root / "proj" / "sess-parent-0001.jsonl"
+        child_path = (
+            root / "proj" / "sess-parent-0001" / "subagents" / "agent-fk1.jsonl"
+        )
+        write_transcript(parent_path, records[:1])
+        write_transcript(child_path, records)
+        assert parse_session(parent_path).outcome.memory_tool_calls == 0
+        assert parse_session(child_path).outcome.memory_tool_calls == 1
+
     @pytest.mark.skipif(not hasattr(time, "tzset"), reason="needs time.tzset")
     def test_a_stamp_without_a_zone_is_utc_whatever_the_host_zone(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1902,6 +2041,36 @@ class TestSessionOutcome:
         digest = parse_session(path)
         for fragment in ("git commit", "fake change", "fake-owner", "pull/101"):
             assert fragment not in repr(digest)
+
+
+class TestTrellisToolName:
+    """The server rule the pack parser and the memory-call count share."""
+
+    @pytest.mark.parametrize(
+        ("name", "tool"),
+        [
+            ("mcp__trellis__get_context", "get_context"),
+            ("mcp__Trellis__get_items", "get_items"),
+            ("mcp__claude_ai_Fake-trellis__get_context", "get_context"),
+            ("mcp__plugin_fake_trellis__some_new_tool", "some_new_tool"),
+            ("mcp__other-memory__get_context", None),
+            ("mcp__fake__shell", None),
+            ("mcp__trellis", None),
+            ("mcp__trellis__", None),
+            ("get_context", None),
+            ("Bash", None),
+            ("", None),
+        ],
+    )
+    def test_the_tool_of_a_trellis_server_else_none(
+        self, name: str, tool: str | None
+    ) -> None:
+        assert trellis_tool_name(name) == tool
+
+    def test_the_pack_parser_reads_the_same_servers(self) -> None:
+        assert transcripts._is_pack_tool("mcp__claude_ai_Fake-trellis__get_context")
+        assert not transcripts._is_pack_tool("mcp__other-memory__get_context")
+        assert not transcripts._is_pack_tool("mcp__trellis__record_feedback")
 
 
 class TestCovariates:

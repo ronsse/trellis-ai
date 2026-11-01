@@ -31,7 +31,7 @@ Subclass shape::
 from __future__ import annotations
 
 import time
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -236,6 +236,124 @@ class TraceStoreContractTests:
             since=now - timedelta(hours=1), until=now + timedelta(hours=1)
         )
         assert len(results) == 1
+
+    # ------------------------------------------------------------------
+    # query — time range compares by instant, whatever offset was written
+    # ------------------------------------------------------------------
+
+    def test_since_finds_a_trace_written_with_a_negative_offset(
+        self, store: TraceStore
+    ) -> None:
+        # One hour ago, written as eleven hours behind UTC: the wall-clock
+        # digits read twelve hours ago, which a text comparison against a
+        # two-hours-ago bound would call too old.
+        instant = utc_now().replace(microsecond=0) - timedelta(hours=1)
+        behind = timezone(timedelta(hours=-11))
+        trace = _make_trace(created_at=instant.astimezone(behind))
+        store.append(trace)
+        found = store.query(since=utc_now() - timedelta(hours=2))
+        assert [t.trace_id for t in found] == [trace.trace_id]
+
+    def test_until_finds_a_trace_written_with_a_positive_offset(
+        self, store: TraceStore
+    ) -> None:
+        # One hour ago, written as fourteen hours ahead of UTC: the digits
+        # read thirteen hours from now, which a text comparison against an
+        # ``until`` of now would call too new.
+        instant = utc_now().replace(microsecond=0) - timedelta(hours=1)
+        ahead = timezone(timedelta(hours=14))
+        trace = _make_trace(created_at=instant.astimezone(ahead))
+        store.append(trace)
+        found = store.query(until=utc_now())
+        assert [t.trace_id for t in found] == [trace.trace_id]
+
+    def test_a_bound_given_with_an_offset_means_its_instant(
+        self, store: TraceStore
+    ) -> None:
+        instant = utc_now().replace(microsecond=0) - timedelta(hours=1)
+        trace = _make_trace(created_at=instant)
+        store.append(trace)
+        ahead = timezone(timedelta(hours=14))
+        behind = timezone(timedelta(hours=-11))
+        # Both bounds name an instant 30 minutes either side of the trace.
+        found = store.query(
+            since=(instant - timedelta(minutes=30)).astimezone(behind),
+            until=(instant + timedelta(minutes=30)).astimezone(ahead),
+        )
+        assert [t.trace_id for t in found] == [trace.trace_id]
+        # And one that is 30 minutes past it, in the same dress, excludes it.
+        assert (
+            store.query(since=(instant + timedelta(minutes=30)).astimezone(behind))
+            == []
+        )
+
+    def test_results_are_ordered_by_instant_across_offsets(
+        self, store: TraceStore
+    ) -> None:
+        now = utc_now().replace(microsecond=0)
+        # ``earlier`` happened first but its digits are the larger: written
+        # fourteen hours ahead of UTC, they read twelve hours from now.
+        earlier = _make_trace(
+            intent="earlier",
+            created_at=(now - timedelta(hours=2)).astimezone(
+                timezone(timedelta(hours=14))
+            ),
+        )
+        later = _make_trace(intent="later", created_at=now - timedelta(hours=1))
+        store.append(earlier)
+        store.append(later)
+        assert [t.intent for t in store.query()] == ["later", "earlier"]
+
+    def test_bounds_are_inclusive_to_the_microsecond(self, store: TraceStore) -> None:
+        instant = datetime(2026, 3, 4, 5, 6, 7, 123456, tzinfo=UTC)
+        written = instant.astimezone(timezone(timedelta(hours=5, minutes=30)))
+        trace = _make_trace(created_at=written)
+        store.append(trace)
+        tick = timedelta(microseconds=1)
+        assert len(store.query(since=instant, until=instant)) == 1
+        assert store.query(since=instant + tick) == []
+        assert store.query(until=instant - tick) == []
+
+    def test_a_naive_created_at_is_read_as_utc(self, store: TraceStore) -> None:
+        # ``Trace`` accepts a naive ``created_at`` and Postgres reads one as
+        # UTC in its default session, so the store does too: the trace is
+        # found by the instant its digits name in UTC, naive bound or aware.
+        now = utc_now().replace(microsecond=0)
+        naive = (now - timedelta(hours=1)).replace(tzinfo=None)
+        trace = _make_trace(created_at=naive)
+        store.append(trace)
+        around = {
+            "since": now - timedelta(hours=2),
+            "until": now - timedelta(minutes=30),
+        }
+        assert [t.trace_id for t in store.query(**around)] == [trace.trace_id]
+        naive_around = {k: v.replace(tzinfo=None) for k, v in around.items()}
+        assert [t.trace_id for t in store.query(**naive_around)] == [trace.trace_id]
+        # Outside the window, an hour either side, it is not found.
+        assert store.query(since=now - timedelta(minutes=30)) == []
+        assert store.query(until=now - timedelta(hours=2)) == []
+        # Both bounds are inclusive at the very instant, which a text compare
+        # misses: "...T05:06:07" sorts before "...T05:06:07+00:00".
+        at = naive.replace(tzinfo=UTC)
+        assert [t.trace_id for t in store.query(since=at, until=at)] == [trace.trace_id]
+
+    def test_naive_and_aware_traces_query_together_in_order(
+        self, store: TraceStore
+    ) -> None:
+        now = utc_now().replace(microsecond=0)
+        old_naive = _make_trace(
+            intent="old naive",
+            created_at=(now - timedelta(hours=3)).replace(tzinfo=None),
+        )
+        aware = _make_trace(intent="aware", created_at=now - timedelta(hours=2))
+        new_naive = _make_trace(
+            intent="new naive",
+            created_at=(now - timedelta(hours=1)).replace(tzinfo=None),
+        )
+        for trace in (aware, old_naive, new_naive):
+            store.append(trace)
+        found = store.query(since=now - timedelta(hours=4), until=now)
+        assert [t.intent for t in found] == ["new naive", "aware", "old naive"]
 
     # ------------------------------------------------------------------
     # query — limit + ordering

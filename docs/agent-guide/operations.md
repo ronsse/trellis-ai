@@ -24,7 +24,7 @@ trellis admin init [--data-dir PATH] [--force] [--format text|json]
 
 `init` writes the data directory into `config.yaml` as `data_dir`. Every surface that opens the stores (CLI commands, `admin health`, the MCP server, the REST API and the capture sweep) reads it from there first, then from `$TRELLIS_DATA_DIR`, then uses `data/` in the config dir. With `--force`, the `--data-dir` default above applies: `init` does not read the `config.yaml` it replaces.
 
-When `config.yaml` exists and `--force` is not given, `init` leaves the file alone. If the `stores/` directory in that data directory is missing, `init` recreates it and reports `"stores_created": true`. That is the fix for `Stores not initialized at PATH`.
+When `config.yaml` exists and `--force` is not given, `init` leaves the file alone. If the `stores/` directory in that data directory is missing, `init` recreates it and reports `"stores_created": true`. That is the fix when the stores were never created. The message names the `data_dir` key when that key supplied the path: if the stores were moved or restored, change `data_dir` to where they are now, because `init` without `--force` creates an empty `stores/` at the configured path and exits 0.
 
 `config.yaml` is read strictly. The top-level keys it accepts are `knowledge`, `operational`, `embeddings`, `retrieval`, `llm`, `classify`, `learning`, `data_dir`, `default_domain`, `default_agent` and `format`, plus any key starting with `x-`. An unknown key, a store name its plane does not have, a store placed under the other plane, or the removed flat `stores:` block raises `ConfigError` naming the file and each offending entry: the CLI exits 5 (`EXIT_STORE`), REST answers 409 `config_error` when it surfaces in a request, and the API refuses to start. Keys are echoed only when they are plain names. A plane DSN env var (`TRELLIS_KNOWLEDGE_PG_DSN` or `TRELLIS_OPERATIONAL_PG_DSN`) that no store of that plane reads logs a `registry_plane_dsn_unused` warning once per process.
 
@@ -68,6 +68,8 @@ trellis admin health [--format text|json]
 ```
 
 `backends` is always present and names the configured backend of each store health reports on: `document`, `graph`, `vector`, `event_log` and `trace`. The blob, outcome, parameter, tuner_state and api_key stores are not reported. Only a `sqlite` store gets a `.db` key, and `false` means its file does not exist. That file is the store's `db_path` when `config.yaml` sets one, otherwise the key's name under the stores directory. `trellis admin init` creates no store files: each is created the first time its store is used, so `false` is normal on a fresh install. A store on any other backend has no `.db` key, and text output lists it as, for example, `postgres (not checked)`. A value that names no registered backend (a typo, `null`, or a DSN written where a name belongs) is `null` in `backends` and `unknown backend (not checked)` in text output; health never prints the value. Health opens no connection, so it cannot tell you whether that store is reachable.
+
+When `TRELLIS_DATA_DIR` is set and names a different directory from the `data_dir` in `config.yaml`, the key wins and health says so: JSON output gains a `data_dir_disagreement` object (`in_use`, `in_use_from`, `ignored`, `ignored_from`) and text output prints the same two paths under the table. The field is absent when the variable is unset or names the same directory, however it is spelled (trailing slash, symlink, `..`). The same disagreement logs a `registry_data_dir_env_ignored` warning on stderr once per process, naming the `data_dir` key and both paths; it never changes an exit code or a command's stdout. The comparison does not expand `~`, because nothing that opens the stores does.
 
 ### `trellis admin stats`
 
@@ -3882,6 +3884,16 @@ again only when its file changes, so an old join would otherwise read as `unknow
 to the pack holdout's pre-treatment exclusion for good. A watermark reset is not the
 remedy: it re-runs distillation through the judge and can write near-duplicate
 memories.
+
+A count added inside `outcome` is such a key too. `outcome.memory_tool_calls` is how
+many of the session's `tool_calls` were to a Trellis MCP tool (any server whose name
+holds `trellis`; a `Bash` call to the `trellis` CLI is not one). A join written before
+it lacks the key, and a rejoin writes that join again with the count, read from the
+unchanged transcript. A missing key means unknown, not `0`: a session that made no
+Trellis call reads `0`. No report or analysis reads the count. A whole-history rejoin
+adds one event per session, and those count against the holdout's scan limit, so compare
+the `--dry-run` count with the limit first, and pass `--limit` if the sum exceeds it:
+the report states the truncation, and its figures move.
 
 ```bash
 trellis-session-capture --rejoin-since 2026-10-01T00:00:00Z [--dry-run]

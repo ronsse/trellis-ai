@@ -1829,6 +1829,29 @@ class TestSessionOutcomeJoin:
             "commits": 2,
         }
 
+    def test_the_join_counts_the_sessions_calls_to_trellis_tools(
+        self, tmp_path: Path
+    ) -> None:
+        """``memory_tool_calls`` rides the outcome block beside
+        ``tool_calls``, and is the calls to Trellis tools among them."""
+        registry = _registry(tmp_path)
+        root = tmp_path / "projects"
+        _pack_session(
+            root / "proj" / "sess-memory-0001.jsonl",
+            "sess-memory-0001",
+            ("get_context", PACK_IDS[0]),
+            ("get_items", PACK_IDS[1]),
+            error=True,
+        )
+
+        _sweep(registry, root, tmp_path / "wm.json")
+
+        (payload,) = _joins(registry, outcome=True)["sess-memory-0001"]
+        assert (
+            payload["outcome"]["tool_calls"],
+            payload["outcome"]["memory_tool_calls"],
+        ) == (3, 2)
+
     def test_a_join_from_before_the_outcome_is_rewritten_with_it(
         self, tmp_path: Path
     ) -> None:

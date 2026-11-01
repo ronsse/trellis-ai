@@ -103,6 +103,24 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **The capture join's `outcome` counts a session's calls to Trellis's own tools.**
+  `outcome.memory_tool_calls` is the number of `tool_use` blocks, among
+  `tool_calls`, whose MCP server name holds `trellis` (`mcp__trellis__*`, a
+  connector or plugin carrying it in a longer name), so a tool added later is
+  counted without a list to edit. A record written into the file again counts
+  once, as `tool_calls` does; a `Bash` call to the `trellis` CLI and a tool on a
+  server without the word in its name are not counted. A session that made no Trellis call
+  reads `0`; a join written before this key lacks it, which reads as unknown.
+  `trellis-session-capture --rejoin-since` fills it on joins already written,
+  from unchanged transcripts, with no change to what it selects: the join
+  differs from a new parse by the key, so it is written again. A sweep that
+  parses a changed transcript does the same. The rule is a substring of the
+  server part, so a third-party server carrying the word is counted too. Only
+  captured: no report or analysis reads the count, and a join carrying the key
+  reads the same as one without it. The rejoin itself stamps each join anew, so
+  its sessions read as unfinished in the holdout report until a later sweep
+  settles them, as with any rejoin. Nothing about packs or serving changes.
+
 - **`trellis admin backup --output DIR` copies the SQLite stores while they are in use.** A plain copy of a store's `.db` file loses the writes still in its write-ahead log and passes `integrity_check` anyway; this command copies each store with SQLite's online backup API instead. The set of stores comes from the registry's config resolution, not a filename glob, and the policy file and the feedback audit log are copied too. `manifest.json` records per store the file, size, row count per table, the `integrity_check` of the copy and the Trellis version. A store on another backend is reported `skipped` with a pointer to its own dump tool, other files under the stores directory are listed in `not_copied`, and any skipped or failed store exits `5` in both `--format` arms. A non-empty `--output` is refused (exit `2`). There is no restore command: the procedure, including the rule that a `data_dir` in `config.yaml` beats `TRELLIS_DATA_DIR`, and a restore drill are in `docs/agent-guide/operations.md`.
 
 ### Changed
@@ -146,6 +164,66 @@ All notable changes to Trellis will be documented in this file.
   valid trace:".
 
 ### Fixed
+
+- **SQLite trace queries compare `created_at` by instant, not as text.** The
+  column holds the writer's `isoformat()` string, so a trace stamped with a
+  non-UTC offset sorted and filtered by its digits: `query(since=...)` dropped
+  a `-11:00` trace that was newer than the bound and `ORDER BY` put zones out of
+  order. `TraceStore.query` now documents by-instant, inclusive bounds with a
+  naive stamp read as UTC, and `SQLiteTraceStore` filters and orders on a
+  generated `created_at_utc` column plus index, added to existing files on open
+  without rewriting any stored row. The key applies any offset Python can write
+  to the column text (sign, hours, minutes, seconds); an offset with its own
+  fraction moves it by under a second. Text Python cannot write is keyed
+  deterministically, by its raw digits for `2026-03-04T05:06:07.123+00:00` (so
+  it stays in a bounded query rather than disappearing) but not always:
+  `2026-03-04T05:06:00.5+5:0` becomes `2026-03-04T05:06:00.5+5:00`. A literal
+  `now` in an old row is kept away from `strftime`, which would otherwise refuse
+  to evaluate the column and fail every open. New rows are written as UTC text,
+  and a stamp `datetime` cannot name in UTC is clamped to its edge in the
+  column; `trace_json` keeps the original. The migration is best effort: a
+  read-only file, or one another connection holds the write lock on (including
+  an exclusive lock that also refuses the follow-up re-read of the columns),
+  still opens and `query` evaluates the same expression inline, unindexed, until
+  a later open succeeds (the attempt waits 250 ms, not the connection's ten
+  seconds). Known limits: an old row past what `datetime` can name in UTC
+  (`0001-01-01T00:00+05:30`, `9999-12-31T23:00-05:00`) can be missed by
+  `query(since=<its own stamp>)`, and rows this build appends are unaffected
+  because their stamp is clamped first. `trace_json` keeps an offset only to the
+  minute, as it always has, while the key keeps the second, so an offset with
+  seconds can make the embed walk skip a row within a minute of it; whole-minute
+  offsets are unaffected. The trace schema rejects such a string, and only an
+  in-process `datetime` with a sub-minute `tzinfo` writes one.
+  `idx_traces_created` stays, because an older build expects it, and
+  `SCHEMA_VERSION` is not bumped, matching the graph store. The trace-embed
+  worker and its cursor order and bound by instant too, so one naive trace among
+  aware ones no longer raises `TypeError` out of the pass on any backend;
+  `as_utc` clamps a stamp `datetime` cannot name in UTC (`datetime.min` at
+  `+05:30`) to the edge instead of raising `OverflowError`. The Postgres trace
+  store now binds `as_utc(...)` on `append` and `query`, so a naive stamp is
+  stored as UTC whatever the session time zone (no change under a UTC session;
+  stored rows are not rewritten). A cursor file written by this build holds an
+  aware stamp, so an older build reading it against a store whose traces are all
+  naive raises `TypeError`; that matters only where an older checkout shares the
+  cursor file. The event log has the same text comparison on `occurred_at`
+  (`stores/sqlite/event_log.py`); it is not changed here.
+
+- **A `data_dir` in `config.yaml` quietly beat `TRELLIS_DATA_DIR`, so a restored
+  store or a cloned config could write into the original while the copy looked
+  untouched.** The precedence is unchanged and intended: an absolute `data_dir`
+  in `config.yaml` wins over the variable. What was missing was any sign of it.
+  When the variable is set and names a different directory, building the store
+  registry now logs a `registry_data_dir_env_ignored` warning to stderr, once per
+  process, naming the `data_dir` key and both paths. `admin health` shows the
+  same two paths in a `data_dir_disagreement` field (JSON) or two lines under the
+  table (text). The same directory spelled another way (trailing slash, symlink,
+  `..`) does not warn, and neither stdout nor an exit code changes. "Stores not
+  initialized at PATH" now names the `data_dir` key when that key supplied the
+  path, and no longer offers `admin init` as the only remedy: for a moved or
+  restored store, change `data_dir`, since `init` creates an empty `stores/`
+  at the configured path. The docs that implied the variable selects the data
+  directory (`mcp-claude-code.md`, `scheduled-curation.md`, `running-trellis.md`)
+  are corrected.
 
 - **The session-capture sweep keeps its progress as it goes.** `run_capture`
   held every record until the end of the run and saved the watermark last, so a
