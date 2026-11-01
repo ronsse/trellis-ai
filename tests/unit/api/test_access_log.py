@@ -30,6 +30,8 @@ from trellis.stores.registry import StoreRegistry
 from trellis_api.access_log import ITEM_ROUTES, items_from_body
 from trellis_api.app import create_app
 
+_NOW = datetime.now(UTC)
+
 
 def _settled(value: Any) -> Any:
     """``value`` with floats rounded: scores jitter below the fourth decimal."""
@@ -346,6 +348,22 @@ class TestAdvisory:
 
 
 class TestUnchangedByTheLog:
+    @pytest.fixture(autouse=True)
+    def _one_clock(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Every recency read sees one instant.
+
+        Rows that tie on every axis are ranked by the age each gets from its
+        own clock reading in ``_apply_recency_decay``, so a stall between two
+        rows reorders them with no log involved.
+        """
+
+        class _Frozen(datetime):
+            @classmethod
+            def now(cls, tz: Any = None) -> datetime:  # noqa: ARG003
+                return _NOW
+
+        monkeypatch.setattr("trellis.retrieve.strategies.datetime", _Frozen)
+
     def test_a_pack_is_the_same_on_or_off(self, world: World, monkeypatch) -> None:
         on = world.pack()
         monkeypatch.setenv("TRELLIS_ACCESS_LOG", "0")
