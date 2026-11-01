@@ -13,7 +13,7 @@
 - [`../../src/trellis/stores/registry.py`](../../src/trellis/stores/registry.py) — `StoreRegistry`, plane-keyed backend table
 - [`../../src/trellis/stores/base/`](../../src/trellis/stores/base/) — Store ABCs
 - [`../../src/trellis/mutate/`](../../src/trellis/mutate/) — Governed mutation pipeline (the sanctioned bridge)
-- [`../../TODO.md`](../../TODO.md) — Graphiti comparison section citing Kuzu as a missing backend
+- [`../../TODO.md`](../archive/TODO.md) — Graphiti comparison section citing Kuzu as a missing backend
 
 ---
 
@@ -59,7 +59,7 @@ Several in-flight decisions hinge on boundaries that don't have names yet:
 | Unified graph + vector backend (Kuzu, ArangoDB, Neo4j with native vector index) | `GraphStore` and `VectorStore` are peers in `_BUILTIN_BACKENDS`; no mechanism for a single backend to satisfy both with a shared instance |
 | Deployment topologies where the knowledge layer and operational layer live on different databases, networks, or retention policies | `StoreRegistry` has one DSN envelope; `TRELLIS_PG_DSN` is shared across Trace/Document/Graph/EventLog |
 | Graph entities referencing their source documents | Graph and Document stores have independent identity systems; no `document_ids` property on entity nodes |
-| Open-source, local-first graph+vector substrate | No Kuzu backend exists today (grep confirms only documentation mentions in [TODO.md](../../TODO.md) and `docs/research/memory-systems-landscape.md`). SQLite's `VectorStore` is a separate table with no transactional coupling to `GraphStore` |
+| Open-source, local-first graph+vector substrate | No Kuzu backend exists today (grep confirms only documentation mentions in [TODO.md](../archive/TODO.md) and `docs/research/memory-systems-landscape.md`). SQLite's `VectorStore` is a separate table with no transactional coupling to `GraphStore` |
 
 ### The decision to make
 
@@ -237,7 +237,7 @@ Registry shares instances when a single backend satisfies multiple ABCs: if both
 - Locks Trellis to graph databases only. Loses Postgres-only deployments, SQLite-local dev, LanceDB analytical workloads.
 - Throws away the plane distinction entirely — Operational audit data is architecturally fused with Knowledge.
 - Large breaking change across every store consumer. Disproportionate to the problem being solved.
-- Conflicts with the existing design point ([TODO.md §Graphiti comparison](../../TODO.md)) that Trellis is deliberately multi-store with local-first SQLite support. The ADR would be reversing a load-bearing decision, not refining it.
+- Conflicts with the existing design point ([TODO.md §Graphiti comparison](../archive/TODO.md)) that Trellis is deliberately multi-store with local-first SQLite support. The ADR would be reversing a load-bearing decision, not refining it.
 
 **Verdict:** Wrong direction for this project. Graphiti made this call; we made the other one on purpose.
 

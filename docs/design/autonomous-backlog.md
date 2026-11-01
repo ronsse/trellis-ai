@@ -13,8 +13,8 @@
 > requirements and status) → [`implementation-roadmap.md`](./implementation-roadmap.md)
 > (where it governs a program item) → this file (scheduling derived from the first two).
 > The corpus is adversarial review evidence and optional implementation aids only — not
-> requirements authority, and **not every open issue appears in roadmap §3.H.** **Read
-> [Current queue](#current-queue--2026-09-04) first** — the Wave sections below are the
+> requirements authority, and **not every open issue appears in roadmap §3.H.** **This
+> file keeps no queue** (see [Current queue](#current-queue)) — the Wave sections below are the
 > accumulated record, not the schedule.
 
 ## How an agent runs an item
@@ -65,39 +65,23 @@ Every item is tagged with who decides when a fork appears mid-item.
 
 ---
 
-## Current queue — 2026-09-04
+## Current queue
 
-> **Derived scheduling view** — read each item's **GitHub issue body/comments** for live
-> requirements and status; consult [`implementation-roadmap.md`](./implementation-roadmap.md)
-> only where it governs that program item (not all open issues are in §3.H).
-> **Evidence and aids** (not authority):
-> [`docs/issues/reviews/2026-09-04/README.md`](../issues/reviews/2026-09-04/README.md),
-> [`manifest.json`](../issues/reviews/2026-09-04/manifest.json), per-issue `#NNN.md`
-> briefs, and optional [`plans/`](../issues/reviews/2026-09-04/plans/) for seven issues
-> (#256, #264, #342, #360, #369, #439, #514 — of which **#342, #369 and #439 are now
-> closed**, 2026-09-20). **Do not copy the 40 briefs here;** read
-> the corpus for measured evidence and close criteria, then confirm status on GitHub and
-> the roadmap before dispatching.
->
-> Reviewed against `main` at `e4e7604` before this doc commit. **Determine live `main` via
-> `git rev-parse origin/main`** — do not treat a SHA embedded here as current.
->
-> Waves 0–5 below are the *historical record* of what each item decided, measured, or
-> refuted. For live state and requirements, **the GitHub issue wins**; the corpus supplies
-> measured evidence only.
+There is no queue in this file. Every issue the queue once listed (the first executable batches, the owner
+prerequisites and the persistent blockers) is closed in the tracker as of 2026-11-01, and what is open now is a
+different set. Ask the tracker, which is authoritative and costs one call:
 
-**Snapshot:** **44 open** on `1ef5c9c`, **2026-09-20**
-(`gh issue list --repo ronsse/trellis-ai --state open --limit 400 --json number | jq length`).
-Re-derive it rather than reading this line; a count with no command behind it is how §5 of
-the PRD went stale for two months.
+```bash
+gh issue list --state open --limit 100 --json number,title,labels
+```
 
-> The 2026-09-04 snapshot read **40 open** and predicted "the count stays 40 until
-> close/duplicate mutations actually land", blaming an automation token without GitHub
-> **Issues write**. **That prediction was falsified in both directions.** The closures it
-> said could not happen did happen — [#525](https://github.com/ronsse/trellis-ai/issues/525) and [#364](https://github.com/ronsse/trellis-ai/issues/364) are both closed —
-> and the count still rose, to 44, because new issues were filed faster than old ones were
-> closed. A backlog total is a *net* of two flows; predicting it from one of them is a
-> category error, and the prediction is not repeated here.
+What an issue may be dispatched under is on the issue (its labels and its latest owner comment) and in
+[`swarm-handoff.md`](./swarm-handoff.md) §6. The blockers the old table carried that were decisions, not work, are in
+[`decision-ledger.md`](./decision-ledger.md): the graph-axis seeding refutation, the chunk source clock (T-6) and the
+advisory-ranking deferral. Evidence and aids (not authority):
+[`docs/issues/reviews/2026-09-04/README.md`](../issues/reviews/2026-09-04/README.md).
+
+Two records from the old queue are kept because each is still the only place it is written down.
 
 PR [#527](https://github.com/ronsse/trellis-ai/pull/527) **selectively transcribed** the
 seven implementation plans and unique review evidence into `docs/issues/reviews/2026-09-04/`.
@@ -105,15 +89,6 @@ The orchestration briefs and reports on remote branch `handoff/issue-sweep-2026-
 **intentionally superseded** and were **not** merged as an ancestral commit — do not retain
 their 37-open count or unsafe closure recommendations. That branch is **eligible for
 owner-approved deletion** after confirming no archival retention is desired.
-
-### First executable batches *(not exhaustive)*
-
-**Batch 1 — early parallel** (disjoint territories; recheck before dispatch):
-
-**Wave D (program plan order): [#360](https://github.com/ronsse/trellis-ai/issues/360) PR1 →
-[#256](https://github.com/ronsse/trellis-ai/issues/256) staged seam.** *(#256 staged seam: **shipped as [#537](https://github.com/ronsse/trellis-ai/pull/537), 2026-09-04** — not open work; see the note below.)* Also parallel when
-disjoint: **#514**. (**#369**, **#439** and **#342** were listed here and are now closed —
-verified 2026-09-20; #369's work merged as `1ef5c9c`.)
 
 **#256 dispatch — operator override (2026-09-04, this program only):** live `keystone`
 label normally means **human authorship only**. Operator instruction on 2026-09-04
@@ -123,59 +98,6 @@ explicitly authorized **this plan's Wave D #256 staged seam** for swarm executio
 Owner review and the adversarial merge gate ([swarm-handoff §4.1](./swarm-handoff.md#41-the-review-gate--every-pr-before-merge)) still apply.
 
 **Status (2026-09-24): the override above is spent.** It authorized one PR and #537 was that PR (`RegistryContext` + `prepare_registry_params`, Bolt setup moved onto the store classes, a synthetic entry-point plugin test, and `tests/unit/test_registry_plugin_boundary_rule.py`); the contract is now in [`adr-plugin-contract.md` § Registry preparation hook](./adr-plugin-contract.md#registry-preparation-hook-store-plugins). The paragraph stays as the authorization record. What remains of #256 — extracting a separate distribution and publishing it — is **owner-only** per the owner's 2026-09-09 comment on the issue (publishing is never an agent's call — [swarm-handoff §2](./swarm-handoff.md#2-the-autonomy-contract)), so do not dispatch it.
-
-- **#264 PR-A** after or parallel with Batch 1 if no file collision; **#264 PR-B**
-  (derived roster) **after #514** when `generate_call_sites` exists (implementation
-  adjacency, not a manifest dependency).
-- **Serialize #360 PR2 with #264 PR-A** — extraction/MCP overlap on `save_memory`.
-
-**Batch 2 — CI / stores.** Three of its four items are closed as of **2026-09-20**, and the
-batch's one hard dependency has therefore been discharged: **#356 is unblocked.**
-
-| Issue | State 2026-09-20 | Note |
-|---|---|---|
-| [#356](https://github.com/ronsse/trellis-ai/issues/356) | **open** | The whole live remainder of this batch. Its blocker #351 is closed, so the manifest's `#351 → #356` dependency no longer gates it |
-| [#526](https://github.com/ronsse/trellis-ai/issues/526) | closed | — |
-| [#351](https://github.com/ronsse/trellis-ai/issues/351) | closed | ArcadeDB graph contract got a service container in #543 |
-| [#350](https://github.com/ronsse/trellis-ai/issues/350) | closed | — |
-
-The workflow-collision note that stood here (#526/#351/#356 sharing CI territory) is moot
-with two of the three closed; #356 now has that territory to itself.
-
-**Other valid-now / valid-slice items** (dispatch when Batch 1–2 are full or territories
-allow; full roster in manifest + roadmap):
-
-| Issue | Verdict | Note |
-|---|---|---|
-| [#494](https://github.com/ronsse/trellis-ai/issues/494) | `valid-now` | Document `retrieve pack --quiet` id population |
-| [#515](https://github.com/ronsse/trellis-ai/issues/515) | `valid-slice` | **Measurement slice only** — map Anthropic cache token fields into `TokenUsage`; defer `cache_control` until benefit measured |
-
-*#522 and #523 stood in this table and are closed as of 2026-09-20.*
-
-All other open items: verdict and wave in
-[`manifest.json`](../issues/reviews/2026-09-04/manifest.json); live requirements and
-status on each **GitHub issue**; roadmap sections only where they govern that item.
-
-### Owner prerequisites *(not dispatchable)*
-
-| Issue | Gate | Note |
-|---|---|---|
-| [#257](https://github.com/ronsse/trellis-ai/issues/257) | `owner-only` | Ingest-normalization ADR — roadmap and issue label; not swarm-eligible regardless of corpus `valid-now` evidence |
-| [#475](https://github.com/ronsse/trellis-ai/issues/475) | `blocked:owner-decision` | Assumptions header — assumptions line set **not agreed**; live issue blocks dispatch |
-
-### Persistent blockers (do not misread)
-
-| Issue | Status |
-|---|---|
-| [#371](https://github.com/ronsse/trellis-ai/issues/371) | **Behaviorally open, blocked-signal** — graph axis is a recency feed until a real seeding path exists; do not dispatch alone |
-| [#375](https://github.com/ronsse/trellis-ai/issues/375) | **Mechanisms refuted** — `SemanticSeedExtractor` changed 0/37 production packs; premise remains but proposed fixes are dead |
-| [#463](https://github.com/ronsse/trellis-ai/issues/463) | **blocked-signal** — panels agreed on no behavior change now but split on clock semantics; parent inheritance requires both evidence and an explicit owner clock definition |
-| [#502](https://github.com/ronsse/trellis-ai/issues/502) | **blocked-signal** — owner chose defer after a panel split; keep five ranked advisories until the ledger F-5 trigger fires |
-| [#503](https://github.com/ronsse/trellis-ai/issues/503) | **blocked-signal** — wait for the first item-scoped advisory to reach a pack |
-| [#208](https://github.com/ronsse/trellis-ai/issues/208) | **external** — re-home to consumer-kg or close (`human`) |
-| [#250](https://github.com/ronsse/trellis-ai/issues/250) | **blocked-operator** — Aura console credential purge |
-| [#201](https://github.com/ronsse/trellis-ai/issues/201), [#261](https://github.com/ronsse/trellis-ai/issues/261), [#306](https://github.com/ronsse/trellis-ai/issues/306) | **blocked-signal** — pilot/loop throughput not yet present |
-| [#194](https://github.com/ronsse/trellis-ai/issues/194) | **blocked-decision** — depends practically on **#360** and owner semantics, **not** on #256 (backend extraction is not on the enforcement critical path) |
 
 ---
 

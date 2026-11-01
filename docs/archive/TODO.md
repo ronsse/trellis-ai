@@ -1,0 +1,2603 @@
+# TODO — Growth & Adoption
+
+> **Archived 2026-11-01.** This file is kept for history and is no longer maintained; it reads as of its last
+> edit, not as of today. The live queue is the issue tracker and the open pull requests (`gh issue list --state open`,
+> `gh pr list --state open`); [`docs/ROADMAP.md`](../ROADMAP.md) says which planning document is authoritative for
+> what. Relative links below were rewritten to resolve from `docs/archive/`.
+
+> ⚠️ **What this file is, and what it is not.** It is an **append-mostly historical log** of
+> per-item detail: what was proposed, by whom, and what was found while doing it. It is
+> **not a live work queue and its checkboxes are not a status signal.** As of 2026-08-31 it
+> carries ~280 unchecked boxes, nothing newer than ~2026-08-19, and no mention of any issue
+> in the #37x–#44x range — so an unchecked box here means "nobody has come back to tick it",
+> never "this is open". Several unchecked items below are in fact **done**, and at least one
+> was **measured and refused**.
+>
+> **For what is actually open, read these instead — in this order:**
+> [`docs/design/implementation-roadmap.md`](../design/implementation-roadmap.md) (state of
+> every phase) → [`docs/design/swarm-handoff.md`](../design/swarm-handoff.md) §6 (the
+> dependency-ordered queue) → [`docs/design/autonomous-backlog.md`](../design/autonomous-backlog.md)
+> (full specs) → [`docs/design/decision-ledger.md`](../design/decision-ledger.md)
+> (decisions taken and pending). **Verify any item here against the code before acting on
+> it.** Only the items explicitly annotated with a 2026-08-31 date below have been re-checked.
+>
+> **Active hand-off:** [`docs/design/implementation-roadmap.md`](../design/implementation-roadmap.md) is the single-page authoritative roadmap with the state of every open phase, recommended execution order, and live-test credentials. Read that first; this file is the per-item granular log.
+>
+> **Active program (2026-05-11; Cohort 1 landed 2026-05-13):** [`docs/design/plan-self-improvement-program.md`](../design/plan-self-improvement-program.md) — closes the loop on empirical observations, provenance, schema evolution, dogfooding, and a coding-agent self-improvement loop. Seven feature items + two cleanup tracks, swarm-decomposable. POC directive: no silent fallbacks; loud-on-misuse. **Status:** All seven feature items (Cohort 1) + C2 silent-fallback cleanup + C1 dead-code removal landed. C1 wrapped 2026-05-15 via a 4-unit swarm + bundled rollup PR (sub-item statuses in the C1 entry below). Cohort 2 of Item 7 (sandboxed Claude Code spawn) deferred to next cycle pending operator review of generated proposals + ADR amendment authorizing autonomous spawn. Section below.
+
+## claude-mem comparison audit — steal-list (2026-08-19)
+
+Source: comparison audit of [thedotmack/claude-mem](https://github.com/thedotmack/claude-mem) v13.15.2 (~66K stars) vs this repo. Full report artifact: <https://claude.ai/code/artifact/23266520-2d32-4893-b405-ff805a73f72e>; conclusions saved in Trellis (entity `01M0C01PG9A9V4F85H2SSHJD5A`, evidence doc `01M0C01MZJE3FHH53X8X9G9P6D`). Headline findings: claude-mem's memory quality is unmeasured (~2,574 tests, all plumbing; "~10x token savings" is two prose constants) — its felt performance is capture density + injection ergonomics, which are exactly Trellis's dogfood deficits. Both systems independently evolved the same three failure classes (filters hiding stored memory ≡ #282; silent capture outages ≡ #297; feedback that never joins ≡ pre-#287). Items ordered by leverage:
+
+- [x] **Progressive-disclosure retrieval: index-mode packs + fetch layer + graph doc-pointers** ([#305](https://github.com/ronsse/trellis-ai/issues/305)) — **LANDED** 2026-08-22 via [#319](https://github.com/ronsse/trellis-ai/pull/319). Three small pieces close the loop claude-mem's 3-layer workflow (`search` index → `timeline` → `get_observations([ids])`) proves out, and Trellis's version traverses the *graph* instead of a chronological timeline:
+  1. **Index mode on `get_context`/`search`** — one line per item (`item_id`, type, title, estimated read cost), no excerpt bodies; composes with the existing two-stage token budgets rather than replacing them (`PackBuilder` already computes per-item token estimates). `pack_id` + stable `item_id`s mean feedback attribution works unchanged on fetched items.
+  2. **Batch fetch-by-id MCP tool** (`get_documents([ids])` or `get_items`) — no such tool exists among the current 14; a known doc id cannot be cheaply pulled over MCP today. Route through PackBuilder-adjacent formatting, token-budgeted, and record served ids so fetches stay attributable.
+  3. **Render `document_ids` in `get_graph` output** — nodes carry doc-link provenance in storage (`save_knowledge` pointer-not-prose; #301 stamps mints with `document_ids=[source_doc]`), but `format_subgraph_as_markdown` (`src/trellis/retrieve/formatters.py`) never surfaces them, so an agent can't follow entity → evidence today. One formatter change makes `get_graph` the traversal layer between index and fetch.
+- [x] **Close the LLM→deterministic ladder for tagging** ([#321](https://github.com/ronsse/trellis-ai/issues/321)) — **BOTH PHASES LANDED** 2026-08-22. The north-star loop — LLM bootstraps, deterministic inherits, LLM switches off for what was learned — did not exist for the tagging layer, and neither did its input: measured 2026-08-22, **all 968 classified prod docs were `classified_mode: "ingestion"`; zero LLM classifications had ever been persisted**. **Phase 1** = shadow-mode tagging ([`classify/shadow.py`](../../src/trellis/classify/shadow.py), `trellis classify shadow` / `shadow-report`): LLM verdicts persisted to `metadata["content_tags_shadow"]`, provably never served — enforced twice, structurally (tag filters address `$.content_tags.<facet>`) and at the serving boundary ([`retrieve/servable.py`](../../src/trellis/retrieve/servable.py), which the acceptance test caught was needed: `PackItem.metadata` splats store metadata wholesale, so the key *did* leak into assembled packs before the strip). Records are a new `ShadowTags`, not a `ContentTags` — **verified** that `ContentTags.content_type`'s closed `Literal` rejects 9 of the 10 `DEFAULT_CLASSIFICATIONS` values, so the enrichment path would raise rather than refine; that disagreement is the measurement, so it is stored verbatim and counted by `shadow-report`. Emits `MEMORY_OP_JUDGED` (new `JudgedOpType.CLASSIFICATION`) as [#264](https://github.com/ronsse/trellis-ai/issues/264)'s classify-layer instance — digest + verdict label only; the open-vocabulary `domain` tags stay off the event and on the document. **Phase 2** = the promotion analyzer ([`learning/tag_evolution.py`](../../src/trellis/learning/tag_evolution.py), `trellis classify tag-candidates`) modelled on [`schema_evolution.py`](../../src/trellis/learning/schema_evolution.py) and sharing its four constraints, with the cooldown rule extracted to a shared [`learning/cooldown.py`](../../src/trellis/learning/cooldown.py) so the two cannot drift. Gated on support **and lift over the tag's base rate** — precision alone is satisfiable by a constant (in a corpus dominated by one tag, every keyword predicts it perfectly), which is the measurement-wired-to-a-constant shape this repo keeps finding. `domain` stays **surface-only**: `apply_promotion` / `revoke_promotion` are pure inverse transforms over the `classify.domain_keywords` map a human pastes into `config.yaml`, never auto-applied, because `domain` is the one facet that hard-excludes and a wrong keyword *hides* content (the #282 failure). Ranking-only facets are surfaced but not auto-promoted — for a boring reason rather than a principled one: no config write target exists for them (`FACETS_WITH_WRITE_TARGET`). **Known gap, deliberately out of scope:** promotion is measured on *agreement with the LLM, not retrieval outcome* — this is a distillation step with a human gate, not a closed learning loop. Closing it needs the pack-feedback join ([`learning/pack_observations.py`](../../src/trellis/learning/pack_observations.py)), which is thin today (13 packs served, 8 graded). Every surfaced candidate's `notes` say so rather than letting a reviewer infer otherwise.
+
+- [ ] **Observer-agent capture via local model** ([#306](https://github.com/ronsse/trellis-ai/issues/306)). claude-mem's core pattern: a locked-down secondary LLM session compresses every tool use into a typed observation, automatically. Trellis fit: PostToolUse-granularity capture with hermes3:8b as observer (free, private — `DETERMINISTIC > LOCAL > FRONTIER`), drafts routed through the governed pipeline + memory-path draft policy. Extends the #255 session auto-capture keystone from session-level to tool-level density; their tier routing (read-only tool batches → cheapest model) carries over.
+- [x] **Read-time file context injection** ([#307](https://github.com/ronsse/trellis-ai/issues/307)) — **LANDED** 2026-08-22 via [#318](https://github.com/ronsse/trellis-ai/pull/318). Their best injection placement: PreToolUse hook on `Read` serves prior observations about the file being opened, staleness-gated (skip if file mtime ≥ newest memory). Trellis can do it graph-anchored — entities/evidence linked to the file path via doc-links — instead of their exact-string JSON path match. Verify async-hook output actually reaches the model pre-tool (their own implementation may be a no-op; audit weakness #10).
+- [x] **Deterministic evidence override in extraction** ([#308](https://github.com/ronsse/trellis-ai/issues/308)) — **LANDED** 2026-08-22 via [#316](https://github.com/ronsse/trellis-ai/pull/316). Never accept verifiable fields (files touched, commands run) from the LLM when they're parseable from tool inputs — claude-mem parses `files_modified` from Edit/Write/patch payloads and discards the model's claim entirely. Same philosophy as the #299–#301 claim floor ("extraction attests mention"), applied one level deeper; belongs in the trace-extraction path.
+- [x] **Capture-health surfacing inside served packs** ([#309](https://github.com/ronsse/trellis-ai/issues/309)) — **LANDED** 2026-08-22 via [#315](https://github.com/ronsse/trellis-ai/pull/315). Their observer-health ledger prepends a loud outage warning to *every* injected context after 3 consecutive capture failures (built after a 17-hour silent outage). Trellis half-has this: #297 emits `WRITE_REJECTED` telemetry + `trellis analyze health`; the missing step is surfacing "capture has been failing since X" in pack output so the operator sees it without running the analyzer.
+- [x] **Elision markers on truncation** ([#310](https://github.com/ronsse/trellis-ai/issues/310)) — **LANDED** 2026-08-22 via [#317](https://github.com/ronsse/trellis-ai/pull/317). Oversize payloads cut head-60%/tail-30% with an explicit `<elided chars=… reason="oversize">` marker so the model knows what it can't see. Cheap adoption in trace ingest and `truncate_excerpt` (which ellipsis-marks but doesn't say how much was dropped).
+- [x] **Skip-discipline extraction prompts** ([#311](https://github.com/ronsse/trellis-ai/issues/311)) — **LANDED** 2026-08-22 via [#313](https://github.com/ronsse/trellis-ai/pull/313). Field-tested language for #298's same-day-stub noise: explicit skip criteria (clean installs, bare listings, repeats, empty status checks) + "if skipping, return an empty response only — never explain the skip in prose" + "non-XML text is discarded".
+- [x] **Retention urgency (anti-lesson)** ([#312](https://github.com/ronsse/trellis-ai/issues/312)) — **ANALYSIS landed** 2026-08-22 via [#314](https://github.com/ronsse/trellis-ai/pull/314) (the ADR — 340 lines of docs, no code); the *disposition* it teed up was decided 2026-08-25 (**Option A**, see [adr-retention-prune.md](../design/adr-retention-prune.md) §6) and phase one is implemented. Marking the ADR as closing the chip is what made the owner gate invisible for three days — #312 was closed COMPLETED while the ADR still read "pending owner review". claude-mem has *no* retention story — unbounded observation/vector growth, an unused `relevance_count`, dead schema migrated on every install. Supports closing the open `retention.prune` handler-or-retire chip before dogfood scale makes it hurt.
+
+## Corpus ingestion & memory-system capture (2026-07-11)
+
+The importers-into-Trellis line (ADR [`adr-corpus-ingestion.md`](../design/adr-corpus-ingestion.md), roadmap §G). Capture real usage into memory + meter what it costs. **Landed this session** (all on `main`, CI green, CLI-only — no container rebuild): `trellis ingest corpus` (§G.1, `bb5a882`), `trellis ingest conversations` capturing claude.ai exports (§G.2, `0a7e482`), `trellis analyze cost` overhead metering (`5ea7cd5`), and `--extract` entity mining double-gated with `TRELLIS_ENABLE_MEMORY_EXTRACTION` (§G.3, `7431488`). Host convenience wrapper `~/.local/bin/trellis-skynet` runs the CLI against the prod pgvector stores.
+
+### Open follow-ups (potential next items)
+
+**Operator / deployment gates (not code — needed to produce the real signal):**
+
+- [ ] **Dogfood capture.** Export claude.ai data (Settings → Privacy → Export data), drop the `.zip` in `~/.trellis/inbox/`, run `trellis-skynet ingest conversations <export> --dry-run` then for real. Judge retrieval quality via the Memory Explorer Packs view; watch `trellis-skynet analyze cost --days 30` climb. **This is the gating signal for every §G.4 follow-up below** — pick them by observed need, not upfront.
+- [ ] **Enable `--extract` on skynet.** Add an `llm:` block to `~/.trellis/config.yaml` (local Hermes via the OpenAI-compatible Ollama endpoint keeps it free) + set `TRELLIS_ENABLE_MEMORY_EXTRACTION=1` in the `trellis-skynet` wrapper. Only `embeddings:` (nomic-embed-text) is configured today, so `--extract` currently no-ops there. Then `trellis-skynet ingest conversations <export> --extract` mines people/accounts/preferences into the graph.
+  - ⚠️ **This box contradicts the "Prerequisites already tracked above" paragraph further down this same file** (in *Capture gaps*), which states that **both** halves are *"satisfied as of 2026-08-26"* — `~/.trellis/config.yaml` carries the `llm:` block (`provider: openai`, `model: hermes3:8b`, `base_url: http://localhost:11434/v1`). Both cannot be true. **Flagged, not resolved: this is operator-domain** — it depends on live host and container state, not on anything in the repo, and it is a *deployment* question rather than a code one. Two things worth knowing before deciding it: the `llm:` block and the env var are **separate** gates (`--extract` is double-gated), and they are set **per surface** — ledger **A-3** records that neither container sets `TRELLIS_ENABLE_MEMORY_EXTRACTION`, so the host wrapper and the containers can legitimately disagree and both readings above may be describing different surfaces. Resolve by measuring both (`trellis-skynet admin write-config --format json` and `GET /api/version`), not by picking one. *(contradiction noted 2026-08-31)*
+- [ ] **Nightly conversation re-sync (optional).** If dogfood proves valuable, add an export-refresh step to `stacks/trellis/curate-nightly.sh` (or a sibling) so new turns flow in without manual re-export. Depends on a stable export path — claude.ai export is manual/emailed, so this may stay a manual monthly `trellis-skynet ingest conversations` until an API-based capture exists.
+
+**§G.4 — code follow-ups (ADR §7 phase 3 only — phase 4 landed as roadmap §G.3, phase 5 struck by ADR §8; gated on the dogfood signal above):**
+
+- [ ] **Transcript / plaintext file handler.** `.txt` + simple speaker-labelled transcripts in the `ingest corpus` handler registry (ADR §2). Audio stays out of core — transcription (Whisper on-host) is an external pre-step whose output enters through this handler.
+- ~~**PDF handler behind an optional extra.** `ingest_corpus/handlers/pdf.py`, text-extraction only; scanned/image PDFs rejected with a clear error (ADR §7 phase 5).~~ — struck by ADR §8 ([#257](https://github.com/ronsse/trellis-ai/issues/257)): format conversion is the client's pre-step.
+- ⛔ **PackBuilder chunk rollup — REFUSED ON MEASUREMENT 2026-08-27, do not re-propose without new evidence.** ~~`PackBuilder` dedups by `item_id`, so two chunks of the same note/conversation can both enter a pack. Add a group-by-`parent_doc_id` rollup in the assembler (ADR §3 flags this as planned follow-up).~~ [#384](https://github.com/ronsse/trellis-ai/pull/384) (`d821094`) measured this and rejected the fix. The phenomenon is real (16 of 37 packs, 11.7% of injected tokens) but the extras are top-ranked not tail, chunk excerpts are not duplicate text, and `max_tokens` is a quota so the freed budget refills. What shipped is the **instrument** (`retrieve/concentration.py`), not a rollup. Reasoning + reopen condition: `CLAUDE.md` § "Repeat-source concentration". — [x] **The list-view half was a separate, live defect and is DONE:** the documents list view default-filters `chunk_index` rows ([#385](https://github.com/ronsse/trellis-ai/issues/385), `bf113be`), extended to the other whole-document surfaces by [#396](https://github.com/ronsse/trellis-ai/issues/396) (`0e5ed75`). *(verified 2026-08-31)*
+- [x] **Index the alias resolver before large-vault `--extract`. — DONE 2026-08-02, verified 2026-08-31.** ~~`memory_ingest_hook._graph_alias_resolver` (and the MCP `save_memory` twin) is an O(n) full-graph scan capped at 2000 nodes.~~ [#289](https://github.com/ronsse/trellis-ai/issues/289) (`a889c85`) landed the indexed lookup: both write paths share [`entity_resolution.build_name_alias_resolver`](../../src/trellis/extract/entity_resolution.py), which does one indexed `resolve_alias` row read first, falls back to the bounded scan only to bootstrap, and mints the unambiguous result back so the next lookup is indexed. **The residual is a *different* item, not this one** — past `DEFAULT_NAME_SCAN_LIMIT` the bootstrap scan sees only the newest window, so an older entity reports a clean "no match" and minting stops permanently. Tracked as [#369](https://github.com/ronsse/trellis-ai/issues/369) (open) and as B3′ in [`autonomous-backlog.md`](../design/autonomous-backlog.md). Do not re-open this box for #369.
+
+## Dogfood gap analysis — 2026-07-11
+
+> **Reconciled 2026-08-26.** Every box below was re-verified against `main` (`5f5a1d7`) and against live prod. Seven of the eight items had shipped without their box being ticked — the section had been reading as an open defect queue for six weeks while [`docs/design/implementation-roadmap.md`](../design/implementation-roadmap.md) §3.H.0 correctly recorded the same work as landed. The roadmap is authoritative; this file is the granular log. One item survives, rescoped: trace + observation embedding.
+
+First full analysis of the live skynet deployment, five days in (deployment audit + code sweep + live MCP probes). **Evidence trail lives in Trellis itself:** trace `01KX98NQH5WF96W6XGJCWXVKFW` (analysis steps + outcome), memory doc `01KX9BR2PR542KJQ7768D5B6B7` (embedded — semantically retrievable distillation), Observation `01KX9BV4FFH6CJ8B59PFMRZFVW` with `evidence_ref` to that doc, hanging off entity `trellis-ai` (`01KX9BR9KB5TJYD04JGB1AE12S`).
+
+**Observed state (prod Postgres, 2026-07-11):** 36 docs (~90% the Jul-6 seed day; Jul 9 had zero events) / 6 traces / 44 nodes / 187 events / 5 packs / 3 feedback events (all trace-level — pack-level `helpful_item_ids` attribution never used once) / **0 advisories / 0 lessons**. The nightly `worker curate` cron fires reliably and reports all-zeros every run — the loop machinery works but is **input-starved**, and three read-path defects make the recommended usage pattern fail. Context-overhead cost is a non-issue ($0.04/30d).
+
+### Retrieval defects (verified live over MCP)
+
+- [x] **`get_context` `domain=` hard-excludes every doc lacking a `domain` metadata key.** — **LANDED** 2026-07-14 via [#254](https://github.com/ronsse/trellis-ai/issues/254); the filter now default-passes a missing key (`PackBuilder._apply_domain_scope`), and [#329](https://github.com/ronsse/trellis-ai/pull/329) / [#331](https://github.com/ronsse/trellis-ai/pull/331) later fixed the *list*-valued facet branch on Postgres, which had the same hard-exclusion shape one layer down. Original report: [severity: H] The scalar domain filter compiles to hard equality ([`sqlite/document.py:205-209`](../../src/trellis/stores/sqlite/document.py)) / jsonb containment ([`pgvector/store.py:189-192`](../../src/trellis/stores/pgvector/store.py)) with **no missing-key default-pass** — unlike the `content_tags` facet path (document.py:52-72), which default-passes NULL. Verified live: `get_context(intent, domain="trellis")` → "No context found"; identical intent without `domain` → 10 docs @ 0.51–0.72. Nothing ingested so far carries a `domain` key (corpus ingest only adds one when `--domain` is passed), and the retrieve-before-task skill *recommends* passing `domain` — so following the skill guarantees empty packs. Fix: default-pass missing keys (mirror the facet path) or demote `domain` to a score boost.
+- [x] **Flat `get_context` omits the `pack_id` header.** — **LANDED** 2026-07-14 via [#262](https://github.com/ronsse/trellis-ai/issues/262). Original report: [severity: M] `get_task_context` prints `**pack_id:**` + a `record_feedback(...)` citation footer; `get_context` ([`mcp/server.py:447`](../../src/trellis/mcp/server.py)) prints neither — so pack-level feedback attribution is impossible from the primary skill-recommended tool, starving `apply-noise-tags` / advisory fitness of per-item signal. (`record_feedback`'s own docstring claims the header exists on every pack.)
+- [x] **`get_context` / `search` bypass PackBuilder entirely.** — **LANDED** 2026-07-14 via [#262](https://github.com/ronsse/trellis-ai/issues/262) (same PR as the `pack_id` header — one retrieval path, four context tools collapsed). Original report: [severity: M] Both hand-roll axis merging ([`mcp/server.py:447, 1100`](../../src/trellis/mcp/server.py)): fixed heuristic relevance (graph always 0.5, traces always 0.3), FTS + cosine concatenated with no RRF normalization (incomparable scales), and the graph axis is a full-intent substring match over 20 nodes (observed returning `tool:*` entities at 0.01–0.02 relevance). The good stack — strategies + RRF reranker + recency/importance decay — only runs in the three sectioned `get_*_context` tools. Fix: route both through PackBuilder, or at minimum RRF-fuse the axes.
+
+### Feedback + skills plumbing
+
+- [x] **MCP `record_feedback` never writes `pack_feedback.jsonl` — fixed.** [severity: M] The tool emitted `FEEDBACK_RECORDED` only; the JSONL audit log was written solely by `trellis.feedback.recording.record_feedback()` (API/SDK path), which nothing on skynet used — the file did not exist anywhere in prod, so the nightly `--reconcile-first` had nothing to backfill. The tool now routes through that same helper (one call writes both sinks, under `<stores_dir>/feedback/`), the emit fails soft, and `worker curate --reconcile-first` scans `<stores_dir>/feedback` (taken off `StoreRegistry.stores_dir`, so `config.yaml`'s `data_dir` is honoured) as well as the legacy `<data_dir>`. Same change made the tool accept a graded `rating` — it previously hard-coded `1.0 if success else 0.0`, so no gradient could ever be recorded.
+- [x] **`link-evidence` skill's documented `relates_to` pattern is unimplementable.** — **LANDED** 2026-07-14 via [#260](https://github.com/ronsse/trellis-ai/issues/260). All three root-cause pieces are in: `EntityUpdateHandler` is registered for `Operation.ENTITY_UPDATE` ([`mutate/handlers.py:1331`](../../src/trellis/mutate/handlers.py)), `document_ids` threads through entity create *and* update with carry-forward-on-omission semantics, and `save_knowledge` calls `ensure_evidence_document` ([`mcp/server.py:1066`](../../src/trellis/mcp/server.py)). [#301](https://github.com/ronsse/trellis-ai/pull/301) additionally stamps extraction mints with `document_ids=[source_doc]`. Original report: [severity: M] The skill instructs `save_knowledge(relates_to=<doc_id from save_memory>, edge_kind="entity_documented_by")`, but edge targets must be graph nodes and documents are not graph nodes — the edge is warn-skipped (`target entity not found`), verified live. Root cause: **no governed write path sets `Entity.document_ids`** (the graph↔doc link is SCHEMA DONE at the store layer; `EntityCreateHandler` doesn't thread it, and `Operation.ENTITY_UPDATE` is declared in [`mutate/commands.py:29`](../../src/trellis/mutate/commands.py) **with no registered handler** in `build_default_handlers`). Fix: thread `document_ids` through entity create + add the ENTITY_UPDATE handler + make `save_knowledge` resolve document-id targets into `document_ids`. Interim pattern that works today: `record_observation(subject_entity_id=..., evidence_ref=<doc_id>)`.
+- [x] **Skills on disk still carry the Jul-10-flagged drift.** — **RESOLVED** in `my-claude-skills` (verified on disk 2026-08-26): record-after-task's template emits `"source": "agent"` with `step_type` / `name` step keys and nests `domain` under `context`; retrieve-before-task now documents `domain=` as safe-to-pass with default-pass semantics, re-verified live 2026-08-15. Original report: [severity: M — operator item, `~/.claude/skills/`, not this repo] record-after-task's template `"source": "claude-code"` is schema-invalid (`source` must be `agent|human|workflow|system`; prod traces use `agent`), and retrieve-before-task recommends `domain=` (see defect above). Fix both templates; stop recommending `domain=` until the filter fix lands.
+
+### Capture gaps (the root cause of the starvation)
+
+- [x] **Claude Code session auto-capture.** — **LANDED** 2026-07-14 via [#255](https://github.com/ronsse/trellis-ai/issues/255), but it did not actually *run* until 2026-08-24: [#333](https://github.com/ronsse/trellis-ai/pull/333) / [#334](https://github.com/ronsse/trellis-ai/pull/334) fixed blocked turn ordering, an accidental context-window coupling, and a sidechain rule discarding 61% of transcripts ([#332](https://github.com/ronsse/trellis-ai/issues/332)). Now cron-driven at 03:00; 334 `save_experience` writes accepted in the trailing 7d as of 2026-08-26. Original report: [severity: H — highest-leverage new feature; untracked anywhere before this entry] Every write today depends on an agent explicitly calling `save_*` / the preview skills — 6 traces in 5 days is the proof, and everything downstream starves (no failure traces → `mine-precedents` has no input → no lessons; sparse feedback → advisories/noise-tagging idle). Add a Claude Code `SessionEnd` hook (or nightly sweep) feeding `~/.claude/projects/*.jsonl` session transcripts through the record-oriented `sync_records` core — the same reader→core seam `ingest conversations` uses. Write up as the next corpus-ingestion ADR increment (§G sibling).
+- [ ] **`save_experience` / `record_observation` content is never embedded *on the write path* — traces are now reachable by a separate worker; observations are not.** [severity: M — **rescoped again 2026-08-31**; `save_knowledge` done 2026-08-26, the trace half done 2026-08-28] **Read the split before working this item.** (a) **Traces: solved, by design, elsewhere.** [#357](https://github.com/ronsse/trellis-ai/pull/357) (`e2529fb`) shipped [`src/trellis_workers/trace_embed/`](../../src/trellis_workers/trace_embed/) — a batch worker (`trellis worker embed-traces`) that collects → renders → embeds → advances an explicit watermark, registering `Operation.EVIDENCE_INGEST` on its *own* executor. So auto-captured traces **are** semantically retrievable after one worker pass. (b) **The `save_experience` write path still has no embed call, and that is deliberate** — the embed is a batch concern, not an inline one. Do **not** "fix" it by adding `run_embed_on_ingest` to `save_experience`; that would duplicate the worker and put an embedder in the write path. (c) **`record_observation` is genuinely uncovered:** it has no embed call on any path *and* the worker walks the **trace store only** (`registry.operational.trace_store`) — verified 2026-08-31. If observations need the semantic axis, that is a separate item; do not read `trace_embed/` as covering them. Original 2026-08-26 rescope follows. [severity: M — `save_knowledge` is done] `save_knowledge` now reaches the semantic axis through the evidence document [#260](https://github.com/ronsse/trellis-ai/issues/260) auto-creates (`ensure_evidence_document` → `run_embed_on_ingest`). **Traces and observations still are not:** `save_experience` ([`mcp/server.py:939`](../../src/trellis/mcp/server.py)) and `record_observation` ([`mcp/server.py:2465`](../../src/trellis/mcp/server.py)) have no embed call on any path, so the 334 auto-captured session traces are findable only via the keyword and graph axes. This matters more now than it did in July — auto-capture made traces the highest-volume item type in the corpus. Original report: [severity: M] Only `save_memory`, REST `POST /documents`/`/evidence`, and `ingest corpus/conversations` hit the embed hook — graph nodes and traces are invisible to the semantic axis, so a fact stored via `save_knowledge` is findable only through the (weak, substring) graph axis. Decide: embed observation/knowledge node text, or have the skills pair every `save_knowledge` with a `save_memory`.
+
+**Prerequisites already tracked above** (operator gates in the corpus section): vault + claude.ai-export ingest, and the `llm:` block (hermes3:8b via Ollama's OpenAI-compatible `base_url`) + `TRELLIS_ENABLE_MEMORY_EXTRACTION=1`. **Both are satisfied as of 2026-08-26** — `~/.trellis/config.yaml` carries the `llm:` block (`provider: openai`, `model: hermes3:8b`, `base_url: http://localhost:11434/v1`) and the claude.ai export was ingested 2026-08-07 (148 conversations). The 2026-07-11 reading that loop starvation was *caused* by a missing `llm:` block was **superseded 2026-08-02**: the host had one all along, and the actual cause was zero per-item attribution on feedback events. §G.4's chunk rollup + alias-resolver indexing stay gated on the vault ingest; the items in this section are **not** gated — the dogfood signal they were waiting on has fired.
+
+## Self-improvement program — proposed 2026-05-11
+
+A program to close the dual-loop's promote half and add four new loops. Read [`docs/design/plan-self-improvement-program.md`](../design/plan-self-improvement-program.md) first (umbrella plan: ordering, dependencies, considerations, success criteria, security model). Each item below points to its own ADR + plan; each is a single swarm unit (or splittable into named phases).
+
+**POC directives across all items:** no silent fallbacks; no backwards-compat shims; loud on misuse; no half-finished implementations; type extensibility preserved. See umbrella plan §2 for the spec.
+
+### Feature items (additive)
+
+- [x] **Item 1 — Observation / Measurement entity vocabulary.** Adds `Observation` + `Measurement` canonical entity types and `hasObservation` canonical edge kind. First-class home for query-history insights, profiling stats, learned patterns. ADR: [`adr-observation-entity-type.md`](../design/adr-observation-entity-type.md). Plan: [`plan-observation-entity-type.md`](../design/plan-observation-entity-type.md). 4 phases, ~1400 LOC + ~700 LOC tests. **No deps.** Landed 2026-05-13: PRs #121 (schemas + well-known), #124 (SDK + MCP + REST + handlers), #125 (retrieval strategy + extractor + eval), #136 (review followup: `confidence` made optional per ADR).
+- [x] **Item 2 — Provenance columns (Phase 3 of graph-ontology).** Promote `source_trace_id` / `agent_id` / `confidence` / `evidence_ref` / `extractor_tier` from edge `properties` JSON to first-class columns on all four backends. ADR already accepted in [`adr-graph-ontology.md`](../design/adr-graph-ontology.md) §6.4. Plan: [`plan-provenance-columns.md`](../design/plan-provenance-columns.md). ~1070 LOC. **Depends on Item 1 (provides the consumer signal).** Landed 2026-05-13: PRs #126 (4-backend schema + ArcadeDB hardening + shared validator), #127 (DSL + contract tests + `migrate-provenance` CLI), #137 (ArcadeDB registry-path forward http_url for server-side enforcement — review followup).
+- [x] **Item 3 — Parameter-registry wiring.** Wake existing dead code in `learning/scoring.py`. Required `registry` kwarg; delete hard-coded `_NOISE_*_THRESHOLD` constants. Smallest unit in the program. Plan: [`plan-parameter-registry-wiring.md`](../design/plan-parameter-registry-wiring.md). ~330 LOC. **No deps.** Landed 2026-05-13: PR #109.
+- [x] **Item 4 — Extraction-failure telemetry + analyzer.** New `EXTRACTION_FAILED` event type; replace silent JSON-parse swallows in LLMExtractor + miner; ship `analyze_extraction_health` CLI. ADR: [`adr-extraction-failure-telemetry.md`](../design/adr-extraction-failure-telemetry.md). Plan: [`plan-extraction-failure-analyzer.md`](../design/plan-extraction-failure-analyzer.md). 5 phases, ~1130 LOC + ~700 LOC tests. **Bridges into cleanup C2.** Landed 2026-05-13: PR #110.
+- [x] **Item 5 — Well-known promotion loop.** Surface open-string types eligible for canonical promotion (count + extractor-diversity + domain-diversity + signal-quality criteria). Human-gated via ADR amendment; never auto-mutates `well_known.py`. Generalizes `CUSTOM_TAG_USED` telemetry from `adr-tag-vocabulary-split.md`. ADR: [`adr-well-known-promotion-loop.md`](../design/adr-well-known-promotion-loop.md). Plan: [`plan-well-known-promotion-loop.md`](../design/plan-well-known-promotion-loop.md). 5 phases, ~1290 LOC + ~665 LOC tests. **No deps.** Landed 2026-05-13: PR #111.
+- [x] **Item 6 — Dogfooding meta-traces.** Every analyze/tune/promote CLI command records a meta-`Activity` (PROV-O) into the graph, with `wasInformedBy` edges (sampled) to consumed events and `wasGeneratedBy` edges from produced observations. First sanctioned cross-plane handler. Unblocks Scenario 5.4 (loop convergence). ADR: [`adr-dogfooding-meta-traces.md`](../design/adr-dogfooding-meta-traces.md). Plan: [`plan-dogfooding-meta-traces.md`](../design/plan-dogfooding-meta-traces.md). 4 phases, ~1270 LOC + ~800 LOC tests. **Depends on Items 1 + 2.** Landed 2026-05-13: PRs #132 (`record_meta_analysis` primitive), #133 (CLI wiring + PackBuilder filter + eval).
+- [x] **Item 7 Cohort 1 — Coding-agent self-improvement loop, proposal-only half (no spawn).** Proposal generator reads `EXTRACTION_FAILED` clusters / `WELL_KNOWN_CANDIDATE` events / `ADVISORY_DRIFT_DETECTED` events; produces stable proposal markdown. ADR: [`adr-coding-agent-loop.md`](../design/adr-coding-agent-loop.md). Plan: [`plan-coding-agent-loop.md`](../design/plan-coding-agent-loop.md). Landed 2026-05-13: PRs #134 (ProposalGenerator + clustering + event types), #135 (CLI `admin generate-proposals` / `list-proposals` / `show-proposal` + eval scenario). Cohort 2 (sandboxed Claude Code spawn via SDK, file-allowlist, draft PR via gh CLI) **deferred** — see "Deferred / gated to next cycle" below.
+
+### Cleanup tracks (parallel; swarm-decomposable)
+
+- [x] **C1 — Dead-code removal.** Landed 2026-05-15 via 4-unit swarm + rollup PR. Per-sub-item status:
+  - **C1.1** (JSONL→learning.scoring file-only bridge framing) — **closed in this PR.** CLAUDE.md "Two feedback paths" section rewritten; ADR-dual-loop-evolution §8 amended.
+  - **C1.2** (`Operation.TRACE_INGEST` stub) — **stale / no-action.** The premise was wrong: `TraceIngestHandler` was wired by `swarm/d1-trace-ingest-decision` (`ec478c1`) and trace ingestion was routed through `MutationExecutor` by `swarm2/b-7-trace-bypass-sites` (`b143e84`). Three production surfaces submit `TRACE_INGEST` Commands today. Plan entry retained as "STALE — do not delete" so future swarms don't re-trip.
+  - **C1.3** (post-Item-3 dead thresholds) — **closed by PR #109** (commit `e672ef5`, 2026-05-12). Verified at base SHA `2ca9584`: zero grep hits for `_NOISE_*_THRESHOLD` / `_lookup_threshold_from_registry` in `src/`.
+  - **C1.4** (eval scenario boilerplate consolidation) — **closed by commit `689c7ef`** (2026-05-09).
+  - **C1.5** (post-Item-4 extract-layer audit) — **closed by PR #110 + C2 sweep.** Audit log added in this PR (`audit/silent_fallbacks_2026-05-14-c1-5-extraction-slice.md`) confirming 13 in-scope sites are correctly classified (4 emit-then-raise, 8 `# GRACEFUL-DEGRADATION:` annotated, 1 loud env-var parser).
+  - **C1.6** (WorkflowEngine) — was "deliberate no-action per validate-before-deleting"; **superseded: DELETED in Phase F F0** (`1291210`, disposition memo `docs/research/workflow-engine-disposition.md`).
+  - **C1.7** (EnrichmentService triggered-consumer stubs) — **deliberate no-action** per "validate before deleting". (`EnrichmentService` itself is wired in production via `LLMFacetClassifier`; only the triggered-consumer pattern is stub.)
+  - **C1.8** ("self-learning" → "feedback loop" rename) — **closed in this PR.** CLAUDE.md + `adr-terminology.md` updated. Three `src/` docstring leftovers carved out as M-severity follow-up below.
+  - **C1.9** (`trellis_workers/` orphan audit) — **audit document landed in this PR** (`docs/design/audit-trellis-workers-orphans-2026-05-14.md`). Three orphan-suspect modules surfaced (876 LOC combined); per the C1.6/C1.7 discipline, deletion deferred until a human decision attaches.
+- [x] **C2 — Silent-fallback hardening.** Audit + replace every `try: X except: pass` / `except: return []` / `except: return None` pattern in `src/` per the POC no-fallback directive. Six phases (audit → embedders → policy/executor → retrieve → MCP → sweep). Each PR ships with a failure-injection test demonstrating loud behavior. Plan: [`plan-cleanup-silent-fallbacks.md`](../design/plan-cleanup-silent-fallbacks.md). ~600 LOC + sweep, across 3+ cohorts. **Depends on Item 4 Phase 0 (provides the emit helper).** Landed 2026-05-13: PRs #115 (Phase 0 baseline), #116, #118, #119, #120, #122, #123 (Phases 1.5/2/3/4/5/6 remediation), #129 (Phase 7 verification), #140 (Phase 8 final closeout). 8 phases. Helper-aware DEFECT count 67; unjustified DEFECTs 0/0. Conditional follow-on (Phase 8.1 — `advisory_store._load` / `policy_store._load`) tracked under "Deferred / gated to next cycle" below.
+
+### Recommended execution order
+
+Per [`plan-self-improvement-program.md`](../design/plan-self-improvement-program.md) §4:
+
+1. **C2 Phase 0** (audit) — establishes POC discipline. Standalone.
+2. **Item 1** (Observation vocabulary) — unblocks Items 2 + 6.
+3. **Item 3** (registry wiring) — smallest unit; wakes dead code. Standalone.
+4. **Item 4** (extraction-failure telemetry) — generates signal Item 7 needs.
+5. **Item 5** (well-known promotion loop) — generates signal Item 7 needs.
+6. **C1** (dead-code removal) — runs in parallel; cleans up slack from Items 3 + 4.
+7. **Item 2** (provenance columns) — schedule now (Item 1 provides the consumer).
+8. **Item 6** (dogfooding) — needs Items 1 + 2.
+9. **Item 7** (coding-agent loop) — capstone.
+
+Items 3, 4, 5, C1, C2 are **independently parallelizable** (5 concurrent swarm units).
+
+### Considerations the program owns
+
+Per [`plan-self-improvement-program.md`](../design/plan-self-improvement-program.md) §5–§6: per-item eval scenarios, plane discipline, LLM cost budgets, idempotency for self-modifying loops, privacy / data classification inheritance, canonical-registry versioning, MCP+SDK surface for new operations, contract test extensions for new edge semantics, security model for Item 7 (branch isolation, no auto-merge, file allowlists, secret scrubbing, weekly LOC cap). Also flagged: backpressure on dogfooding, observation freshness decay, structural-vs-empirical conflict resolution, system-authored content filtering by default, no "regress trust" mechanism (out of scope), cross-loop event-stream contention between Items 4 and 5.
+
+### Program-level eval
+
+- [~] **Master scenario `program_convergence` + 6 satellite scenarios.** Replaces and extends the deferred Scenario 5.4 with a 9-axis convergence chart proving each item's loop closes. Plan: [`plan-program-level-eval.md`](../design/plan-program-level-eval.md). Per-axis wiring lands with each item's PR (not a separate follow-on); regression-suite + chart renderer are independent units totaling ~850 LOC after items 1-7 land. **Status 2026-05-15:** Phase 0 (master scenario scaffold + 9-axis dataclasses + user doc) landing as `feat/program-convergence-phase0`. Phase 2 (regression-suite + `parameter_registry_passthrough` satellite, ~300 LOC) and Phase 3 (Matplotlib chart renderer, ~200 LOC) remain independent open units. Phase 0 follow-ups logged below.
+
+### Follow-ups surfaced by program_convergence Phase 0 (2026-05-15)
+
+- [x] **Axis C semantics — tighten from proxy to plan's prose definition.** Closed by Unit D1 (2026-05-16). `PackItem.injected_advisory_ids` (landed in Unit C1 / PR #171) now carries per-item provenance; `_compute_advisory_hit_rate` reads it to compute `hits / total_advisories_presented` across the lookback window. Synthetic baseline at `rounds=50` lands at 0.0 — the `AdvisoryGenerator` only emits `APPROACH` advisories with `entity_id=None`, and C1's provenance stamping fires only on `entity_id == item_id` match. `THRESHOLD_C_LAST_QUARTER` dropped from 0.6 to 0.0 to keep CI green; per-axis unit tests in `tests/unit/eval/test_program_convergence.py` exercise the tightened semantics (all-success → 1.0, all-failure → 0.0, mixed → ratio, no-stamping → 0.0). Follow-up to lift the bar back tracked below.
+- [ ] **Synthetic corpus doesn't exercise per-item advisory provenance — axis C threshold can't bite until it does.** Unit D1's tightened axis C reads `PackItem.injected_advisory_ids`, but C1's stamping rule fires only on `entity_id == item_id` match, and the synthetic `AdvisoryGenerator` run produces only `APPROACH`-category advisories with `entity_id=None`. Net: `THRESHOLD_C_LAST_QUARTER` is pinned at 0.0 and won't catch axis-C regressions on the synthetic corpus. Two fix paths: (a) tighten the synthetic corpus to drive the generator toward `ENTITY` / `ANTI_PATTERN` categories with `entity_id` set; (b) broaden C1's stamping join to also capture boost/suppression influence (per the C1 [M] deferred finding). Once either lands, re-baseline the threshold (target 0.5+ per plan §4.2). [severity: M]
+- [ ] **`_meta_traces_enabled` env-var gate uncovered by tests.** Master scenario raises `ProgramConvergenceError` if `record.activity_id is None` (the no-op variant fired when `TRELLIS_META_TRACES=off`), but no test exercises that branch. 3-line test would pin it. [severity: L]
+- [ ] **Master scenario instantiates dedicated `SQLiteParameterStore` instead of using `registry.operational.parameter_store`.** Reason: the well-known analyzer requires every key in `REQUIRED_SCHEMA_EVOLUTION_PARAM_KEYS`, and the registry's default seed leaves them unset (reading from the registry would raise `KeyError`). Cleaner when more of Item 5's seeding lands in the registry default. Self-contained scope; the temp param store leaks zero state across runs. [severity: L]
+- [ ] **`PARAM_COMPONENT_ID` re-export missing from `trellis.learning.__all__`.** Phase 0 imports it from the submodule `trellis.learning.schema_evolution`. The package-level re-export exists but isn't in `__all__`. Tiny tweak. [severity: L]
+- [ ] **Axis E provenance probe counts non-erroring queries, not non-empty results.** Sits flat at 1.0 after Item 2 lands. Probe is the right shape for "can the column be queried?" but doesn't add signal beyond that. Phase 2's regression assertion `axis E == 1.0 after Item 2 lands` works against this shape. [severity: L]
+- [ ] **`docs/agent-guide/program-convergence-eval.md` references Phase 3 PNG renderer in future tense.** When Phase 3 lands, update the "How to invoke" section pointing at the renderer entrypoint. [severity: L]
+
+### Follow-ups surfaced by program_convergence Phase 2 (2026-05-15)
+
+Phase 2 ships the `program_regression_suite` CI gate + `parameter_registry_passthrough` satellite. The suite works correctly — it runs the master at 50 rounds, asserts the 9 plan-§4.2 thresholds, and exits 1 on regression. **End-to-end run currently fails axes A, D, G** — these are plan-vs-synthetic-corpus calibration gaps the suite correctly surfaces with actual-vs-expected detail, not suite bugs. The suite is NOT in default `pytest tests/` or `make test`; it's operator-invoked via `uv run python -m eval.runner --scenario program_regression_suite`.
+
+- [x] **Axis A threshold mis-calibrated for synthetic corpus — closed by Phase 5B (this branch).** Picked option (a). Introduced `CorpusProfile = Literal["synthetic", "real"]` kwarg on the regression suite's `run()`; synthetic uses `delta ≥ 0.05` (above the observed 0.0545 ceiling), real keeps the plan's `0.15`. Invalid profile raises `ValueError`. Default is `synthetic` (CI today). Tightening the corpus generator to push delta over 0.15 remains a real-corpus follow-up if/when one comes online.
+- [ ] **Axis D seeding rate insufficient for "≥10/seed by r25" threshold.** Master's `_seed_observations` writes `DEFAULT_OBSERVATION_BATCH=2` observations per round in round-robin across ~22 seed entities, yielding ~2.36/seed by r25 vs the threshold's 10. Fix: bump batch size to ~9 or seed every entity each round in the master scenario. Cross-Phase decision (modifying master scenario is out of scope for Phase 2). [severity: M]
+- [ ] **Axis G threshold tuning vs corpus expansion.** `_seed_well_known_parameters` sets `well_known_count_threshold=10`; the small synthetic graph may not produce 10 occurrences of any open-string value before round 30. Fix: lower the seeded threshold for the eval profile, or expand the corpus generator's open-string variety. [severity: L]
+- [ ] **Regression suite uses quarter-mean comparisons rather than literal round-N samples.** Axes A/B/C/E grade against the master's natively emitted `_quarter_means` shape (more robust for synthetic noise) rather than the plan's literal "round 5 vs round 50" wording. Future PR exposing per-round axis values on the master `ScenarioReport` could switch to literal samples. [severity: L]
+- [ ] **Satellite `run()` signature drift risk.** Suite calls `module.run()` with no args, accepting either `ScenarioReport` or `dict`. If a satellite ever requires the runner's registry as a positional arg (matching master's signature), `_call_satellite` raises. Today only `parameter_registry_passthrough.run` accepts `*args, **kwargs`. [severity: L]
+
+### Follow-ups surfaced by program_convergence Phase 3 (2026-05-15)
+
+Phase 3 ships the Matplotlib chart renderer (3x3 subplot grid, one axis per subplot, `tab10` palette stable per axis index). Importable `render_program_convergence_chart(stats, output_dir)` — no CLI by design.
+
+- [x] **Renderer NOT wired into master scenario's `run()` — closed by Phase 4 (this branch).** `run()` gained `render_chart: bool = False` kwarg; renders to `eval/reports/<timestamp>.png`. `ScenarioReport` gained `convergence_stats: Any = None` field exposing `_MultiAxisStats` for post-hoc rendering.
+- [x] **No CHANGELOG entry for matplotlib dev dep — closed by Phase 4 (this branch).** `[Unreleased]/Added` block added documenting `matplotlib>=3.8` as a dev-only dep.
+- [x] **Eval-tree ruff debt — moved to trellis-evals TODO.md (2026-07-12)** along with the whole `eval/` harness (subtree split, history preserved).
+- [ ] **Pre-existing duplicate `hypothesis>=6.92` entry in `pyproject.toml` `dev = [...]`.** Surfaced during Phase 3's `pip install -e ".[dev]"`. Trivial cleanup. [severity: L]
+- [x] **Chart renderer hardcodes `figsize=(15.0, 11.0)` and `dpi=100` — closed by Unit B4 (2026-05-16).** Both threaded as optional kwargs through `render_program_convergence_chart` and `run(chart_figsize=, chart_dpi=)`; `None` defaults preserve the legacy 1500x1100 PNG.
+- [ ] **Single-figure overlay variant is unbuilt.** Phase 3 picked subplot grid (mixed Y-axis units). A single-figure-with-9-lines variant could feed the existing `_AXIS_DISPLAY_TITLES` and `_AXIS_EXPECTED_SHAPE` constants into a legend if a stakeholder asks. Not blocking. [severity: L]
+
+### Follow-ups surfaced by program_convergence Phase 4 (2026-05-15)
+
+Phase 4 calibrated axes D + G and wired the renderer. Axis D ✅ passes cleanly at round 0 after the `DEFAULT_OBSERVATION_BATCH: 2 → 10` bump. Axis G still reads 0 — **the threshold fix was correct in spirit but masked by an orthogonal machinery gap** (recorded below).
+
+- [x] **Axis G machinery gap — closed by Phase 5A (this branch).** Picked option (b): synthesize `MUTATION_EXECUTED` events directly. Fix required three coupled changes — emit events with varied `requested_by`, switch seed `node_type` from `"entity"` to `"eval_seed_entity"` (open-string), and embed `content_tags` in node properties (`_summarize_tags` gate). Axis G now fires at round 4 with 1 candidate; subsequent rounds correctly suppressed by analyzer cooldown.
+- [ ] **Axis A threshold mismatch for synthetic corpus — still open.** Plan §4.2 says "delta ≥ 0.15" but synthetic corpus only produces ~0.06 headroom (baseline 0.94 → 1.0). Resolution requires either lowering the regression suite's threshold for the synthetic profile (touches Phase 2's `program_regression_suite/scenario.py`) or expanding the corpus generator (touches Phase 0 master). Phase 4 deliberately stacked on Phase 3 (not Phase 2) so this is intentionally deferred. Bundle into Phase 5. [severity: M]
+- [ ] **`metrics: dict[str, float | str]` type widening.** Phase 4 broadened `ScenarioReport.metrics` from `dict[str, float]` to `dict[str, float | str]` to admit grep-target strings like `chart_path`. Eight other scenarios annotate their local `metrics` literal as `dict[str, float]`. Construction still works but a `Mapping`-based annotation would be cleaner. [severity: L]
+- [x] **`_render_chart()` writes to hard-coded `eval/reports/` path — closed by Unit B5 (2026-05-16).** `_default_chart_output_dir()` now anchors against `__file__` (four `.parent` hops to repo root + `eval/reports/`); `run()` accepts `chart_output_dir=` to override.
+- [ ] **`PIE804` pre-existing on `_seed_observations` line 416.** `**{"confidence": confidence}` flagged as `PIE804 Unnecessary dict kwargs`. Pre-dates Phase 4 (Phase 0 code). Inline comment explains the choice (avoid type-ignore noise until `GraphStore.upsert_edge` ABC accepts provenance kwargs natively). [severity: L]
+
+### Follow-ups surfaced by program_convergence Phase 5A (2026-05-15)
+
+Phase 5A closed the axis G machinery gap discovered during Phase 4. The fix required three coupled changes because the well-known analyzer has multiple gates beyond `distinct_extractors`.
+
+- [ ] **Analyzer shape footgun — `_summarize_tags` reads `content_tags` from `properties` only.** If any backend stores `content_tags` as a top-level column (e.g., a future structured-tag column type), `_summarize_tags` silently returns empty domains and axis G stays at 0. Pin the shape contract in the analyzer's docstring + add a unit test, or introduce an explicit ABC-level convention for tag storage. [severity: M]
+- [ ] **`node_type` drift across eval scenarios.** Phase 5A switched the master scenario's seed `node_type` from `"entity"` to `"eval_seed_entity"`. Other eval scenarios (e.g., `agent_loop_convergence`'s `_populate_entity_documents`) still write `"entity"`. No current consumer breaks because the master owns the change and `_seed_observations` keys off `subject_entity_type="entity"` as a content property (string, unrelated to graph type). Worth a sweep for any places that assume `node_type="entity"` for seeded nodes when sharing fixtures. [severity: M]
+- [ ] **Pre-existing mypy error introduced by Phase 4 surfaces during Phase 5A typecheck.** `metrics: dict[str, float]` declared at scenario.py line 976 but `ScenarioReport.metrics` was widened to `dict[str, float | str]` in Phase 4. The local declaration should widen to match. Tracks the same Phase 4 calibration commit. [severity: L]
+- [ ] **Phase 5A axis G test runs the full 30-round scenario (~3s).** A faster, more targeted unit test could call `analyze_well_known_candidates` directly against a hand-rolled graph + event log fixture — catches the same regression in milliseconds. Useful if Phase 2's regression suite cadence grows. [severity: L]
+
+### Follow-ups surfaced by program_convergence Phase 5B (2026-05-15)
+
+Phase 5B split the regression suite's axis A threshold by corpus profile (`synthetic` 0.05 / `real` 0.15). Closes the Phase 2 axis A item for synthetic runs.
+
+- [x] ~~**Runner cannot pass `profile` to scenarios via CLI.** `eval.runner` calls `module.run(registry)` with no kwargs, so the only way to invoke the suite with `profile="real"` today is to import `run()` programmatically. A small CLI flag (`--scenario-arg profile=real`) on the runner would make the opt-in mechanism first-class. Not blocking — operators driving real corpora already write harness scripts. [severity: L]~~ Closed by swarm-wave Unit A5 (`feat/eval-runner-scenario-arg`) — `eval.runner` now accepts repeatable `--scenario-arg NAME=VALUE` with int → float → bool → str coercion; unknown kwargs surface as a loud scenario failure rather than a silent drop.
+- [ ] **Synthetic threshold 0.05 leaves only ~0.005 margin above observed 0.0545 ceiling.** A future tightening of `KeywordSearch` or `PackBuilder` that shrinks the synthetic delta below 0.05 (without breaking convergence) would flip axis A to regress under the synthetic profile. Mitigation: the assertion message + finding `detail` makes the cause obvious; the fix is a one-line tuning of `THRESHOLD_A_DELTA_BY_PROFILE["synthetic"]`. Worth revisiting if the synthetic corpus is reshaped. [severity: L]
+- [ ] **`metrics` is `dict[str, float]` so profile string can't be persisted in the metrics dict.** Surfaced via `decision` text + axis A finding `detail` instead. Same root cause as Phase 4's `metrics` widening item — widening to `dict[str, float | str]` (Phase 4's choice for `chart_path`) would let the JSON report carry `metrics["profile"] = "synthetic"` for downstream tooling. [severity: L]
+
+### Deferred / gated to next cycle
+
+- [ ] **Item 7 Cohort 2 — Sandboxed Claude Code spawn (Phase 2+3 of the coding-agent loop).** Scope: sandboxed worktree creation per proposal, GitHub PR proposer via `gh` CLI, per-cycle budget ledger (LOC + token), file-allowlist enforcement, secret scrubbing on diffs, draft-PR opening only (no auto-merge). ADR: [`adr-coding-agent-loop.md`](../design/adr-coding-agent-loop.md). Plan: [`plan-coding-agent-loop.md`](../design/plan-coding-agent-loop.md). Umbrella: [`plan-self-improvement-program.md`](../design/plan-self-improvement-program.md) §6 (security model). **Gating criteria:** (a) operator review of N real Cohort 1 proposals first (target N = 5-10, generated against the dogfooded EventLog over the next operational cycle); (b) ADR amendment authorizing autonomous spawn — Cohort 1 only ships the proposal generator, not autonomous mutation of the codebase. Do not unblock without both.
+- [x] **Phase 8.1 (conditional) — `advisory_store._load` / `policy_store._load` revisit. — TRIGGER FIRED; BOTH ADDRESSED 2026-08-29/30, but NOT by the mechanism this item prescribed.** *(verified 2026-08-31)* C2 Phase 8 (#140) classified both `_load` paths as ANNOTATE-GRACEFUL, with the conditional trigger *"promote to LOUD — raise `StoreLoadError` from `_load`, fail fast at registry construction."* The trigger fired for both stores — [#393](https://github.com/ronsse/trellis-ai/issues/393) (advisory, `0d9f2a6`) and [#413](https://github.com/ronsse/trellis-ai/issues/413) (policy, `fb2e168`) — **and the prescribed remedy was deliberately not taken.** Read this before assuming `_load` raises:
+  - **`_load` still never raises, by design.** Both docstrings say so explicitly: *"constructing a store never raises"*, so retrieval and `trellis policy list` cannot be felled by a corrupt file whatever shape the corruption takes.
+  - **What changed is that the read *records* its failure and the WRITE refuses it.** `_degrade(reason, detail)` marks the store, and `refuse_if_degraded()` blocks every mutating path. The defect was never the breadth of the catch — it was that a degraded load left a state indistinguishable from an empty deployment *and then let the next write act on it*. So: **the read degrades and the write refuses.**
+  - **A missing top-level key is degradation, not an empty store.** Defaulting `policies` / `advisories` to `[]` made `{}` and a typo'd key load as a *clean* empty store, which left the whole defect intact for those shapes.
+  - **Strictness lives in the enforcement reader instead** — [`mutate/policy_source.py`](../../src/trellis/mutate/policy_source.py) raises `ConfigError` (not `StoreLoadError`) on an unreadable, malformed, or non-`Policy` file, and never degrades to an empty list. That module did not exist when this item was written. `PolicyStore` stays lenient because it is the CRUD reader, not the enforcement path — two readers, two postures, deliberately.
+
+  Net: the concern is closed and the outcome is stronger than "fail fast at registry construction" would have been, but anyone grepping for `StoreLoadError` will not find it.
+
+### Followups landed in this swarm
+
+Hidden-work tracked here so the Cohort 1 / C2 PR list doesn't look thinner than it actually is:
+
+- **#117** — SQLite `busy_timeout=10s` partial fix for `test_concurrent_ingests` flakes (deeper cause closed by #131).
+- **#128** — `scripts/audit_silent_fallbacks.py` helper-call-chain awareness (`_raise_*` / `NoReturn` / `sys.exit` recognition) so audit-tool DEFECTs match actual silent-fallback shape.
+- **#130** — `learning/observations.py` → `learning/pack_observations.py` rename (disambiguate from singular `Observation` entity introduced by Item 1).
+- **#131** — SQLite WAL + thread-local connection pool; `test_concurrent_ingests` now 100/100.
+- **#136** — Item 1 review followup: `Observation.confidence` made optional per ADR (not required at draft time).
+- **#138** — Phase 5 test-ordering flake closed (structlog `BoundLoggerLazyProxy` cache eviction).
+- **#139** — `EXIT_*` constants adopted across 9 CLI modules (47 sites + `code=2` ADR conflicts resolved).
+- **#152** — Post-C1.5 cleanup: `EnrichmentService` broad-except + two `_parse_response` JSON-decode branches now emit `EXTRACTION_FAILED` (was silently swallowed). 4 failure-injection tests.
+- **#155** — Closes both M-severity follow-ups from #152: `batch_enrich` emits `EXTRACTION_FAILED` with new `failure_kind="batch_collector_error"` on gather-collector escapes; `LLMFacetClassifier` emits new `EventType.CLASSIFICATION_DEGRADED` event when degrading to `needs_llm_review=True`. 6 new tests.
+
+### Deferred follow-ups from #155 — observability gaps to revisit
+
+Surfaced by review of the M-severity follow-ups landed in #155. Tracked here so they don't fall on the floor across stacked PRs:
+
+- **[M] `batch_enrich` collector-emit passes `source_hint=None`.** `EnrichmentService.batch_enrich` now emits `EXTRACTION_FAILED` with `failure_kind="batch_collector_error"`, but it has no per-item identifier to populate `source_hint`. The proposal-generator clustering path ([`src/trellis_workers/code_authoring/clustering.py`](../../src/trellis_workers/code_authoring/clustering.py)) silently skips events missing `source_hint`/`failure_kind` (debug-log only), so collector escapes will be invisible to the coding-agent loop. Once `batch_enrich` callers thread an item-level identifier (doc_id, correlation_id), pass it through to the emit so collector escapes don't all collapse into a single `<none>` bucket — or update the clustering docstring to note batch-collector events are intentionally excluded.
+- **[M] `LLMFacetClassifier._emit_degraded` only knows the generic `"enrichment_failure"` slug.** `EnrichmentResult` exposes `error: str | None` but not a structured `failure_kind` field, so the classifier can't mirror the upstream's specific kind (`"parse_error"`, `"model_error"`). Once #152's emit sites are in active use, add a structured `failure_kind: ExtractionFailureKind | None = None` field to `EnrichmentResult` (the model already uses `extra="forbid"` — additive change is safe) and thread it into `_emit_degraded` so `CLASSIFICATION_DEGRADED.upstream_failure_kind` carries the same slug the upstream emitted. Closes the timestamp-join workaround documented in the `EventType.CLASSIFICATION_DEGRADED` docstring.
+- **[L] `LLMFacetClassifier` is not yet wired with an `event_log` in production.** Tests are the only callers passing `event_log=` today; the registry / classifier-pipeline builder doesn't thread the operational-plane EventLog into the constructor. New telemetry is dormant in production until that wiring lands.
+- **[L] `tests/unit/classify/test_llm.py` and `tests/unit/classify/test_llm_classifier.py` overlap.** Slimmer FakeLLM-free `test_llm.py` vs. heavier `test_llm_classifier.py`. Consider consolidating into one path once #155's tests have stabilized.
+
+## Phase F — Inner agent loop / curation loop (proposed 2026-05-18)
+
+Sibling to the Self-Improvement Program. Closes the gap surfaced 2026-05-18: solid data + outcome-evaluation infrastructure exists, but no inner agent loop runs curation, summarization, or other graph-side operations on Trellis's own data. See [`docs/design/adr-graph-skill-harness.md`](../design/adr-graph-skill-harness.md) for the harness contract and [`docs/design/adr-inner-curation-loop.md`](../design/adr-inner-curation-loop.md) for the first concrete skill (curator).
+
+### Phases
+
+| # | Scope | Status |
+|---|---|---|
+| **F0** | ADRs + reserved names + scaffolding (harness + curator + eval skeleton); WorkflowEngine cleanup | Wave 1 in flight (4 PRs, base SHA `af374d2`) |
+| **F1** | Harness implementation: skill loader, tool registry, agent loop, 5 tools, budgets, telemetry | gated on Wave 1 merge |
+| **F2** | Curator skill: explicit + detected triggers, under-population detector, `CurationScheduler` | gated on F1 |
+| **F3** | On-retrieval lazy enrichment hook in `PackBuilder` (async fan-out) | gated on F2 |
+| **F4** | Skill outcome feedback (`curation.feedback_recorded`) | gated on F2 + F3 events |
+| **F5** | Score-based evolver interface + stub (`ScoreBasedEvolver` Protocol); McCoy port deferred | gated on ≥30 days of F4 signal |
+| **F6** | `eval/scenarios/skill_loop_convergence/` end-to-end implementation | grows alongside F1–F5 |
+
+### Wave 1 deferred follow-ups (2026-05-18)
+
+**From the harness ADR (Unit A):**
+- **[M][scope:F1]** Add five `SKILL_*` values to `EventType` (`skill.dispatched`, `skill.step`, `skill.completed`, `skill.failed`, `skill.outcome_recorded`).
+- **[M][scope:F1]** Amend `BUDGET_CONSUMED` payload variant docstring in `event_log.py` to discriminate the harness emitter (`source="trellis_workers.agent.harness"`).
+- **[L][scope:F1]** `tool_args_hash` canonicalization spec — sorted-key JSON via `model_dump_json`, matching `code_authoring/clustering.py`.
+- **[L][scope:F2-F5]** Skill-domain reservation lookup table (`curator.*` / `retrieval.*` / `outcome.*` / `evolver.*`); today it's a gentleman's agreement.
+- **[L][scope:follow-up]** `read_node(..., as_of=...)` for SCD-2 time-travel reads. Defer until a consumer asks.
+
+**From the curator ADR (Unit B):**
+- **[M][scope:F2]** `EnrichmentService.enrich()` returns single `auto_summary`; curator wants `summary` + `description`. Curator ADR §3.4 argues *not* to wrap `EnrichmentService` — flag here so a future cohort considers a shared "structured-summary" primitive below both callers.
+- **[L][scope:F3]** `PackBuilder` couples to curator skill name in the pre-committed design. Cleaner: emit generic `pack.under_populated_node_observed`, let a small subscriber translate. Raise during F3 implementation review.
+- **[L][scope:F4]** Sampled human-quality CLI (`trellis admin curation sample`) referenced in curator §2.5 but unspecified. Belongs in F4 evaluator's plan.
+- **[L][scope:F2]** Add a one-line note to curator §2.4: `ENTITY_UPDATE` overwrites are versioned in SCD-2; prior `description` survives via `get_node_history()`.
+
+**From the engine disposition (Unit C):**
+- **[M][scope:follow-up]** ~~Stale doc references to `WorkflowEngine` to update in a follow-up PR~~ — **DONE 2026-07-02** (all files below annotated with the F0 retirement):
+  - `TODO.md` line 305 (existing C1.6 entry — mark closed)
+  - `docs/design/audit-trellis-workers-orphans-2026-05-14.md` engine/* table rows
+  - `docs/design/plan-cleanup-dead-code.md` C1.6 section
+  - `docs/design/plan-evaluation-strategy.md` lines 62, 208
+  - `docs/design/plan-next-swarm-wave.md` line 305
+  - `docs/design/adr-llm-client-abstraction.md` lines 60, 185, 219, 259
+  - `eval/scenarios/agent_loop_convergence/README.md` line 49
+- **[L][scope:follow-up]** Two other 2026-05-16-audited orphan-suspects still in `KEEP — VALIDATE`: `extract/query_pattern_observer.py`, `learning/miner.py` (~610 LOC total). `maintenance/retention.py` was **deleted** 2026-08-25 ([adr-retention-prune.md](../design/adr-retention-prune.md) §3.3). Re-evaluate if any align with Phase F skill or evolver needs.
+- **[L][scope:follow-up]** ~~`docs/design/implementation-roadmap.md` is dated 2026-04-27 and predates Items 1–7 + Phase F. CLAUDE.md positions it as the canonical agent-entry doc; refresh the "State of the project" table.~~ — **DONE 2026-07-02**: §1 rewritten (current state + changed-since digest + container-based live-test reality), B.3/E.5 statuses corrected to landed, §4 rebalanced to the gate table, §5 hand-off updated (incl. the Bolt-substrate validation discipline).
+
+**From the F6 eval skeleton (Unit D):**
+- **[M][scope:F1+F2+F5]** Add `node.enriched`, `curation.feedback_recorded`, and an evolver round-scored event type to `EventType`. F1/F2/F5 own the enum delta in their respective PRs.
+- **[M][scope:F5]** Decide whether `_Telemetry` (private to `program_convergence_real_llm.scenario`) is extracted to a shared `eval/` module or reused locally by `skill_loop_convergence`. Decision belongs to F5.
+- **[L][scope:F3]** `curation.feedback_recorded` and `pack_feedback.jsonl` symmetry: should F3 write feedback to the JSONL audit log via `record_feedback()` for parity with `PackFeedback`?
+- **[L][scope:F1]** Scenario kwargs (`periods`, `nodes_per_period`, `periods_per_evolution`, `initial_variant_pool`) are conservative guesses; revise once F1 has measured curator wall-time.
+
+### Wave 2 — F1 harness implementation
+
+Triggers once all 4 Wave 1 PRs merge. Estimated 6–8 sub-units, ~1500–2000 LOC across parallel work:
+
+- skill loader + frontmatter validator (`harness.py`, `skill.py`)
+- tool registry + allowlist enforcement (`tools.py`)
+- agent loop runner (planner call → tool dispatch → observation, with `max_steps` + budget caps)
+- 5 tool implementations (`read_node`, `read_document`, `search_graph`, `propose_mutation`, `emit_event`)
+- budget tracker + telemetry (`SKILL_*` event types added to `EventType`)
+- CLI: `trellis admin run-skill <skill_id>`
+- contract test suite for skill loaders (mirrors `GraphStoreContractTests` discipline)
+- import-lint rule per harness ADR §4.1 (skills must not import `trellis.stores.*`, `trellis.mutate.executor`, or `trellis.llm.providers.*`)
+
+F2 (curator) follows F1; F3 (lazy enrichment) and F4 (feedback) can run in parallel after F2.
+
+## Knowledge graph foundations — research + ADR
+
+- [x] **Live-test the Neo4j backends (validated against AuraDB Free, 2026-04-25)** — **110/110 tests pass live**: 33 graph + 19 vector (shape #2) + 58 contract suite. Cypher correctness, HNSW index ordering, SCD-2 close-then-insert versioning, `as_of` time-travel, alias resolution, `compact_versions`, the DSL compiler (eq / in / exists × top-level / properties), and the "embeddings on `:Node` excludes historical versions" test all work as designed. **One drift caught:** AuraDB Free hosts the user database under the instance ID (`<id>.databases.neo4j.io` ↔ database name `<id>`), not the canonical `"neo4j"`. The store's `database="neo4j"` default is fine for self-hosted but wrong for AuraDB; fixed by adding a `TRELLIS_TEST_NEO4J_DATABASE` env var to the three Neo4j test fixtures (defaults to `"neo4j"`). Production users on AuraDB must pass `database=<instance_id>` to `Neo4jGraphStore` / `Neo4jVectorStore` — already a documented constructor kwarg, no code change needed.
+
+
+- [x] **Graph ontology survey + alignment ADR (Phase 0 fully landed)** — `docs/design/adr-graph-ontology.md`. Phase 0 ships: (1) `src/trellis/schemas/well_known.py` — 195 lines of canonical schema.org / PROV-O constants, alias maps from legacy lowercase to canonical, `canonicalize_*` / `is_canonical_*` / `is_known_*` helpers; (2) 41 tests in `tests/unit/schemas/test_well_known.py` covering aliases, idempotence, naming conventions, and structural drift guards; (3) docstring pointers on legacy `EntityType` / `EdgeKind` enums; (4) extended `EntityType` / `EdgeKind` tables in `docs/agent-guide/schemas.md` with canonical-name columns and ADR cross-references; (5) new §2.5 "Graph ontology" subsection in `adr-terminology.md`. **Form deviation from ADR:** canonical names are module-level constants, not new enum members — avoids two-enum-members-per-type confusion for collision cases. Legacy enums unchanged. **Phase 1 (extractors emit canonical names) and Phase 2 (retrieval canonicalizes for bucketing) not yet started.**
+- [x] **Canonical translation layer ADR (Phases 0-3 landed)** — `docs/design/adr-canonical-graph-layer.md`. Status: Phases 0-3 complete; Phase 4 (vector DSL) deferred as informational. Shipped 2026-04-25:
+  - **Phase 0** — `GraphStoreContractTests` (49 tests, includes node-role / generation_spec / document_ids / temporal `as_of` for edges, query, subgraph + alias time-travel + DSL execute_*) and `VectorStoreContractTests` (25 tests). Per-backend subclasses for SQLite (always), Postgres (env-gated), Neo4j (env-gated), pgvector (env-gated), LanceDB (importorskip-gated). `CLAUDE.md` and `adr-plugin-contract.md` updated.
+  - **Phase 1** — `FilterClause` / `NodeQuery` / `SubgraphQuery` / `SubgraphResult` DSL in `src/trellis/stores/base/graph_query.py` with `eq` / `in` / `exists` operators on `node_type` / `node_role` / `node_id` / `properties.<key>`. `execute_node_query` / `execute_subgraph_query` added to `GraphStore` ABC with default routing (handles `eq` only, raises on `in`/`exists` to surface the gap). 16 DSL unit tests.
+  - **Phase 2** — Per-backend compilers: SQLite (`json_extract`), Postgres (JSONB `@>` containment for type-aware eq + `?` for exists), Neo4j (Cypher for top-level columns + Python-side property filtering after `properties_json` decode, matching legacy `query()` strategy). All three pass full operator surface.
+  - **Phase 3** — `adr-plugin-contract.md` extended with "Required: implement the canonical DSL" subsection. Plugin backends must override `execute_*` and pass DSL contract tests; default ABC routing is migration-only.
+  - **Validation:** SQLite passes 49/49 graph + 25/25 vector contracts. LanceDB passes 25/25 vector. Postgres, Neo4j, pgvector subclasses ready and skip cleanly until env vars set. Total `pytest tests/unit/stores/ tests/unit/schemas/`: **653 passed, 118 skipped, mypy clean across 213 files.**
+
+## Real-data validation sequence — next blocker for "agent-improvement" data (2026-04-26)
+
+**Goal:** produce evidence that the system actually behaves well on realistic-shaped workloads. Today every test is a unit test or a small integration test; nothing demonstrates the self-learning loop converging on a controlled corpus, and nothing measures retrieval quality at scale. Closing that gap is the next foundation-level prerequisite before any "this got X% better" claim — and it's also what generates the data needed to talk publicly about the project's benefits.
+
+**Plan docs (now on main):**
+* [`docs/design/plan-evaluation-strategy.md`](../design/plan-evaluation-strategy.md) — full strategy: directory layout, scenario menu, what each one measures, how it ties back to the Phase-3 deferred items in the hardening plan.
+* [`docs/design/plan-neo4j-hardening.md`](../design/plan-neo4j-hardening.md) §5 — Phase-3 deferred items the eval scenarios will inform. Most will turn out to not be needed once 5.3 produces real numbers — don't pre-build any.
+
+**The "dataset":** there is no committed dataset binary by design. The eval framework uses **two deterministic seeded synthetic generators** committed in [`eval/generators/`](../../eval/generators/) — `graph_generator.py` (used by 5.1 + 5.3) and `trace_generator.py` (used by 5.2). Same seed → byte-identical output. Small fixtures commit to `eval/datasets/` if and when they're needed; large corpora are always generated, never committed. That decision is locked in §3 of the strategy doc; revisit only if a design partner wants to run eval against captured production traces.
+
+### Eval framework + scenarios — all landed 2026-04-27
+
+- [x] **#29 — Eval Phase 1: harness skeleton.** [`eval/runner.py`](../../eval/runner.py) + `_example` scenario + `pyproject.toml` exclusion of `eval/` from sdist + smoke test in `tests/unit/eval/`.
+- [x] **#30 — Scenario 5.1 multi-backend equivalence.** Same input → SQLite + Postgres + Neo4j → diff results. Validates that the canonical DSL Phase-2 compilers don't drift between backends in practice.
+- [x] **#31 — Scenario 5.2 synthetic traces e2e.** First retrieval-quality numbers on synthetic-but-realistic data. Three domains (software engineering, data pipeline ops, customer support); deterministic ground-truth labels per trace.
+- [x] **#32 — Scenario 5.3 populated-graph performance.** Default 1K node graph (kwargs scale up), p50/p95/p99 latency per query type per backend, recall@10 vs brute-force baseline. Threshold-driven warnings gate Phase-3 unblock items (HNSW tuning fires when recall < 0.95; UNWIND bulk path fires when ingest throughput < 100 nodes/sec).
+- [x] **#36 — Switch eval ingest to `upsert_*_bulk`.** Done; both 5.1 and 5.3 now use bulk upserts so cross-backend comparisons aren't dominated by per-row Neo4j round trips.
+
+### First live-data eval run — 2026-04-27
+
+Loaded the deterministic eval dataset (5K nodes / 20K edges / 1K embeddings, dim=16) into AuraDB Free via [`scripts/load_eval_dataset_to_aura.py`](../../scripts/load_eval_dataset_to_aura.py), then ran scenario 5.3 against the live populated graph. Status: `regress` — three Phase-3 deferred items got threshold-fired. Numbers + decision recommendations live in [`docs/design/plan-neo4j-hardening.md`](../design/plan-neo4j-hardening.md) §5.1. (Per [§7.1 of the eval strategy](../design/plan-evaluation-strategy.md), `eval/reports/` is gitignored — committed baselines are deferred until 5.1-5.4 have run cleanly several times.)
+
+**Phase 3 unblocks — all landed 2026-04-27:**
+
+- [x] **HNSW vector-index params + quantization config** ([PR #58](https://github.com/ronsse/trellis-ai/pull/58)) — `m` / `ef_construction` / `quantization` constructor kwargs on `Neo4jVectorStore`, `quantization=False` default. recall@10: 0.36 → 1.00.
+- [x] **`upsert_nodes_bulk` raw-UNWIND fast path** ([PR #60](https://github.com/ronsse/trellis-ai/pull/60)) — branches the write Cypher on whether the role-immutability pre-fetch returned overlapping rows. Standalone 5K bulk against AuraDB Free: 45 → 3643 nodes/sec, matching the loader's raw UNWIND path.
+- [x] **`db.index.vector.queryNodes` → `SEARCH` migration** ([PR #59](https://github.com/ronsse/trellis-ai/pull/59)) — Cypher 25 SEARCH clause, bumps minimum Neo4j to 2025.06. Live deprecation notifications during eval run: many → 0.
+
+**Closed-loop scenario 5.3 re-run (post-fixes):** `vector_recall_at_10.neo4j: 1.00` (was 0.36), `ingest_nodes_per_sec.neo4j: 219.86` (was 46.6), zero deprecation warnings. Detail in [`plan-neo4j-hardening.md` §5.1.1](../design/plan-neo4j-hardening.md). The remaining warn is `ingest_nodes_per_sec.sqlite: 32.4` — SQLite's `upsert_nodes_bulk` is a per-row Python loop and could use its own fast path. Separate item.
+
+**Eval framework gaps — status:**
+
+- [x] **Eval scenarios didn't honor `TRELLIS_NEO4J_DATABASE`** — fixed in [PR #56](https://github.com/ronsse/trellis-ai/pull/56).
+- [x] **Eval scenarios used per-row `vector_store.upsert()` instead of `upsert_bulk`** — surfaced after the bulk fast path landed because the per-row vector loop dominated the throughput metric. Fixed in the scenario-5.3-closure PR.
+- [ ] **pgvector dim mismatch on the shared Neon test DB.** Existing `embedding` column is `vector(3)` (provisioned by an earlier contract test); scenarios default to dim=16. pgvector does not auto-migrate. Either align scenario `embedding_dim` default to 3, or drop+recreate the column.
+- [ ] **Single vector index per `(:Node, embedding)` on AuraDB.** Unit-test fixtures own `trellis_test_node_embeddings` (dim=3); scenario 5.1 wants `trellis_node_embeddings` (dim=16). Neo4j silently no-ops the colliding CREATE; the ONLINE-wait then times out at 30s. The loader script handles this by dropping the test index. Document the cohabitation rule in [`docs/deployment/neo4j-auradb.md`](../deployment/neo4j-auradb.md).
+- [x] **SQLite `upsert_nodes_bulk` per-row Python loop — DONE.** Verified 2026-05-09: rewrite landed in [`src/trellis/stores/sqlite/graph.py:415-495`](../../src/trellis/stores/sqlite/graph.py:415) — single `executemany` plus one commit per call, branched on whether any row in the batch already has a current version. Atomicity-of-validation contract preserved via `_pre_validate_nodes_bulk` running all per-row validators (including role immutability via bulk `get_nodes_bulk`) before any write touches the DB. Closes the bottleneck flagged after the Neo4j bulk fix.
+
+### Follow-ups surfaced by C1 swarm 2026-05-15
+
+- [ ] **`EnrichmentService` silent JSON-decode + broad-except.** [`src/trellis_workers/enrichment/service.py:169`](../../src/trellis_workers/enrichment/service.py:169) (top-level `except Exception` returning `EnrichmentResult(success=False, ...)`) and lines 228, 233 (`json.JSONDecodeError` in `_parse_response` returning a failure result). Same shape as the original `_parse_candidates` pattern the C2 sweep closed, but lives outside `src/trellis/extract/` and `src/trellis_workers/learning/`. The C2 audit script classified these as GUARD (specific-catch + non-trivial body) and did not promote. Worth a follow-up when the enrichment path is wired through the new failure-telemetry analyzer. Surfaced by C1 swarm Unit C. [severity: M]
+- [ ] **Three `src/` docstrings still use "self-learning".** [`src/trellis/schemas/outcome.py:1,4`](../../src/trellis/schemas/outcome.py:1) ("OutcomeEvent schema — per-call signal for the self-learning loop" / "consumed by the self-learning loop's tuners"), [`src/trellis/stores/base/tuner_state.py:1`](../../src/trellis/stores/base/tuner_state.py:1) ("TunerStateStore — mutable working state for the self-learning loop."), [`src/trellis/ops/__init__.py:1`](../../src/trellis/ops/__init__.py:1) ("Ops helpers — raw signal recording for the self-learning loop."). Out of C1.8's scope (Done-when limited to CLAUDE.md / `docs/agent-guide/` / `docs/design/adr-*.md`); next substantive touch to each module should adopt "feedback loop" per the terminology ADR. Carve-out note added to [`adr-terminology.md`](../design/adr-terminology.md) §2.6 by C1 swarm Unit A. [severity: M]
+- [x] **`test_structlog_routes_to_stderr_not_stdout` pre-existing flake. — ROOT CAUSE FIXED 2026-08-30 by [#377](https://github.com/ronsse/trellis-ai/issues/377) (`75b892e`).** *(re-run 2026-08-31: 5/5 pass in `.ci-venv`)* ~~Fails on base SHA `2ca9584` with empty stderr — the `store_instantiated` event never reaches stderr.~~ The 2026-05-15 diagnosis was right about the area and right that it was a configuration-ordering problem: `configure_stderr_logging()` bound `sys.stderr` into structlog's **global** factory *eagerly, at call time*, so whichever stream was current when it ran was baked in for the life of the process. `75b892e` **resolves the stream lazily** instead. The same root cause is what let a single bare `CliRunner()` poison 109 tests across 23 directories — see [`swarm-handoff.md`](../design/swarm-handoff.md) §5, where the mechanism is kept as a recognisable shape. Surfaced by C1 swarm Unit A. [severity: M]
+- [ ] **C1.9 orphan-suspect modules — decision pending.** Three modules under `src/trellis_workers/` have zero `src/` production callers (only test references); 876 LOC combined. Audit document: [`docs/design/audit-trellis-workers-orphans-2026-05-14.md`](../design/audit-trellis-workers-orphans-2026-05-14.md). Per C1.6/C1.7 discipline, deletion deferred until a human decision attaches. Validate-before-deleting candidates:
+  - **`src/trellis_workers/extract/query_pattern_observer.py`** (384 LOC; re-exported from `extract/__init__.py` but never imported by `src/` — this is the Phase 3 sample extractor of [`plan-observation-entity-type.md`](../design/plan-observation-entity-type.md), landed via PR #125; "no production caller" is by plan design).
+  - **`src/trellis_workers/learning/miner.py`** (272 LOC; `PrecedentMiner` with no production callers — only docstring references in `src/trellis/extract/telemetry.py:13` and `src/trellis/stores/base/event_log.py:129`).
+  - **`src/trellis_workers/maintenance/retention.py`** (220 LOC; `RetentionWorker` / `RetentionPolicy` / `StalenessDetector` referenced nowhere in `src/`).
+
+### Then write — scenario 5.4 (the "agent improvement" curve)
+
+- [ ] **Scenario 5.4 — agent loop convergence (NOT WRITTEN, ~3 days, ~800 LOC per the strategy doc).** Synthetic agent runs N rounds of: ask for context → use it (deterministic success/failure based on whether ground-truth entities are in the pack) → record feedback. Track per-round: pack quality score, fraction of useful items, advisory generation + suppression events, parameter changes from the rule tuner. Plot score-over-rounds. **This is the scenario that produces the curve you can show people** — it's the first end-to-end exercise of the dual-loop feedback system on a controlled corpus where ground truth is known by construction. Without it, the "self-learning" claim has no evidence behind it; with it, you have a chart. Depends on #31's generators landing first.
+
+### Smaller foundation gaps surfaced 2026-04-26
+
+These are loose ends from the audit that ran with this section. None block the eval sequence above, but each is worth tracking so it doesn't get lost:
+
+- [x] **`Operation.TRACE_INGEST` exists in the registry but has no handler — STALE (closed 2026-05-15).** This entry is no longer accurate: `TraceIngestHandler` was wired into the governed pipeline by `swarm/d1-trace-ingest-decision` (commit `ec478c1`) and trace ingestion was routed through `MutationExecutor` by `swarm2/b-7-trace-bypass-sites` (commit `b143e84`). Three production surfaces submit `TRACE_INGEST` Commands today: [`src/trellis_cli/ingest.py:67`](../../src/trellis_cli/ingest.py:67), [`src/trellis_api/routes/ingest.py:47`](../../src/trellis_api/routes/ingest.py:47), [`src/trellis/mcp/server.py:641`](../../src/trellis/mcp/server.py:641). Discovered during C1 swarm by Unit A (2026-05-14) when it refused to delete the enum; entry preserved here as `[x]` so the next cleanup pass doesn't re-trip on the stale plan.
+- [ ] **No eval scenario exercises a real LLM yet.** `EnrichmentService` and the OpenAI/Anthropic providers have unit tests with mocked responses, but no end-to-end run with a live API has been measured for cost or quality on a synthetic corpus. To say anything credible about benefits, this needs to happen at least once. Budget ~$10-50 for 100 agent rounds depending on model. Lands naturally as part of running 5.4 against a real provider.
+- [ ] **No baseline / regression discipline yet.** Eval plan §7.1 explicitly defers committed baselines and regression gates until after 5.1-5.4 are usable manually — that's the right call (codifying earlier locks in the wrong shape). But for a "this got X% better" story we need this layer. Pick it up after 5.4 has run cleanly at least three times so we have variance bounds to set thresholds against.
+
+- [ ] **Advisory restoration unreachable in scenario context** — surfaced 2026-04-28 while landing scenario 5.4's regime-shift demo for [`plan-evaluation-strategy.md` §5.5.2 row 1](../design/plan-evaluation-strategy.md). The fitness loop's `auto_restore` branch in [`src/trellis/retrieve/effectiveness.py::run_advisory_fitness_loop`](../../src/trellis/retrieve/effectiveness.py) is unit-tested via manual evidence injection ([`tests/unit/retrieve/test_effectiveness.py::test_auto_restore_when_evidence_recovers`](../../tests/unit/retrieve/test_effectiveness.py)) but **cannot fire end-to-end in any organic loop** because of an architectural fence: `AdvisoryStore.list()` filters out `SUPPRESSED` advisories by default, so PackBuilder never delivers them again, so no new presentations accrue, so the fitness loop sees no rebound evidence. **Validate before fixing:** does production agent activity actually need restoration to fire automatically, or is operator-driven manual `advisory_store.restore()` the right shape? If the former, options are (a) age out failure evidence by time window (requires longer-lived corpora than synthetic scenarios produce), (b) add a dedicated "rescore-suppressed" pass that reads from EventLog directly for SUPPRESSED ids without re-delivering them, (c) change `AdvisoryStore.list()` semantics so the fitness loop sees SUPPRESSED entries while PackBuilder still doesn't. Option (c) is the smallest production-code change but warrants an ADR addendum because it splits "delivery filter" from "scoring filter". The 3 suppressions firing in scenario 5.4's regime-shift mode (measured 2026-04-28) prove suppression works; restoration is the unproven half of the §5.5.2 row 1 punch list.
+
+- [x] **File-only JSONL → `learning.scoring` bridge — closed 2026-05-15 via option (c).** Resolution per C1 swarm Unit A: `CLAUDE.md` "Two feedback paths" section rewritten — EventLog is authoritative; `pack_feedback.jsonl` is an audit log only. [`adr-dual-loop-evolution.md`](../design/adr-dual-loop-evolution.md) §8 amended to mark the file-only promote path as **rejected**. The structural-underspecification problem (`PackFeedback` missing per-item `item_type` / `source_strategy` / `category`) no longer needs solving because the file-only promote path is no longer claimed.
+
+- [x] **Attribute-based filtering on retrieval strategies — github + dbt closed 2026-05-07.** github author_attribution went 0% → 100% via edge-typed traversal (commit `44b3d17`); dbt layer_classification + test_coverage + test_cross_reference went 0% → 100% via property-based category seeds (commit `746c5b1`). The original TODO entry below is preserved for context; the remaining open work is narrower (now just multi_hop_lineage on dbt and multi_pr_series Q1 on github) and tracked under "Eval-blocked retrieval gaps after Phase E" lower in this section.
+
+- [x] **Attribute-based filtering on retrieval strategies (`SeededGraphSearch` + `KeywordSearch` + `SemanticSearch`)** — surfaced 2026-05-07 while landing the Phase D phrase-seed win on the github corpus ([`eval/runs/phase_d_2026-05-07_github_phrase_seed_extraction.json`](../../eval/runs/phase_d_2026-05-07_github_phrase_seed_extraction.json)). Three skills remain at 0% across the dbt + github corpora and **all three need attribute filtering, not seed extraction**:
+  - **github `author_attribution`** — intent "PRs authored by `app/dependabot`, not by `ronsse`" extracts user entity_ids fine but `SeededGraphSearch` has no notion of "find PRs whose `wasAttributedTo` edge points at this user". Today it returns the user node itself + raw 1-hop neighbors, with no filter on edge kind or direction.
+  - **dbt `layer_classification`** — intent "Show me all the mart-layer models" needs to filter `Dataset` entities by `properties.schema='marts'` (or `properties.tags ⊇ {'staging'}`).
+  - **dbt `test_coverage`** / **`test_cross_reference`** — intents about "not-null tests" or "relationships test" need to filter `dbt_test` entities by their `test_type` property.
+
+  **Mechanism options** (pick one or compose):
+  - (a) Extend each strategy's `filters: dict[str, Any] | None` parameter with new keys: `edge_filter={"kind": "wasAttributedTo", "target": user_eid}`, `attr_filter={"properties.schema": "marts"}`. Each backend's `query()` already supports filter-by-property predicates per [TODO Tag Filters Phase 2](#smaller-foundation-gaps-surfaced-2026-04-26). Smallest change.
+  - (b) Add a new strategy class `AttributeSearch(SearchStrategy)` that takes a structured filter object and returns matching nodes. Composes alongside existing strategies in the scenario's strategy list. Cleaner separation but more wiring.
+  - (c) Build a "category index" at corpus-load time analogous to the phrase index: phrase → set of entity_ids. The seed extractor returns the set; PackBuilder treats the set as candidates. Doesn't generalize beyond hand-curated category phrases — least architectural lift but most fragile.
+
+  **Validate before designing:** the github_corpus and jaffle_shop scenarios already have ground-truth queries that exercise exactly these three skills. Pick option (a) first since it composes with the existing phrase-seed work, run both scenarios, see whether `author_attribution` / `layer_classification` / `test_coverage` flip from 0% → ≥0.6. If they do, ship (a) and skip (b)/(c). Single round of paid embeddings ≈ $0.003 per scenario; the experiment is cheaper than the design discussion.
+
+  **Out of scope:** column-level lineage. The dbt extractor currently treats columns as opaque properties of the `Dataset` node, not as separate `:Column` entities, and that's the right call for retrieval-shaped queries (a 100-table corpus would otherwise become a 1000+ node corpus dominated by structural noise). Column-level reasoning belongs in a downstream tool that receives a packed `Dataset` and parses its `description` / `columns` properties on demand.
+
+- [x] **Consolidate eval scenario boilerplate** — landed 2026-05-09 in commit `689c7ef` ("refactor(eval): consolidate convergence-scenario boilerplate"). Shared modules now live at `eval/scenarios/_convergence_common.py` (~351 LOC), `eval/scenarios/_strategies.py` (~74 LOC), `eval/scenarios/_telemetry.py` (~85 LOC). Per-scenario reductions: `agent_loop_convergence` −231 LOC, `dbt_corpus_convergence` −336 LOC, `github_corpus_convergence` −311 LOC. Intentionally not unified: `agent_loop_convergence_real_llm` keeps its own chat+embed `_Telemetry` (shared module is embed-only); `_RoundResult` stays scenario-local because the discriminator differs (domain vs skill+difficulty).
+
+- [x] **`build_lineage_index` memoization — moved to trellis-evals TODO.md (2026-07-12).** Original note: `eval/corpora/dbt_loader.py::build_lineage_index` does per-entity BFS with no cross-entity memoization. Fine for the 21-node jaffle_shop fixture (microseconds) but worst-case O(N × E) scales poorly: a real dbt manifest with 10K+ models and depth-5–10 fan-out would cost tens of millions of edge visits at scenario setup. When a real-manifest scenario lands, refactor to a topo-sort + DP pass over the dependency DAG (computes each entity's closure in O(E) total). Same observation applies to the three separate `graph_store.query(limit=5000)` passes in `build_name_index` / `build_category_index` / `build_lineage_index` — fold to a single iteration over a pre-fetched node list.
+
+- [ ] **Eval-blocked retrieval gaps after Phase E** — surfaced 2026-05-07 as the residue from the Phase D + E phrase-seed and category-seed wins (commits `1d0dc1b`, `44b3d17`, `746c5b1`). Six of seven github skills and six of eight dbt skills now sit at 100% across the convergence scenarios. Two skills remain:
+  - **github `multi_pr_series` Q1 (47% → 75%) — DONE 2026-05-09 via SEM-1** (commit `528f594`, [`src/trellis/retrieve/semantic_seeds.py`](../../src/trellis/retrieve/semantic_seeds.py)). Path (a) was attempted on 2026-05-08 and yielded a NEGATIVE RESULT — see "GitHub corpus seed-extraction follow-ups" below. Path (b) deferred. Instead, the architectural fix landed: `SemanticSeedExtractor` embeds the intent at query time, finds top-K most-similar entity-summary docs via `SemanticSearch`, and emits their `entity_ids` as graph-traversal seeds. Composes additively with literal seed extraction (literal keeps priority; cap `SEM1_MAX_TOTAL_SEEDS=4` on the github scenario prevents pack-budget displacement). Verified: 75% coverage on PRs #29-#32 (3-of-4 required) via TF-IDF proxy embedding; real OpenAI embeddings should match or exceed (required PRs at proxy similarity ranks 3, 4, 8). 22 unit + 7 scenario-level tests. No regression on `cross_pr_lineage` or topic-content queries.
+  - **dbt `multi_hop_lineage` (0%)** — intent "What is the full upstream lineage of the customers mart?" with `required_coverage = [stg_customers, stg_orders, stg_payments, raw_customers, raw_orders, raw_payments]` — 6 entities at 0.6 threshold needs 4 in pack. Seed extraction yields `m_customers`. Depth=2 traversal returns the right subgraph (m_customers + 3 staging + 3 raw + dbt tests), but ranking + the 8-item pack budget routinely puts only 2-3 of the staging+raw layers in. Two fixes: (a) add a "lineage-of-X" category in [`eval/corpora/dbt_loader.py::build_category_index`](../../eval/corpora/dbt_loader.py) that, for any model X, precomputes the transitive closure of outbound `dependsOn` edges and indexes phrases like "upstream of X" / "lineage of X" / "ancestors of X" → that closure as seeds with `depth=0`; (b) connected-component-aware ranking in `GraphSearch` that prefers all-or-nothing inclusion when a query's seeds span a coherent component. (a) is the clean fit and matches the Phase E pattern (precompute at corpus-load time, look up at query time).
+
+- [ ] **Item-type semantics + summary-generation path — ADR-shaped lift** — surfaced 2026-04-28 while reviewing context-quality blind spots for [`plan-evaluation-strategy.md` §5.5.3](../design/plan-evaluation-strategy.md). [`PackItem.item_type`](../../src/trellis/schemas/pack.py) is free-form; the schema docstring lists `"trace, evidence, precedent, entity"` but strategies only stamp three concrete values — `"document"` ([`KeywordSearch`](../../src/trellis/retrieve/strategies.py)), `"vector"` ([`SemanticSearch`](../../src/trellis/retrieve/strategies.py)), `"entity"` ([`GraphSearch`](../../src/trellis/retrieve/strategies.py)). Summaries ride as documents with `metadata.content_type="entity_summary"`; precedents become `item_type="entity"` once retrieved despite [`Precedent` schema](../../src/trellis/schemas/precedent.py) and [`learning.scoring`](../../src/trellis_workers/learning/scoring.py) tagging them `entity_type="precedent"` upstream. Edges/links never become `PackItem`s at all (GraphSearch returns destination nodes only). Net effect: `relevance_score` is the sole ranking knob and a pack of 5 redundant precedents scores identically to a pack of `{1 summary, 1 precedent, 3 full docs}` at equal total relevance. **The lift required:** (i) a real corpus that contains *both* full documents and pre-generated summaries — the synthetic scenarios just stamp `content_type` for vibes — (ii) a sanctioned generation path (LLM worker? deterministic extractive summarizer? both?) that produces summaries from full docs and stamps them as a distinct shape, (iii) tier-mapping heuristics aligned with whatever shapes actually flow (as of #952 [`tier_mapping.py`](../../src/trellis/retrieve/tier_mapping.py) also matches the `node_type` a graph or observation row carries, so its `{"precedent","owner","team"}` and `{"trace","observation"}` rules are reachable through `GraphSearch`; no core code mints a `trace`- or `observation`-typed graph node today, and keyword/semantic items are deliberately not read that way), (iv) ~~a type-aware density dimension in [`evaluate_pack`](../../src/trellis/retrieve/evaluate.py) that scores pack composition (e.g., `expected_shapes: {"summary": 1, "precedent": ≥1, "full_doc": ≥2}`)~~ — **mechanism landed in Unit E1**: `ShapeCompositionScorer` + `EvaluationScenario.expected_shapes` + `ShapeConstraint(min_count, max_count)` ship the type-aware dimension. Scenarios opt in by setting `expected_shapes`; default `None` keeps every existing scenario at 1.0 (no-op). No production scenario has opted in yet — picking the right shape vocabulary still needs the real-corpus signal called out below. **Validate before designing:** what shape distribution do real agent packs actually need to be useful? Run scenario 5.4 against an LLM-backed enrichment for one or two real workloads, look at which item shapes the agent references vs ignores, then design the typed schema (i, ii, iii above) against that evidence. ADR addendum + likely a 5.5/5.6 follow-up scenario, not a one-PR change. Defer until at least §5.5.2 row 2 (JSONL promote / precedent generation) lands so the typed shapes have a producer.
+
+## Neo4j hardening series — all landed 2026-04-27
+
+The hardening plan ([`plan-neo4j-hardening.md`](../design/plan-neo4j-hardening.md)) was originally written as a 7-PR series. The first wave (#20-#27) ran into stale diffs against the post-`Neo4jSessionRunner` / post-bulk-methods architecture and was closed. The cleanup pass on 2026-04-27 re-landed every item against current main:
+
+- [x] **Phase 1.1 — `DriverConfig` + registry-side driver sharing** (PR #51). Production-safe driver kwargs: 30s connect timeout, pool size 100, 30s retry, keep-alive. `StoreRegistry` caches one driver per `(uri, user)` so graph + vector against the same Neo4j instance share one pool. Closes the highest-cost deferred item — calls no longer hang indefinitely on bad network.
+- [x] **Phase 1.2 — `StoreRegistry.__enter__` / `__exit__`** (PR #46). Required by the eval runner.
+- [x] **Phase 1.3 — Opt-in `validate()` Neo4j connectivity ping** (PR #52). `TRELLIS_VALIDATE_CONNECTIVITY=1` gates a per-cached-driver Bolt ping during `validate()`; failures aggregate alongside config errors in `RegistryValidationError`. Off in dev (fast restarts), on in production via env config.
+- [x] **Phase 1.4 — Vector-index ONLINE-wait after CREATE** (PR #47). Real production correctness fix; the A.1 e2e suite already paid the cost of working around this race.
+- [x] **Phase 1.5 + 2.2 — `docs/deployment/neo4j-{local,auradb}.md`** (PR #49). Local Docker + AuraDB onboarding walkthroughs, AuraDB name-is-instance-id callout, multi-writer NODE KEY constraint, troubleshooting matrices.
+- [x] **Phase 2.1 — `docs/deployment/recommended-config.yaml`** (PR #53). Three blessed shapes — local Neo4j+SQLite / cloud AuraDB+Postgres / Postgres-only — with smoke test pinning the per-block backend contract.
+- [x] **Phase 2.3 — `trellis admin migrate-graph` CLI + `src/trellis/migrate/` package** (PR #50). Backend-agnostic graph migration via the public `GraphStore` API. SQLite ↔ Postgres ↔ Neo4j without per-backend branches; idempotent on retry.
+
+## Cloud deployment — POC follow-ups
+
+- [ ] **Docker + compose smoke test** — once Docker is available on the dev host, run `docker compose up --build` and verify `/healthz`, `/readyz`, `/api/version`, `/ui/`, plus `trellis demo load` against the containerized API. Proves the Postgres+pgvector path works under the same Dockerfile ECS will use. Runbook: `docs/deployment/local-compose.md`.
+- [x] **Uvicorn log unification** — *Done 2026-04-25 (commit `58a29c3`).* `configure_logging` installs a `structlog.stdlib.ProcessorFormatter` on the root handler; uvicorn's per-logger handlers cleared so `uvicorn` / `uvicorn.error` / `uvicorn.access` all flow through the shared structlog chain. Containers now see one log shape per line in JSON mode.
+- [x] **Fail-fast config validation on startup** — *Done 2026-04-25 (commit `58a29c3`).* New `RegistryValidationError` + `StoreRegistry.validate()` walks every store_type, instantiates each, and aggregates errors into one multi-line message. `app.py` lifespan calls it after construction so missing DSNs / unset S3 buckets / plugin import failures crash startup before uvicorn accepts requests.
+- [ ] **End-to-end AWS deployment dry-run** — provision RDS + S3 + ECS in a sandbox account per `docs/deployment/aws-ecs.md`, push the image, boot the task, confirm green. Catches IAM / VPC endpoint / Secrets Manager wiring gaps the compose stack can't see.
+- [ ] **Native API-key auth (Phase 1.5)** — deferred until the VPN-only assumption breaks. Design: `TRELLIS_AUTH_MODE=off|optional|required` env toggle, Bearer tokens validated against a new `trellis_api_keys` table, scopes `read`/`write`/`admin`, wired via FastAPI `Depends` on router includes. `/api/version`, `/healthz`, `/readyz`, `/ui` stay public.
+
+## Exploratory items — needs real-data signal before next move (2026-04-25)
+
+A triage pass surfaced these as **speculative scaffolding or unwired hooks** sitting in the tree without a concrete production signal telling us what they should look like. Don't build, wire, or delete based on intuition — each one needs a real workload (or a design partner asking) to define what "done" looks like. Listed here so they're tracked, not lost.
+
+- [ ] **Workflow engine / tier-based escalation** — [`src/trellis_workers/engine/thinking.py`](../../src/trellis_workers/engine/thinking.py). `WorkflowEngine` + `WorkflowTier` (FAST / STANDARD / DEEP / CRITICAL) + `EscalationConfig` + `DEFAULT_TIERS` + `determine_initial_tier()` heuristic. Fully designed and unit-tested, **zero production callers** (only `tests/unit/workers/engine/test_thinking.py` references it). The intended consumer is something like `EnrichmentService` or a future worker that auto-escalates reasoning effort on confidence-gate failures. **Validate before wiring:** does any worker we actually run produce confidence-gate failures or low-quality outputs that would benefit from auto-escalation? Run the existing enrichment / classification workers against representative content for a week, look at the confidence distribution, and only then decide between (a) wire it up, (b) collapse to a one-shot tier and delete the engine, or (c) delete entirely. The risk of leaving it as-is: low — well-documented, no maintenance cost beyond import-graph clutter. The risk of pre-wiring without data: medium — you bake in tier thresholds and escalation policies that match nobody's real workload.
+
+- [ ] **Enrichment event-loop wiring** — [`src/trellis_workers/enrichment/service.py`](../../src/trellis_workers/enrichment/service.py). `EnrichmentService` itself is wired (used by `LLMFacetClassifier` in [`src/trellis/classify/classifiers/llm.py`](../../src/trellis/classify/classifiers/llm.py)) — what's missing is the **triggered consumer**: a scheduled sweep, on-event handler, or Claude-Code-skill that pulls fresh `TRACE_INGESTED` / `NODE_UPSERTED` events through enrichment and emits Commands back through `MutationExecutor`. ADR-deferred-cognition §4.2 lists three mechanism options and explicitly defers the choice. **Validate before wiring:** what is the actual enrichment volume on representative ingest? If it's bursty (clusters of 100+ items at once), an event-driven trigger gets backpressure right; if it's a steady trickle, scheduled sweeps are simpler and cheaper. Either way the LLM cost profile dictates the answer — measure with a real workload before designing the loop.
+
+- [ ] **Blob TTL sweep automation** — [`stores/base/blob.py:sweep_expired()`](../../src/trellis/stores/base/blob.py) is implemented in `LocalBlobStore` and `S3BlobStore` (Gap 4.4, shipped 2026-04-22), but **never called by any scheduler, CLI, or runtime**. The only callers are contract tests. **Validate before automating:** how fast do blobs accumulate and what TTL pattern do real producers use? Run a representative ingest workload for a week and look at: (a) blob count growth rate, (b) what fraction of `put()` calls actually pass a TTL vs. omit it, (c) whether S3 lifecycle rules cover the policy already. Then choose between: (i) standalone scheduled job, (ii) CLI command (`trellis admin sweep-blobs --before <date> --dry-run`) that an operator runs ad-hoc, (iii) S3-side lifecycle rules + skip the in-process sweep on cloud, (iv) all three. Without that data the choice is arbitrary.
+
+- [ ] **Graph version compaction automation** — [`stores/base/graph.py:compact_versions()`](../../src/trellis/stores/base/graph.py) is implemented in `sqlite/graph.py`, `postgres/graph.py`, `neo4j/graph.py` (Gap 4.2, shipped 2026-04-22), but **never called outside contract tests**. Same shape as blob sweep. **Validate before automating:** how fast do closed SCD-2 rows accumulate, and at what point do `as_of` queries start to degrade? Run an ingest workload that mutates entities at production cadence (re-classification, edge updates, alias additions) for a week or two against the Postgres backend, then plot `as_of` query latency vs. closed-row count. The threshold for automation is a real operational signal, not a guess. Until then: leave the API alone, don't schedule.
+
+These four items were carved out from the recent Postgres / pgvector live-test triage (2026-04-25, A.2). One sibling item — the `src/trellis/stores/sql/` Dialect prototype — was deleted outright in the same triage; it had been sitting untracked since 2026-04-22 with no callers. The above four are tracked here because they're **already in the tree** (so silent deletion would be lossy), but each represents a design question that's premature to answer without production data.
+
+## Recently Completed (2026-04-13 → 2026-04-15)
+
+The dual-loop evolution sprint landed Phases 1–4 plus follow-ons. Items previously open under Tiered Retrieval, Graph Modeling, and Advisory work are now live:
+
+- **Dual-loop Phases 1–4:** decision trail on `PACK_ASSEMBLED`, `Advisory`/`AdvisoryStore`/`AdvisoryGenerator`, advisories embedded in pack responses, `run_advisory_fitness_loop()` with confidence adjustment and suppression.
+- **Tiered Context Retrieval Phases 1–3:** `RetrievalAffinity` enum + `ContentTags.retrieval_affinity`, `SectionRequest` / `PackSection` / `SectionedPack`, `PackBuilder.build_sectioned()`, `TierMapper` with default heuristics, `format_sectioned_pack_as_markdown()`, `get_objective_context` / `get_task_context` MCP tools, SDK methods + `POST /api/v1/packs/sectioned`, tiered-retrieval + classification adoption guides.
+- **Graph Modeling Phase 2 (node_role):** `NodeRole` enum (STRUCTURAL/SEMANTIC/CURATED), `node_role` + `GenerationSpec` on `Entity` with model validator, mutation handler validation, PackBuilder filter for structural nodes.
+- **Cross-cutting:** configurable retrieval budgets per tool/domain (`BudgetConfig`), `pack_id` header in pack markdown, `item_id` / `advisory_id` citation footer, `record_feedback` accepting `helpful_item_ids` / `unhelpful_item_ids` / `followed_advisory_ids` for element-level fitness attribution.
+- **Sprint A — Close the feedback loop (2026-04-15):** exponential recency decay in retrieval strategies, `save_memory` content-hash dedup + `EventType.MEMORY_STORED`, session-aware dedup in `get_context` / `PackBuilder` with `session_id` propagated through MCP tools and `PACK_ASSEMBLED` payload, `trellis analyze pack-sections` CLI + `trellis.retrieve.pack_sections` module.
+- **Sprint B — Unblock platform integration (2026-04-15):** `POST /api/v1/ingest/bulk` endpoint, entity/edge types relaxed to open `str`.
+- **Sprint D — Credibility signals (2026-04-15):** split `ci.yml` into `lint.yml`/`typecheck.yml`/`tests.yml` + README badges (lint, typecheck, tests, MIT license), `py.typed` marker, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `make check` aggregate target.
+- **Sprint E — Deterministic capability (2026-04-15):** `Reranker` protocol + `RRFReranker` + `MMRReranker` integrated into `PackBuilder`, `MinHashIndex` (128-perm LSH) for fuzzy dedup in `save_memory`, `trellis admin graph-health` diagnostic command with role/type/leaf/orphan analysis + CI exit codes.
+
+See commits `ed3e2fd`, `f5760f6`, `66320ae`, `aaf7ccd`, `837dde6`, `d0bfd40`, `4cb78b9`.
+
+## Next Up (re-prioritized 2026-04-15)
+
+Grouped by coherent sprint, ordered by ROI given current state. Each item links into its detailed entry below.
+
+### Sprint A — Close the feedback loop (finish dual-loop sprint cleanly) — COMPLETE (2026-04-15)
+
+The advisory fitness loop just shipped but we have no operational visibility and the upstream signal quality is still weak. Close these before opening new fronts.
+
+- [x] **`trellis analyze pack-sections` CLI** — observability for the sectioned packs and advisories that just shipped. Reads `PACK_ASSEMBLED` events with `entity_type="sectioned_pack"`, reports per-section packs-count / avg-items / unique-items / empty-rate, flags frequently-empty sections. Module: `trellis.retrieve.pack_sections`.
+- [x] **Recency decay in PackBuilder scoring (P0)** — exponential decay with floor (`base * (floor + (1-floor) * 0.5^(age/half_life))`) in `KeywordSearch` / `SemanticSearch` / `GraphSearch`; half-life 30 days, floor 0.3.
+- [x] **`save_memory` dedup + event emission (P0)** — content-hash dedup via `DocumentStore.get_by_hash`; emits new `EventType.MEMORY_STORED` with doc_id, content_length, content_hash, metadata.
+- [x] **Session-aware dedup in `get_context` (P0)** — `session_id` plumbed through MCP tools and `PackBuilder.build{,_sectioned}()`; items served within 60-minute window are excluded (flat pack tracks as `RejectedItem(reason="session_dedup")`). `session_id` is now a first-class field on `Pack` / `SectionedPack` and appears in `PACK_ASSEMBLED` payload.
+- [~] ~~**`trellis analyze advisory-effectiveness` CLI**~~ — already shipped in commit `66320ae` (see `src/trellis_cli/analyze.py:295`). Struck from Sprint A.
+
+### Sprint B — Unblock platform integration
+
+- [x] **`POST /api/v1/ingest/bulk` endpoint (P0)** — shipped 2026-04-15. Accepts `entities` + `edges` + `aliases` in one request; entities and edges flow through `MutationExecutor` (audit events, per-item idempotency key); aliases route directly to `graph_store.upsert_alias` (no alias mutation operation exists yet). Strategies: `continue_on_error` (default, backfill-friendly), `stop_on_error` (halts across groups), `sequential`. Processing order entities → edges → aliases. Response reports per-group counts (`total`/`succeeded`/`failed`/`rejected`/`duplicates`/`skipped`) + per-item results. See [BulkIngestRequest](../../src/trellis_api/models.py) and [ingest_bulk()](../../src/trellis_api/routes/ingest.py). Unblocks the consumer deployment's EKS deploy.
+- [x] **EntityType/EdgeKind enum role clarification** — resolved 2026-04-15. `Entity.entity_type` and `Edge.edge_kind` relaxed from StrEnum to open `str` (previously silently rejected domain-specific values like `uc_table`, `dbt_model`, contradicting CLAUDE.md's "any string" claim). Enums retained in `schemas/enums.py` as named constants for well-known agent-centric values. Locked in by `TestEntityTypeIsOpenString` and `TestEdgeKindIsOpenString`. Docs updated: `schemas.md`, `playbooks.md`, `client-layer-inventory.md`.
+
+### Sprint C — LLM abstraction decision (ADR, not code) — COMPLETE (2026-04-15)
+
+- [x] **ADR: LLM Client Abstraction** — decided Option B: Protocol in core, reference implementations behind optional extras. `LLMClient` protocol (replaces `LLMCallable`) with `Message`/`LLMResponse`/`TokenUsage` types in `trellis.llm`. `EmbedderClient` protocol for future async paths. (A `CrossEncoderClient` Protocol was originally sketched for reranking but was removed in 2026-05 as YAGNI — re-add when the first reranker implementation lands.) Reference implementations for OpenAI and Anthropic SDKs behind `[llm-openai]`/`[llm-anthropic]` optional extras. **Clean cut:** `LLMCallable` had no production consumers — deleted outright; `EnrichmentService`/`PrecedentMiner` migrated; `EnrichmentResult` gained `usage: TokenUsage | None`. Phases 1–3 of the ADR are implemented; Phase 4 (Sprint F features) remains. See [`docs/design/adr-llm-client-abstraction.md`](../design/adr-llm-client-abstraction.md).
+
+### Sprint D — Credibility signals (interstitial, low cognitive load)
+
+Do in parallel with Sprints A–C; none of these block or conflict. See [Repository Polish & Credibility Signals](#repository-polish--credibility-signals) for the full list. Start with:
+
+- [x] Split `ci.yml` into `lint.yml` / `typecheck.yml` / `tests.yml` + badges — done 2026-04-15.
+- [x] `py.typed` marker + License badge — done 2026-04-15.
+- [ ] Enable GitHub Discussions + topics
+- [x] CONTRIBUTING.md + Code of Conduct + SECURITY.md — done 2026-04-15.
+
+### Sprint E — Deterministic capability (safe to start pre-LLM-decision) — COMPLETE (2026-04-15)
+
+- [x] **Reranker protocol + RRF/MMR** — `Reranker` ABC in `retrieve/rerankers/base.py`, `RRFReranker` (reciprocal rank fusion across strategy lists), `MMRReranker` (maximal marginal relevance with text-overlap diversity). PackBuilder accepts optional `reranker` parameter, applied after dedup/filters, before budget enforcement. Telemetry includes reranker name. 23 tests.
+- [x] **MinHash/LSH deterministic dedup stage** — `MinHashIndex` in `classify/dedup/minhash.py` with configurable permutations (128), LSH banding (16 bands), Jaccard threshold (0.85), entropy filter. Integrated into `save_memory` MCP tool as stage 2 dedup (after exact hash, before store). 16 tests.
+- [x] **`trellis admin graph-health` diagnostic** — role distribution, top entity types, leaf-node analysis, orphan detection. Warning signals for structural dominance, type imbalance, semantic leaves, missing curated nodes. Supports `--entity-type`, `--role`, `--format json`. Exit codes 0/1/2 for CI. 10 tests.
+
+### Sprint F — Unblocked (Sprints A + C complete)
+
+- **LLM Client Protocols + Reference Implementations (Phases 1–3 of ADR)** — DONE. `trellis.llm` package shipped: `LLMClient` and `EmbedderClient` protocols + types + OpenAI/Anthropic providers + `EnrichmentService`/`PrecedentMiner` migrated. `LLMCallable` deleted (no production callers). (A `CrossEncoderClient` Protocol was sketched originally but removed in 2026-05 as YAGNI — re-add when an LLM-based reranker lands.) See [`docs/design/adr-llm-client-abstraction.md`](../design/adr-llm-client-abstraction.md).
+- **Pack Quality Evaluation Framework** — cleaner to build now that Sprint A observability reveals where real gaps are.
+- **Tiered Extraction Pipeline — Phase 1 DONE (2026-04-15).** Shipped `trellis.extract` core (`Extractor` Protocol, `ExtractorTier`, `ExtractionContext`, `ExtractionDispatcher` with event telemetry, `ExtractorRegistry`, `JSONRulesExtractor`) + `EntityDraft`/`EdgeDraft`/`ExtractionResult` schemas + `EXTRACTION_DISPATCHED` event. `DbtManifestExtractor` and `OpenLineageExtractor` ported to `trellis_workers.extract` (pure — no I/O, no store writes). Old `IngestionWorker` base + `dbt.py` + `openlineage.py` deleted. CLI `trellis ingest dbt-manifest` / `openlineage` now route through `MutationExecutor` (governed writes).
+- **Tiered Extraction Pipeline — Phase 2 DONE (2026-04-15 → 2026-04-16).** Steps 1–9 all shipped. See [Tiered Extraction Pipeline — Phase 2 Plan](#tiered-extraction-pipeline--phase-2-plan) below for the per-step record. Scope broadened beyond the original LLM-only framing to lead with deterministic wins first — preserved the "deterministic options for the write" differentiator (LLM-tier extractors are additive, opt-in (`allow_llm_fallback=False` by default), never a silent replacement for rules). Future Tiered-Extraction work (graduation tracking, LLM-assisted dedup, self-learning classification) should branch off its own plan section.
+- **Graph Modeling Phase 4 (`trellis curate list/show/regenerate/edit/diff`)** — note: `trellis curate` namespace exists but hosts mutation commands (promote/link/label/entity/feedback), not the curation-workflow commands in the Phase 4 plan. Either rename one or the other; decide before building.
+
+### Deprioritized / deferred
+
+- ~~**`LLMExtractor`, `SaveMemoryExtractor`, `HybridJSONExtractor`**~~ — **SHIPPED** 2026-04-16 in Phase 2 Steps 4–6 (composition won — factory `build_save_memory_extractor` instead of a dedicated class).
+- **LLM-based rerankers + `CrossEncoderClient`** — re-add the ~16-LOC Protocol alongside the first implementation (it was removed in 2026-05 as YAGNI — see ADR §2.5).
+- ~~**Prompt library pattern**~~ — **SHIPPED (minimal)** 2026-04-16 in Phase 2 Step 3 — `PromptTemplate` + `render()` + two templates. Full Jinja2-based registry still deferred; three prompts against `str.format` is below the complexity threshold.
+- **LLM-assisted dedup for `save_memory`** — [unblocked: `EmbedderClient` protocol ships today; needs async embedding path before wiring]
+- **Self-Learning Classification** — depends on sufficient `ENRICHMENT_COMPLETED` volume; revisit once LLM tier is live.
+- **Native graph backend (Neo4j/Memgraph)** — P3, only when graphs exceed ~100K edges and need 4+ hop traversal.
+- **More Framework Integrations (CrewAI, AutoGen)** — defer until LangGraph integration validates the pattern.
+
+### Housekeeping
+
+- [x] Normalize `trellis` → `trellis` / `trellis` throughout this TODO (done 2026-04-15; badge URLs use `trellis-ai` as the PyPI package name).
+- [x] Fold "Observation Pipeline" into "Tiered Extraction Pipeline" — done 2026-04-15 via cross-reference note on the Observation Pipeline section.
+
+---
+
+## Logic Gaps — Core Loop Audit (2026-04-20)
+
+Gaps identified in a structured audit of context handling, the learning loop, context curation, and storage & retrieval. Each item is a concrete, observable weakness in the ingest → tag → retrieve → feedback → learn cycle. Ranked priority at the bottom. **These are production-experience-store concerns, not POC blockers** — defer any single item that a design partner hasn't pushed on, per POC-stage scope discipline.
+
+### Priority ranking (top 5 by loop impact)
+
+1. ~~**4.1 — Idempotency cache silent reset**~~ — *Done 2026-04-20.*
+2. ~~**2.3 — JSONL ↔ EventLog divergence**~~ — *Done 2026-04-20.*
+3. ~~**2.1 — Advisory suppression is terminal**~~ — *Done 2026-04-20.*
+4. ~~**1.1 — Tag drift / no reclassification path**~~ — *Done 2026-04-20.*
+5. ~~**3.2 — Dedup by `item_id` only**~~ — *Done 2026-04-20.*
+6. ~~**2.4 — Advisory fitness drift detection**~~ — *Done 2026-04-20.*
+
+**ALL Core Loop Audit gaps closed as of 2026-05-09.** Original top-5 + 1.2 + 1.3 + 2.2 + 2.4 + 3.1 + 3.3 + 3.4 + 3.5 + 4.2 + 4.3 + 4.4 + 4.5 complete. The 1.3 + 3.5 + 4.5 close-outs landed in swarm 3 (B-6 schema fingerprint, I-1 extraction validation, I-2 importance freshness).
+
+### Area 1 — Context handling (ingest + classify)
+
+- [x] **1.1 Tag drift — no re-classification as graph context grows.** *Fixed 2026-04-20.* `ContentTags` gained a `classified_at: datetime | None` stamp, set automatically by `MergedClassification.to_content_tags()` and by `apply_noise_tags()` so every tag mutation leaves a freshness marker. New [`classify/refresh.py`](../../src/trellis/classify/refresh.py) module exposes `reclassify_item(item_id, pipeline, document_store, ...)` and `reclassify_stale(..., max_age_days=30)` — programmatic entry points that re-run the pipeline against stored items, emit `EventType.TAGS_REFRESHED` with before/after diffs, and preserve prior tags when the fresh pipeline produces no signal (avoids a regression wiping good classifications). Context builder is pluggable so callers can inject graph-neighbor signals; default extracts `source_system`/`title`/`existing_tags` from metadata. Shipped: [`schemas/classification.py`](../../src/trellis/schemas/classification.py), [`classify/protocol.py`](../../src/trellis/classify/protocol.py), [`classify/refresh.py`](../../src/trellis/classify/refresh.py), [`classify/feedback.py`](../../src/trellis/classify/feedback.py), [`stores/base/event_log.py`](../../src/trellis/stores/base/event_log.py). 17 new tests. **Deferred:** automated scheduling of `reclassify_stale()` and graph-neighbor context auto-injection — both land cleanly on top of this once a consumer pushes.
+- [x] **1.2 Silent classifier-mode switch — AUDIT-CLOSED, no code change.** Verified 2026-05-09: swarm B6's audit decision is recorded in [`src/trellis/classify/pipeline.py:1-15`](../../src/trellis/classify/pipeline.py:1). Mode is not a runtime-mutable flag — it is deterministically derived from whether `llm_classifier` was supplied at construction. There is no in-process flip to observe, so no new `CLASSIFIER_MODE_CHANGED` event is needed. Per-item mode observation is already covered: the pipeline stamps `MergedClassification.mode` on every result, propagated to `ContentTags.classified_mode`, which rides inside the `after` payload of every `EventType.TAGS_REFRESHED` event from `classify.refresh`. Operators wanting "what mode classified this item" should read `after.classified_mode` from the refresh event or the persisted `content_tags`.
+- [x] **1.3 Malformed-trace / orphaned-entity validation — DONE 2026-05-09.** Per [`docs/design/adr-extraction-validation.md`](../design/adr-extraction-validation.md) (Accepted) + commit `c1f2679`. New `ExtractionValidator` Protocol in [`src/trellis/extract/validators.py`](../../src/trellis/extract/validators.py) with three default validators (`EmptyResultValidator`, `OrphanProvenanceValidator`, `DraftLocalReferenceValidator`). When any validator fires, `ExtractionDispatcher.dispatch()` quarantines the original entities/edges into `unparsed_residue["rejected_by_validators"]`, returns an empty `ExtractionResult`, and emits `EXTRACTION_REJECTED` event — no Commands flow downstream. Plus Variant A′: `LinkCreateHandler.ValidationError` now routes through `MutationExecutor._emit_rejection` with `reason="orphan_edge"`. `analyze_extraction_validation()` aggregator for per-source trend telemetry. No fallback paths (greenfield enforcement).
+
+### Area 2 — Learning loop (feedback + advisories + parameter tuning)
+
+- [x] **2.1 Advisory suppression is terminal — no restoration path.** *Fixed 2026-04-20.* `Advisory` gained `status: AdvisoryStatus (ACTIVE | SUPPRESSED)` + `suppressed_at` + `suppression_reason`. `AdvisoryStore` gained `suppress(id, reason)` / `restore(id)` (both idempotent) and `list()` excludes suppressed by default with `include_suppressed=True` opt-in. `run_advisory_fitness_loop()` no longer hard-deletes — it soft-suppresses failing advisories and **auto-restores** suppressed ones whose confidence climbs above `suppress_below + _RESTORE_HYSTERESIS` (0.05). New `EventType.ADVISORY_SUPPRESSED` / `ADVISORY_RESTORED` events give the audit trail. Report gained `advisories_restored: list[str]`. `remove()` kept for manual admin cleanup. Shipped: [`schemas/advisory.py`](../../src/trellis/schemas/advisory.py), [`stores/advisory_store.py`](../../src/trellis/stores/advisory_store.py), [`retrieve/effectiveness.py`](../../src/trellis/retrieve/effectiveness.py), [`stores/base/event_log.py`](../../src/trellis/stores/base/event_log.py). 17 new tests; all 1691 unit tests pass. **Known limitation:** auto-restore only fires when the suppressed advisory still has presentations in the analysis window — if it's starved of packs (because it's suppressed), restoration requires operator action via `advisory_store.restore(id)` or a shadow-eval mode (future work).
+- [x] **2.2 No automatic rollback for promoted parameters.** *Fixed 2026-04-22.* New [`learning/tuners/rollback.py`](../../src/trellis/learning/tuners/rollback.py) closes the loop on top of `promote_proposal()`. `monitor_post_promotion(params_version, ...)` resolves the promoted snapshot, looks up its `PARAMS_UPDATED` event to recover `baseline_version` + promotion timestamp, queries `OutcomeStore` for post-promotion and equivalent-window baseline outcomes, and compares success rates. When post samples reach `min_samples_post_promote` (default 20) and the drop exceeds `regression_threshold` (default 0.10 absolute), a new `EventType.PARAMETERS_DEGRADED` event fires. With `PostPromotionPolicy(auto_demote=True)` a rollback `ParameterSet` (source="tuner:rollback", restoring baseline values) is written and emits a companion `PARAMS_UPDATED` carrying `reverted_from=params_version` so audit stays intact — `run_post_promotion_sweep()` skips events with that marker so a rollback cannot itself be demoted. Verdict space is explicit: `ok`, `degraded`, `insufficient_samples`, `no_baseline`, `no_promotion_event`, `unknown_version`; actions are `none`, `event_only`, `demoted`. Signal-only is the default — matches Gap 2.4's posture; auto-demote is a one-line opt-in once an operator trusts the signal on their traffic. Shipped: [`stores/base/event_log.py`](../../src/trellis/stores/base/event_log.py), [`learning/tuners/rollback.py`](../../src/trellis/learning/tuners/rollback.py), [`learning/tuners/__init__.py`](../../src/trellis/learning/tuners/__init__.py). 13 new tests covering every verdict + action path; all 1868 unit tests pass. **Deliberately deferred:** shadow-evaluation mode (serve both snapshots in situ and compare online) — larger design, no design partner pushing today; latency / cost signals beyond success rate; auto-scheduled sweep loop (stays manual until a concrete consumer needs it).
+- [x] **2.3 JSONL feedback file and EventLog can silently diverge.** *Fixed 2026-04-20.* `PackFeedback` now carries a ULID `feedback_id` that bridges the JSONL append and the `FEEDBACK_RECORDED` event. `record_feedback()` returns a `FeedbackRecordResult` with per-sink emission status + captured error, so in-process callers can detect divergence immediately (no more silent fail-soft). EventLog emission is idempotent: the same `feedback_id` on replay reports `event_log_skipped_as_duplicate=True` and does not double-count. `reconcile_feedback_log_to_event_log(log_dir, event_log)` backfills missing entries from the JSONL file — safe to run repeatedly. Shipped: [`feedback/models.py`](../../src/trellis/feedback/models.py), [`feedback/recording.py`](../../src/trellis/feedback/recording.py). 11 new tests. Priority list top-5 is now 2.1 / 1.1 / 3.2 / 2.4 / 4.3 (with 4.1 + 2.3 landed).
+- [x] **2.4 Advisory fitness loop has no stopping criterion or drift detection.** *Fixed 2026-04-20.* `analyze_advisory_effectiveness()` / `run_advisory_fitness_loop()` gained a `drift_window_days: int | None = 7` parameter. When set and smaller than `days`, the analyser runs a second aggregation over the recent sub-window and flags advisories whose fitness diverges materially via two stateless patterns: `regime_shift_decline` (recent success_rate dropped ≥ 0.25 vs. full window) and `lift_sign_flip` (full lift and recent lift have opposite signs with `|recent_lift| ≥ 0.1`). Regime-shift wins when both fire — stronger operational signal. New `AdvisoryDriftAlert` model on `AdvisoryEffectivenessReport.advisories_drifting`, new `EventType.ADVISORY_DRIFT_DETECTED` event emitted per alert by the fitness loop (fail-soft). Signal-only by design: drift does **not** gate confidence updates or suppression — the smoothed blend still runs — because auto-halting tuning on drift alerts is scope-creep without a design partner asking for it (POC discipline). Auto-rollback on post-promotion degradation (gap 2.2) remains the separate, complementary piece. Shipped: [`schemas/effectiveness.py`](../../src/trellis/retrieve/effectiveness.py), [`stores/base/event_log.py`](../../src/trellis/stores/base/event_log.py). 9 new tests; all 1766 unit tests pass.
+
+### Area 3 — Context curation (pack builder + retrieval)
+
+- [x] **3.1 Token-budget estimate is off at boundaries.** *Fixed 2026-04-21.* New [`retrieve/token_counting.py`](../../src/trellis/retrieve/token_counting.py) introduces a pluggable `TokenCounter` Protocol + `HeuristicTokenCounter` default (matches the prior 4-chars-per-token behavior). `PackBuilder` gained three opt-in kwargs: `token_counter` (swap in tiktoken/anthropic/etc.), `token_budget_safety_margin: float` (fractional headroom subtracted from `max_tokens` before the greedy walk — guards against estimator under-counting overflowing the real window; `0.0` preserves prior behavior, floor of 1 token for pathological small budgets), and `token_budget_validator: TokenCounter | None` (optional second-pass accurate counter whose totals + delta land in telemetry alongside the estimator's). `PACK_ASSEMBLED` payloads now include `token_counter`, `token_budget_safety_margin`, `token_budget_effective`, `token_total_estimated`, and — when a validator is configured — `token_counter_validator`, `token_total_validated`, `token_count_delta`, `token_count_delta_pct` (plus a `token_budget_overrun_detected` structlog warning when the validated total exceeds `max_tokens`). Same telemetry on `build_sectioned()` aggregated across sections. Validator exceptions are logged and swallowed — post-hoc validation never breaks assembly. Shipped: [`retrieve/token_counting.py`](../../src/trellis/retrieve/token_counting.py), [`retrieve/pack_builder.py`](../../src/trellis/retrieve/pack_builder.py), [`retrieve/__init__.py`](../../src/trellis/retrieve/__init__.py). 14 new tests (4 counter protocol, 10 PackBuilder integration); all 1846 unit tests pass. No core dependency added — tokenizer adapters live in caller code and plug in via the Protocol.
+- [x] **3.2 Dedup by `item_id` only; no semantic equivalence.** *Fixed 2026-04-20.* `PackBuilder` gained an opt-in `semantic_dedup: SemanticDedupConfig | None = None` constructor arg. When configured, both `build()` and `build_sectioned()` run a new `_semantic_dedup_tracked()` stage after exact item_id dedup: orders items by relevance_score descending, feeds excerpts through `MinHashIndex` (default 128 perms / 16 bands / 0.85 Jaccard threshold), rejects near-duplicates with `reason="semantic_dedup"`. The entropy filter (`min_shingles=5`) prevents false-positive dedup on trivially short excerpts ("TBD", citation stubs). `PACK_ASSEMBLED` telemetry gained `semantic_dedup_enabled` + `semantic_dedup_rejected` fields so tuners can see its effect. Disabled by default — POC-safe backward compat. Shipped: [`retrieve/pack_builder.py`](../../src/trellis/retrieve/pack_builder.py), [`retrieve/__init__.py`](../../src/trellis/retrieve/__init__.py). 9 new tests; all 1717 unit tests pass.
+- [x] **3.3 Tag filters are AND-only; no OR, no negation — DONE (single-facet operator dict shape, AND-only by design).** *Fixed 2026-05-09 in commit `2b7c153`.* New [`stores/base/tag_filters.py`](../../src/trellis/stores/base/tag_filters.py) `normalize_facet_filter()` accepts a single-key operator dict per facet: `{"in": [...]}` / `{"not_in": [...]}` / `{"eq": x}` / `{"ne": x}`. Empty list opts out of the facet. SQLite + Postgres document stores wire the parser into query paths (`not_in` branches to SQL `NOT IN`; default-pass for untagged items preserved). PackBuilder default for `signal_quality` flips from enumerated allowlist `["high","standard","low"]` to direct negation `{"not_in": ["noise"]}` — robust if new signal_quality values are added later. **OR/NOT/nesting deliberately not supported**: callers compose multi-facet filters at call site; this parser handles one facet's operator shape only. The `signal_quality != noise` case (cited in the original gap) is now expressible directly. 26 new tests; document_store + pack_builder tests extended.
+- [x] **3.4 `PACK_ASSEMBLED` telemetry produced but not closed-loop consumed.** *Fixed 2026-04-21.* New [`retrieve/telemetry.py`](../../src/trellis/retrieve/telemetry.py) module consumes rejection / budget / strategy signals from `PACK_ASSEMBLED` payloads. `analyze_pack_telemetry(event_log, days=N)` returns `PackTelemetryReport` with budget-saturation rates (`max_items_hit_rate`, `max_tokens_hit_rate`, `any_budget_hit_rate`), rejection-reason distribution (counts + shares), per-strategy yield with top rejection reasons, and narrative findings (`>50%` budget hit → raise budget/tighten ranking; `<25%` yield on a strategy with ≥20 samples → investigate). `trellis analyze pack-telemetry` CLI wraps the analyzer with Rich tables + `--format json`. 9 new tests. Deliberately read-only — proposing budget/ranking parameter changes from these signals is a separate tuning rule that can land in `RuleTuner` when needed.
+- [x] **3.5 Stale importance scores — DONE 2026-05-09.** Per [`docs/design/adr-importance-score-freshness.md`](../design/adr-importance-score-freshness.md) (Accepted) + commit `7f62fb1`. `ContentTags` gains `importance_scored_at: datetime | None`. Three writer paths now stamp it: `EnrichmentService.enrich()` (LLM scoring), `reclassify_item()` (re-derives via `compute_importance(base_importance=prior)` to preserve LLM contribution), and `apply_noise_tags()` (signal_quality changes alter the score). Read-path `_apply_importance` rewritten with freshness-aware decay: scores ≥ 0.5 past the 180-day horizon decay with the same half-life math as recency decay, capped at floor 0.3, tunable per domain via `ParameterRegistry`. Greenfield writer contract — missing stamp on items with `auto_importance > 0` raises `ValueError` (no fallback to `classified_at`).
+
+### Area 4 — Storage & retrieval mechanisms
+
+- [ ] **4.1 Idempotency cache silent reset.** [`mutate/executor.py:126-130`](../../src/trellis/mutate/executor.py:126) `_seen_idempotency_keys` is an in-memory set capped at 10k with `.clear()` on overflow. Safe when `event_log` is attached (line 115 falls through to `has_idempotency_key()`), but when no event_log is configured, post-reset duplicate commands execute undetected. Also: no warning emitted, no metric, no FIFO eviction. Production risk for long-running workers without an event log. **→ Fix in progress 2026-04-20.**
+- [x] **4.2 Temporal versioning has no retention or compaction.** *Fixed 2026-04-22.* `GraphStore` gained `compact_versions(before, *, dry_run=False, event_log=None) -> CompactionReport` — closed SCD2 rows (`valid_to IS NOT NULL AND valid_to < before`) are dropped from `nodes`, `edges`, and `entity_aliases` in a single transaction; current rows (`valid_to IS NULL`) are never touched. New `CompactionReport` schema carries per-table counts, the `valid_to` range of compacted rows, a `dry_run` flag, and `duration_ms` — dry runs return the same report shape without modifying the store so operators can preview impact. New [`EventType.GRAPH_VERSIONS_COMPACTED`](../../src/trellis/stores/base/event_log.py) is emitted when an `event_log` is provided (dry runs emit too, with `dry_run=True` in the payload, so previews are observable). Base class exposes the API as a concrete method that raises `NotImplementedError`, letting backends opt in incrementally — `SQLiteGraphStore` and `PostgresGraphStore` both ship implementations. Shipped: [`schemas/graph.py`](../../src/trellis/schemas/graph.py), [`stores/base/graph.py`](../../src/trellis/stores/base/graph.py), [`stores/base/event_log.py`](../../src/trellis/stores/base/event_log.py), [`stores/sqlite/graph.py`](../../src/trellis/stores/sqlite/graph.py), [`stores/postgres/graph.py`](../../src/trellis/stores/postgres/graph.py). 9 new SQLite tests + 2 Postgres tests (gated on `TRELLIS_TEST_PG_DSN`); all 1855 unit tests pass. **Deliberately deferred:** `archive_before(ts)` (cold-storage handoff via BlobStore) and `keep_latest_n` retention — both compose cleanly on top of `compact_versions` once a design partner pushes. Compaction remains a manual API call — a scheduler / auto-compaction loop is also out of scope until a concrete consumer needs it.
+- [x] **4.3 Extractor tier fallback is opaque.** *Fixed 2026-04-21.* New `EventType.EXTRACTOR_FALLBACK` + dispatcher instrumentation. [`ExtractionDispatcher`](../../src/trellis/extract/dispatcher.py) now emits `EXTRACTOR_FALLBACK` in two cases: (1) `prefer_tier_override` — `ctx.prefer_tier` causes a lower-priority tier to be selected over a higher-priority match; (2) `empty_result` — chosen extractor ran but produced no entities and no edges (strongest single graduation signal: "deterministic silently fails for this source"). Payload carries `source_hint`, `chosen_extractor`, `chosen_tier`, `skipped_tier`, `reason`. New [`trellis.extract.telemetry`](../../src/trellis/extract/telemetry.py) module with `analyze_extractor_fallbacks(event_log, days=N)` producing `ExtractorFallbackReport` — overall rate, reason counts, per-source aggregates, and findings flagging sources with ≥50% fallback rate over ≥10 dispatches (graduation candidates for `empty_result`, callsite audit for `prefer_tier_override`). `trellis analyze extractor-fallbacks` CLI wraps the analyzer with Rich tables + `--format json`. 13 new tests (5 dispatcher emission, 8 analyzer). Dispatcher does **not** auto-retry on failure — the events mark sources for human review, not silent tier escalation.
+- [x] **4.4 Blob-store GC absent.** *Fixed 2026-04-22.* `BlobStore.put()` gained an optional keyword-only `expires_at: datetime | None = None`; when set, it's persisted under the reserved metadata key `BLOB_EXPIRES_AT_KEY` ("trellis_expires_at") so the two backends agree without magic strings. New `BlobStore.sweep_expired(before=None, *, prefix="", dry_run=False, event_log=None) -> BlobGCReport` drops blobs whose TTL is strictly earlier than the cutoff — `before` defaults to `utc_now()`. `BlobGCReport` carries `swept`, `skipped_no_ttl`, `skipped_not_yet_expired`, `errors`, `dry_run`, and `duration_ms`; dry runs return the same shape without deletes so operators can preview impact. New [`EventType.BLOB_GC_SWEPT`](../../src/trellis/stores/base/event_log.py) is emitted when an `event_log` is provided (dry runs emit too). Both `LocalBlobStore` (reads TTL from the JSON meta sidecar) and `S3BlobStore` (reads TTL from object Metadata via `head_object`) ship implementations; malformed TTLs + failed deletes count as `errors` and the sweep continues — fail-soft by design. Base class exposes the API as a concrete method that raises `NotImplementedError`, letting other backends opt in incrementally. Shipped: [`schemas/blob.py`](../../src/trellis/schemas/blob.py), [`stores/base/blob.py`](../../src/trellis/stores/base/blob.py), [`stores/local/blob.py`](../../src/trellis/stores/local/blob.py), [`stores/s3/blob.py`](../../src/trellis/stores/s3/blob.py), [`stores/base/event_log.py`](../../src/trellis/stores/base/event_log.py). 20 new tests (14 LocalBlobStore, 6 S3BlobStore); full suite 1888 passed. **Deliberately deferred:** count-based retention (keep latest N per prefix), scheduled sweep loop, S3-lifecycle-rule integration (operators can run bucket policies in parallel), and eviction-by-size quotas — all compose cleanly on top once a concrete consumer needs them.
+- [x] **4.5 Schema fingerprint on substrate switch — DONE 2026-05-09.** Per swarm 3 commit `df42896`. `StoreRegistry.validate()` now computes a per-store `(plane, store_kind, substrate_class_name, SCHEMA_VERSION)` fingerprint, persists it to `stores_dir/_trellis_meta.json` on first boot, and raises `ConfigError` on mismatch (with a clear migration-window message pointing operators at `TRELLIS_SKIP_FINGERPRINT_CHECK=1`). Mirrors the on-by-default shape of `_check_embedding_dim_consistency`. Substrate base classes (`SQLiteStoreBase`, `PostgresStoreBase`) declare `SCHEMA_VERSION="1"`; future schema migrations bump the constant. Follow-up: per-substrate metadata read/write paths (Postgres `_trellis_meta` row, Neo4j `(:_TrellisMeta)` node, S3 `_trellis_meta.json` blob) for all-remote deployments where there's no local `stores_dir`.
+
+---
+
+## Tiered Extraction Pipeline — Phase 2 Plan
+
+Started 2026-04-15. **Deterministic-first sequencing** — the core value proposition is that writes have deterministic options; LLM paths are additive, never substituted silently. All extractors route drafts through `MutationExecutor` (governed writes). The dispatcher already enforces tier priority `DETERMINISTIC > HYBRID > LLM` with `allow_llm_fallback=False` as the default.
+
+### Step 1 — `JSONRulesExtractor` ancestor edges — DONE (2026-04-15)
+
+Closes the Phase 1 promise (*"Nested / ancestor-tracking edges will follow in Phase 2"* from [json_rules.py](../../src/trellis/extract/json_rules.py)).
+
+- `EdgeRule` has two modes: `source_field` (field-reference, existing) or `via_ancestor=True` (new). `@model_validator` enforces exactly one.
+- `_walk` now yields `(item, trail)` where trail is the tuple of wildcard-matched ancestors, outer→inner.
+- `_apply_ancestor_edge_rule` uses object-identity matching on the trail; closest matching ancestor wins.
+- Internal `_EntityMatch` dataclass carries the trail alongside each draft.
+- 5 new tests: column→table nesting, closest-ancestor selection, missing-ancestor skip, both validator failure modes. All 41 extract tests pass, ruff + mypy clean.
+
+### Step 2 — `AliasMatchExtractor` (deterministic, `save_memory` path) — DONE (2026-04-16)
+
+Shipped in [`src/trellis/extract/alias_match.py`](../../src/trellis/extract/alias_match.py). Tier=`DETERMINISTIC`, supported_sources=`["save_memory"]`.
+
+- Default mention pattern matches `@word` (configurable via `mention_pattern`).
+- Injected `alias_resolver: Callable[[str], list[str]]` keeps `trellis.extract` decoupled from `GraphStore`. The MCP wiring layer (Step 7) provides the concrete hookup.
+- Accepts either plain `str` or `dict` with `{"text", "doc_id"}`. Without a `doc_id`, no edges are emitted.
+- **No `EntityDraft` for matches** — the resolver returns IDs of entities that already exist; emitting drafts with `entity_type="unknown"` would clobber real metadata. Only `EdgeDraft` (`<doc_id>-[mentions]->(<entity_id>)`) is produced.
+- **Ambiguous mentions (resolver returns >1) skip silently** — deterministic extractor refuses to guess; the mention goes to residue for the LLM-tier fallback.
+- Residue strategy: no mentions → full text; partial resolution → `{"text", "unmatched_mentions": [...]}`; all resolved → `None`.
+- 18 tests cover contract, input shapes, resolution paths, customization, metadata. All 59 extract tests pass.
+- Resolved the open question on the resolver signature: stayed with `Callable[[str], list[str]]` (per-alias lookup, extractor does the parsing) rather than `(text) -> list[(id, span)]` (resolver does both). The simpler signature composes better with whatever name-lookup the MCP layer builds.
+
+### Step 3 — Prompt scaffolding — DONE (2026-04-16)
+
+Shipped in [`src/trellis/extract/prompts/`](../../src/trellis/extract/prompts/):
+
+- `prompts/base.py` — `PromptTemplate` (frozen dataclass: `name`, `version`, `system`, `user_template`) + `render()` helper that normalizes optional inputs (`entity_type_hints`, `edge_kind_hints`, `domain`, `source_system`) into template variables so templates can reference them unconditionally.
+- `prompts/extraction.py` — `ENTITY_EXTRACTION_V1` (generic entity+edge extraction) and `MEMORY_EXTRACTION_V1` (mention-focused, no-edges mode for `save_memory`).
+- No Jinja2 dependency — plain `str.format` as planned. `expected_schema` embedded in the system prompt text instead of as a separate field (YAGNI). 13 tests.
+
+### Step 4 — `LLMExtractor` — DONE (2026-04-16)
+
+Shipped in [`src/trellis/extract/llm.py`](../../src/trellis/extract/llm.py). Tier=`LLM`.
+
+- Consumes `LLMClient.generate()`; defaults to `ENTITY_EXTRACTION_V1` but accepts any `PromptTemplate`.
+- Budget-aware: `context.max_llm_calls == 0` short-circuits before any network call, returning `llm_calls=0`, `tokens_used=0`, `unparsed_residue=text`.
+- Tolerant JSON parsing via `_parse_json_tolerant`: strips markdown fences (``` / ```json), tries full-string parse, falls back to widest-brace-span extraction for models that emit prose around the JSON. Bare arrays are lifted to `{"entities": [...], "edges": []}`. Failure → `entities=[], edges=[], unparsed_residue=response.content, overall_confidence=0.0` — never raises.
+- Populates `llm_calls=1` and `tokens_used=response.usage.total_tokens if response.usage else 0`.
+- Per-draft validation: entities without `entity_type` or `name` are dropped; edges without all three of `source_id`/`target_id`/`edge_kind` are dropped; confidences are clamped to `[0.0, 1.0]`; non-dict `properties` defaults to `{}`. Malformed individual entries don't tank the whole result.
+- All drafts get `node_role=NodeRole.SEMANTIC` (LLM output is never structural — enforces the graph-modeling invariant).
+- 23 tests.
+
+### Step 5 — `HybridJSONExtractor` — DONE (2026-04-16)
+
+Shipped in [`src/trellis/extract/hybrid.py`](../../src/trellis/extract/hybrid.py). Tier=`HYBRID`. Composes any two `Extractor` instances.
+
+- **Deterministic-first is load-bearing.** Skips the LLM stage entirely when `det.overall_confidence >= threshold` and `det.unparsed_residue is None`.
+- **Budget gates are explicit.** Because HYBRID tier isn't gated by `allow_llm_fallback` at the dispatcher, the wrapper enforces it itself. `allow_llm_fallback=False`, `max_llm_calls=0`, and missing context all skip LLM with a structlog warning (never silent).
+- **Deterministic wins in merges.** Entity dedup key = `(entity_type, entity_id or name)`; edge dedup key = `(source_id, target_id, edge_kind)`. Confidence = min of the two stages when both contribute.
+- **Residue selector composes cleanly.** Default selector promotes string residue to `{doc_id, text}` when the original input had a `doc_id`, preserves dict residue with `doc_id` merged in, and falls through to `raw_input` for unknown shapes. Overridable via `residue_selector: Callable[[Any, ExtractionResult], Any]`.
+- **Provenance preserved.** `extractor_used` and `provenance.extractor_name` both become `"hybrid(<det_name>+<llm_name>)"` so effectiveness analysis can attribute output correctly.
+- 15 tests covering short-circuit, LLM-for-residue (including doc_id preservation), all three budget gates, entity/edge dedup, confidence math, provenance composition.
+
+### Step 6 — Decide: `SaveMemoryExtractor` class vs composed `HybridJSONExtractor(AliasMatch, LLM)` — DONE (2026-04-16)
+
+**Decision: composition wins.** No new class. Shipped [`src/trellis/extract/save_memory.py`](../../src/trellis/extract/save_memory.py) — a single `build_save_memory_extractor()` factory that returns a preconfigured `HybridJSONExtractor(AliasMatchExtractor, LLMExtractor)` with `MEMORY_EXTRACTION_V1` prompt and `max_tokens=400` default.
+
+Why composition was enough:
+- `AliasMatchExtractor` already had `supported_sources=["save_memory"]`, configurable `edge_kind`, and produces a residue shape (`{"text", "unmatched_mentions"}`) that `HybridJSONExtractor`'s default selector handles cleanly — doc_id injection included.
+- `LLMExtractor` already accepts a custom `PromptTemplate`, `model`, and `max_tokens`. `MEMORY_EXTRACTION_V1` slots in with zero new code.
+- `HybridJSONExtractor`'s merge, budget gates, and provenance work as-is.
+
+Everything memory-specific was config, not behavior. Promoting to a dedicated class would have added inheritance without new capability.
+
+Side cleanup during Step 6: dropped `ClassVar` annotations on `tier` attributes across `AliasMatchExtractor`, `LLMExtractor`, and `HybridJSONExtractor` so they structurally conform to the `Extractor` Protocol (mypy surfaced the mismatch when the factory composed them). 8 new tests; 118 extract tests total.
+
+### Step 7 — Wire extraction into MCP `save_memory` — DONE (2026-04-16)
+
+Feature-flagged via environment variable `TRELLIS_ENABLE_MEMORY_EXTRACTION` (accepts `1`/`true`/`yes`/`on`). Default is off — no behavior change for existing deployments. Shipped sync-in-process for v1; the deferred EXTRACTION_REQUESTED event + worker path is still on the table if latency becomes an issue.
+
+What landed:
+
+- **`trellis.extract.commands.result_to_batch`** — new public helper that converts `ExtractionResult` drafts into a `CommandBatch` with `ENTITY_CREATE` and `LINK_CREATE` commands. Replaces the private `_result_to_batch` that lived in `trellis_cli/ingest.py`; both CLI and MCP now share the same code path, so the "drafts never touch a store" invariant has exactly one enforcement point.
+- **`trellis/mcp/server.py` `_get_memory_extractor()`** — lazy, cached builder that checks the env flag, constructs an `LLMClient` from env (OpenAI preferred via `OPENAI_API_KEY`, Anthropic fallback via `ANTHROPIC_API_KEY`), builds a name-based alias resolver against the graph store, and assembles the extractor via `build_save_memory_extractor`. Failure on any step (flag off, no key, SDK not installed, etc.) returns `None` and caches that result so we don't retry on every save.
+- **`save_memory` hook** — after the document is stored and `MEMORY_STORED` is emitted, calls `_run_memory_extraction()` which runs the extractor, converts drafts via `result_to_batch`, and executes the batch through a `MutationExecutor` with `create_curate_handlers(registry)` + `requested_by="save_memory_extractor"`. All failures are logged at debug level and swallowed — `save_memory` success never depends on extraction.
+- **Dispatch context** — `ExtractionContext(allow_llm_fallback=True, max_llm_calls=1, max_tokens=400)` per plan. `source_hint="save_memory"` so the dispatcher picks this extractor when the factory registers multiple.
+
+Tests:
+
+- 8 tests for `result_to_batch` (entity conversion, edge conversion, ordering, strategy, requested_by propagation)
+- 4 feature-flag tests for the MCP path: flag off (default), flag on without LLM client, flag on with injected fake LLM (extractor builds + LLM fires once), extraction failure non-fatal
+- CLI `ingest_dbt_manifest` / `ingest_openlineage` refactored to use the new `result_to_batch`; 17 CLI tests still green
+- Full run: 191 tests pass across mcp + extract + cli/ingest scopes. Lint + mypy clean on the changed scope.
+
+### Step 8 — `LLMClient` construction hook in `StoreRegistry` — DONE (2026-04-16)
+
+Split into four sub-agent briefs; all shipped. See [`docs/plans/2026-04-16-phase2-step8-subtasks.md`](../plans/2026-04-16-phase2-step8-subtasks.md) for the full work orders.
+
+- **8A — DONE.** `StoreRegistry.build_llm_client()` + `build_embedder_client()` read an `llm:` block from `~/.config/trellis/config.yaml`. Returns `None` when unconfigured; never raises. Lazy SDK imports keep core dependency-free. Masked-key logging. Supports `api_key_env` (preferred) or `api_key` literal with the documented fallback: if both are set and the env var is unset, the literal is used.
+- **8B — DONE.** MCP `save_memory` now calls `_build_llm_client(registry)` which prefers `registry.build_llm_client()` and falls back to `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` env vars for backward compat. Instance-level `monkeypatch` of `registry.build_llm_client` is the supported test-injection pattern.
+- **8C — DONE.** `trellis admin check-extractors [--format json]` diagnostic reports extractor readiness with CI-friendly exit codes: `0` READY, `1` WARN (non-fatal suboptimal states), `2` BLOCKED (flag on but no LLM obtainable — the case where extraction would silently skip).
+- **8D — DONE.** Docs: config template extension in `trellis admin init`, new "Configuring LLM extraction" playbook entry, ADR Phase 4 close-out, TODO close-out (this change).
+
+### Step 9 — Docs + ADR + TODO close-out — DONE (2026-04-16)
+
+Folded into 8D — single commit covers the config template, playbook, ADR, and TODO updates.
+
+- [x] "Configuring LLM extraction" added as Playbook 12 in [docs/agent-guide/playbooks.md](../agent-guide/playbooks.md).
+- [x] Phase 4 of [adr-llm-client-abstraction.md](../design/adr-llm-client-abstraction.md) lists shipped items + remaining open work.
+- [x] Matching items struck from "Deprioritized / deferred" above.
+
+### Deliberately out of scope for Phase 2
+
+- Jinja2 prompt library with versioning (str.format is enough for three prompts).
+- Streaming LLM responses (ADR §2.4).
+- Structured output / `response_model` (ADR §2.4).
+- `CrossEncoderClient` Protocol + implementations (separate backlog item — Protocol was removed in 2026-05 as YAGNI; re-add it together with the first implementation).
+- Graduation tracking (LLM→Hybrid→Deterministic auto-promotion) — needs effectiveness data we don't have yet.
+- `SCD Type 2` for extracted entities — out of scope; existing graph versioning applies once drafts land.
+
+### Resumption checklist
+
+When picking this back up:
+1. Re-read this section end-to-end.
+2. `git log --oneline origin/main..HEAD` — confirms which commits have / haven't been pushed.
+3. Next action: **Phase 2 is complete.** Steps 1–9 all shipped (2026-04-15 → 2026-04-16). Future Tiered-Extraction work — LLM-assisted dedup, self-learning classification, graduation tracking, LLM-based rerankers — should branch off their own plan section rather than extending this one.
+4. Run `pytest tests/unit/extract/ tests/unit/llm/ tests/unit/feedback/ tests/unit/cli/test_admin.py tests/unit/mcp/ -q` to confirm the Phase 2 surface is still green before editing.
+
+---
+
+## Client Boundary & Extension Contracts — Phase 1 Plan
+
+Started 2026-04-17. **Problem:** `trellis_sdk` is a thin facade over direct core imports — 11+ `from trellis import ...` calls in [client.py](../../src/trellis_sdk/client.py) force client codebases (Unity Catalog integration, dbt sync, any domain-specific extractor package) to reach past the SDK into core types. API DTOs inherit `TrellisModel` from core, so schema changes ripple to the wire. No version handshake, no static OpenAPI, no plugin discovery for runtime extensions. Migration work is harder than it needs to be and scaling to N client packages is constrained by the tight coupling.
+
+**Goal:** Establish four narrow contracts — versioned HTTP API, frozen wire DTOs, HTTP-only SDK with a client-side `extract` module, and an entry-points plugin loader — so client packages can ship their own data models and extensions without importing `trellis.*`.
+
+### Step 1 — API version handshake + static OpenAPI in CI — DONE (2026-04-17)
+
+Cheap, unblocks everything else. No new business logic.
+
+- [x] `GET /api/version` returning `{api_major: 1, api_minor: 0, api_version, wire_schema, sdk_min, package_version, deprecations: []}`. Route mounted at [src/trellis_api/routes/version.py](../../src/trellis_api/routes/version.py) — deliberately outside the `/api/v1` prefix because it describes which major is running. No store access, safe to keep public when auth lands.
+- [x] `Deprecation` + `Sunset` + `Link` response headers (RFC 9745 + RFC 8594). Registry-based emitter at [src/trellis_api/deprecation.py](../../src/trellis_api/deprecation.py) — add a deprecation by inserting one entry into `ROUTE_DEPRECATIONS`; both the headers *and* the `/api/version` payload pick it up automatically. Handlers call `apply_deprecation_headers(response, path)` unconditionally (no-op when not deprecated).
+- [x] `docs/api/v1.yaml` — static OpenAPI spec committed at [docs/api/v1.yaml](../api/v1.yaml). Regenerated by [scripts/generate_openapi.py](../../scripts/generate_openapi.py). `make openapi` regenerates locally; `make openapi-check` is the CI drift-check. New workflow [.github/workflows/openapi.yml](../../.github/workflows/openapi.yml) fails PRs that change the live schema without updating the committed spec.
+- [x] `api_major`, `api_minor`, `wire_schema`, `sdk_min` constants in [src/trellis/api_version.py](../../src/trellis/api_version.py) — single source of truth imported by the route AND the CLI. `trellis admin version [--format json]` added in [src/trellis_cli/admin.py](../../src/trellis_cli/admin.py).
+- 11 new tests (`tests/unit/api/test_version.py`, `tests/unit/cli/test_admin_version.py`); full api + sdk suites (66 tests) green; ruff + mypy clean on the changed scope.
+
+### Step 2 — `trellis_wire` package (frozen wire DTOs) — DONE (2026-04-18)
+
+Prerequisite for clean Step 3/4. Translation layer at the API edge, not in every route.
+
+- [x] **New package [src/trellis_wire/](../../src/trellis_wire/)** — zero dependencies on `trellis.*` core. Enforced by a structural test (`TestWirePackageIsolation`) that AST-walks every file in the package and fails if any `import trellis` or `from trellis.*` appears.
+- [x] **Wire DTOs for every request/response** — all 27 DTOs from the old `trellis_api/models.py` ported to [src/trellis_wire/dtos.py](../../src/trellis_wire/dtos.py). Class names preserved for drop-in compatibility. Request DTOs inherit `WireRequestModel` (`extra="forbid"` + `frozen=True`); response DTOs inherit `WireModel` (`extra="forbid"`, mutable). **Frozen-response scope note:** `trellis_api/routes/ingest.py` currently builds bulk-ingest responses by incrementing counters on nested models (`response.entities.skipped += 1`). Fully freezing responses requires refactoring the route's accumulator pattern — tracked as a follow-up, not a blocker for Step 2. The critical contract guarantee (`extra="forbid"`) ships now universally.
+- [x] **Translators:** [src/trellis/wire/translate.py](../../src/trellis/wire/translate.py) — `trellis.wire` is the core-adjacent module that knows about both sides; `trellis_wire` stays pure. Only enum translators exist for now (DTOs are wire-shape natively); DTO-level translators will be added when a route needs the same conversion twice.
+- [x] **Parity tests** — [tests/unit/wire/test_parity.py](../../tests/unit/wire/test_parity.py) — 17 tests verify (a) same members, (b) same string values, (c) round-trip equality via translators, (d) structural isolation (no core imports in wire package). Parametrized across both `BatchStrategy` and `NodeRole`.
+- [x] **Backward-compat shim:** [src/trellis_api/models.py](../../src/trellis_api/models.py) is now a pure re-export of the 24 DTOs from `trellis_wire`. Zero route changes needed (6 route files untouched). New code should `from trellis_wire import ...` directly; shim stays indefinitely.
+- [x] **Packaging:** `pyproject.toml` wheel packages updated to ship `src/trellis_wire` + `py.typed` marker. The wire package is now independently importable by client code.
+- **Decision captured:** codegen wire DTOs deferred. Hand-written keeps schema changes deliberate. Revisit only if the DTO count grows past ~30 or if multi-language clients appear.
+
+**Verification:** 17 new wire parity tests pass; full `tests/unit/api/ + tests/unit/sdk/ + tests/unit/wire/` suites (83 tests) green; ruff + mypy clean on all new scope; OpenAPI spec regenerates identically (the one `test_delete_policy` flake and 5 Windows-path integration failures all confirmed pre-existing on `main`).
+
+### Planes Phase 4 — Graph ↔ document link — SCHEMA DONE (2026-04-18; Kuzu parts deferred 2026-04-19)
+
+Schema + contract change shipped on SQLite and Postgres:
+
+- New `document_ids: list[str] | None = None` parameter on `GraphStore.upsert_node()`.
+- `validate_document_ids()` helper in `src/trellis/stores/base/graph.py` (non-empty strings, no duplicates, `None`/empty-list both valid, each element checked).
+- Two backends carry the column: SQLite (`document_ids_json TEXT` with idempotent `_migrate_add_document_ids` ALTER TABLE), Postgres (`document_ids JSONB` via `CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ADD COLUMN IF NOT EXISTS`). Kuzu parts from the original Phase 4 commit (`1c656fb`) were dropped when the Kuzu substrate pick was deferred — the successor substrate will pick up the `document_ids_json` column as part of its initial schema.
+- Read path returns `document_ids: list[str]` on every `get_node` / `get_nodes_bulk` / `query` / `get_node_history` / `get_subgraph` result — always a list, empty when absent, so consumers can iterate unconditionally.
+- Graceful degrade for pre-migration rows: NULL column reads as `[]`.
+- `tests/unit/stores/test_document_ids.py` exercises the validator, roundtrip, SCD preservation, bulk read, query projection, validation at the backend boundary, and backfill degrade. Kuzu-parametrized cases will land with the successor substrate.
+
+**Follow-up PRs** (separated to keep this diff surgical and avoid touching agent-facing code while other sessions are active):
+
+- [ ] **Populate `document_ids` on ingestion.** When `/api/v1/evidence` or a worker extractor derives a graph entity from a `DocumentStore` row, call `upsert_node(..., document_ids=[evidence.doc_id])`. Sites: `src/trellis_api/routes/ingest.py`, `src/trellis/mutate/handlers.py`, relevant extractors in `trellis_workers`.
+- [ ] **Consume `document_ids` in retrieval.** `PackBuilder` gains a "materialize documents from graph nodes" step — after graph traversal, bulk-fetch the referenced docs from `DocumentStore` and merge into the pack. Avoids the parallel-paths gap (vector → entity, FTS → document, graph → entity) documented in the ADR §1. Site: `src/trellis/retrieve/`.
+- [ ] **Integration test**: evidence ingested → entity extracted → graph node has `document_ids` → pack materializes source content via graph traversal alone.
+
+### Step 3 — HTTP-only SDK + `trellis.testing` in-memory shim — DONE (2026-04-18)
+
+Drop dual-mode. Single code path for all clients.
+
+- [x] **Local-mode branch removed.** `base_url=None` no longer instantiates a `StoreRegistry` in-process. `TrellisClient` / `AsyncTrellisClient` constructors require `base_url=` OR an injected `http=` client (for tests); passing neither raises `ValueError`. Full rewrite at [src/trellis_sdk/client.py](../../src/trellis_sdk/client.py) and [src/trellis_sdk/async_client.py](../../src/trellis_sdk/async_client.py).
+- [x] **SDK has zero `trellis.*` imports.** Enforced structurally by [tests/unit/sdk/test_isolation.py](../../tests/unit/sdk/test_isolation.py) which AST-walks every `.py` in `src/trellis_sdk/` and fails on any `from trellis.*` / `import trellis` it finds. Skill formatters ported to [src/trellis_sdk/_format.py](../../src/trellis_sdk/_format.py) (~80 pure-string lines, no Advisory Pydantic model required); the core `trellis.retrieve.formatters` stays in place for MCP use.
+- [x] **`trellis.testing` shim.** New package [src/trellis/testing/](../../src/trellis/testing/) with `in_memory_client()` / `in_memory_async_client()` context managers. Sync variant uses Starlette's `TestClient` (an `httpx.Client` subclass with ASGI-portal support); async variant uses raw `httpx.AsyncClient` + `httpx.ASGITransport`. Drops the network entirely — microsecond round-trips. Migrated all `tests/unit/sdk/*` fixtures to use it.
+- [x] **Typed exception hierarchy.** [src/trellis_sdk/exceptions.py](../../src/trellis_sdk/exceptions.py) ships `TrellisError` → `TrellisAPIError`, `TrellisRateLimitError` (parses `Retry-After` header as seconds-int or HTTP-date, clamps past dates to 0), `TrellisVersionMismatchError`. 404s deliberately *don't* raise — many SDK methods translate to `None`; the caller decides.
+- [x] **Version handshake.** `TrellisClient` / `AsyncTrellisClient` hit `GET /api/version` lazily on first request. Mismatched `api_major` or SDK below `sdk_min` raises `TrellisVersionMismatchError`; server minor older than SDK logs a warning (features may be missing, but safe to continue). Disable via `verify_version=False` — the testing shim does this by default so tests don't need to mock `/api/version`.
+- [x] **Bounded concurrency.** `AsyncTrellisClient` ships `asyncio.Semaphore(max_concurrency)` (default 16) guarding every request. `max_concurrency` is a constructor kwarg and exposed as a property. Handshake uses a separate `asyncio.Lock` so parallel first-calls don't all hit `/api/version`.
+- [x] **Example updated.** [examples/sdk_local_demo.py](../../examples/sdk_local_demo.py) now uses `trellis.testing.in_memory_client` — the lightest path without a separate server process.
+
+**Tests:**
+
+- 9 sync client tests (ingest, retrieve, curate, pack, construction)
+- 12 async client tests (same + concurrency + max_concurrency propagation)
+- 7 skill tests (unchanged behaviour, new fixture)
+- 14 HTTP helper tests (5 × `raise_for_status`, 6 × Retry-After parsing, 4 × handshake, 2 × integration)
+- 1 structural isolation test
+- Totals: **43 SDK tests; 101 pass across SDK + API + wire suites; full `tests/unit/` is 1352 passing** (the 1 failure is the pre-existing Windows `\var\` path issue on `main`).
+
+**Out-of-scope issues flagged as follow-ups:**
+
+- `StoreRegistry._get()` has a thread-safety bug — two concurrent cache-miss threads can both instantiate the same store. Discovered when stress-testing concurrent reads through `in_memory_async_client`; workaround is `max_concurrency=1` in one test. Fix = wrap cache access in `threading.Lock`. Separate task spawned.
+- Response DTO freezing (from Step 2 carry-over) still deferred.
+- Skills module still has utility — if clients want to build their own, they can import `trellis_sdk._format` directly (private but stable).
+
+### Step 4 — `trellis_sdk.extract` module + `POST /api/v1/extract/drafts` — DONE (2026-04-18)
+
+Client-side extractor contract. Unity Catalog, dbt, etc. live in their own packages and submit drafts over HTTP.
+
+- [x] **Wire DTOs:** [src/trellis_wire/extract.py](../../src/trellis_wire/extract.py) ships `ExtractorTier`, `EntityDraft`, `EdgeDraft`, `ExtractionBatch`, `DraftSubmissionRequest`, `DraftSubmissionResult`. Request DTOs frozen per the Step 2 convention. `generation_spec` deliberately omitted from wire `EntityDraft` — curated-node provenance flows through a dedicated curation path, not extraction.
+- [x] **SDK surface:** [src/trellis_sdk/extract/__init__.py](../../src/trellis_sdk/extract/__init__.py) re-exports the wire DTOs plus a `DraftExtractor` Protocol (structural — no inheritance required). Client packages depend on `trellis_sdk` alone and get everything transitively.
+- [x] **Client method:** `TrellisClient.submit_drafts(batch, *, strategy, requested_by, idempotency_key)` and async variant. Sends `Idempotency-Key` header when set; header wins over `batch.idempotency_key` when both are present.
+- [x] **Server route:** [src/trellis_api/routes/extract.py](../../src/trellis_api/routes/extract.py) at `POST /api/v1/extract/drafts`. Wire batch → core `ExtractionResult` (via new translator in [src/trellis/wire/translate.py](../../src/trellis/wire/translate.py)) → `result_to_batch` → `MutationExecutor`. Zero new mutation logic; same bridge the CLI ingest commands and MCP `save_memory` use. Audit trail records `f"{extractor_name}@{extractor_version}"` in `requested_by` and `provenance.source_hint = batch.source`.
+- [x] **Idempotency stamping:** server stamps `{key}:{i}` on every command in the batch so per-entity dedup survives replays at the executor layer.
+- [x] **Draft translators:** `entity_draft_to_core`, `edge_draft_to_core`, `extraction_batch_to_core_result` in `trellis.wire.translate`. Three translators cover the wire → core direction; reverse direction not needed yet (responses don't include draft payloads).
+- [x] **Testing shim updated:** [src/trellis/testing/inmemory.py](../../src/trellis/testing/inmemory.py) wires the new router into `_build_app` so the extract route is reachable from in-process tests.
+- [x] **Example client package:** [examples/trellis_example_extractor/](../../examples/trellis_example_extractor/) with `reader.py`, `types.py`, `sync.py`, `README.md`. Demonstrates namespaced types (`example.widget`, `example.contains`), `idempotency_key` derived from a snapshot ID, and two submission modes (real server vs. in-memory shim). `PYTHONPATH=src python -m examples.trellis_example_extractor.sync` runs end-to-end against an in-memory fixture and prints the submission report.
+- [x] **Playbook:** "Playbook 13: Building a client extractor package" in [docs/agent-guide/playbooks.md](../agent-guide/playbooks.md) — fork instructions, namespace-choice guidance, the 8-step shape (types → extractor → submit → idempotency → operational shape → testing → when to graduate to a server plugin).
+- [x] **OpenAPI spec updated:** `docs/api/v1.yaml` now includes the `/api/v1/extract/drafts` route + 6 new schemas. Grew from 52KB → 60KB.
+
+**Tests:** 35 new tests across three files (`tests/unit/wire/test_extract.py` — 13; `tests/unit/sdk/test_extract.py` — 7; `tests/unit/api/test_extract_route.py` — 15). Full boundary suite is 136 green (was 101 after Step 3). SDK isolation test still passes — `trellis_sdk.extract` only depends on `trellis_wire`.
+
+**Decisions captured:**
+- **Chose a new route (`/extract/drafts`) over reusing `/ingest/bulk`.** The new route captures extractor identity + version in the audit trail automatically via `source_hint` + `requested_by`; `/ingest/bulk` would require the caller to wire that up by convention. Small duplication, clean telemetry — the right call per the original plan.
+- **Schema registry deferred.** `properties: dict[str, Any]` stays as the escape hatch for domain-specific fields. Revisit once ≥3 client extractor packages exist and the patterns are visible.
+- **No reverse (core → wire) draft translator yet.** Responses don't return draft payloads; if a future `GET /api/v1/extract/batches/{id}` surfaces submitted drafts, add the reverse translator then.
+
+### Step 5 — Entry-points plugin loader (runtime extensions) — DONE (2026-04-18)
+
+Only for things that *must* run in the API process: custom store backends, custom LLM providers/embedders, and (reserved) classifiers, rerankers, policy gates, search strategies.
+
+- [x] **`trellis.plugins` package** — [src/trellis/plugins/](../../src/trellis/plugins/) with `loader.py` (discovery + merge), `diagnostic.py` (status report), `__init__.py` (public surface). Four public helpers: `discover(group)`, `load_class(spec)`, `merge_with_builtins(group, builtins)`, `collect_plugin_report()`. One implementation, consumed by every registry that wants plugins.
+- [x] **StoreRegistry plugin hook** — `_get_merged_backends()` in [src/trellis/stores/registry.py](../../src/trellis/stores/registry.py) merges `_BUILTIN_BACKENDS` with `trellis.stores.{type}` entry points on first access. Cached per store_type. Shadowing policy: built-in wins by default; `TRELLIS_PLUGIN_OVERRIDE=1` (accepts `1`/`true`/`yes`/`on`) lets plugins override — explicit, never silent.
+- [x] **LLM provider/embedder hooks** — `_try_llm_provider_plugin` and `_try_llm_embedder_plugin` in `registry.py` route through `trellis.llm.providers` and `trellis.llm.embedders` entry points. Unknown built-in providers fall through to plugin resolution. Plugins use the same factory signature as built-ins (`api_key=, base_url=, default_model=`) so Config parity is maintained.
+- [x] **ExtractorRegistry alignment** — [src/trellis/extract/registry.py](../../src/trellis/extract/registry.py) `load_entry_points` now routes through the central `discover()` + `load_class()` helpers instead of calling `importlib.metadata.entry_points` directly. Uniform logging and error handling.
+- [x] **Entry-point groups defined + documented:**
+    - `trellis.stores.{trace,document,graph,vector,event_log,blob}` — wired via `StoreRegistry`
+    - `trellis.llm.providers`, `trellis.llm.embedders` — wired via `StoreRegistry.build_llm_client` / `build_embedder_client`
+    - `trellis.extractors` — wired via `ExtractorRegistry`
+    - `trellis.classifiers`, `trellis.rerankers`, `trellis.policies`, `trellis.search_strategies` — **reserved**: discovered by `check-plugins` but not yet consumed by a registry (no `ClassifierRegistry` etc. exists to hook into). Wire them when a real plugin author appears — don't pay the consumer-wiring cost speculatively. Decision captured in the ADR.
+- [x] **`trellis admin check-plugins [--format json]`** — [src/trellis_cli/admin.py](../../src/trellis_cli/admin.py). Walks every group, imports each advertised class, reports `LOADED` / `SHADOWED` / `BLOCKED` with reasons. Exit codes `0` clean, `1` shadowing only, `2` any blocked — matches the `check-extractors` convention.
+- [x] **ABI policy:** no declared `trellis-abi` version. Protocol/ABC contracts are the ABI, enforced by `py.typed` + plugin CI typechecking. Revisit only if contract drift escapes into production. Decision captured in ADR §"ABI stability".
+- [x] **ADR:** [docs/design/adr-plugin-contract.md](../design/adr-plugin-contract.md) — groups table, shadowing policy, override env var, ABI decision, alternatives considered (config-driven dotted paths, Protocol-only) and why they were rejected.
+
+**Tests:** 38 new tests across [tests/unit/plugins/](../../tests/unit/plugins/) (loader — 21, diagnostic — 7, registry integration — 5) and [tests/unit/cli/test_admin_plugins.py](../../tests/unit/cli/test_admin_plugins.py) — 5. Full unit suite is 1375 green (1 pre-existing Windows-path failure in `test_scoring.py` is unchanged). Ruff + mypy clean.
+
+**Decisions captured:**
+
+- **Reserved vs. wired groups.** Four groups (`classifiers`, `rerankers`, `policies`, `search_strategies`) are discovered + reported but not consumed. Their consumer registries (`ClassifierPipeline`, PackBuilder reranker param, executor policy gates, PackBuilder strategies) take inline lists today — wiring plugin loading requires changing the consumer APIs. Deferring keeps scope tight; `check-plugins` still surfaces them so operators can experiment.
+- **Cache invalidation.** `_MERGED_BACKENDS_CACHE` is populated on first access and stays warm for the process lifetime. Installing a plugin wheel mid-process doesn't take effect until restart (which is the standard Python plugin model; nothing special needed).
+- **No plugin marketplace.** `pip install trellis-your-thing` is the whole distribution story. No central registry, no review process, no trust rating. Matches how Python plugins work elsewhere.
+
+### Step 6 — MCP as a separate narrower contract — DONE (2026-04-18)
+
+MCP ≠ REST. Keep MCP the ~11 agent-shaped tools; REST stays the programmatic surface.
+
+- [x] **`mcp_tools_version` added to `/api/version` response.** New constant `MCP_TOOLS_VERSION = 1` in [src/trellis/api_version.py](../../src/trellis/api_version.py) (single source of truth). Wired through [src/trellis_wire/dtos.py](../../src/trellis_wire/dtos.py) `VersionResponse`, [src/trellis_api/routes/version.py](../../src/trellis_api/routes/version.py) handshake route, and [src/trellis_cli/admin.py](../../src/trellis_cli/admin.py) `trellis admin version` output.
+- [x] ~~MCP tools import from `trellis_wire`, not `trellis.schemas.*`.~~ **Decision reversed after scope review.** The MCP server is deliberately in-process (imports from `StoreRegistry`, `PackBuilder`, `MutationExecutor`) for performance — direct store access instead of HTTP round-trips. MCP tools return markdown strings, not Pydantic DTOs, so there's no wire contract to defend at the return-shape level. The "narrow contract" is the tool *signatures*, not the internal types. Rationale captured in [adr-mcp-contract.md §"MCP stays in-process"](../design/adr-mcp-contract.md).
+- [x] **Capabilities matrix documented.** Two docs:
+    - [docs/design/adr-mcp-contract.md](../design/adr-mcp-contract.md) — full ADR: versioning rules, alternatives considered (mass wire-DTO purge, shared version number, MCP-over-HTTP), consequences.
+    - [docs/agent-guide/surfaces.md](../agent-guide/surfaces.md) — operator-facing TL;DR: "where do I call X?" + capability map covering all 18 capabilities across REST / MCP / SDK.
+
+**Verification:** `/api/version` tests + `trellis admin version` CLI tests updated for the new field. OpenAPI spec regenerated (52→60→60.7KB). Ruff + mypy clean; 127 tests across api/sdk/wire/plugins green.
+
+**Decisions captured:**
+
+- **Independent versioning.** `mcp_tools_version` bumps on MCP breaking changes (tool removed/renamed, argument or return shape non-additively changed). REST `api_major` moves don't force an MCP bump, and vice versa — MCP consumers (Claude Desktop, Cursor, custom agent hosts) have a different release cadence than programmatic REST consumers.
+- **No mass refactor of MCP imports.** The MCP server stays in-process with its existing core imports. The "narrow contract" is the 11 tool signatures — adding wire-DTO plumbing to an in-process server is pure overhead.
+- **Canonical surface per capability.** The matrix in `surfaces.md` is the source of truth; reviewers check it when adding a capability. Both-surface capabilities (trace/evidence ingest, search, packs, feedback) are kept intentionally — they serve different audiences with different presentation needs.
+
+---
+
+## Phase 1 — Status
+
+**DONE (Steps 1–6):**
+1. API version handshake + static OpenAPI in CI
+2. `trellis_wire` frozen DTOs (zero core deps)
+3. HTTP-only SDK + `trellis.testing` in-memory shim
+4. `trellis_sdk.extract` + `POST /api/v1/extract/drafts`
+5. Entry-points plugin loader (runtime extensions)
+6. MCP as separate narrower contract
+
+**What the four contracts look like in code (final):**
+
+| Contract | Where | Enforcement |
+|---|---|---|
+| Versioned REST API + OpenAPI | `/api/version` handshake, `docs/api/v1.yaml`, CI drift-check | `openapi-check` in GitHub Actions |
+| Wire DTOs (zero core deps) | `src/trellis_wire/` | Structural test AST-walks the package |
+| HTTP-only SDK (zero core deps) | `src/trellis_sdk/` + `trellis.testing` shim | Structural test AST-walks the package |
+| Client extractors | `src/trellis_sdk/extract/`, `POST /api/v1/extract/drafts` | Playbook 13, `examples/trellis_example_extractor/` |
+| Runtime plugins | `src/trellis/plugins/`, `trellis admin check-plugins` | Shadowing policy + `TRELLIS_PLUGIN_OVERRIDE` env var |
+| MCP vs REST | `mcp_tools_version`, `docs/agent-guide/surfaces.md` | Capabilities matrix, independent versioning |
+
+**Follow-ups carried forward (not Phase 1 work):**
+
+- `StoreRegistry._get()` thread-safety bug (spawned task from Step 3).
+- Response-DTO freezing (from Step 2 — needs `ingest.py` accumulator refactor).
+- Wiring the reserved plugin groups (`classifiers`, `rerankers`, `policies`, `search_strategies`) when a concrete consumer appears.
+- Schema registry for client extractor `properties` payloads (deferred until ≥3 client packages exist).
+
+### Deliberately out of scope for Phase 1
+
+- Schema registry (Option B from the extension discussion) — use `EntityDraft.properties: dict[str, Any]` escape hatch for now. Revisit once we have ≥3 client extractor packages and can see the patterns.
+- Codegen'd wire DTOs or OpenAPI-generated client SDKs (TypeScript, Go). Unblock later if multi-language clients appear.
+- Plugin marketplace / discovery site. Just `pip install trellis-unity-catalog` for now.
+- Remote extractors (extractor-as-a-microservice). Client-side extraction + `submit_drafts` covers the current use cases.
+
+### Ordering rationale
+
+1 → 2 → (3 ∥ 5) → 4 → 6. Step 1 is cheap and standalone. Step 2 is a prerequisite for clean 3 and 4. Steps 3 and 5 are independent and can be parallelized across two contributors. Step 4 depends on Step 3's SDK and Step 2's wire DTOs being in place. Step 6 is a cleanup pass after 2 and 5 land.
+
+### Resumption checklist
+
+When picking this back up:
+1. Re-read this section end-to-end.
+2. `git log --oneline origin/main..HEAD` — confirms pushed/unpushed commits.
+3. Next action: start with Step 1 (API version handshake + OpenAPI in CI). It's the cheapest piece and unblocks review of later structural changes.
+4. Before editing, run `pytest tests/unit/ -q` and confirm current green baseline.
+
+---
+
+## Feedback-Driven Parameter Tuning — Plan & Status
+
+Started 2026-04-19 on branch `claude/hybrid-search-retrieval-Pk6qs`. The
+goal is a governed parameter-tuning system that lets Trellis adjust the
+weights inside its own retrieval / tagging / advisory components based
+on observed agent outcomes, with per-`(domain, intent_family,
+tool_name)` granularity and a governed promotion pipeline (validate →
+canary → promote). Section renamed 2026-04-20 to align with
+[`adr-terminology.md`](../design/adr-terminology.md) — "self-learning"
+is explicitly **not** a project term; the existing "feedback loop"
+(EventLog-authoritative + JSONL) informs this tuning loop, which adds
+the governed parameter-mutation layer on top.
+
+The work is split into 7 PRs sequenced by conflict risk (additive
+first). PRs 1, 2, 3, 4, 5 have shipped; **PR 2b, PR 6, and PR 7+
+remain.** This section captures the locked decisions plus the detailed
+spec for each remaining PR so a future session can resume cleanly.
+
+### Locked design decisions
+
+These were settled at the start of the sprint and ground every PR.
+Don't relitigate without surfacing the trade-off explicitly.
+
+1. **Two stores split** — agent-facing knowledge (`Trace`, `Entity`,
+   `Document`, `Vector`, `EventLog`) stays where it is. New ops-tier
+   data (`OutcomeEvent`, `ParameterSet`, `ParameterProposal`) lives in
+   dedicated stores so high-volume tuning telemetry never pollutes the
+   knowledge graph.
+2. **EventLog is audit-tier only.** Raw `OutcomeEvents` do **not** flow
+   through `EventLog.emit`. Curated governance events (`PARAMS_UPDATED`,
+   `TUNER_PROPOSAL_CREATED`, `CANARY_COMPLETED`, `PRECEDENT_PROMOTED`)
+   continue to land there.
+3. **Storage layout** — SQLite uses three new files in `stores_dir`:
+   `outcomes.db`, `parameters.db`, `tuner_state.db`. Postgres (future)
+   uses a dedicated `trellis_ops` schema.
+4. **Dimensions taxonomy.**
+   - **Learning axes** (cells the tuner can specialise on): `domain`,
+     `intent_family`, `tool_name`, `phase` (with `agent_role` deferred
+     to v2).
+   - **Identity axes**: `component_id`, `params_version`.
+   - **Audit axes**: `agent_id`, `run_id`, `session_id`, `pack_id`,
+     `trace_id`, `occurred_at`, `recorded_at`.
+   - **Policy-assigned**: `cohort` = hash(`run_id`+`component_id`),
+     `segment`.
+5. **Precedence chain for parameter resolution** (narrowest first,
+   then back off):
+   - `(component_id, domain, intent_family, tool_name)`
+   - → `(component_id, domain, intent_family)`
+   - → `(component_id, domain)`
+   - → `(component_id, intent_family)`
+   - → `(component_id)`
+
+   `domain` is single-valued per call; multi-domain items back off to
+   the wider cell. Custom (non-catalog) `intent_family` strings are
+   accepted, learned in isolation, and back off past the intent axis on
+   cold-start.
+6. **Intent-family catalog (10 entries, extensible verbs):** `discover`,
+   `lookup`, `verify`, `diagnose`, `plan`, `implement`, `review`,
+   `summarize`, `compare`, `classify`. Defined in
+   `trellis.schemas.outcome.INTENT_FAMILIES`. Custom strings allowed.
+7. **Phase catalog (7 entries):** `ingest`, `enrich`, `extract`,
+   `retrieve`, `assemble`, `advise`, `feedback`. Defined in
+   `trellis.schemas.outcome.PHASES`. Note `enrich` (not `classify`) so
+   the phase name doesn't collide with `intent_family="classify"`.
+8. **Trellis internals also emit outcomes.** Internal LLM-driven
+   classifiers/extractors record `OutcomeEvents` with
+   `agent_role="trellis.<component>"`. Dual-emission patterns (outer
+   pack + inner classifier) link via `run_id`.
+9. **Cutoff rule** — *consumed by agents/packs = knowledge tier;
+   consumed by Trellis to self-improve = ops tier.*
+10. **Naming collision fix** — the call-level outcome type is
+    `ComponentOutcome` (not `Outcome`); `trellis.schemas.trace.Outcome`
+    already exists for trace-level outcomes.
+11. **Parameter mutations go through `MutationExecutor`** — validate →
+    policy gate (min sample=5, min effect=0.15) → idempotency →
+    execute → emit `PARAMS_UPDATED` event. Tuners propose; the executor
+    promotes.
+12. **Canary before promote.** Deterministic cohort hash assigns
+    canary vs control. Fitness gate must pass before promotion.
+13. **Precedence + caching live in `ParameterRegistry`**, a thin facade
+    over `ParameterStore`. When constructed with `store=None` (or when
+    resolve fails), the registry returns the caller's hardcoded default
+    — making every call-site migration behaviour-preserving.
+14. **Migration discipline** — every constant migration must keep the
+    hardcoded default as the fallback. No silent value changes; any
+    semantic change ships as a separate, explicit commit.
+
+### Shipped PRs (1–5, on `claude/hybrid-search-retrieval-Pk6qs`)
+
+| # | Commit | Surface area |
+|---|--------|--------------|
+| 1 | `66665dc` | Ops foundation: `OutcomeEvent` + `ComponentOutcome`, `ParameterSet`/`Scope`/`Proposal` schemas, `OutcomeStore` / `ParameterStore` / `TunerStateStore` ABCs + SQLite impls wired into `StoreRegistry`, `record_outcome()` helper. 49 tests. |
+| 2 | `c989bbe` | `ParameterRegistry` runtime facade with precedence-chain resolve + caching + `invalidate(scope=None)`. 13 tests. |
+| 3 | `50cc815` | Migrated `retrieve.effectiveness` (`analyze_effectiveness`, `analyze_advisory_effectiveness`, `run_effectiveness_feedback`, `run_advisory_fitness_loop`) and `learning.scoring` (`_recommend_learning_action` via `analyze_learning_observations`) to honour `ParameterRegistry`. Component ids: `retrieve.effectiveness.items`, `retrieve.effectiveness.advisory`, `learning.scoring`. 5 tests. |
+| 4 | `5a67ebc` | `RRFReranker()` wired as default in MCP server `_build_pack_builder`, REST `/api/v1/packs` route, and SDK `assemble_pack` / `assemble_sectioned_pack`. SDK local-mode now calls `build_strategies(registry)` so `SemanticSearch` auto-enables when `embeddings:` config provides a vector store + embedding fn. |
+| 5 | `2260a59` | `record_feedback(..., outcome_store=..., component_id=...)` dual-emits an `OutcomeEvent` alongside the existing JSONL append + `FEEDBACK_RECORDED` event. Field mapping documented in commit message. 7 tests. |
+
+PR 4 (`classify` → `enrich` phase rename) was a no-op — the `PHASES`
+catalog already shipped with `"enrich"` in PR 1, and a repo-wide grep
+turned up zero existing `phase="classify"` references.
+
+Totals at end-of-sprint: **+2775 lines, 78 new tests, 1339 total unit
+tests passing**, lint + mypy clean.
+
+### PR 2b — Migrate rerankers + strategies.py constants (NEXT UP)
+
+Behaviour-preserving migration of the remaining hardcoded constants
+to `ParameterRegistry`. Defaults stay as the fallback; no semantic
+change. Pattern is the same as the effectiveness/scoring migrations
+in commit `50cc815` — see those diffs for the exact shape.
+
+**Files to touch:**
+
+- `src/trellis/retrieve/rerankers/rrf.py` — `k=60` (constructor arg).
+  Component id: `retrieve.rerankers.RRFReranker`. Resolve via
+  registry at construction in a new factory or lazily in `__init__`.
+- `src/trellis/retrieve/rerankers/mmr.py` — `lambda_param=0.7`,
+  `shingle_size=3`. Component id: `retrieve.rerankers.MMRReranker`.
+- `src/trellis/retrieve/strategies.py` — six constants:
+  - `DEFAULT_RECENCY_HALF_LIFE_DAYS = 30.0` (line 21)
+  - `RECENCY_FLOOR = 0.3` (line 26)
+  - importance multiplier `base * (1.0 + importance)` (line 52) —
+    consider exposing the `1.0` baseline as a parameter.
+  - `domain_match_boost = 1.3` (line 266) — currently inline literal.
+  - `curated_boost = 1.3` (lines 205, 270) — already a constructor
+    arg on `GraphSearch`.
+  - `description_boost = 1.2` (line 277) — currently inline literal.
+  - position decay step `0.05` (line 262) — currently inline literal.
+
+  Component ids: `retrieve.strategies.KeywordSearch`,
+  `retrieve.strategies.SemanticSearch`,
+  `retrieve.strategies.GraphSearch`.
+
+**Wiring approach:**
+
+- Add an optional `registry: ParameterRegistry | None = None`
+  parameter to `build_strategies()` in `src/trellis/retrieve/strategies.py`.
+  Add a parallel `build_rerankers(kind, registry, scope)` factory in
+  `src/trellis/retrieve/rerankers/__init__.py` (or wherever the
+  defaults move).
+- Each strategy constructor pulls overrides via the registry inside
+  `__init__`. When `registry is None`, the existing module-level
+  constants are used unchanged.
+- Update the three call sites that build strategies (MCP
+  `_build_pack_builder`, REST `/api/v1/packs`, SDK `_get_registry`)
+  to pass `registry=ParameterRegistry(store_registry.parameter_store)`.
+
+**Tests to add:**
+
+- `tests/unit/retrieve/test_strategies_registry.py` — defaults
+  preserved; registry override changes recency half-life / boosts.
+- `tests/unit/retrieve/rerankers/test_registry.py` — RRF `k` and MMR
+  `lambda_param` honour registry overrides.
+
+**Acceptance:**
+
+- `pytest tests/unit/ -q` shows the same 1339+ tests passing.
+- All registry-resolved values fall through to the documented
+  hardcoded defaults when no `ParameterStore` snapshot exists.
+- No diff in pack output for the existing
+  `tests/unit/retrieve/test_pack_builder.py` golden cases.
+
+### PR 6 — `RuleTuner` + `trellis metrics` CLI — DONE
+
+Shipped: [`trellis.learning.tuners.rule_tuner`](../../src/trellis/learning/tuners/rule_tuner.py) (`TuningRule` / `apply_rules` / `RuleTuner.run`), [`trellis.learning.tuners.promotion`](../../src/trellis/learning/tuners/promotion.py) (governed promotion pipeline), [`trellis_cli/metrics.py`](../../src/trellis_cli/metrics.py) with `outcomes` / `proposals` / `versions` / `tune` / `promote` subcommands. 98 unit tests across `tests/unit/learning/` and `tests/unit/cli/test_metrics.py`. Design notes below preserved for reference; future extensions (budget-hit-rate rule consuming telemetry.py signals, canary fitness gates, `BanditTuner`) build on this surface.
+
+The first concrete tuner, plus the operator surface area for reading
+out per-cell aggregates and proposed parameter changes.
+
+**`RuleTuner` (`src/trellis/learning/tuners/rule_tuner.py`):**
+
+- Reads `OutcomeEvent`s from `OutcomeStore.query(...)` since the last
+  cursor stored in `TunerStateStore.get_cursor("rule_tuner")`.
+- Aggregates per learning-axis cell `(component_id, domain,
+  intent_family, tool_name)`: count, success_rate, mean latency,
+  optionally `metrics["precision"]` etc.
+- Applies a small fixed rule set, e.g. *if `success_rate < 0.4` and
+  `count >= 30`, propose halving the recency boost*. Rules live in
+  configuration so they're tweakable without code changes.
+- Emits `ParameterProposal` records via
+  `TunerStateStore.put_proposal(...)` — does **not** mutate
+  `ParameterStore` directly.
+- A separate `promote_proposals()` step consumes proposals through
+  `MutationExecutor`: validate (schema) → policy gate (min sample=5,
+  min effect=0.15, configurable) → idempotency (proposal_id) → execute
+  (`ParameterStore.put`) → emit `PARAMS_UPDATED` event. Calls
+  `ParameterRegistry.invalidate(scope)` on success so the next
+  `get(...)` re-resolves.
+- Cohort assignment: deterministic `hash(run_id + component_id) % 100`
+  — first decile is canary unless overridden. Canary fitness gate is
+  a follow-up step.
+
+**Schemas / types already in place from PR 1:** `ParameterProposal`,
+`ParameterScope`, `ParameterSet`. No new schemas should be needed for
+the rule-based tuner.
+
+**`trellis metrics` CLI (`src/trellis_cli/metrics.py`):**
+
+- Subcommands:
+  - `trellis metrics outcomes [--component-id ...] [--domain ...]
+    [--intent ...] [--phase ...] [--days N] [--format json|table]` —
+    pretty-print aggregate stats per cell.
+  - `trellis metrics proposals [--tuner ...] [--status ...]
+    [--format json]` — list pending / canary / promoted proposals
+    with sample size + effect size.
+  - `trellis metrics versions <component_id> [--scope ...]
+    [--format json]` — list `ParameterSet` snapshots and which is
+    active.
+  - `trellis metrics promote <proposal_id>` — dry-run by default;
+    `--commit` actually routes the proposal through the mutation
+    pipeline.
+- All commands honour `--format json` per the CLAUDE.md hard rule
+  (machine output via JSON, never parse the human format).
+
+**Deprecate** `trellis analyze advisory-effectiveness` and
+`trellis analyze pack-sections` *only after* the new `trellis
+metrics outcomes` covers their reporting needs. Until then, both
+coexist; the deprecation note ships in a separate commit.
+
+**Tests:**
+
+- `tests/unit/learning/test_rule_tuner.py` — proposal generation,
+  cursor advancement, idempotency on re-runs.
+- `tests/unit/learning/test_promotion.py` — full round-trip:
+  outcomes → proposal → policy gate → `ParameterStore.put` →
+  `EventLog.emit`. Use `MutationExecutor` with mocked policy gate.
+- `tests/unit/cli/test_metrics_cli.py` — JSON output stable across
+  runs; `--format table` doesn't break with empty stores.
+
+### PR 7+ — Speculative features
+
+Each is independent and can land in any order once PR 6 ships.
+
+- **SurrealDB substrate — tuner-knob audit** (investigation task, not
+  code). When the Knowledge-Plane graph+vector substrate lands on
+  SurrealDB (or whichever candidate succeeds Kuzu per the
+  planes-and-substrates ADR amendment), audit which tuner knobs
+  become redundant vs. which new substrate-exposed knobs want to be
+  surfaced through `ParameterRegistry`. Specifically map:
+  - Fusion layer — does the substrate's native hybrid query make
+    `RRFReranker(k=...)` redundant? If yes, default-off RRF and
+    expose substrate weights instead.
+  - Per-strategy top-k — currently `limit_per_strategy=20` on
+    `PackBuilder.build(...)`; with a unified substrate this becomes
+    `top_n_vector` / `top_n_ft` on one query.
+  - Distance metric (`cosine` / `euclidean` / `manhattan`), HNSW
+    `ef` — expose as `ParameterSet` values under
+    `component_id="retrieve.strategies.<SubstrateHybrid>"`.
+  - Unchanged layers (expected): recency decay, importance /
+    domain / curated / description boosts, MMR diversity, session
+    dedup, budget enforcement, effectiveness / advisory thresholds,
+    learning promote / noise thresholds, all of PR 6's RuleTuner
+    surface.
+  Deliverable: a short design note listing the knob-by-knob impact
+  so the substrate swap and the tuner integration don't collide.
+
+- **Discovery endpoint** (`POST /api/v1/discover` + matching MCP
+  tool) — keyword-only fast path that surfaces curated entities,
+  domains, and graph anchor points without LLM cost. Use case: the
+  client-discovery flow we discussed (an agent landing in an unknown
+  codebase needs structural anchors before it can ask focused
+  questions).
+- **LLM query rewrite** — gated by `EnrichmentService`; when the raw
+  intent looks ambiguous (no domain match, no keyword overlap with
+  recent traces), expand into 2–3 alternative phrasings and union
+  the results. Records its own `OutcomeEvent` so the tuner can learn
+  when expansion helps vs. hurts.
+- **Cross-encoder rerank** — re-add `CrossEncoderClient` Protocol
+  (~16 LOC; removed 2026-05 as YAGNI) and wire it as an optional
+  `Reranker` after RRF. Slow but high-precision; should run only on
+  the top-k items after RRF/MMR.
+- **`BanditTuner`** — Thompson-sampling alternative to `RuleTuner`.
+  Same proposal/promotion plumbing; different exploration strategy.
+  Defer until we have enough outcome volume to warrant the
+  complexity (see ADR if/when written).
+
+### Picking this back up
+
+1. `git checkout claude/hybrid-search-retrieval-Pk6qs && git pull`.
+2. Re-read **Locked design decisions** above. Don't relitigate; if
+   a decision needs to change, surface the trade-off explicitly and
+   amend the list.
+3. Confirm baseline: `make lint && make typecheck && pytest
+   tests/unit/ -q` should report 1339+ passed, 8 skipped.
+4. Start PR 2b. Pattern is the same as commit `50cc815` — read those
+   diffs first; the migration is mechanical once you internalise
+   the `_resolve_param` helper shape.
+5. `pytest tests/unit/retrieve/ tests/unit/ops/ -q` after each
+   migration step confirms behaviour preservation.
+6. PR 6 is the next big block; consider whether to stage the
+   `RuleTuner` implementation and the CLI as separate commits to
+   keep diffs reviewable.
+
+---
+
+## In Progress
+
+### PyPI Publishing
+- [x] Rename package to `trellis-ai` in pyproject.toml
+- [x] Add classifiers, keywords, authors, project URLs
+- [x] Add hatch-vcs fallback version
+- [x] Verify `python -m build` succeeds
+- [ ] Create GitHub repo at `trellis-ai/trellis-ai` (or update URLs to actual repo)
+- [ ] Tag `v0.1.0` and push
+- [ ] Publish to PyPI: `python -m twine upload dist/*`
+- [ ] Verify `pip install trellis-ai` works from a clean venv
+- [ ] Set up GitHub Actions for automated PyPI publishing on tag push
+
+### Framework Integration (LangGraph)
+- [ ] Create `integrations/langgraph/` with Trellis as a tool provider
+- [ ] Wrap MCP tools as LangGraph `Tool` instances
+- [ ] Add example: agent retrieves context → executes → saves trace
+- [ ] Write README with setup instructions
+- [ ] Open PR upstream to LangGraph's integrations/community tools
+
+## Backlog
+
+### Demo & Content
+- [ ] Record 60-second demo GIF showing the retrieve → act → record feedback loop
+- [ ] Write blog post: "Why AI agents keep making the same mistakes" (target HN, r/LocalLLaMA)
+- [ ] Create starter knowledge pack (common deployment patterns, debugging playbooks) so new users get value on day one
+
+### Discoverability
+- [ ] Submit to awesome-mcp-servers list
+- [ ] Submit to awesome-llm-agents / awesome-ai-tools lists
+- [ ] Publish ClawHub skill: `clawhub publish integrations/openclaw/`
+
+### Developer Experience
+- [ ] Add hosted playground (Streamlit or Gradio) showing graph visualization and search
+- [ ] Write persona-targeted docs: "Trellis for platform teams", "Trellis for solo devs with Claude Code"
+
+### Human-Review UI — KPI dashboards, observability, metrics, run history
+
+**Problem.** We've shipped a rich read-model: `context-effectiveness`, `apply-noise-tags`, `token-usage`, `generate-advisories`, `advisory-effectiveness`, `pack-sections`, `pack-quality`, `dimension-predictiveness`, `pack-telemetry`, `extractor-fallbacks`, plus the full `trellis metrics` suite (`outcomes` / `proposals` / `versions` / `tune` / `promote`). All of this is CLI-only today. An operator debugging "why is this agent suddenly failing" has to pick the right command, parse a terminal table, cross-reference `pack_id`s by hand, and re-run with different `--days` windows to trend anything. That's fine for the person who wrote the code; it's a cold-start cliff for everyone else.
+
+The mutation pipeline produces every signal we'd want. A UI layer on top turns operators from "has to know Trellis internals" into "can answer questions about agent behavior from the browser."
+
+**Goal.** A web UI (same host as the existing `/ui/` surface — see [aws-ecs.md](../deployment/aws-ecs.md)) that turns the existing analyzers into clickable dashboards, surfaces items that need human review, and lets operators scrub through historical runs. Read-only first; mutations (promote proposal, suppress advisory, reclassify doc) gated behind explicit buttons that route through the same `MutationExecutor` the CLI uses — never direct store writes.
+
+**Why now / why not now.** Not a POC blocker. The CLI covers every operation a design partner's first 20 operators can execute. Dashboards matter when (a) the first partner passes ~10k packs/week and the CLI output stops fitting on a screen, (b) we onboard a second team whose ops people aren't Python-first, or (c) we demo the feedback loop to a buyer who wants to see trends, not typed commands. Ship when one of those fires; the analyzers themselves are already the substrate.
+
+**Surfaces (suggested ordering by ROI):**
+
+1. **KPI dashboard (landing page)** — one page summarizing the five loops at today's snapshot:
+   - Context effectiveness: success rate, noise candidates flagged / applied.
+   - Pack quality: per-dimension trend, which dimensions are signal vs noise (predictiveness).
+   - Learning loop: pending proposals, active `ParameterSet` per scope, last promotion timestamp.
+   - Extraction health: `EXTRACTOR_FALLBACK` rate per source_hint, graduation candidates.
+   - Pack telemetry: budget-hit rate, top rejection reason, per-strategy yield.
+   Each tile has a "drill in" link to the corresponding detail view.
+
+2. **Human-review queue** — one feed of items that need operator action, sourced from the existing event stream without new writes:
+   - `TunerProposal` records in `pending` / `canary` status ready for `promote`.
+   - `Advisory` records flagged `ADVISORY_DRIFT_DETECTED` (Gap 2.4).
+   - Extractor sources flagged `empty_result` fallback rate ≥50% ≥10 dispatches (Gap 4.3).
+   - Pack-quality scenarios with `insufficient_data` after N days (dimension predictiveness can't fire).
+   - Budget saturation above threshold (Gap 3.4).
+   Each row: one-line summary, evidence link, two-click resolution (accept / dismiss / defer).
+
+3. **Run history / pack replay** — given a `pack_id`, show the full audit trail: the `PACK_ASSEMBLED` payload (strategies, rejected items, budget trace), attached `QualityReport` (if any), downstream `FEEDBACK_RECORDED` outcome, and the `EXTRACTION_DISPATCHED` + `EXTRACTOR_FALLBACK` events that seeded the underlying entities. Deep-link from everywhere. This is the "scrubbable timeline" experience — operators need this to debug "why did this agent see this item."
+
+4. **Observability timeline** — the full `EventLog` rendered as a filterable time-series (event_type facet, source facet, entity_id search). Essentially a tailored log viewer that knows about Trellis event shapes. Replaces the "grep the JSONL" workflow that exists today.
+
+5. **Metrics trends** — time-series line charts of every scalar the analyzers emit (success rate, fallback rate, budget-hit rate, dimension correlations). The `--days` CLI parameter becomes a draggable window selector; the JSON output becomes the chart's data source. Trends matter more than snapshots for tuning.
+
+6. **Mutation surface (deferred)** — minimal buttons to route through `MutationExecutor`: promote proposal, suppress advisory, restore advisory, trigger `apply-noise-tags`, apply reclassification pass. All gated behind a confirmation + actor identification step. Defer until the read-only views are populated — writes without visibility are riskier than the status quo.
+
+**Architecture constraints (non-negotiable):**
+- **Every write goes through `MutationExecutor`.** No direct store writes from the UI layer. Same rule as the CLI.
+- **Events, not polling.** UI should subscribe to the `EventLog` rather than poll stores. This also gives us "live" dashboards for free on supported substrates. SQLite polling is an acceptable interim.
+- **JSON shape already exists.** Every analyzer ships `--format json`. The UI consumes that contract, not a new API. When the UI needs something the CLI doesn't, add it to the analyzer first (so CI / scripting keeps parity).
+- **Auth surface is `trellis_api_keys`** (deferred auth phase, see "Cloud deployment — POC follow-ups"). UI-specific auth is out of scope — ride whatever the API adopts.
+- **Framework choice.** Don't reach for a bespoke React build. The existing `/ui/` surface should be extended. If that proves insufficient, a thin server-rendered UI (HTMX, or a small Svelte component set) is preferable to a SPA — this is tooling, not a product.
+
+**Prerequisites already in place:**
+- All analyzers return `TrellisModel` reports with `.model_dump()` → ready to serve as JSON.
+- `EventLog.get_events(event_type=..., since=...)` is the one query UIs need.
+- `trellis metrics` REST endpoints can re-use CLI command logic if we factor out the analysis functions (most are already pure of I/O beyond the event log).
+
+**Explicit non-goals:**
+- No agent-facing UI. Agents use MCP / SDK / REST. Humans use this.
+- No graph visualization in v1 (separate, heavier thread — see "Add hosted playground" above).
+- No ad-hoc query language. The dashboards are opinionated views over structured data; raw SQL / Cypher belongs in a separate admin tool.
+
+**Open design questions (to answer once this lands in a sprint):**
+- Single-page or multi-page? Single-page is faster to build and ships today's data well; multi-page scales better when trends matter.
+- Real-time updates? Cheap via `EventLog` subscribe when substrate supports it (Postgres `LISTEN`, SurrealDB live queries); polling is acceptable otherwise.
+- Identity model: do we record which operator approved a promotion? Adds `actor` to `MutationCommand` metadata — small change, worth considering before first mutation ships.
+
+### Research — Agent & Compaction Improvements
+- [x] Review https://barazany.dev/blog/claude-codes-compaction-engine for compaction strategies
+- [x] Review https://github.com/instructkr/claude-code for agent orchestration and memory patterns
+- [x] Write up findings: [docs/research/compaction-and-agent-patterns.md](../research/compaction-and-agent-patterns.md)
+- [x] **P0:** Add recency decay to PackBuilder relevance scoring (`retrieve/strategies.py`) — shipped 2026-04-15 (Sprint A)
+- [x] **P0:** Session-aware dedup in `get_context` (track recently served items per session_id) — shipped 2026-04-15 (Sprint A)
+- [x] **P0:** Dedup check + event emission in `save_memory` (`mcp/server.py`) — shipped 2026-04-15 (Sprint A) with `EventType.MEMORY_STORED`
+- [ ] **P1:** Wire `save_memory` into enrichment pipeline (`DocumentEnrichmentWorker`)
+- [ ] **P1:** `DocumentPromotionWorker` — route high-value docs to precedents/graph
+- [x] ~~**P1:** TTL metadata + `DocumentRetentionWorker` for auto-expiry~~ — **SUPERSEDED** 2026-08-25 by the governed `retention.prune` verb ([adr-retention-prune.md](../design/adr-retention-prune.md) §3.3 backlog ruling, §6.4). Auto-expiry becomes a criteria class of the governed verb, not a standalone worker; blob TTL already has its answer in `BlobStore.sweep_expired`.
+- [ ] **P1:** Tier 1 compaction worker — strip old tool outputs from traces >30 days
+- [ ] **P2:** `get_detail(item_id)` MCP tool for lazy/deferred content loading
+- [ ] **P2:** Tier 2 compaction — fuzzy document dedup via similarity threshold
+- [ ] **P3:** Tier 3 compaction — LLM-driven trace consolidation with summary merging
+- [ ] **P3:** SCD Type 2 versioning for documents (matching graph store pattern)
+
+### Tiered Context Retrieval — Sectioned Pack Assembly
+
+> **Problem discovered (2026-04-05):** In the consumer deployment's multi-agent pipeline, each agent constructs a narrow, task-scoped retrieval intent ("SQL generation for layer domain_c_sessions"). This misses strategic context (who owns this data? what already exists? what failed before?) because keyword retrieval only surfaces content with vocabulary overlap to the technical task. The user's business objective gets decomposed into a structured spec before context retrieval happens, so no agent ever asks the *strategic* question.
+>
+> **Solution:** Tiered pack assembly. The graph provides sectioned retrieval where each section targets a different *kind* of knowledge with its own budget and retrieval strategy. Applications define which sections each agent phase needs. Some sections (objective/domain) are assembled once and shared across all phases; others (tactical/entity) are assembled per-step.
+
+#### The Four Retrieval Tiers
+
+| Tier | What It Provides | When Assembled | Content Sources |
+|------|-----------------|----------------|-----------------|
+| **Objective** | Business intent, domain conventions, ownership, governance, what already exists | Once per workflow, from user's original request | Precedents, constraints, ownership entities, domain_intent docs |
+| **Strategic** | Patterns, prior art, design decisions, materialization rules | Once during planning, enriched after discovery | Patterns, procedures, successful traces, decisions |
+| **Tactical** | Column schemas, code examples, known pitfalls for this exact task | Per-step, uses outputs from prior steps | Entity metadata, code docs, error-resolutions, recent traces |
+| **Reflective** | Quality constraints, compliance rules, comparison against original objective | After execution, before validation | Constraints, failed traces, precedent applicability |
+
+#### Implementation: Three-Layer Classification
+
+The tier isn't a label on the content — it's a filter on the retrieval. Classification happens at three layers:
+
+**Layer 1 — Deterministic (ingest time).** Already exists via `StructuralClassifier`, `KeywordDomainClassifier`, `SourceSystemClassifier`. Tags `content_type`, `scope`, `signal_quality`, `domain`.
+
+**Layer 2 — Heuristic rules (retrieval time).** New. Maps content properties to tier eligibility:
+- Objective: `scope IN (universal, org)` AND `content_type IN (constraint, decision, documentation)`, or entity_type is OWNER/TEAM/PRECEDENT
+- Strategic: `content_type IN (pattern, procedure, decision)`, or entity is DBT_MODEL/PIPELINE_DEFINITION, or successful trace with matching domain
+- Tactical: `content_type IN (code, configuration, error-resolution)`, or entity is UC_TABLE/UC_COLUMN
+- Reflective: `content_type IN (constraint, discovery)`, or failed traces, or precedent with applicability match
+
+These rules are **configurable per application** — shipped as defaults, overridable.
+
+**Layer 3 — LLM-enriched (ingest time, async).** New `retrieval_affinity` classification facet on `ContentTags`:
+```python
+class RetrievalAffinity(StrEnum):
+    DOMAIN_KNOWLEDGE = "domain_knowledge"     # business concepts, ownership, governance
+    TECHNICAL_PATTERN = "technical_pattern"    # how-to, SQL patterns, conventions
+    OPERATIONAL_CONTEXT = "operational"        # traces, incidents, error history
+    REFERENCE_DATA = "reference"              # entity metadata, schemas, configs
+```
+Classified by the existing `LLMFacetClassifier` pipeline when deterministic confidence is low. Content can have multiple affinities (a "lookback windows" doc is both domain_knowledge and technical_pattern).
+
+#### Implementation Tasks
+
+##### Phase 1: Schemas & Classification (P0) — ✅ DONE (2026-04)
+
+> Landed in `src/trellis/schemas/classification.py` and the classifier pipeline. Kept for historical reference; see [Recently Completed](#recently-completed-2026-04-13--2026-04-15).
+
+- [x] **Add `retrieval_affinity` to `ContentTags`** (`schemas/classification.py:52`)
+- [x] **Add `RetrievalAffinity` enum** (`schemas/classification.py:28-33`)
+- [x] **Extend deterministic classifiers** to populate `retrieval_affinity`
+- [x] **Extend `LLMFacetClassifier`** to classify ambiguous content into affinities
+- [x] **Tests**: unit tests for each classifier extension, round-trip serialization of new field
+
+##### Phase 2: Sectioned Pack Assembly (P0) — ✅ DONE (2026-04)
+
+> Landed in `src/trellis/schemas/pack.py`, `src/trellis/retrieve/pack_builder.py`, and `src/trellis/retrieve/tier_mapping.py`. Kept for historical reference.
+
+- [x] **`SectionRequest` schema** (`schemas/pack.py:92-107`)
+  ```python
+  class SectionRequest(TrellisModel):
+      name: str                                    # e.g., "domain", "patterns", "entities"
+      retrieval_affinities: list[RetrievalAffinity] | None = None  # filter by affinity
+      content_types: list[ContentType] | None = None               # filter by content type
+      scopes: list[Scope] | None = None                            # filter by scope
+      entity_ids: list[str] | None = None                          # seed entities for graph search
+      max_tokens: int = 2000                                       # per-section budget
+      max_items: int = 10                                          # per-section cap
+      strategies: list[str] | None = None                          # override which strategies run
+  ```
+
+- [x] **`SectionedPack` schema** (`schemas/pack.py:121-150`)
+- [x] **`PackBuilder.build_sectioned()`** method (`retrieve/pack_builder.py:189-268`)
+- [x] **Tier-mapping rules / `TierMapper`** (`retrieve/tier_mapping.py:54-146`, defaults at `:26-51`)
+- [x] **Tests**: sectioned pack assembly with mock strategies, per-section budgeting, cross-section dedup, tier mapping rules
+
+##### Phase 3: Formatted Output & MCP Tools (P1) — ✅ DONE (2026-04)
+
+- [x] **`format_sectioned_pack_as_markdown()`** (`retrieve/formatters.py:278`)
+- [x] **New `get_objective_context` MCP tool** (`mcp/server.py:525+`)
+- [x] **New `get_task_context` MCP tool** (`mcp/server.py:631+`)
+- [x] **SDK methods**: `assemble_sectioned_pack`, `get_objective_context`, `get_task_context` (sync + async) + `POST /api/v1/packs/sectioned` endpoint
+- [ ] **Update flat `get_context` MCP tool** to accept `sections` param for backward-compatible sectioned retrieval. (Still flat; `get_objective_context` / `get_task_context` are the new entry points.)
+
+##### Phase 4: CLI & Documentation (P1) — PARTIAL
+
+- [x] **`trellis analyze pack-sections`** CLI command — shipped 2026-04-15 (Sprint A). Reports per-section packs-count / avg-items / unique-items / empty-rate from `PACK_ASSEMBLED` events, flags frequently-empty sections.
+- [x] **Adoption guide**: [docs/agent-guide/tiered-context-retrieval.md](../agent-guide/tiered-context-retrieval.md)
+- [x] **Tagging guide**: [docs/agent-guide/tagging-for-retrieval.md](../agent-guide/tagging-for-retrieval.md)
+- [ ] **Migration guide**: update existing `get_context` / `search` docs to reference sectioned retrieval as the recommended pattern for multi-agent workflows
+
+### Pack Composition — Open Explorations (2026-04-20)
+
+Surfaced while refining README messaging. Two gaps between the current `PackBuilder` and the "curated from prior runs + live discovery, weighted" mental model.
+
+- [ ] **Explore: flow promoted precedents into main packs.** Today promoted precedents live as `PRECEDENT_PROMOTED` events reached via `get_lessons` — they are **not** merged into `PackBuilder.build()` candidates. Before wiring this in, establish a baseline: for the last N sessions with feedback, how often did the relevant precedent actually exist? How often would injecting top-K precedents into the candidate pool have displaced a higher-scoring discovered item vs. added real signal? If the hit rate is low, the feature is costume jewelry; if it's meaningful, design a `PrecedentSearch` strategy (own `strategy_source`, RRF'd alongside keyword/semantic/graph, per-strategy budget). Decision gate: baseline analysis first, implementation second.
+- [ ] **Explore: call-time strategy weights.** `PackBuilder` currently fuses keyword/semantic/graph via fixed-weight RRF ([rerankers/rrf.py](../../src/trellis/retrieve/rerankers/rrf.py)). An agent cannot say "lean on graph for this structural intent" or "lean on semantic for this conceptual intent" per-call. Scope: add optional `strategy_weights: dict[str, float] | None` to `PackBuilder.build()` and the MCP / SDK / REST surfaces, plumb through to a weighted-RRF variant, emit weights in `PACK_ASSEMBLED` for effectiveness attribution so the tuning loop can learn when different mixes win. Small change, potentially high leverage — but confirm via effectiveness analysis on existing sessions that strategy-source wins actually cluster by intent type before adding the surface.
+
+### Pack Quality Evaluation Framework (interactive testing)
+
+Generic pack evaluation that works on synthetic scenarios *and* real event log data. Extends the existing `effectiveness.py` / `token_usage.py` pattern with richer scoring dimensions.
+
+#### Background: What We Built & Learned (consumer deployment, 2026-04-05)
+
+Built a project-specific pack analysis in the consumer deployment repo (40 passing tests). The implementation:
+
+1. **5 domain scenarios** (domain-a, domain-b, domain-c, domain-d, reference) with synthetic entity fixtures and knowledge base items loaded from the consumer deployment repo's `knowledge/` directory.
+2. **5 scoring dimensions**: completeness (coverage checklist hit rate), relevance (mean PackItem.relevance_score), noise ratio (cross-domain items / total), coverage breadth (distinct content categories / expected), token efficiency (useful tokens / total).
+3. **2 use-case weight profiles** — pipeline generation (technical depth) vs business domain context (organizational breadth) — same pack, different weights, meaningfully different scores.
+4. **Synthetic pack assembly** — reads knowledge .md files (frontmatter + body), splits multi-section docs, loads precedent .yaml, builds entity fixtures, scores via keyword overlap (Jaccard + tag bonus), applies domain filter + budget. Mirrors `ContextProvider` logic without live stores.
+
+**Key findings from initial analysis:**
+- **Keyword retrieval misses ownership/governance docs** when intent is technical ("Generate SQL for dedup..."). The vocabulary gap between technical intents and organizational metadata means agents never see who owns the data. This validates the need for either (a) mandatory context injection for ownership metadata, (b) semantic search, or (c) structured pack sections by content_type.
+- **Relevance scores are moderate (0.30-0.43)** even for correct items — pure keyword overlap between specific task intents and broad convention docs is inherently limited. Embedding-based semantic search would significantly improve recall.
+- **Coverage breadth is weakest for simple domains** (reference: 0.60) — fewer domain-specific precedents and patterns available.
+- **Noise ratio is 0.000 everywhere** — domain filter works well (knowledge items tagged `domain: all` pass through), but the metric only catches metadata-tagged cross-domain contamination, not topical irrelevance.
+- **Pipeline gen scores higher (0.805) than business context (0.758)** — knowledge base is stronger on technical patterns than organizational context.
+
+**What's domain-specific (stays in the consumer deployment):** scenario definitions, domain-specific entity fixtures, knowledge base loading, use-case weight profiles.
+
+**What's generic (belongs here):** scoring dimensions, evaluator protocol, report structures, CLI surface, pack diff/replay, strategy ablation, event integration.
+
+#### Implementation Plan
+
+**Architecture:** Follow the `effectiveness.py` pattern exactly. New `evaluate.py` module in `retrieve/`, new `QualityReport` extending `TrellisModel`, new `trellis analyze pack-quality` CLI command.
+
+##### P1: Core Evaluation Engine
+
+- [ ] **`retrieve/evaluate.py`** — Generic pack quality scorer.
+
+  ```python
+  class QualityDimension(Protocol):
+      name: str
+      def score(self, pack: Pack, ground_truth: EvaluationScenario) -> float: ...
+
+  class EvaluationScenario(TrellisModel):
+      """Downstream projects define these; core library scores them."""
+      intent: str
+      domain: str | None
+      seed_entity_ids: list[str]
+      required_coverage: list[str]  # keywords that MUST appear in pack
+      expected_categories: list[str]  # content types that should be present
+      metadata: dict[str, Any]  # use-case-specific context
+
+  class QualityReport(TrellisModel):
+      """Extends the EffectivenessReport pattern."""
+      scenario_name: str
+      pack_id: str | None
+      dimensions: dict[str, float]  # dimension_name -> score [0, 1]
+      weighted_score: float
+      missing_coverage: list[str]
+      findings: list[str]  # actionable observations
+  ```
+
+  Built-in dimensions (all deterministic, no LLM):
+  - `CompletenessScorer` — fraction of `required_coverage` keywords found in pack items
+  - `RelevanceScorer` — mean `relevance_score` across included items
+  - `NoiseScorer` — fraction of items with mismatched `domain_system` metadata
+  - `BreadthScorer` — distinct content categories present vs `expected_categories`
+  - `EfficiencyScorer` — token budget utilization (useful tokens / total)
+
+  Extension point: implement `QualityDimension` protocol for custom scorers (e.g., LLM-as-judge for semantic relevance, embedding similarity to reference outputs).
+
+- [ ] **`EvaluationProfile`** — Named weight sets for different use cases.
+
+  ```python
+  class EvaluationProfile(TrellisModel):
+      name: str  # e.g., "code_generation", "domain_understanding", "investigation"
+      weights: dict[str, float]  # dimension_name -> weight (must sum to 1.0)
+  ```
+
+  Ship 2 built-in profiles (from downstream-consumer learnings):
+  - `code_generation`: completeness=0.35, relevance=0.25, noise=0.20, breadth=0.10, efficiency=0.10
+  - `domain_context`: completeness=0.20, relevance=0.20, noise=0.15, breadth=0.30, efficiency=0.15
+
+- [ ] **`trellis analyze pack-quality`** CLI command.
+
+  Two modes:
+  1. **Event log mode**: score packs from `PACK_ASSEMBLED` events in the event log. Joins with scenario metadata from a YAML fixture file.
+  2. **Scenario mode**: load `EvaluationScenario` fixtures from a YAML file, assemble packs via `PackBuilder`, score them. No live event log needed.
+
+  Output: Rich table (dimension scores per scenario) + JSON mode. Follow `analyze context-effectiveness` pattern.
+
+##### P2: Interactive Pack Testing
+
+- [ ] **Pack replay/diff** — `trellis analyze pack-diff --left <config_a.yaml> --right <config_b.yaml>`.
+
+  Given two pack configurations (different budgets, strategies, domain filters, or scoring weights), assemble both packs for the same scenario and render:
+  - Items only in left, only in right, in both (with rank delta)
+  - Score deltas per dimension
+  - Token budget utilization comparison
+
+  This is the core "interactive testing" tool — lets you tune retrieval parameters and see exactly what changes.
+
+- [ ] **Strategy ablation** — `trellis analyze strategy-ablation --scenario <file.yaml>`.
+
+  For each scenario, assemble packs with:
+  - keyword-only (KeywordSearch)
+  - graph-only (GraphSearch)
+  - semantic-only (SemanticSearch)
+  - combined (all strategies)
+
+  Report which strategy contributes the most unique high-value items per scenario type. Identifies where to invest retrieval improvements.
+
+- [ ] **Live quality gating** — emit `PACK_QUALITY_SCORED` event alongside `PACK_ASSEMBLED`.
+
+  When `PackBuilder.build()` runs, optionally evaluate the pack against a scenario (if one is registered for the current agent_id/skill_id) and emit quality scores as an event. Downstream consumers can alert on low-quality packs before they reach the agent.
+
+  Integration point: `PackBuilder.__init__(evaluator=None)` — optional evaluator that runs post-assembly.
+
+##### P3: Learning Loop Integration
+
+- [x] **Dimension predictiveness validation (prereq for calibration)** — DONE. `analyze_dimension_predictiveness()` + `trellis analyze dimension-predictiveness` CLI shipped. Joins `PACK_QUALITY_SCORED` (P2 event, now emitted automatically by `PackBuilder` when an evaluator is wired) against `FEEDBACK_RECORDED` by `pack_id`, computes per-dimension Pearson / point-biserial correlation, classifies dimensions as strong / moderate / weak / noise / insufficient_data (20-sample minimum). Weighted score reported separately. Read-only — never mutates profiles. See [`docs/agent-guide/pack-quality-evaluation.md`](../agent-guide/pack-quality-evaluation.md) § *Dimension predictiveness validation*. Per-scenario breakdowns still aggregate across scenarios; add once volume justifies it.
+- [ ] **Feedback-driven dimension calibration** — once predictiveness is validated, auto-adjust `EvaluationProfile` weights from the same correlations. If `noise_ratio` doesn't correlate with failure, reduce its weight. If `breadth` strongly predicts success, boost it. Gated behind a `--apply` flag and a `ParameterSet` promotion through `MutationExecutor` (same path as other tuned parameters). Depends on P2 live gating emitting `PACK_QUALITY_SCORED` events.
+- [ ] **Automatic scenario generation from traces** — mine `PACK_ASSEMBLED` + `FEEDBACK_RECORDED` event pairs to auto-generate `EvaluationScenario` fixtures. Successful traces become ground-truth scenarios; failed traces become regression tests.
+
+#### Relationship to Existing Infrastructure
+
+| Existing Module | Relationship | Integration Point |
+|----------------|--------------|-------------------|
+| `effectiveness.py` | Complementary. Effectiveness measures pack→outcome correlation over time. Quality evaluation measures pack properties at assembly time. | Share `QualityReport` → `EffectivenessReport` pipeline: quality scores become features for effectiveness analysis. |
+| `token_usage.py` | Subset. Token efficiency dimension replaces ad-hoc budget tracking with a principled score. | `EfficiencyScorer` can consume `TOKEN_TRACKED` events for calibration. |
+| `ClassifierPipeline` | Upstream. Classification quality directly affects pack content quality. | `BreadthScorer` depends on correct `content_type` tags from classification. Low breadth may indicate classification gaps, not retrieval gaps. |
+| `importance.py` | Upstream. Importance scores feed `relevance_score` in strategies. | `RelevanceScorer` measures the downstream effect of importance weighting. Ablation can compare packs with/without importance boost. |
+| `formatters.py` | Downstream. Formatters consume packs that evaluation scored. | Future: `format_pack_as_markdown()` could annotate items with their quality contribution (e.g., "this item covers the ownership gap"). |
+| `PackBuilder` | Core dependency. Evaluation scores packs that PackBuilder assembles. | Optional `evaluator` parameter on `PackBuilder` for inline quality gating. |
+
+### Unity Catalog Backfill & Platform Integration
+- [x] **P0:** `POST /api/v1/ingest/bulk` endpoint accepting entities + edges + aliases in one request — shipped 2026-04-15 (see Sprint B entry above)
+- [ ] **P1:** Clarify EntityType/EdgeKind enum role — either remove from schemas or document as "well-known types" (storage layer already accepts any string)
+- [ ] **P2:** Add `GET /api/v1/sync/status` for recent backfill run tracking
+- [ ] Reference: the consumer deployment repo — runners already work against GraphStore directly, need API mode for EKS deployment
+
+### Storage Backend Guidance & 3-Layer Architecture
+- [ ] Add a "Choosing Backends" section to README and/or agent guide that explains the 3-layer architecture and why each tool exists:
+  - **PostgreSQL for graph** — recursive CTEs for transitive dependency queries (`WITH RECURSIVE deps AS ...`), ACID transactions for atomic entity+edge+alias upserts, SCD Type 2 temporal versioning (`valid_from`/`valid_to` with `as_of` queries), referential integrity on edges, MVCC for concurrent writers (API + backfill scripts simultaneously)
+  - **S3/local for blobs** — large artifacts, embeddings, file content
+  - **LanceDB (or pgvector) for vector search** — ANN similarity, document retrieval, semantic search only
+- [ ] Document what LanceDB/SQLite CANNOT do and when to upgrade:
+  - No transactions (crash mid-upsert of entity+edges = partial state)
+  - No recursive CTEs (transitive graph traversal requires pulling edges into Python — works at ~170K edges, painful beyond)
+  - No SCD Type 2 temporal queries (no `as_of` time-travel)
+  - No referential integrity (dangling edge references)
+  - No concurrent writer isolation (single-machine only)
+  - SQLite is fine for dev/single-agent use; PostgreSQL is required for production multi-writer deployments
+- [ ] Add a decision matrix to docs: "If you need X, use Y backend" table
+- [ ] Consider adding a startup warning when graph store is SQLite but edge count exceeds a threshold (e.g., >50K) suggesting Postgres migration
+
+### Configurable Ingestion Rules & Population Framework
+Currently all content routing is hardcoded — each worker/tool decides where content goes with fixed metadata. There's no configurable framework for defining "source X → store Y with metadata Z and lifecycle W."
+
+- [ ] **Design: IngestionRule schema** — declarative rules in `config.yaml` that control content routing. Each rule specifies:
+  - `source` — where content comes from (used for matching)
+  - `content_type` — what shape of content (entity, document, observation, trace)
+  - `destination` — which store(s) receive it (graph_store, document_store, trace_store)
+  - `metadata_defaults` — metadata injected on every item from this source
+  - `lifecycle` — retention, staleness, refresh policies
+  - `enrich` — whether to trigger ClassifierPipeline + EnrichmentService
+  - `promote` — whether high-importance items auto-promote to precedents/graph
+  - `filters` — conditions for accepting/rejecting content
+- [ ] **Provide `config.yaml.sample`** with annotated examples and reasoning for each field — application-specific rules belong in consumer repos, not in the core library
+- [ ] **Population surface guidelines** — document which store handles which content shape and WHY:
+  - **GraphStore**: structured entities with typed relationships (nodes + edges). Use when content has identity, hierarchy, or dependency structure. Supports transitive queries, temporal versioning, referential integrity.
+  - **DocumentStore**: searchable text content. Use for descriptions, observations, notes — anything retrieved by keyword or semantic search. Attach `content_type`, `domain`, `memory_type` metadata for lifecycle and retrieval filtering.
+  - **TraceStore**: immutable execution records. Use for agent work with intent, steps, outcome. Append-only by design — never update, only add feedback.
+  - **VectorStore**: embedding vectors for semantic search. Populated by enrichment workers, not directly by ingestion. Complements DocumentStore, not a replacement.
+  - **EventLog**: append-only audit trail. Never populated directly — emitted by the system on mutations and feedback.
+- [ ] **IngestionRouter class** — evaluates rules at ingestion time to determine destination(s), metadata injection, and lifecycle policy. Replaces hardcoded routing in individual workers.
+- [ ] **Backfill vs incremental mode** — bulk loading needs different behavior:
+  - Dedup strategy (skip-if-exists vs upsert vs version)
+  - Batch size / transaction boundaries
+  - Whether to trigger enrichment (skip during bulk load, enable after)
+  - Progress tracking and resumability (checkpoint after N items)
+- [ ] **Extend policy gates to cover ingestion** — currently policies only gate mutations. Add ingestion-level policies for accept/reject, redaction, and rate limiting.
+- [ ] **Refactor existing workers** to use IngestionRouter instead of hardcoded paths
+
+### Workflow Integration Hooks (context in, traces out, results back)
+
+Proven patterns from the consumer deployment that should be generalized into the core library. These enable any workflow engine (not just that deployment) to integrate with the experience graph.
+
+Reference implementation: the consumer deployment repo's `agents/{graph_context,trace_recorder,result_feedback}.py`
+
+#### Context Injection (pre-dispatch)
+- [ ] **`ContextInjector` class** — generic pre-dispatch hook that assembles graph context for a worker/agent. Takes entity IDs + intent, returns formatted context (markdown or structured).
+  - Uses `PackBuilder.build()` internally (keyword + graph + trace search)
+  - Configurable token budget and format (markdown for prompt injection, JSON for structured tools)
+  - Falls back gracefully with WARNING when API unreachable (never blocks the pipeline)
+  - Should support both SDK client mode (remote HTTP) and direct registry mode (local stores)
+- [ ] **Example: `assemble_worker_context(entity_ids, intent, max_tokens) -> str`** in SDK
+- [ ] **Config-driven**: which stores to query (graph, documents, traces, precedents) and token budget per store
+
+#### Trace Recording (post-dispatch)
+- [ ] **`WorkflowTraceRecorder` class** — generic post-dispatch hook that records execution traces.
+  - Maps workflow step metadata (skill name, duration, status, artifacts) to the Trace schema
+  - Records on success AND failure — failure traces are valuable for learning ("what went wrong when generating SQL for this table?")
+  - Fire-and-forget with WARNING on failure (never blocks pipeline)
+  - Should accept a `trace_template` for workflow-specific fields
+- [ ] **Example: `record_step_trace(skill, run_id, status, duration_ms, entity_ids) -> trace_id`** in SDK
+- [ ] **Feedback wiring**: after trace is recorded, enable `record_feedback(trace_id, success, notes)` to close the loop
+
+#### Result Feedback (post-execution)
+- [ ] **`ResultFeedbackLoop` class** — generic post-execution hook that records evidence linking results to entities.
+  - On success: creates DOCUMENT entity + DESCRIBED_BY edge from target entity → result doc
+  - On failure: trace alone captures the failure (no document created)
+  - Supports storing full content in blob store (S3) with summary in document store
+  - Fire-and-forget with WARNING on failure
+- [ ] **Example: `record_result(target_entity, result_summary, full_content, success) -> None`** in SDK
+
+#### MCP Server as Sidecar
+- [ ] **Document the pattern**: run `trellis.mcp.server` alongside `trellis_api` so workers can query the graph at runtime via MCP tools
+  - Workers get `get_context`, `search`, `get_graph`, `get_lessons` tools
+  - `.mcp.json` entry: `{"trellis": {"command": "python3", "args": ["-m", "trellis.mcp.server"], "env": {"TRELLIS_PG_DSN": "..."}}}`
+- [ ] **Consider**: should the API server also serve MCP (single process) or keep them separate?
+
+### Observation Pipeline (wire save_memory into learning) — FOLDED INTO TIERED EXTRACTION
+
+> **Consolidation note (2026-04-15):** This section's `save_memory` → enrichment → promotion flow overlaps with the "Tiered Extraction Pipeline" section below. The `DocumentEnrichmentWorker` described here is the consumer of `SaveMemoryExtractor` (Tiered Extraction Phase 2). Treat the items below as the **Phase 3 integration tail** of Tiered Extraction, not as a parallel workstream. The `dedup + event emission` item is split out to Sprint A because it does not depend on the LLM extractor path.
+
+- [x] **[Sprint A, P0]** Dedup + event emission in `save_memory` — shipped 2026-04-15. Content-hash dedup via `DocumentStore.get_by_hash`; emits `EventType.MEMORY_STORED`.
+- [ ] Design doc: `save_memory` as observation ingestion funnel (see `docs/research/compaction-and-agent-patterns.md`) — folded into Tiered Extraction Phase 5 docs.
+- [ ] `DocumentEnrichmentWorker` (classify + enrich new documents) — [blocked: Tiered Extraction Phase 3 integration + LLMClient ADR]
+- [ ] `DocumentPromotionWorker` (route high-value docs to precedents/graph) — promoted precedents are **curated nodes** (`node_role=CURATED`, `generation_spec.generator_name="precedent_promotion"`). Depends on Phase 4 `trellis curate regenerate` machinery.
+- [x] ~~TTL metadata + `DocumentRetentionWorker` for auto-expiry~~ — **SUPERSEDED** 2026-08-25, see [adr-retention-prune.md](../design/adr-retention-prune.md) §6.4.
+
+### Self-Learning Classification (reduce LLM cost over time)
+- [ ] Investigate: train a lightweight model (logistic regression, small transformer, or decision tree) on accumulated LLM classification outputs to progressively replace LLM calls
+- [ ] The ClassifierPipeline already has a deterministic-first / LLM-fallback architecture — the idea is to **grow the deterministic tier** by learning from LLM outputs over time
+- [ ] Approach options:
+  - **Scikit-learn model** trained on (content features → content_type, domain, signal_quality) from EnrichmentService outputs. Retrain periodically as a batch job. Simplest, most interpretable.
+  - **Embedding + kNN classifier** using the vector store — classify new items by nearest-neighbor vote from previously LLM-classified items. Leverages existing infrastructure.
+  - **Active learning loop** — only send items to the LLM when the deterministic classifier's confidence is below threshold (already how ClassifierPipeline works), but feed LLM results back to retrain the deterministic classifiers.
+- [ ] Key metric: LLM call rate over time should decrease as the deterministic classifiers absorb learned patterns
+- [ ] Data pipeline: `ENRICHMENT_COMPLETED` events → training set extraction → model fit → deploy as a new `LearnedClassifier` conforming to the `Classifier` Protocol
+- [ ] Consider: could also apply to importance scoring (`auto_importance`) — learn what the LLM considers important from historical scores
+
+### Tiered Extraction Pipeline (deterministic-first, LLM-augmented, grows over time)
+
+> **Design insight (2026-04-11, in response to the Graphiti deep audit):** The Graphiti comparison initially framed "LLM-driven extraction" as strictly a weakness versus our "deterministic-first" approach. That framing is wrong. **LLM-based extraction is the correct default for unknown or evolving domains** where you haven't yet characterized the structure. **Deterministic extraction is the correct target state for known, stable domains** where the cost of LLM calls is unjustified by the marginal information gained. A mature platform needs **both**, with an explicit graduation path from one to the other.
+>
+> **The pattern already exists in the codebase — at the wrong layer.** Our `ClassifierPipeline` uses deterministic-first / LLM-fallback for **classification** (tagging content with `domain`, `content_type`, `signal_quality`, etc.), and the "Self-Learning Classification" section above plans to grow the deterministic tier by mining LLM outputs. That's the right pattern — but we've only been applying it one level deep. Apply it one layer up, to **extraction** itself: the process of turning raw input into entities and edges before classification even runs.
+>
+> **Why this matters:**
+> - A new consumer spinning up against a domain they don't yet understand currently has to hand-write an ingestion runner before they can see any value from Trellis. That's a hard cold-start problem — exactly the cold-start problem Graphiti solved by defaulting to LLM extraction.
+> - Our `save_memory` path already ingests unstructured agent observations, and currently punts all the "what entities are in this observation?" work to the caller. An LLM extractor in core would make `save_memory` actually useful without requiring consumers to build their own extraction layer.
+> - The graduation path (LLM → hybrid → deterministic) gives consumers a clear cost-reduction story: *start expensive-but-universal, get cheaper as the domain crystallizes*.
+
+#### The three extractor tiers
+
+| Tier | When to use | Cost per item | Examples |
+|---|---|---|---|
+| **Deterministic** | Known source with stable schema | ~0 (parse cost only) | UC catalog runner, dbt manifest parser, OpenAPI spec ingester, GitHub repo walker, OpenLineage feed processor, language-server integrations, CSV/Parquet table readers |
+| **Hybrid** | Partial structure + ambiguous relationships | 0-1 LLM calls per N items (amortized) | JSON with typed fields but unclear cross-field relationships; YAML with consistent shape but variable content semantics; log lines with common patterns + occasional surprises; markdown with frontmatter + free-text body |
+| **LLM** | Unstructured input, unknown source, or exploratory phase | 2-5 LLM calls per item (Graphiti-style) | Raw text documents, conversational agent observations, screenshots + OCR, arbitrary user-pasted content, first-pass ingestion of a new source system, content from an unfamiliar domain |
+
+The tiers are not mutually exclusive — a single ingestion run can use different tiers for different inputs. The **dispatcher** decides which tier applies based on the input's provenance hints, the domain's maturity, and the consumer's cost budget.
+
+#### Architecture
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                 Raw input from any source                    │
+│  (text, JSON, message, database row, file, observation,     │
+│   API response, user paste, agent memory write, ...)         │
+└────────────────────────────┬─────────────────────────────────┘
+                             │
+                             ▼
+               ┌──────────────────────────┐
+               │   ExtractionDispatcher   │
+               │                          │
+               │  Routes by:              │
+               │   • source_hint          │
+               │   • domain registry      │
+               │   • content-type detect  │
+               │   • consumer config      │
+               │   • cost budget          │
+               └────────────┬─────────────┘
+                            │
+        ┌───────────────────┼───────────────────┐
+        │                   │                   │
+        ▼                   ▼                   ▼
+┌───────────────┐  ┌───────────────┐  ┌───────────────┐
+│ Deterministic │  │    Hybrid     │  │      LLM      │
+│  Extractor    │  │   Extractor   │  │   Extractor   │
+│               │  │               │  │               │
+│ Registered by │  │ Rules-based   │  │ Graphiti-like │
+│ source system │  │ for structure │  │ entity+edge   │
+│ (UC, dbt,     │  │ + LLM for     │  │ extraction    │
+│ OpenAPI, ...)│  │ ambiguous     │  │ from raw text │
+│               │  │ relationships │  │               │
+└───────┬───────┘  └───────┬───────┘  └───────┬───────┘
+        │                  │                  │
+        └──────────────────┼──────────────────┘
+                           ▼
+              ┌──────────────────────────┐
+              │     ExtractionResult     │
+              │  (entities, edges,       │
+              │   provenance, confidence,│
+              │   extractor_used)        │
+              └────────────┬─────────────┘
+                           │
+                           ▼
+                [Existing mutation pipeline]
+                 validate → policy → …
+```
+
+#### Graduation path
+
+The graduation path is the key differentiator from a pure-LLM approach. Once an LLM extractor has been used enough against a new domain to stabilize patterns, those patterns get mined into a deterministic or hybrid extractor:
+
+```
+[LLM extractor used on domain X]
+          │
+          │  logs (input, extracted entities/edges) as ENRICHMENT_COMPLETED
+          │  events with `extractor_used="llm"` tag
+          ▼
+[Pattern mining over accumulated extractions]
+          │
+          │  finds stable extraction rules:
+          │   - "every item with field X.type = 'table'
+          │      produces an entity with name = X.fqn"
+          │   - "relationship Y always links A→B when
+          │      A.kind = 'foo' and B.kind = 'bar'"
+          ▼
+[Generate a HybridExtractor with the rules]
+          │
+          │  rules handle the easy 80%
+          │  LLM handles the ambiguous 20%
+          ▼
+[Register the HybridExtractor in the dispatcher]
+          │
+          │  LLM calls drop by ~80% on that domain
+          ▼
+[Continue mining; promote Hybrid → Deterministic
+ as the LLM-fraction approaches 0]
+```
+
+This is the same pattern the "Self-Learning Classification" section describes for classification — just applied one stage earlier in the pipeline. The feedback loop is identical: LLM outputs become training data for deterministic replacements.
+
+#### Phase 1: Core Protocol and Dispatcher (P1)
+
+- [ ] **`Extractor` Protocol** (`src/trellis/extract/base.py`)
+  ```python
+  class Extractor(Protocol):
+      name: str                       # unique registry key
+      tier: ExtractorTier              # deterministic / hybrid / llm
+      supported_sources: list[str]     # source_hint values this handles
+      version: str                     # semver for graduation tracking
+
+      async def extract(
+          self,
+          raw_input: Any,
+          source_hint: str | None = None,
+          context: ExtractionContext | None = None,
+      ) -> ExtractionResult: ...
+  ```
+
+- [ ] **`ExtractorTier` enum** — `DETERMINISTIC`, `HYBRID`, `LLM`. Used for routing, telemetry, and graduation tracking.
+
+- [ ] **`ExtractionResult` schema** (`src/trellis/schemas/extraction.py`)
+  ```python
+  class EntityDraft(TrellisModel):
+      entity_id: str | None            # None = let the alias system assign
+      entity_type: str
+      properties: dict[str, Any]
+      node_role: NodeRole = NodeRole.SEMANTIC
+      confidence: float                # extractor's confidence in this entity
+
+  class EdgeDraft(TrellisModel):
+      source: str
+      target: str
+      kind: str
+      properties: dict[str, Any] = {}
+      confidence: float
+
+  class ExtractionResult(TrellisModel):
+      entities: list[EntityDraft]
+      edges: list[EdgeDraft]
+      extractor_used: str              # registry key of the extractor
+      tier: ExtractorTier
+      llm_calls: int                   # cost tracking
+      tokens_used: int
+      overall_confidence: float
+      provenance: ProvenanceSpec       # source_id, timestamp, raw_input_hash
+      unparsed_residue: Any | None = None  # content that couldn't be extracted
+  ```
+
+- [ ] **`ExtractionDispatcher` class** (`src/trellis/extract/dispatcher.py`)
+  - Constructed with a registry of `Extractor` instances
+  - `async dispatch(raw_input, source_hint, context) -> ExtractionResult`
+  - Routing logic (in priority order):
+    1. If `source_hint` matches a registered deterministic extractor → use it
+    2. If `source_hint` matches a registered hybrid extractor → use it
+    3. If `context.allow_llm_fallback=True` and an LLM extractor is registered → use it
+    4. Otherwise raise `NoExtractorAvailable` (explicit failure, not silent passthrough)
+  - Dispatcher emits `EXTRACTION_DISPATCHED` events with extractor used, tier, cost, confidence for effectiveness analysis
+
+- [ ] **`ExtractionContext` schema** — carries the consumer's preferences and cost budget:
+  ```python
+  class ExtractionContext(TrellisModel):
+      allow_llm_fallback: bool = False            # gate LLM usage explicitly
+      max_llm_calls: int = 5                      # hard cap per extraction
+      max_tokens: int = 8000                      # hard cap per extraction
+      prefer_tier: ExtractorTier | None = None    # force a specific tier
+      domain: str | None = None                   # hint for domain-specific extractors
+      source_system: str | None = None            # hint for source-matched extractors
+  ```
+
+- [ ] **Registry mechanism** — extractors register via Python entry points (`trellis.extractors`) so consumer packages can ship their own. Core ships a minimal set; consumers extend.
+
+- [ ] **Tests**: dispatcher routing, context-based gating, cost budget enforcement, explicit failure when no extractor matches
+
+#### Phase 2: Reference Implementations (P1-P2)
+
+- [ ] **`PassthroughExtractor` (tier=DETERMINISTIC, P1)** — For when the caller already has structured data and just wants the dispatcher's bookkeeping. Accepts `{"entities": [...], "edges": [...]}` and returns it wrapped in an `ExtractionResult`. Useful for existing runners (UC, dbt) to plug into the dispatcher without being rewritten. Zero cost. Acts as the migration bridge from the current "consumers upsert directly" model.
+
+- [ ] **`JSONSchemaExtractor` (tier=DETERMINISTIC, P1)** — For JSON input with a registered schema. Walks the input using a declarative extraction rulebook (`{"entity_rules": [...], "edge_rules": [...]}`) and emits drafts. Covers the 80% case of "we have structured JSON and know what it means" without any LLM cost. Useful for OpenLineage feeds, audit logs, dbt manifest rows, UC column metadata, etc.
+
+- [ ] **`LLMExtractor` (tier=LLM, P2)** — [blocked: LLMClient ADR (Sprint C)] Graphiti-style extraction from raw text or unknown-structure JSON. Pipeline:
+  1. Call LLM with extraction prompt (entity types, relationship kinds to look for, examples from domain registry)
+  2. Parse structured response (Pydantic `ExtractedEntities`, `ExtractedEdges`)
+  3. Optionally call LLM again for deduplication if the dispatcher's pass identified potential collisions
+  4. Return `ExtractionResult` with full cost accounting
+  - Prompt templates live in `src/trellis/extract/llm_prompts/` using the same Jinja pattern as the prompt library TODO in the Graphiti section
+  - Depends on the **`LLMClient` + `EmbedderClient` abstractions** TODO from the Graphiti section. That work is a prerequisite.
+  - Reference: `graphiti/graphiti_core/utils/maintenance/node_operations.py` and `edge_operations.py` — their extraction pipeline is the template. We don't need to match it line-for-line; we need the basic "extract → dedup → return" loop.
+  - Initial scope: one implementation using the `LLMClient` abstraction, works with any registered LLM provider. Do not ship multiple extractor implementations for different providers.
+
+- [ ] **`HybridJSONExtractor` (tier=HYBRID, P2)** — [blocked: LLMClient ADR (Sprint C)] JSON with known structure for some fields, free-text for others. Applies deterministic rules first, then calls LLM only for the ambiguous portions. The prototype for all hybrid extractors.
+
+- [ ] **`SaveMemoryExtractor` (tier=LLM, P2)** — [blocked: LLMClient ADR (Sprint C)] Dedicated extractor for the `save_memory` unstructured observation path. Knows the observation format (agent_id, intent, observation text) and extracts entities/edges specifically for the agent-memory domain. Cross-reference: the "Observation Pipeline" section's `DocumentEnrichmentWorker` uses this.
+
+- [ ] **Tests**: each extractor exercised with domain fixtures; cost tracking verified; confidence scores sensible; graceful degradation when LLM unavailable
+
+#### Phase 3: Integration with Existing Paths (P1-P2)
+
+- [ ] **Wire dispatcher into `save_memory`** — currently `save_memory` creates a document and lets the enrichment pipeline classify it. Extend to optionally run the dispatcher first to extract entities/edges from the observation, then save the document *and* create the entities in one governed transaction. Gated by a config flag (`enable_llm_extraction: bool`) that defaults to False — LLM path is opt-in, not automatic.
+
+- [ ] **Wire dispatcher into `ingest bulk` endpoint** — the bulk ingest endpoint (P0 in the Unity Catalog Backfill section) currently expects pre-structured entity/edge lists. Extend to accept a new format `{"raw_items": [...]}` where each item is routed through the dispatcher. Structured callers still use the pre-structured format; unstructured callers can now use the raw format with an explicit `source_hint` and `allow_llm_fallback=True`.
+
+- [ ] **Wire dispatcher into `DocumentEnrichmentWorker`** — when a new document arrives via `save_memory`, the enrichment worker first classifies (existing path) and then optionally runs extraction. Extracted entities are created via the mutation pipeline; extracted edges link the entities to the document. This makes `save_memory` into a real "drop unstructured content and get structured graph updates" path, not just a document stash.
+
+- [ ] **New event: `EXTRACTION_COMPLETED`** — emitted after every dispatch with: extractor_used, tier, cost, confidence, entities_created, edges_created, source_hint. Feeds into the graduation pipeline below and into effectiveness analysis.
+
+#### Phase 4: Graduation Mechanism (P2-P3)
+
+- [ ] **Pattern mining worker** (`src/trellis/extract/mining/`)
+  - Scheduled job that reads `EXTRACTION_COMPLETED` events where `extractor_used` is an LLM extractor
+  - For each (source_hint, domain) bucket, looks for stable patterns in the LLM's outputs:
+    - "every input of shape X produces an entity of type Y with name = X.field_Z"
+    - "relationship kind W always appears between entities of types A, B when condition C holds"
+    - Simple frequency + consistency thresholds first; machine-learning later if needed
+  - Outputs candidate `JSONSchemaExtractor` rules for human review
+
+- [ ] **`trellis extract graduate` CLI command**
+  - Lists mined patterns per domain
+  - Shows: which rules are candidates, how much LLM cost they'd displace, confidence
+  - Lets a human approve a rule set and deploy it as a new `HybridExtractor` in the registry
+  - Approved rules are versioned and tracked — graduation is auditable
+
+- [ ] **Graduation telemetry** — track per-domain:
+  - LLM call rate over time (should decrease as graduation progresses)
+  - Deterministic coverage % (fraction of items handled without LLM)
+  - False-positive rate of deterministic rules (compared against periodic LLM re-extractions for sampling)
+  - Domain "maturity score" = (deterministic coverage) × (1 - false-positive rate)
+
+- [ ] **Graduation guardrails** — automatically revert a deterministic rule to the LLM path if:
+  - Its false-positive rate (measured against periodic LLM sampling) exceeds a threshold
+  - The source schema changes in a way that invalidates the rule (detected via schema diff)
+  - A consumer explicitly flags an extraction as wrong and the flag points back to the rule
+
+- [ ] **Tests**: pattern mining over synthetic fixtures, graduation CLI workflow, automatic reversion on rule degradation
+
+#### Phase 5: Documentation & Positioning (P2)
+
+- [ ] **`docs/agent-guide/extraction-pipeline.md`** — explains the three tiers, how to register a new extractor, how to use the dispatcher from a runner, how the graduation path works, when to opt into LLM fallback, and when to write a dedicated deterministic extractor.
+
+- [ ] **Update `docs/agent-guide/modeling-guide.md`** — add a section noting that LLM extractors are a valid path for exploratory ingestion of new domains, and that the modeling guide's four-question test applies equally to LLM-extracted entities (the extractor is responsible for setting `node_role` correctly).
+
+- [ ] **Update README positioning** — revise the value prop to include "starts LLM-powered for unknown domains, graduates to deterministic for stability." This is a genuinely differentiated story vs both Graphiti (LLM forever) and pure-deterministic systems (hand-write everything). It's the right synthesis.
+
+- [ ] **Blog post**: "Why your ingestion pipeline should start expensive and get cheaper" — the tiered-extraction story as a thought-leadership piece. Positions Trellis as the mature answer to the cold-start / long-run tradeoff.
+
+#### Connection to adjacent sections
+
+- **Self-Learning Classification** (`### Self-Learning Classification`) — same pattern applied to tagging rather than extraction. Both feed into a "grow deterministic tier over time" philosophy.
+- **Configurable Ingestion Rules & Population Framework** (`### Configurable Ingestion Rules & Population Framework`) — the `IngestionRule` schema there is a natural pairing: rules specify *where content goes*, the extractor dispatcher decides *how it becomes structured*. Both are consulted by the ingestion router.
+- **Observation Pipeline** (`### Observation Pipeline`) — `save_memory` is the first real consumer of the LLM extractor path. The `DocumentEnrichmentWorker` and `SaveMemoryExtractor` are tightly coupled.
+- **Graphiti comparison — LLM/Embedder abstractions** — Phase 2 depends on those abstractions landing first. Cannot implement `LLMExtractor` without an `LLMClient`.
+- **Graph Modeling Guidance — node_role** — LLM extractors must respect `node_role` (default SEMANTIC; can explicitly produce STRUCTURAL or CURATED if the extraction prompt calls for it). Wire into the Phase 2 prompt design.
+
+#### Open questions
+
+- [ ] **Should the dispatcher support parallel extraction** (run multiple extractors on the same input and merge)? Argument for: hybrid approaches where a deterministic extractor handles the structured fields and an LLM handles the text body. Argument against: complexity, double-cost. Decision: start with single-extractor dispatch; add parallel as a Phase 3 feature if real need emerges.
+- [ ] **Where does extraction cost get charged**? For LLM extraction in `save_memory`, the cost is incurred by whoever owns the Trellis deployment, not the agent calling `save_memory`. Consumers need visibility into cost budgets. Resolve via the `ExtractionContext.max_llm_calls` / `max_tokens` caps — callers opt in and declare their budget; exceeded budgets raise.
+- [ ] **How does graduation interact with SCD Type 2 history?** When a rule changes, do we re-extract existing entities with the new rule and version them? Or only apply to new ingestions? Decision deferred to implementation; default leaning: only new ingestions (no retroactive rewrite), with a separate `trellis extract reingest <source>` command for explicit backfills.
+- [ ] **Should the LLM extractor support streaming**? For very large raw inputs, Graphiti chunks and extracts incrementally. We likely want this eventually; defer to Phase 2 v2.
+
+### Domain-Specific Entity Types & Per-Implementation Skill Curation
+
+> **Principle:** The core library defines the *machinery* (stores, mutations, retrieval, classification) but never prescribes *what* a deployment should store. Each implementation develops its own entity types, categories, and knowledge curation patterns based on its domain and usage.
+
+The current design already supports arbitrary string entity types and edge types at the storage layer. What's missing is guidance and structure around *how* implementations should evolve their own vocabularies.
+
+- [ ] **Document the extensibility pattern** — a "Building Your Domain" guide in `docs/agent-guide/`:
+  - How to introduce domain-specific entity types (e.g., `EXEMPLAR`, `UC_TABLE`, `PIPELINE`, `METRIC`) without modifying core enums
+  - How to structure `knowledge/` directories (conventions, precedents, patterns) with frontmatter that drives classification
+  - How domain categories evolve: start with `general`, split into `data_pattern`, `convention`, `architecture`, etc. as usage reveals natural groupings
+  - How `retrieval_affinity` tags bridge domain-specific content to the generic retrieval tier system
+  - When to add a new entity type vs. using metadata on an existing type (decision criteria: does it have its own identity? do agents query for it by type? does it participate in typed edges?)
+  - Example: one consumer deployment defines `UC_TABLE`, `DBT_MODEL`, `EXEMPLAR`, `PRECEDENT` — another deployment might define `API_ENDPOINT`, `RUNBOOK`, `INCIDENT`, `PLAYBOOK`
+
+- [ ] **Per-implementation skill context** — how agents learn what entity types and categories exist in *their* deployment:
+  - Agents should be able to discover available types via graph introspection (e.g., `trellis retrieve entity-types` → list of types with counts)
+  - Skill definitions (MCP tool descriptions, agent system prompts) should be generated or enriched from the graph's actual content, not hardcoded
+  - The graph teaches the agent what to ask for — if an agent sees `EXEMPLAR` entities exist, it can request exemplars; if they don't, it doesn't waste tokens asking
+
+- [ ] **Starter templates** — provide a minimal `knowledge/` scaffold and sample `ingestion-rules.yaml` that new deployments can copy and customize, rather than starting from scratch or copying a consumer deployment's domain-specific setup
+
+### Graph Modeling Guidance, Node Roles & Curation
+
+> **Problem discovered (2026-04-10):** A downstream data-architecture deployment was ingesting a Unity Catalog with ~500K columns and modeling **every column as its own graph node** with a `belongs_to` edge back to its parent table. The result: graph inflation of 10-100×, retrieval pollution (column nodes competing with tables for token budget), traversal pollution (fan-out through leaf-only column nodes), and no payoff — schema lineage is table-to-table, not column-to-column, and nobody ever queried for a column as an independent entity. This was a *runner-side* modeling error, not a core-library bug — Trellis faithfully stores whatever is handed to it — but Trellis has a **guidance gap** that let the error propagate: there is no documentation telling consumers how to decide what gets to be a node, no diagnostic that surfaces the smell, and no schema affordance for distinguishing "structural plumbing" from "things worth retrieving."
+>
+> **Core principle:** Trellis should be strict about **correctness** (schemas, mutations, audit, immutability) and flexible about **modeling** (what entity types exist, how granular the graph is). Modeling judgment is domain-specific — a pharma deployment may genuinely need molecule→atom decomposition, a code-search deployment may need function→parameter. The core library cannot pre-judge. But it **can** teach good modeling via documentation, **measure** graph health via diagnostics, and **provide affordances** (like `node_role`) that let consumers express intent without constraining the schema surface.
+
+> **Three node roles, not two:** The design distinguishes three kinds of nodes:
+> - **`structural`** — fine-grained, machine-generated, regenerated from source. Columns, function parameters, file lines. Retrieved only as part of their parent's context, never standalone.
+> - **`semantic`** (default) — represents a real thing in the world, ingested with a source-of-truth. Tables, services, people, documents, precedents. Normal retrieval, standalone-discoverable.
+> - **`curated`** — synthesized/derived from the graph itself. Domain rollups, community clusters, precedents, "popular entities" summaries. Regenerable from a generator spec, human-editable, boosted for broad/strategic queries.
+>
+> The curated tier is what unlocks iteration: ingested entities can't be freely edited (you'd drift from source-of-truth), but curated nodes are **meant** to be edited and re-run. Separating them in the schema means curation tooling can operate on curated nodes without risking corruption of ingested ground truth. This subsumes several existing TODO items (precedents, community detection, domain rollups) under one coherent framework.
+
+#### Phase 1: Modeling Guide Documentation (P1, no code)
+
+- [ ] **Create `docs/agent-guide/modeling-guide.md`** — the canonical "how to decide what gets to be a node" reference. This is the highest-leverage, lowest-risk artifact in this section — it's pure documentation, it prevents future consumers from making the column-explosion mistake, and it can be written and merged without touching any code.
+
+  Contents (draft outline):
+
+  1. **The four-question test for node-vs-property-vs-document.** A thing should be a **node** only if at least one is true:
+     1. You traverse *from* it to other things (not just from its parent)
+     2. You query *for* it directly across parents ("find all X of type Y")
+     3. You attach evidence/observations/policies *to it independently* of its parent
+     4. It has its own lifecycle (versioning, deprecation) separate from its parent
+
+     If none are true, it's a **property** on the parent (JSON field). If it has substantial text content that benefits from full-text/semantic search, it's a **document** linked to the parent via an edge.
+
+  2. **The three node roles** — `structural`, `semantic`, `curated` — with the full table from the section intro above, plus retrieval defaults, lifecycle expectations, and examples drawn from **multiple domains** (data platforms, codebases, infrastructure, knowledge management) so no single domain looks canonical.
+
+  3. **Anti-patterns with named diagnoses:**
+     - **Schema explosion** — modeling every leaf of a hierarchical structure (columns, params, file lines, config keys) as its own node
+     - **Leaf-only nodes** — nodes that only ever appear as the target of one edge kind and never as a source
+     - **Ingested-looking curated nodes** — synthetic summaries stored without `node_role=curated`, making them indistinguishable from ground truth and impossible to regenerate safely
+     - **Property-envy documents** — information that belongs as structured properties on a node being shoved into freeform document text because "it's easier to ingest"
+     - **Cardinality explosion from implicit joins** — creating a node for every (table, column) pair, every (file, line) pair, every (service, endpoint) pair
+
+  4. **Temporal reinforcement paragraph** (one of the decision factors the guide should make explicit):
+     > Every node in Trellis is a temporal entity. The graph store uses SCD Type 2 versioning (`valid_from`/`valid_to`) to track how each node's properties change over time, and `get_node_history()` returns the full audit trail. **Every node you create is a commitment to track its history forever.** If you model 500K columns as nodes, you now have 500K independent temporal histories — almost none of which you'll ever query by time. If columns are instead a JSON property on the table node, a schema migration shows up as *one* property-diff event on the table's history, which is usually what you actually want to see. When deciding node-vs-property, ask: *"do I want time-travel queries at this granularity?"* If no, it's a property.
+
+  5. **Curated-node temporality paragraph** (separate because it has different semantics):
+     > Curated nodes carry two kinds of history: (1) standard SCD Type 2 property history (edits to the summary are property changes), and (2) a `generation_spec` recording which algorithm/prompt/inputs produced them and when. Regenerating a curated node creates a new version via the standard SCD mechanism but additionally updates the `generation_spec` fields — this separates "someone edited the summary" from "we re-ran the clustering algorithm," which matters for curation workflows and for trusting curated content in downstream retrieval.
+
+  6. **Worked example — database catalog ingestion.** Walk through a concrete UC ingest showing:
+     - **The wrong shape:** `UC_TABLE` node + N `UC_COLUMN` nodes + N `belongs_to` edges per table. Graph inflates by 20-50×. Retrieval ranks individual columns against table descriptions. Traversal fans out through column leaves.
+     - **The right shape:** one `UC_TABLE` node with `columns: [...]` as a JSON property, one `schema_description` document linked via `DESCRIBED_BY`, table-level `DEPENDS_ON` edges for lineage, and an `OWNED_BY` edge to a team entity. ~1 node per table, retrievable as a coherent unit.
+     - **The legitimate exception:** when column-level lineage is a real requirement (regulated data products, dbt exposures with per-column grants), model only the columns that actually participate in lineage as `node_role=structural` nodes — not *all* columns. Everything else stays a property.
+
+  7. **Worked example — code repository ingestion.** Show the same structural-vs-semantic-vs-curated split applied to a different domain (files, functions, imports, symbols) to reinforce that this is not database-specific.
+
+  8. **Decision flowchart** (mermaid or ASCII) tying it all together.
+
+- [ ] **Cross-link from `docs/agent-guide/schemas.md` and the Domain-Specific Entity Types section** so consumers find the modeling guide before they start designing their ingestion runners. The guide is useless if nobody reads it before they write the runner.
+
+- [ ] **Cross-link from `README.md`** under the "How to use Trellis" section — a one-sentence pointer: "Before designing an ingestion runner, read the modeling guide to avoid graph-inflation anti-patterns."
+
+#### Phase 2: `node_role` Schema Extension (P1, co-land with Tiered Retrieval Phase 1) — ✅ DONE (2026-04)
+
+> Landed in `src/trellis/schemas/enums.py` and `src/trellis/schemas/entity.py`. Kept for historical reference.
+
+- [x] **Add `NodeRole` enum** (`schemas/enums.py:22-40`)
+- [x] **Add `node_role` to the `Node` schema** (`schemas/entity.py:59`, default `SEMANTIC`)
+- [x] **Mutation handler validation** — `upsert_node` rejects invalid `node_role` / `generation_spec` combinations (model validator on `Entity`)
+- [x] **Extend deterministic classifiers to populate `node_role`** (landed in the classifier pipeline; structural opt-in only)
+- [x] **`PackBuilder` filter logic** — structural-node filtering + curated-node boost via `TierMappingConfig`
+- [x] **Update `schemas.md` and `trace-format.md`** in the agent guide to document `node_role` and `generation_spec`
+- [x] **Tests**: round-trip serialization, validator enforcement, PackBuilder filter behavior
+
+#### Phase 3: `trellis admin graph-health` Diagnostic (P1, can ship independently)
+
+- [ ] **New CLI command: `trellis admin graph-health`** (`src/trellis_cli/admin.py`)
+  - Read-only analysis — never modifies the graph
+  - Supports `--format json` for machine output and rich-table for humans
+  - Optional `--entity-type` filter to scope analysis to one type at a time
+  - Optional `--role` filter (`structural` / `semantic` / `curated`) for role-specific reports
+
+- [ ] **Report: role distribution**
+  - Total nodes by `node_role` (count + percentage)
+  - **Warning signal:** `structural` > 70% of total nodes → likely over-modeling, point to the modeling guide
+  - **Warning signal:** `curated` > 30% of total nodes → curation outpacing ingestion, may indicate duplicate generators or stale regeneration
+  - **Warning signal:** zero `curated` nodes in a graph with >10K semantic nodes → curation infrastructure not being used; recommend running precedent promotion / community detection
+
+- [ ] **Report: top entity types by count**
+  - Ranked list with percentages
+  - **Warning signal:** any single entity type is >70% of all nodes → type-imbalance, likely a dominant machine-generated type that should be reviewed for structural-vs-semantic classification
+
+- [ ] **Report: leaf-node analysis by entity type and role**
+  - For each entity type: fraction of nodes that are leaves (zero outbound edges) vs branches (≥1 outbound edge)
+  - **Warning signal:** a `semantic` entity type with >90% leaves → those nodes are probably structural plumbing masquerading as semantic content. Suggest reclassification to `structural` or merging into a parent node's properties.
+  - **Fine:** a `structural` entity type with ~100% leaves — that's expected and correct
+  - Report distinguishes these so structural leaves don't trigger warnings
+
+- [ ] **Report: edge fan-out distribution per edge kind**
+  - For each edge kind: histogram of out-degree per source node
+  - **Warning signal:** an edge kind whose source nodes have median fan-out of exactly 1 and whose targets are ≥90% leaves → likely a "structural glue" edge (e.g., `belongs_to`) that could be replaced by embedding the target as a property
+  - **Warning signal:** an edge kind that only appears on one entity type → may indicate a type-specific shortcut that should be documented or refactored
+
+- [ ] **Report: curated-node freshness**
+  - For each `generator_name`: count of curated nodes, median age since `generated_at`, oldest and newest
+  - **Warning signal:** a generator with curated nodes older than `staleness_threshold_days` (default 30, configurable) → regeneration overdue
+  - **Warning signal:** a generator with zero runs in the last 90 days → may be abandoned; recommend removal or reactivation
+
+- [ ] **Report: "suggested demotions"**
+  - List entity types whose shape matches the structural profile (>90% leaves, single inbound edge kind, low-or-zero outbound edges) but are currently classified as `semantic`
+  - For each, show: count, dominant inbound edge kind, example node IDs
+  - Explicitly labeled "suggestion, not enforcement" — the runner's choice stands, this is advisory
+
+- [ ] **Report: orphan detection**
+  - Nodes with no edges in either direction (semantic islands)
+  - Edges with dangling endpoints (references to nonexistent nodes)
+  - Overlaps with the "consistency sweep" TODO in the Cross-Store Reference Model section — consider consolidating when both land
+
+- [ ] **Output formatting**
+  - Human mode: rich tables with color-coded warnings (green/yellow/red per threshold), final summary line (`3 warnings, 1 critical`)
+  - JSON mode: structured report matching an `trellis.admin.GraphHealthReport` schema for programmatic consumption
+  - Exit code: 0 if no warnings, 1 if warnings, 2 if critical (for CI integration)
+
+- [ ] **Tests**:
+  - Synthetic fixtures exercising each warning signal independently
+  - Integration test against a realistic mixed graph (some semantic, some structural, some curated, some orphans)
+  - JSON output matches schema
+  - Exit codes match severity
+
+- [ ] **Documentation**: `docs/agent-guide/graph-health.md` explaining each report, what the signals mean, and how to act on them. Cross-link from the modeling guide.
+
+#### Phase 4: `trellis curate` CLI Namespace (P2, enables iteration loop)
+
+> **Naming conflict:** An `trellis curate` namespace already exists at `src/trellis_cli/curate.py` but it hosts **mutation commands** (`promote`, `link`, `label`, `entity`, `feedback`) rather than curated-node-workflow commands. Before building out this phase, decide: rename the existing namespace (e.g., `trellis mutate`), or put these new commands under a different verb (e.g., `trellis curated` or `trellis synth`). The command list below assumes the curation-workflow semantics described in this section.
+
+- [ ] **New CLI command namespace for curated-node workflows** — operations on curated nodes. Depends on Phase 2 (`node_role=CURATED` and `generation_spec`) being in place — ✅ Phase 2 is complete.
+
+- [ ] **`trellis curate list`** — list curated nodes with filters
+  - Flags: `--generator NAME` (filter by `generation_spec.generator_name`), `--stale [DAYS]` (older than threshold), `--entity-type TYPE`, `--domain DOMAIN`
+  - Output: table with node_id, generator, generated_at, age, summary snippet
+  - `--format json` for programmatic consumption
+
+- [ ] **`trellis curate show <node_id>`** — full view of a curated node
+  - Displays: properties, `generation_spec`, SCD Type 2 version history, inbound/outbound edges, source nodes listed in `generation_spec.source_node_ids`
+  - Useful for "why does this domain summary say X?" investigations
+
+- [ ] **`trellis curate regenerate <node_id>`** — re-run the node's generator
+  - Loads `generation_spec`, dispatches to the registered generator by `generator_name`, captures new output, upserts a new version via the mutation pipeline
+  - Old version preserved via SCD Type 2 — regeneration is never destructive
+  - Flags: `--dry-run` (show what would change), `--force` (bypass freshness check)
+  - Requires a **generator registry** — new module `src/trellis/curate/generators.py` with a `Generator` Protocol and a registry populated at startup. Each generator declares `name`, `version`, and `regenerate(node, spec) -> GenerationResult`.
+  - Built-in generators (start with one or two, grow over time):
+    - `precedent_promotion` (wraps the precedent promotion worker — see Observation Pipeline section)
+    - `community_detection_louvain` (when community detection lands — see Graphiti section)
+    - `domain_summary_llm` (when domain rollup lands)
+
+- [ ] **`trellis curate edit <node_id>`** — human-edit a curated node's summary
+  - Opens the node's `summary` / `content` property in `$EDITOR`
+  - Saves as a property change (SCD Type 2 version bump) — `generation_spec` is untouched, because this is a human edit, not a regeneration
+  - Adds a `human_edited: true` flag to the new version's metadata to distinguish edited versions from regenerated versions
+  - This is the "iterate and curate easily" affordance — lets humans refine machine-generated summaries without losing the regeneration ancestry
+
+- [ ] **`trellis curate regenerate-all`** — bulk regeneration with filters
+  - Flags: `--generator NAME`, `--stale-days N`, `--dry-run`
+  - Walks matching curated nodes, invokes regenerate on each, reports success/failure counts
+  - For CI: `trellis curate regenerate-all --generator precedent_promotion --stale-days 7`
+
+- [ ] **`trellis curate diff <node_id> --from <version> --to <version>`** — compare two versions of a curated node
+  - Shows property-level diff between SCD versions
+  - Distinguishes property changes (human edits) from `generation_spec` changes (regenerations)
+  - Useful for reviewing whether a regeneration produced meaningfully different content
+
+- [ ] **Generator registry entry-point mechanism** — consumer packages can register their own generators via Python entry points (`trellis.curate.generators`), so domain-specific curation lives in consumer repos, not core
+
+- [ ] **Tests**:
+  - End-to-end regenerate: create curated node → edit source nodes → regenerate → verify new version reflects changes and old version is preserved
+  - Edit flow: edit → verify property change, `generation_spec` unchanged, `human_edited` flag set
+  - Registry: custom generator registered via entry point is discoverable and invokable
+  - Diff: shows meaningful output for both edits and regenerations
+
+- [ ] **Documentation**: `docs/agent-guide/curation-workflows.md` — the iteration loop pattern, when to edit vs regenerate, how to write a custom generator, how to structure a curation CI job
+
+#### Phase 5: Consolidation with Adjacent Work (P2, mostly docs and refactors)
+
+This section folds existing TODO items into the curated-node framework. No new code surface — just reframing so the pieces compose.
+
+- [ ] **Precedents as curated nodes** — the `DocumentPromotionWorker` TODO in the Observation Pipeline section should produce nodes with `node_role=CURATED` and `generation_spec.generator_name="precedent_promotion"`. Update the worker's design doc to reflect this. Migration: existing precedent nodes (if any) get backfilled with `node_role=CURATED` and a synthetic `generation_spec` carrying `generator_name="precedent_promotion_legacy"` to mark them as pre-framework.
+
+- [ ] **Community detection as curated nodes** — when the Graphiti-comparison community detection feature lands, community cluster nodes should be `node_role=CURATED` with `generation_spec.generator_name="community_detection_louvain"` (or whichever algorithm). The generation_spec captures the algorithm parameters (resolution, random_seed, min_community_size) so regeneration is deterministic and reproducible. Update the Graphiti-comparison TODO entry to cross-reference this framework rather than proposing a parallel mechanism.
+
+- [ ] **Domain rollups as curated nodes** — the "domain" entity concept discussed in the Domain-Specific Entity Types section should be implemented as curated nodes, not semantic nodes. A domain rollup is synthesized from the entities belonging to the domain; it's regeneratable, editable, and boosted in objective-tier retrieval. This also fits the "objective-tier content" slot in the Tiered Context Retrieval design (curated domain nodes are exactly what you want to assemble once per workflow and share across agent phases).
+
+- [ ] **Workflow/saga entities** — the Graphiti comparison proposes promoting workflow runs from implicit (`workflow_id` on traces) to first-class entities. These are **semantic**, not curated — a workflow run is a real thing that happened, not a synthesis. Explicitly note this distinction in the Graphiti TODO entry so the two concepts don't get confused.
+
+- [ ] **Update the Graphiti comparison section** to reference the curated-node framework as the umbrella mechanism for community detection, rather than describing community nodes as a novel concept. The framework is broader than community detection alone.
+
+- [ ] **Effectiveness correlation with node role** — extend `effectiveness.py` to report outcome correlation **by node role of items included in the pack**. Hypothesis: curated nodes correlate more strongly with successful outcomes than raw semantic nodes, because they're pre-digested and higher signal density. If confirmed, this validates the curated-tier boost in PackBuilder. If not confirmed, it's a signal that current curation isn't adding value and the generators need tuning. This is a feedback loop closing between the tiered retrieval work and the curated-node framework.
+
+#### Open Questions (to resolve before or during implementation)
+
+- [ ] **Should `node_role` be mutable?** Current proposal: no — changing it requires delete+recreate. Rationale: role is a graph-structural invariant, not a property. Counter-argument: a semantic node that turns out to be pure plumbing might benefit from in-place demotion to structural. Decision deferred until a concrete case arises; default is immutable.
+
+- [ ] **Should `structural` nodes emit SCD Type 2 history?** They're regenerated from source, so version history is arguably redundant (the history lives in the source system). Turning off SCD for structural nodes would massively reduce storage cost in high-cardinality deployments but breaks the uniformity of the graph store model. Decision: keep SCD on for now (uniformity > storage cost), revisit if storage becomes a pain point.
+
+- [ ] **Should curated nodes have an explicit `refreshable: bool` flag?** Some curated nodes might be one-shot (e.g., an LLM summary of a specific trace at a specific point in time) that shouldn't be regenerated. Alternative: `generation_spec.parameters.refreshable = false` and have the regenerate command respect it. Decision: piggyback on parameters, no dedicated field.
+
+- [ ] **How does `node_role` interact with the Cross-Store Reference Model's typed ID prefixes?** Proposal: IDs remain `ent:` regardless of role (the role is a property of the entity, not its identity). Curated nodes don't get their own prefix. Resolve this when the typed-ID work starts.
+
+- [ ] **Generator registry discovery mechanism** — Python entry points vs config-file registration vs runtime registration via `MutationExecutor.register_generator()`. Entry points are cleanest for plugin distribution but add a dependency on `importlib.metadata`. Decide when implementing Phase 4.
+
+### Cross-Store Reference Model & Source of Truth
+
+> **Problem:** The system uses 6 independent stores with no referential integrity between them. The same concept (e.g., a UC table) can exist as a graph node, a document, a vector embedding, and a blob — each with a different ID. There is no unified way to ask "give me everything the system knows about entity X" without querying every store independently and hoping IDs match. As more backends are added (Neo4j, filesystem, Obsidian), this problem multiplies.
+
+> **Core question:** What is the minimum reference architecture that lets stores stay independent while maintaining coherent cross-references without duplicating data or creating excessive management overhead?
+
+#### Current State (gaps identified via codebase audit)
+
+1. **No unified ID namespace.** All IDs are bare ULIDs with no type prefix. A string like `01ARZ3NDEKTSV4RRFFQ69G5FAV` could be a trace, document, node, edge, or event. `PackItem.item_id` is ambiguous without `item_type` metadata.
+
+2. **No cross-store foreign keys.** Stores reference each other only through denormalized fields in payloads (`Evidence.attached_to`, `Trace.evidence_used`). These are soft pointers — no validation, no cascade, no reverse lookup.
+
+3. **Same concept, different IDs.** An entity `node_abc` in GraphStore and its description `doc_xyz` in DocumentStore are not linked except by convention (both carry the entity name in metadata). PackBuilder's in-memory dedup catches exact ID collisions only — not "these two items describe the same thing."
+
+4. **No `source_of_truth` in core schemas.** When the same entity is upserted from multiple sources (UC runner, dbt runner, manual creation), the last write wins. No merge logic, no conflict detection, no provenance chain.
+
+5. **No cross-store atomicity.** Mutation handlers write to GraphStore then EventLog sequentially. If the second write fails, state is inconsistent with no rollback.
+
+6. **No reverse lookups.** Graph knows about entities; DocumentStore knows about documents. Neither knows about the other. To find "all documents about entity X," you must iterate evidence `attached_to` fields or scan the event log.
+
+#### Design Principles (proposed)
+
+- [ ] **Design doc: `docs/design/cross-store-references.md`** — full treatment of the reference model. Key principles to evaluate:
+
+  **P1: Graph as the directory.** GraphStore is the "index of everything." Every concept that exists in any store has a corresponding node (or at minimum, is reachable via an edge from a node). Other stores hold the content; the graph holds the relationships. You query the graph to discover what to fetch from other stores.
+
+  **P2: Typed ID namespace.** Prefix IDs at the API boundary: `ent:`, `doc:`, `trc:`, `evt:`, `vec:`, `blob:`. Internal stores can use bare ULIDs, but any ID that crosses a store boundary carries its type. This makes `PackItem.item_id` self-describing and enables correct routing without relying on sidecar metadata.
+
+  **P3: Content lives in exactly one authoritative store.** No duplicating document text as a graph node property AND as a DocumentStore entry. Store it once, reference it by typed ID. The graph node carries a pointer (`described_by: doc:xyz`), not a copy.
+
+  **P4: Edges are the cross-store pointers.** GraphStore edges bridge stores: `ent:abc --[DESCRIBED_BY]--> doc:xyz`. The edge lives in the graph; the content lives in the document store. Retrieval follows the pointer. This is the same pattern the graph already uses for intra-store relationships — extend it to cross-store.
+
+  **P5: Source of truth is always external (for ingested entities).** The graph is a cache/index. UC, dbt, GitHub are the real sources. A `source_of_truth` field + `staleness_days` on entities defines the refresh contract. For human-created entities (precedents, conventions), the graph IS the source of truth. The field captures both cases.
+
+  **P6: Eventual consistency over distributed transactions.** Cross-store writes will sometimes fail partially. Design for idempotent retry (the mutation executor already has idempotency checks), not 2PC. Add periodic consistency sweeps that detect orphaned references, missing reverse links, and stale entries.
+
+#### Implementation Tasks
+
+- [ ] **Add `source_of_truth` to Entity schema** — `source_of_truth: str | None` indicating which external system is authoritative (e.g., `"unity_catalog"`, `"dbt_manifest"`, `"knowledge_base"`, `None` for graph-native). Informs staleness detection and conflict resolution.
+
+- [ ] **Typed ID prefix convention** — define the prefix scheme (`ent:`, `doc:`, `trc:`, etc.). Implement as a `TypedId` value object that serializes as `"{prefix}:{ulid}"`. Introduce gradually: new IDs use typed format, existing bare ULIDs are accepted via backward-compatible parsing.
+
+- [ ] **Cross-store dedup in PackBuilder** — extend dedup to group items by "canonical entity" not just by bare ID. When a graph node and a document both reference the same canonical entity, merge them into a single PackItem (or rank and keep the richer one). Requires the graph-as-directory pattern: look up which documents/evidence are linked to each entity node.
+
+- [ ] **Reverse index on entities** — when a document or evidence references an entity (via `attached_to`), store the reverse pointer on the entity node's properties (or as an edge). Enables "give me everything about entity X" via a single graph query without scanning other stores.
+
+- [ ] **Consistency sweep CLI** — `trellis admin check-integrity`: scan GraphStore edges, verify both endpoints exist, flag dangling references. Scan DocumentStore `attached_to` fields, verify target entities exist. Report orphans. Optionally repair (create missing reverse edges, archive orphaned documents).
+
+- [ ] **Evaluate: graph-as-directory cost** — does requiring every concept to have a graph node create unacceptable overhead for high-volume stores (vectors, blob artifacts)? Or is it a negligible cost given that graph nodes are lightweight metadata? Determine the threshold: everything gets a graph node vs. only "important" things get graph nodes.
+
+### Store-Per-Purpose Architecture & Backend Diversity
+
+> **Principle:** Different retrieval and storage needs demand different backends. The right store depends on the operation — graph traversal, semantic similarity, full-text search, document storage, and blob archival each have optimal backends that may differ. The experience graph should compose these backends transparently.
+
+The current `StoreRegistry` + ABC pattern already supports this — 6 store ABCs, lazy-loaded backends via config. But the *aspirational vision* is broader than the current 3-backend set (SQLite, PostgreSQL, LanceDB/pgvector).
+
+**Landscape of relevant storage paradigms:**
+
+| Need | Current Backend | Potential Backends | Why |
+|------|----------------|-------------------|-----|
+| Graph traversal (shallow) | PostgreSQL (recursive CTE) | PostgreSQL, SQLite | CTEs handle 2-3 hop traversal well |
+| Graph traversal (deep) | PostgreSQL (limited) | Neo4j, Memgraph, Apache AGE | Native graph engines optimized for deep traversal (6+ hops), path finding, community detection |
+| Semantic search | LanceDB / pgvector | LanceDB, pgvector, Qdrant, Pinecone | ANN index tuning, quantization, metadata filtering |
+| Full-text search | SQLite FTS5 / PostgreSQL | PostgreSQL tsvector, Elasticsearch, Typesense | Ranking, stemming, fuzzy matching at scale |
+| Document storage | SQLite / PostgreSQL | PostgreSQL, MongoDB, filesystem | Structured metadata + content |
+| Blob/artifact storage | Local filesystem / S3 | S3, GCS, Azure Blob, local | Large files, binary artifacts, cost optimization |
+| Local-first / offline | SQLite + LanceDB | SQLite, filesystem, Obsidian vault | Single-machine, no server, git-syncable |
+| Markdown knowledge graph | (not supported) | Obsidian-style markdown + wikilinks, [mempalace](https://github.com/milla-jovovich/mempalace) | Human-readable, git-versioned, filesystem-native, existing ecosystem of graph visualization tools |
+
+- [ ] **Audit current ABC surface area** — ensure each store ABC's interface is backend-agnostic enough that a native graph database (Neo4j), a dedicated search engine (Elasticsearch), or a filesystem-backed store (Obsidian-style markdown) could implement it without contorting the interface
+  - GraphStore: does the interface assume SQL? Would a Cypher/Gremlin backend need adapter shims?
+  - DocumentStore: could a filesystem backend (directory of markdown files with YAML frontmatter) implement the current interface?
+  - VectorStore: is the interface ANN-library-agnostic?
+
+- [ ] **Document the "store-per-purpose" design philosophy** — expand the existing "Storage Backend Guidance" section into a standalone design doc:
+  - Why a single database (even PostgreSQL) isn't optimal for all operations
+  - How the registry composes heterogeneous backends behind uniform ABCs
+  - Trade-off matrix: latency, concurrency, traversal depth, semantic quality, operational complexity
+  - When to add a new backend vs. when to upgrade an existing one
+  - Cost profile: local-first (free) → managed PostgreSQL ($) → dedicated graph DB + vector DB ($$$)
+
+- [ ] **Filesystem-backed stores for local-first use** — investigate feasibility:
+  - GraphStore backed by markdown files with YAML frontmatter + wikilinks (Obsidian-compatible)
+  - DocumentStore backed by a directory of text files with metadata sidecar
+  - Trade-offs: no transactions, no concurrent writes, but human-readable, git-syncable, zero-infrastructure
+  - This enables a "knowledge base as code" pattern where the graph *is* the repo
+
+- [ ] **Native graph backend** (P3) — for deployments needing deep traversal:
+  - Neo4j or Memgraph backend for GraphStore
+  - When: graph exceeds ~100K edges and queries need 4+ hop traversal (community detection, impact analysis, full dependency chains)
+  - The current PostgreSQL recursive CTE approach works for 2-3 hops but degrades with depth
+
+### Research: Graphiti Comparison & Feature Adoption
+
+> **Reference:** [github.com/getzep/graphiti](https://github.com/getzep/graphiti) — temporal knowledge graph engine by Zep. Similar purpose (agent memory), different architecture (single graph DB, LLM-heavy extraction). Initial scan 2026-04-08; **deep code-level analysis 2026-04-11** (cloned repo, audited `graphiti_core/` end-to-end).
+>
+> **Headline findings from the deep audit:**
+> - Graphiti is production-grade and feature-complete for its target use case (conversational agent memory). ~34K LOC in `graphiti_core/`, 45% of which is driver abstraction (Neo4j/FalkorDB/Kuzu/Neptune).
+> - 24.8K GitHub stars, 2.5K forks, published arXiv paper (2501.13956), active hiring. The notoriety and credibility gap is the largest single difference between the two projects — and is almost entirely presentation/marketing, not capability.
+> - Their architecture is **edge-centric temporal, LLM-heavy, single-store graph-DB-locked**. Ours is **node-centric temporal, deterministic-first, multi-store with local-first support**. These are genuinely different design points — neither dominates the other — but Graphiti has shipped and polished choices we still have in TODO.
+> - Several things I assumed Graphiti had are more primitive than expected: community detection is label-propagation (not Louvain/Leiden); dedup is 3-stage (exact → MinHash/LSH → LLM) rather than LLM-first; saga nodes exist but minimal orchestration; REST server has no auth.
+> - Several things I assumed we had parity on, we don't: their reranker abstraction (`CrossEncoderClient` with OpenAI/Gemini/BGE implementations), their token usage tracker aggregated per-prompt-name, their Jinja2 prompt library with typed response models, their OpenTelemetry tracing, and their CI polish (ruff + pyright + per-database integration workflows).
+> - Several things we have that they don't: structured trace schema with steps/tool calls/outcomes, immutable audit trail via EventLog, governed mutation pipeline (validate → policy → idempotency → execute → emit), policy-based access control, blob store abstraction, pre-compression of context into Packs with token budgets and telemetry, and the whole classification/tagging infrastructure (ContentTags, signal_quality, retrieval_affinity).
+
+#### Architecture Comparison (deep-audit update)
+
+| Dimension | Trellis (ours) | Graphiti | Implication / status |
+|-----------|----------------|----------|---------------------|
+| **Storage model** | 6 independent stores (graph, doc, vector, trace, event, blob) composed via StoreRegistry | Single graph database with vectors as node properties | Graphiti has zero cross-store reference problems but is locked into graph DBs. We trade cross-store complexity for backend diversity and SQLite-based local dev. Our Cross-Store Reference Model TODO addresses the complexity cost. |
+| **Backend support** | SQLite (default), PostgreSQL, LanceDB, pgvector, local/S3 blob | Neo4j, FalkorDB, Kuzu, Amazon Neptune | Graphiti has zero SQLite story; they can't run local-first without Redis (FalkorDB) or embedded Kuzu. We're the only option for truly local-first agent memory. |
+| **Temporal granularity** | SCD Type 2 on **nodes** (`valid_from`/`valid_to`). Edges are point-in-time. | Bi-temporal on **edges** (`valid_at`, `invalid_at`, `expired_at`, `reference_time`). Nodes are mutable with current summaries. | Graphiti captures "when did this relationship become true" — we capture "when did this entity change." Neither is strictly better; they're complementary. **Adopting edge-level temporality is still the single highest-value feature to port.** |
+| **Fact contradiction** | None. Last-write-wins. | LLM-judged. Old edge gets `invalid_at`, new edge gets `valid_at`, both preserved. | Genuine capability gap — but only matters if you ingest contradictable unstructured facts. For structured ingestion (UC catalogs, dbt manifests), upsert semantics are usually correct. |
+| **Entity extraction** | Explicit — consumers write deterministic runners; no core extraction path exists for unstructured input | LLM-driven extraction from text/JSON/messages (1-2 LLM calls per episode) | **More nuanced than I initially framed it.** Our approach is correct *for known, stable domains* — writing a UC or dbt runner once, running it millions of times, is 100× cheaper than an LLM per row. But for **unknown or evolving domains** (new source systems, unstructured agent observations, arbitrary user content) we have **no story at all** — consumers have to write their own extraction logic from scratch. Graphiti's LLM-extraction approach is the right default for that case. The right architecture is **both**: deterministic extractors for known domains, LLM extractors for unknown domains, with a graduation path as patterns stabilize. See the new "Tiered Extraction Pipeline" section below. |
+| **Entity dedup** | Deterministic alias system (`source_system, raw_id → entity_id`) | **3-stage pipeline**: exact match → MinHash/LSH with 32 permutations, Jaccard ≥0.9, entropy filter → LLM resolution for ambiguous cases (`utils/maintenance/dedup_helpers.py`) | Surprisingly sophisticated on Graphiti's side. We should adopt the **fuzzy match stage** (MinHash/LSH, no LLM cost) for the `save_memory` unstructured path — it sits between our alias exact-match and an LLM fallback. |
+| **Classification** | Deterministic-first pipeline with LLM fallback (`ClassifierPipeline`, 4 deterministic classifiers + 1 LLM classifier). Goal: reduce LLM cost over time. | All classification is LLM (no deterministic tier). | Our approach is strictly better for cost/scale. Graphiti has nothing to adopt here; we should document this as a genuine differentiator. |
+| **Retrieval strategies** | Keyword + semantic + graph, sectioned pack assembly with per-section budgets, tag filtering | BM25 + vector + BFS graph traversal, unified hybrid search | Both hybrid. Our sectioned packs are more sophisticated for multi-agent workflows. Their unified search has richer reranking (see below). |
+| **Reranking** | Importance-weighted relevance scores (single pass) | **`CrossEncoderClient` abstraction** (`graphiti_core/cross_encoder/`) with **OpenAI reranker**, **Gemini reranker**, and **BGE local cross-encoder** (sentence-transformers). Additional rerank strategies: RRF, MMR, node-distance, episode-mention. | **Capability gap.** Rerankers are cheap to add (one new abstraction, 2-3 implementations) and integrate cleanly with our existing strategy protocol. This should be a TODO. |
+| **Community detection** | None | **Label propagation** (not Louvain/Leiden). Simple vote-tally algorithm, O(V+E) per iteration. LLM called only to summarize the resulting clusters. (`utils/maintenance/community_operations.py`) | Simpler than I assumed — label propagation, not a fancy community algorithm. Still a gap for us but cheap to port. Already covered by our curated-node framework. |
+| **Narrative/workflow** | `parent_trace_id` + `workflow_id` (implicit) | `SagaNode` with `first_episode_uuid`, `last_episode_uuid`, `last_summarized_at`. `NEXT_EPISODE` edges. Minimal orchestration — no state machines, no hierarchical sagas. | Graphiti makes this first-class but their orchestration is thin. Our TODO for "Workflow/saga entities" is roughly at parity with what they actually ship. |
+| **Multi-tenancy** | Domain-based filtering via metadata | `group_id` on every node/edge/episode | Similar mechanism, different naming. Both are partition-by-field, not row-level security. |
+| **LLM cost per ingestion** | ~0 LLM calls for deterministic pipeline; 1 call per ambiguous item in enrichment | **2-5 LLM calls per episode** (extract_nodes → dedup → extract_edges → dedup → summarize). Heavy. | Our cost profile is strictly better **for known domains where a deterministic runner exists**. For **unknown domains**, our cost is effectively infinite — we can't ingest them at all without bespoke runner work. Graphiti's cost profile is the inverse: high but finite for unknown domains. Neither is universally better; they're appropriate for different points in the domain-maturity lifecycle. The "Tiered Extraction Pipeline" section below closes this gap on our side. |
+| **LLM provider support** | None (we have no LLM client abstraction in core — enrichment callers provide their own) | **7 providers** with unified `LLMClient` ABC: OpenAI, AzureOpenAI, OpenAIGeneric, Anthropic, Gemini, Groq, GLiNEr2 (local NER). Structured outputs via `response_model=PydanticModel`. Token tracker per prompt name. Optional response caching. | **Real gap.** We outsource LLM calls to consumers, which means every consumer reimplements the same client, retry, token tracking, caching. Adding an `LLMClient` abstraction in core (optional dep) would be a big DX improvement and cost us nothing in our deterministic-first philosophy — the abstraction is invoked only when the LLM path fires. |
+| **Embedder abstraction** | None in core (vector store is populated by consumers) | **`EmbedderClient` ABC** with OpenAI, AzureOpenAI, Voyage, Gemini implementations | Similar to LLM client — we punt to consumers. Worth adopting a minimal abstraction to reduce consumer boilerplate. |
+| **MCP tools exposed** | **10 tools** (`get_context`, `save_experience`, `save_knowledge`, `save_memory`, `get_lessons`, `get_graph`, `record_feedback`, `search`, `get_objective_context`, `get_task_context`) | **16 tools** covering temporal queries, community access, manual graph curation, per-entity graph context BFS, edge/episode deletion | Close in count. Theirs is more CRUD-oriented; ours is more macro-composed. Worth auditing their MCP surface for operations we're missing (entity-graph BFS context, delete paths). |
+| **REST API** | FastAPI with full surface (mutations, retrieval, admin, graph UI) | FastAPI with async worker queue for ingestion (POST /messages returns 202), direct save for entities/edges, search by node/edge/episode/community | Both FastAPI. Graphiti's async queue pattern is worth adopting for bulk ingestion endpoints. Neither has auth built-in. |
+| **Trace/provenance** | Structured `Trace` schema with steps, tool calls, outcomes, evidence, feedback. Immutable. | `EpisodicNode` stores raw content blob + `source_description` + `valid_at`. Less structure. | **We're strictly richer here.** Traces are first-class in our model; episodes are closer to "messages that got ingested." Worth emphasizing as a differentiator. |
+| **Audit / event log** | `EventLog` ABC with append-only guarantee, emitted by every mutation | None. Direct mutations. | **We're strictly richer here.** Governance, replayability, debugging are all stronger. |
+| **Governance pipeline** | `MutationExecutor` with 5 stages (validate → policy → idempotency → execute → emit) and pluggable Protocol-based handlers/gates | Direct database writes, no pipeline | **We're strictly richer here.** Worth calling out as a core differentiator. |
+| **Policy / access control** | `PolicyType` (mutation/access/retention/redaction) with `Enforcement` modes (enforce/warn/audit_only) | None visible beyond `group_id` partitioning | **We're strictly richer here.** Important for enterprise/regulated deployments. |
+| **Blob store** | Dedicated abstraction (local fs or S3) for large artifacts | None. Content stored as node properties. | **We're strictly richer here.** Graphiti would need a complete new store for artifacts >few KB. |
+| **Tests** | 70 test files, unit-scoped with `tmp_path` + mocks | ~36 test files, split unit/integration, integration runs real Neo4j + FalkorDB containers | Roughly comparable scale; their integration harness is more mature. Their CI runs DB-in-container tests; ours doesn't. |
+| **Type checking** | `mypy strict=false`, `warn_return_any=true`, `disallow_untyped_defs=false` | **Pyright basic mode** for core, **pyright standard** for server, both in CI | Their type-checking is stricter and runs in CI per-module. We should tighten and switch to pyright (or at least match the enforcement rigor). |
+| **Linting** | ruff in CI (good) | ruff + pyright in CI (good), plus `make check` aggregate | Parity modulo the pyright addition. |
+| **Prompt management** | None in core | **`prompts/` library** — ~1665 LOC of Jinja2 templates wrapped in Python functions returning `list[Message]`. Typed Pydantic response models for structured outputs. Versioned and tracked per prompt name. | Capability gap if/when we add an LLM path. Not a blocker now; worth copying the pattern later. |
+| **Telemetry / tracing** | structlog logging, basic event log | OpenTelemetry spans on major operations (add_episode, search), Datadog/Honeycomb/Jaeger compatible, disabled by default | Capability gap. OpenTelemetry is low-cost to add (optional dep, no-op tracer by default) and is a credibility signal for enterprise adopters. |
+| **Concurrency/rate-limiting** | None explicit | `SEMAPHORE_LIMIT` env var (default 10) gates parallel LLM calls to prevent rate-limit errors. Async worker queue in REST server. | Only matters when LLM path exists. TODO for later. |
+
+#### Strategic assessment
+
+Graphiti is a **1-D specialist** (conversational memory with temporal facts, heavy LLM, single-store graph DB). Trellis is a **2-D generalist** (agent memory *and* structured knowledge ingestion, deterministic-first, multi-store with local-first). The two projects are **not in direct competition** — they target overlapping but distinct use cases.
+
+**Where we lose:**
+1. **Notoriety and credibility signals** — 24.8K stars vs ours. Paper, blog posts, community. This is the single biggest gap and is mostly addressable via presentation, not code. See the new "Repository Polish & Credibility" section below.
+2. **Edge-level temporality** — genuine capability gap. Already the highest-value feature on our Graphiti adoption list.
+3. **Reranking surface** — they have a clean `CrossEncoderClient` abstraction with multiple implementations; we have importance-weighted scores. Cheap to add.
+4. **LLM/embedder abstractions in core** — they own the client layer; we punt to consumers. Adding minimal ABCs would help consumers and cost us nothing.
+5. **MinHash/LSH dedup stage** — surprisingly good deterministic dedup for fuzzy string matching. Cheap to adopt for `save_memory`.
+6. **Type-checking rigor** — pyright in CI, stricter than our mypy config.
+7. **OpenTelemetry tracing** — enterprise credibility signal, low effort.
+
+**Where we win (and should market hard):**
+1. **Governed mutation pipeline** — validate → policy → idempotency → execute → emit. No equivalent in Graphiti.
+2. **Immutable audit trail via EventLog** — enterprise compliance, debugging, replayability.
+3. **Policy/access control system** — none in Graphiti.
+4. **Multi-store with local-first** — SQLite-to-production path. Graphiti cannot do this.
+5. **Deterministic-first classification with a grow-over-time plan** — 10-100× cheaper than LLM-only *for the domains you've characterized*. See "Self-Learning Classification" for the roadmap that turns LLM outputs into deterministic rules.
+6. **Structured trace schema** — steps, tool calls, outcomes, evidence, feedback are all first-class. Graphiti's `EpisodicNode` is just a content blob with a timestamp.
+7. **Blob store abstraction** — artifact-friendly from day one.
+8. **Sectioned pack assembly** — multi-agent workflows with per-section budgets. Graphiti has unified search only.
+9. **Contextual pack telemetry** — `PACK_ASSEMBLED` events with full retrieval report enable effectiveness analysis loops Graphiti can't do.
+
+**Caveat on advantage #5:** deterministic-first is only an advantage *once you've written the deterministic extractors*. For a new consumer spinning up against a domain they don't yet understand, Graphiti's LLM-extraction path is strictly better — they can ingest raw content immediately. Our advantage kicks in after the domain has been characterized and a runner written. The "Tiered Extraction Pipeline" section below closes this gap by adding an LLM-extraction path to the core library with a graduation mechanism that converts it into deterministic rules over time.
+
+**Where we're at parity or better but they ship it and we don't yet:**
+- FastAPI REST surface (both)
+- MCP server (both; theirs has 16 tools, ours has 10)
+- Hybrid retrieval (both)
+- CI lint + tests (both)
+- Python packaging (both)
+
+#### Features to Evaluate for Adoption
+
+- [ ] **Temporal edge validity (P0, highest ROI)** — Add `valid_from`/`valid_to` to edges, matching the existing SCD Type 2 pattern on nodes. Enables: "when did this dependency start?", "what were the relationships at time T?", tracking when facts change without losing history. This is the highest-value Graphiti concept to adopt — it extends an existing pattern we already have on nodes. Implementation: mirror the node-side SCD Type 2 in `GraphStore.upsert_edge` / `get_edge_history` / `list_edges(as_of=...)`. Postgres and SQLite backends both need migrations. The schema change is additive (existing edges get `valid_from=created_at`, `valid_to=None`).
+
+- [ ] **Contradiction detection on upsert** — When `upsert_node` receives properties that conflict with existing properties from a different `source_of_truth`, flag it rather than silently overwriting. Store both versions with temporal validity. Requires the `source_of_truth` field proposed in the cross-store reference model. Start simple: detect numeric/date/enum conflicts; ignore free-text differences.
+
+- [ ] **Community detection** — Auto-cluster entities into domain groups using graph structure (Louvain, Leiden, or label propagation). Creates community cluster nodes with summary embeddings. Enables: "tell me about the orders domain" → returns pre-computed cluster summary rather than individual entity lookups. Evaluate: does this provide value over manual `domain` metadata tags? Where does it discover structure that manual tagging misses? **Implementation note:** community nodes should use `node_role=CURATED` with `generation_spec.generator_name="community_detection_<algorithm>"` from the "Graph Modeling Guidance, Node Roles & Curation" framework — do not introduce a parallel `COMMUNITY` entity type or a separate regeneration mechanism. The curated-node framework already covers regeneration, freshness tracking, and retrieval boosting.
+
+- [ ] **Workflow/saga entity** — Promote workflow runs from implicit (`workflow_id` on traces) to explicit first-class entities. A `WORKFLOW_RUN` node links to its traces via ordered edges. Enables: "show me all runs of the SQL generation workflow", "what was the last successful run?", "compare run 5 vs run 6." Natural fit for the multi-agent pipeline use case. **Role:** workflow runs are `node_role=SEMANTIC` (they are real things that happened, not synthesis) — do not confuse with curated nodes.
+
+- [ ] **LLM-assisted dedup for unstructured observations** — [blocked: LLMClient ADR (Sprint C)] The `save_memory` path ingests unstructured agent observations. These don't have clean `(source_system, raw_id)` aliases. Evaluate Graphiti's LLM dedup approach for this path: before creating a new document/entity from `save_memory`, compare against recent similar items via embedding similarity + LLM confirmation. The deterministic alias system stays for structured ingestion; LLM dedup activates only for unstructured input.
+
+- [ ] **Reranking strategies + `CrossEncoderClient` abstraction (P1)** — RRF + MMR are deterministic and safe to ship now (Sprint E). `BGECrossEncoder` and API-based cross-encoders are [blocked: LLMClient ADR (Sprint C)]. Graphiti offers RRF, MMR, cross-encoder (`graphiti_core/cross_encoder/` with OpenAI, Gemini, and BGE local implementations), node-distance, and episode-mention reranking. Trellis currently uses importance-weighted relevance scores only. Implementation plan:
+  1. Add `Reranker` Protocol in `src/trellis/retrieve/rerankers/base.py` with `rank(query: str, candidates: list[PackItem]) -> list[RankedItem]`
+  2. Ship three built-in rerankers: `RRFReranker` (deterministic, no LLM, combines heterogeneous score distributions from our keyword/semantic/graph strategies — highest ROI), `MMRReranker` (deterministic, adds diversity — useful against the "sectioned packs all returning similar items" problem), `BGECrossEncoder` (local sentence-transformers model, optional dependency via `[rerank]` extra)
+  3. `PackBuilder` accepts optional `reranker: Reranker | None` parameter. Applied after strategy union + dedup, before budget enforcement.
+  4. Re-add `CrossEncoderClient` Protocol (mirroring our LLM client approach; removed 2026-05 as YAGNI) only if/when we add the LLM-based rerankers
+  5. Tests: per-reranker unit tests with synthetic candidates; integration test showing RRF improves pack quality on a fixture scenario
+  6. Reference: Graphiti's `graphiti_core/cross_encoder/bge_reranker_client.py` is a ~80-line implementation worth copying as a starting point
+
+- [ ] **MinHash/LSH deterministic dedup stage (P1, for `save_memory`)** — Graphiti's 3-stage dedup (`utils/maintenance/dedup_helpers.py`): exact match → MinHash with 32 permutations + LSH banding + Jaccard ≥0.9 + entropy filter → LLM resolution. The middle stage is **deterministic and LLM-free** and catches fuzzy duplicates (typos, casing, punctuation) without cost. We should adopt this for the `save_memory` unstructured observation path and for document ingestion — it sits between our existing exact-match alias system and a future LLM fallback. Implementation:
+  1. New module `src/trellis/classify/dedup/minhash.py` with `MinHashIndex` class (configurable permutations, shingles size, similarity threshold)
+  2. Integrate into `save_memory` path: before creating a new document, hash + check index, return existing doc ID if Jaccard ≥ threshold
+  3. Index populated on ingestion; stored in a new `dedup_signatures` SQLite/Postgres table for persistence
+  4. **Cost consideration**: index grows with document count; evaluate memory footprint at 10K/100K/1M scale. Optional LRU eviction based on recency.
+  5. Tests: exact duplicate detection, fuzzy duplicate detection (typos), entropy filter (short/generic names skipped), false-positive rate measurement on a synthetic corpus
+  6. Reference: `graphiti/graphiti_core/utils/maintenance/dedup_helpers.py` lines 39-200+
+
+- [ ] **`LLMClient` + `EmbedderClient` abstractions in core (P2, optional dependency)** — **Sprint C ADR decides this.** Many other items block on it. — Graphiti owns the LLM and embedder client layer via ABCs (`graphiti_core/llm_client/client.py`, `graphiti_core/embedder/client.py`) with unified `async _generate_response(response_model=...)` and `async create(input_data)` interfaces, retry logic, token tracking, and optional response caching. Trellis currently punts this to consumers — every consumer reimplements retry, token tracking, caching. Plan:
+  1. Add `src/trellis/llm/` module with `LLMClient` Protocol, `TokenUsageTracker`, optional `ResponseCache` (hashed by blake2b of messages), and one or two built-in implementations gated behind optional dependencies (`[llm-openai]`, `[llm-anthropic]`)
+  2. Add `src/trellis/embeddings/` with `EmbedderClient` Protocol and built-in OpenAI implementation gated behind `[embed-openai]`
+  3. These are **optional** — the core library never imports them at runtime; only the enrichment pipeline and (future) rerankers use them
+  4. This is purely a DX improvement for consumers building enrichment workers; it does not change our deterministic-first philosophy
+  5. Existing `LLMFacetClassifier` gets refactored to accept a `LLMClient` instance
+  6. Reference: Graphiti's `llm_client/client.py` (~300 LOC) is the template — we don't need 7 provider implementations, one or two is enough for v1
+
+- [ ] **Prompt library pattern (P2, only if LLM abstractions land)** — [blocked: LLMClient ADR (Sprint C)] — Graphiti ships `graphiti_core/prompts/` (~1665 LOC) as a library of Jinja2 templates wrapped in Python functions returning `list[Message]`. Each prompt has a typed Pydantic response model. Prompts are versioned and tracked per `prompt_name` for token usage aggregation. If we add the LLM client abstraction, adopt this pattern for the enrichment prompts rather than inline f-strings. Reference: `graphiti/graphiti_core/prompts/extract_nodes.py` as the template.
+
+- [ ] **OpenTelemetry tracing (P2, credibility signal)** — Graphiti supports OTel spans on major operations (`add_episode`, `search`) with custom attributes (query length, reranker scores), compatible with Datadog/Honeycomb/Jaeger, disabled by default via a no-op tracer. Low implementation cost (optional dep, `[tracing]` extra), real enterprise credibility signal. Add spans to: `MutationExecutor.execute`, `PackBuilder.build` and `build_sectioned`, each `SearchStrategy.search`, `ClassifierPipeline.classify`, `MCP tool invocations`. Use standard OTel conventions (span kind, status codes). Document in `docs/agent-guide/observability.md`.
+
+- [ ] **Async worker queue for bulk ingest (P2)** — Graphiti's REST server wraps `POST /messages` in an async worker queue (`AsyncWorker` class, FIFO, returns 202) to decouple request latency from ingestion processing. Adopt the same pattern for our bulk ingest endpoint (`POST /api/v1/ingest/bulk` — already on TODO in the Unity Catalog Backfill section). Reference: `graphiti/server/graph_service/routers/ingest.py`.
+
+- [ ] **MCP tool parity audit (P2)** — Graphiti's MCP server exposes 16 tools; ours exposes 10. Audit which of their tools fill capability gaps for us:
+  - `get_entity_graph_context(entity_id, depth)` — BFS neighbors with context. **Worth adding.** Enables agents to ask "show me everything connected to entity X out to 2 hops."
+  - `list_facts_by_entity(entity_id)` — incoming + outgoing edges for one entity. **Worth adding.** Currently requires consumers to call `search` with awkward filters.
+  - `delete_episode(uuid)` — cascade deletion. **Skip** — our traces are immutable by design.
+  - `delete_entity_edge(uuid)` — edge removal. **Skip for now** — should go through the mutation pipeline, not a direct MCP tool.
+  - `list_available_entity_types()` — enumerate types. **Worth adding** — matches our "Per-implementation skill context" TODO in the Domain-Specific Entity Types section.
+  - `update_entity_summary(uuid, summary)` — manual curation. **Map to `trellis curate edit`** from the curated-node framework rather than a direct MCP call.
+  - `retrieve_latest_episodes(n)` — time-windowed retrieval. **Worth adding** as `get_recent_traces(n, since)`.
+  - Each addition lands in `src/trellis/mcp/server.py` and gets a test in `tests/unit/mcp/`.
+
+- [ ] **Write-up: `docs/research/graphiti-comparison.md`** — Full analysis with code examples showing how each system handles the same scenario (e.g., "agent discovers a new table dependency, records it, later the dependency changes, then queries what existed at time T"). Clarify where Trellis's design is intentionally different vs. where it has gaps. Should become a permanent comparison doc (not just a one-time research note) since Graphiti is the most frequent competitive reference — potential adopters will ask about it. Cross-link from README in a "How does this compare to Graphiti?" FAQ section.
+
+#### What NOT to Adopt (and why)
+
+- **Single-store architecture** — Graphiti's choice eliminates cross-store problems but locks you into graph databases. Trellis's multi-store design supports SQLite (local dev), PostgreSQL (production), LanceDB (semantic search) independently. The generalizability goal requires backend diversity. Solve cross-store references via the graph-as-directory pattern instead.
+
+- **LLM-driven extraction for all ingestion** — Graphiti calls an LLM for every entity extraction, edge extraction, dedup check, and summarization. This is appropriate for conversational memory (few messages, high value per message). Trellis ingests thousands of UC tables, dbt models, and metadata records — LLM cost would be prohibitive. Keep the deterministic-first pipeline; add LLM paths only where deterministic fails (unstructured input, ambiguous dedup).
+
+- **Vectors-in-graph** — Storing embedding vectors as graph node properties works when you have one database. With separate stores, embedding storage belongs in the dedicated VectorStore (LanceDB, pgvector) which is optimized for ANN indexing. Cross-referencing via `item_id = doc_id` convention is sufficient.
+
+### Repository Polish & Credibility Signals
+
+> **Why this section exists:** The deep Graphiti audit (2026-04-11) made it clear that the biggest single difference between Trellis and Graphiti is not capability — it's **presentation, credibility, and discoverability**. Graphiti has 24.8K stars, a published arXiv paper, blog posts, a dedicated Discord, and polished CI badges. Trellis has none of these yet. Every item in this section is low-risk, reversible, and mostly doesn't touch code — but together they close the credibility gap that determines whether a skeptical engineer gives the project 30 seconds or 30 minutes of attention.
+>
+> **Priority framing:** These are **not nice-to-haves**. The order of operations for an open-source project being discovered by potential users is: see a README badge → trust the project enough to read the README → trust the README enough to try the quickstart → trust the quickstart enough to integrate. Each step has a 50-80% drop-off. Missing badges and an unlinted README cause the first drop, and you never get a second chance. Graphiti nailed this; we haven't yet.
+
+#### Badges (README, top of file, first thing a visitor sees)
+
+- [x] **CI status badge** — DONE. Tests / Lint / Type Check badges live at the top of `README.md` (the project never had a single `ci.yml`; it shipped pre-split into `lint.yml` / `tests.yml` / `typecheck.yml`).
+
+- [x] **Ruff lint badge** — DONE. `[![Lint](...)]` in README; backed by `.github/workflows/lint.yml`.
+
+- [x] **Type-check badge** — DONE. `[![Type Check](...)]` in README; backed by `.github/workflows/typecheck.yml`.
+
+- [x] **Test status badge (with matrix)** — DONE (aggregate). Single `[![Tests](...)]` badge; underlying `tests.yml` runs the 3.11/3.12/3.13 matrix.
+
+- [ ] **Coverage badge** — requires setting up coverage reporting. Options:
+  - **Codecov** (`codecov.io`, free for open source) — standard, widely trusted badge, integrates via GitHub Action. Add `pytest --cov=src --cov-report=xml` to test workflow, upload via `codecov/codecov-action@v4`, add badge.
+  - **Coveralls** — similar, slightly less common.
+  - **No coverage badge** — if coverage is currently low or uneven, ship the badge after improving coverage. Do not ship a badge showing 40%.
+  - Decision gate: measure current coverage first (`pytest --cov=src`), decide based on result. Target ≥80% before shipping the badge. **1-2 hours** including workflow changes.
+
+- [x] **PyPI version badge** — DONE. `[![PyPI](...)]` in README; auto-renders the latest published version.
+
+- [x] **Python versions supported badge** — DONE. `[![Python](...)]` in README; auto-renders from PyPI classifiers.
+
+- [x] **License badge** — DONE. `[![License: MIT](...)]` in README.
+
+- [ ] **Downloads badge** — `[![Downloads](https://static.pepy.tech/badge/trellis-ai/month)](https://pepy.tech/project/trellis-ai)`. Gated on PyPI publish, shows momentum. Only add once downloads are non-embarrassing (e.g., after first announcement push). **5 minutes** when ready.
+
+- [ ] **GitHub stars badge** (optional) — `[![GitHub stars](https://img.shields.io/github/stars/OWNER/trellis.svg?style=social)](...)`. Only useful after visible community activity. Do not add while the number is low.
+
+- [ ] **"Powered by" / "Built with" badges** (optional, if we ship specific integrations) — MCP, Claude, OpenAI, etc. Use sparingly; too many badges is worse than too few.
+
+#### Workflow file hygiene
+
+- [x] **Split `ci.yml` into per-concern workflows** — DONE. `.github/workflows/{lint,tests,typecheck}.yml` each carry their own `name:` matching the README badges; failures in one concern don't block the others.
+
+- [x] **Add database integration test workflow** — DONE. `.github/workflows/live-infra.yml` runs the full Neo4j (AuraDB) + Postgres + pgvector live suite on every push to main and on `workflow_dispatch`. Skips cleanly when secrets are absent.
+
+- [x] **Claude Code review workflow** — `claude.yml` checked in; mentioned in CONTRIBUTING.md.
+
+- [x] **CodeQL scanning** — DONE. `.github/workflows/codeql.yml` runs the `security-extended` query suite on push, PR, and a weekly Monday cron.
+
+- [x] **Release workflow** — DONE. `.github/workflows/publish.yml` triggers on `v*` tags; OIDC-based trusted-publisher setup.
+
+#### README polish
+
+- [ ] **Hero tagline** — one-sentence value prop in italics under the title, before any prose. Current README opens with "A structured context graph and experience store for AI agents." That's good but buries the differentiator. Something like:
+  > *Structured, governed, local-first memory for AI agents — immutable traces, policy-gated mutations, and token-budgeted context retrieval. Built for teams that need auditability and reproducibility, not just a vector store.*
+  Target: make it obvious in 10 seconds what Trellis is and why it's different from a memory framework or a vector DB.
+
+- [ ] **"How does this compare to X?" FAQ section** — a short table comparing Trellis to Graphiti, Mem0, Zep, LangChain Memory, Letta (formerly MemGPT), and plain pgvector/Chroma. Include the Graphiti comparison as the lead example. This is the question every skeptical adopter asks; answering it prominently converts skeptics into trial users. Cross-link to `docs/research/graphiti-comparison.md` for the long version.
+
+- [ ] **Quickstart section tightening** — current README has diagrams but the "how to actually run this" path is not top-of-page. Pattern from Graphiti (which has a 600-line README, but the quickstart is up top): tagline → badges → 5-line install + first-run snippet → then the deep dive. First-run snippet should produce visible output in <60 seconds from a clean venv.
+
+- [ ] **Sub-minute demo GIF** — already in the "Demo & Content" TODO. The deep audit reinforces this is important: Graphiti's README has architecture diagrams but no GIF, which is actually an opportunity — a GIF showing "retrieve → act → record → retrieve smarter next time" would be a unique differentiator in the space.
+
+- [ ] **Link to paper / blog post** — Graphiti links to [arXiv:2501.13956](https://arxiv.org/abs/2501.13956) prominently. We don't have a paper (yet), but linking to a blog post explaining the design philosophy (governed mutations, immutable traces, why deterministic-first classification matters) would serve the same credibility function. **Gated on writing the blog post.** Deferred until there's content to link.
+
+- [ ] **"Used by" or "Adopters" section** — even if it's just "used internally at [company]" or "built for [project]", showing that *someone* runs this in production is a credibility signal. Gated on having users willing to be named.
+
+- [x] **CONTRIBUTING.md** — DONE. Lives at repo root.
+
+- [x] **Code of Conduct** — DONE. `CODE_OF_CONDUCT.md` at repo root.
+
+- [x] **Security policy** — DONE. `SECURITY.md` at repo root.
+
+- [x] **Changelog** — DONE. `CHANGELOG.md` in Keep-a-Changelog format with entries through v0.5.1 + v0.5.2 + an `[Unreleased]` `### Deprecated` block landed in PR #95.
+
+#### Documentation polish
+
+- [ ] **Docs site (optional, P2)** — Graphiti has a docs site linked from the README. Options:
+  - **mkdocs-material** — cheapest path, renders our existing `docs/` markdown into a site. Deploy via GitHub Pages. ~30 minutes setup.
+  - **Docusaurus / Mintlify / Fumadocs** — prettier, more effort.
+  - **Just keep `docs/` on GitHub** — fine for v1, less polished. Decision: start with mkdocs-material before the first public announcement, not before.
+
+- [ ] **Architecture diagram in README** — current README has ASCII diagrams (good! unique!). Supplement with a rendered mermaid or SVG architecture diagram for visitors who skim. Place after the tagline, before the deep dive.
+
+- [ ] **Type-check strictness increase** — Graphiti uses pyright in basic mode for core and standard mode for server. We use `mypy strict=false` with most warnings off. Tighten over time:
+  1. Phase 1: enable `disallow_untyped_defs = true` for `src/trellis/schemas/`, `src/trellis/mutate/`, `src/trellis/stores/base/` (the parts with the clearest contracts)
+  2. Phase 2: extend to `src/trellis/retrieve/` and `src/trellis/classify/`
+  3. Phase 3: evaluate switching mypy → pyright (pyright is faster, has better error messages, and is what Graphiti uses — community signal that it's the modern default for new projects)
+  4. Each phase is its own PR so contributors see incremental rigor
+
+- [x] **`py.typed` marker file** — DONE. Ships on all six packages: `src/trellis/`, `src/trellis_cli/`, `src/trellis_sdk/`, `src/trellis_api/`, `src/trellis_workers/`, `src/trellis_wire/`. Listed under `[tool.hatch.build.targets.wheel] include` in `pyproject.toml`.
+
+- [x] **`Makefile` parity with Graphiti** — DONE. `make {format,lint,typecheck,test}` plus `make check` aggregate (lint + typecheck + test).
+
+#### Community & visibility
+
+- [ ] **Discord or GitHub Discussions** — Graphiti has a Discord. GitHub Discussions is zero-setup and lives inside the repo. Enable Discussions and pin a welcome thread before any external announcement. **5 minutes.**
+
+- [x] **GitHub topics / tags** — DONE. Repo carries 17 topics covering the proposed set (with `agent-memory` standing in for `llm-memory` and `retrieval-augmented-generation` for `rag`).
+
+- [ ] **Submit to awesome-* lists** — already in the Discoverability TODO. Key targets: `awesome-mcp-servers`, `awesome-llm-apps`, `awesome-agents`, `awesome-ai-agents`. Each one is a 1-2 line PR.
+
+- [ ] **HN Show / Launch post** — when ready (post-PyPI publish, post-quickstart tightening, post-demo-GIF). Template: "Show HN: Trellis — governed, local-first memory for AI agents with auditable traces." Time it for a Tuesday or Wednesday morning US Eastern for best visibility. Have badges, demo, and docs ready before posting.
+
+- [ ] **Blog post: the design philosophy** — one-shot thought-leadership post explaining: why deterministic-first classification matters, why immutable traces matter, why multi-store architecture matters. Serves as the "paper substitute" that lets us link serious content from the README. Target: Substack, dev.to, or a dedicated blog. ~2000 words.
+
+- [ ] **Comparison blog post** — "Trellis vs Graphiti vs Mem0: choosing an agent memory system." Not a hit piece — a genuine "these tools are for different things" explainer. Cross-promotes all three projects, builds goodwill, converts people who are shopping specifically by comparing. Gated on the design philosophy post landing first.
+
+- [ ] **Conference / meetup submissions** — once the project is public and there's at least one production user, submit talks to: PyCon, ML/AI meetups, LLM DevDay, FOSDEM. Prepared slides reusable across venues.
+
+#### Ordering and dependencies
+
+The suggested execution order for this section, front-loaded by ROI:
+
+1. **Immediate (before any public announcement)** — ✅ done modulo Discussions + tagline:
+   - ✅ Split workflows into lint/typecheck/tests + badges
+   - ✅ License badge, Python versions badge
+   - ✅ `py.typed` marker (all six packages)
+   - ✅ GitHub topics (17 topics covering the proposed set)
+   - ⏳ Enable GitHub Discussions (repo settings — no code)
+   - ⏳ Tighten README hero tagline (judgement call; current tagline is the bold line under the title)
+
+2. **Before first external announcement (HN/blog), ~1 day total:**
+   - ✅ CONTRIBUTING.md + Code of Conduct + SECURITY.md
+   - ⏳ Coverage measurement + optional Codecov integration (only ship badge if ≥80%)
+   - ⏳ README "how does this compare to X?" section
+   - ⏳ Quickstart tightening (5-line install + 60-second first-run)
+   - ⏳ Rendered architecture diagram alongside the ASCII one
+   - ⏳ Demo GIF (from Demo & Content section)
+
+3. **Before v1.0 release, ~2-3 days:**
+   - ✅ Database integration test workflow (`live-infra.yml` covers Neo4j + Postgres + pgvector)
+   - ⏳ Type-check strictness phase 1 (schemas/mutate/stores)
+   - ⏳ Design philosophy blog post
+   - ⏳ Graphiti comparison doc (`docs/research/graphiti-comparison.md`)
+   - ✅ CHANGELOG.md
+   - ✅ Release workflow (`publish.yml` triggers on `v*` tags via OIDC)
+
+4. **Post-v1.0, ongoing:**
+   - ⏳ Coverage improvement to ≥80%
+   - ⏳ Type-check strictness phases 2 and 3
+   - ⏳ Comparison blog post
+   - ⏳ mkdocs-material docs site
+   - ⏳ Submit to awesome-* lists
+   - ⏳ Conference submissions
+   - Downloads badge, stars badge (once numbers are non-embarrassing)
+
+### More Framework Integrations
+- [ ] CrewAI integration (`integrations/crewai/`)
+- [ ] AutoGen integration (`integrations/autogen/`)
+- [ ] Contribute integration PRs upstream to each framework's repo
+
+## Branch Convergence Follow-ups (2026-04-19)
+
+Captured during the pre-merge simplify + review pass on the 6-PR branch convergence batch (chore/ruff-up038, client-boundary-step4, terminology-adr, tag-vocabulary-split-phase-0, planes-phase-a-adr, planes-phase-c-doclink). **None are merge blockers** — fix-now items landed with their source PRs; items below were labeled "follow-up" or "no action now" by the reviewers. Grouped by source PR so they can be picked up individually.
+
+### From PR 1 — Client Boundary Phase 1
+- [ ] **Collapse 6× `# type: ignore[no-any-return]` on `StoreRegistry` store-type property accessors** (`src/trellis/stores/registry.py:477,481,485,489,493,497`) with a typed generic overload on `_get`. Would also let us drop the similar ignore at the embedder-plugin return path.
+- [ ] **Add `Depends(get_executor)` helper in `src/trellis_api/deps.py`** so `src/trellis_api/routes/extract.py:71-73` (and `curate.py:28-29`, `mutations.py:37-38`, `ingest.py:189-190`) stop rebuilding `create_curate_handlers(registry)` + `MutationExecutor(...)` per request. Pre-existing pattern; extract.py joins it.
+- [ ] **Expose a read-only `StoreRegistry.builtin_backend_names()` view** so `src/trellis/plugins/diagnostic.py:40-50` doesn't hand-copy `_BUILTIN_STORE_NAMES` / `_BUILTIN_LLM_PROVIDER_NAMES` / `_BUILTIN_LLM_EMBEDDER_NAMES`. Prevents silent drift. The comment at `diagnostic.py:37-39` currently justifies the duplication as a layering trade-off — acceptable but fixable.
+- [ ] **Cache `discover()` results in the LLM plugin path** (`src/trellis/stores/registry.py:_try_llm_plugin`) for consistency with `_get_merged_backends`. Low-impact since `build_llm_client` is typically called once at config time.
+
+### From PR 3 — Tag-Vocabulary Phase 0
+- [ ] **Trim `_format_reservation_error` + `_NAMESPACE_GUIDANCE` dict** in `src/trellis/schemas/classification.py:54-88` to a single f-string with inline dict lookup (~35 lines → ~10). Also drop the `_ReservedField = Literal["custom key", "domain value"]` alias — it's over-engineered for two call sites with verbatim strings.
+- [ ] **Drop TOCTOU `path.exists()` pre-check** in `scripts/claude_postedit_lint.py:40`. Operate directly; `ruff` gives a clear error when the file is missing.
+
+### From PR 4 — Planes-Phase-A
+- [ ] **`Literal["knowledge", "operational"]` (or `StrEnum`) for plane names.** Currently raw strings flow through `_PLANE_OF`, `_PLANE_PG_DSN_ENV`, `_extract_store_config`, and the `migrate-config` CLI. A typed alias would give mypy teeth on `_PLANE_OF.get(...)` callers. Also lets us delete the `"<unknown>"` sentinel branches that still appear in a few error messages.
+- [ ] **Share a common base between `_KnowledgePlane` / `_OperationalPlane`** (`src/trellis/stores/registry.py:512-561`). The two classes are copy-paste forwarders to `self._registry._get(...)`. Trade-off: a dynamic `_PlaneAccessor` using `__getattr__` saves ~40 lines but loses static `.graph_store` autocomplete. Minimum fix: share a tiny `_PlaneBase` with the constructor + private `_registry` attribute.
+- [ ] **Collapse flat-property deprecation into a descriptor or decorator** (`src/trellis/stores/registry.py:802-830`). Six near-identical properties all call `_warn_flat_property("X"); return self._get("x")`; a single `_DeprecatedFlatProperty(store_type)` descriptor would replace them and eliminate the `removesuffix("_store")` ceremony in `_warn_flat_property`.
+- [ ] **Normalize `_FLAT_CONFIG_WARNED` to match the other one-shot guards** (`src/trellis/stores/registry.py:115, 174, 229-230`). It uses a module-level `bool` with `global` statements, while `_LEGACY_PG_DSN_WARNED` and `_FLAT_PROPERTY_WARNED` are `set`s (no `global` needed). Change it to a single-element set or a list for consistency.
+- [ ] **Parametrize migrate-config tests** (`tests/unit/cli/test_admin_migrate_config.py:69-99`). `creates_backup_by_default`, `force_skips_backup`, `dry_run_does_not_write` share identical setup and differ only in flags. `@pytest.mark.parametrize` with `(flags, expect_backup, expect_write)` saves ~45 lines.
+- [ ] **Consolidate registry plane tests** (`tests/unit/stores/test_registry_planes.py:95-154`). `test_flat_property_emits_deprecation_warning`, `test_flat_property_warning_is_one_shot`, and `test_event_log_flat_property_names_its_plane` are all covered by `test_all_six_flat_properties_have_deprecation` once extended with one-shot and plane-name assertions.
+
+### From PR 6 — Planes-Phase-C (document_ids)
+- [ ] **Reject whitespace-only strings in `validate_document_ids`** (`src/trellis/stores/base/graph.py:76`). Currently `bool("   ")` is `True`, so `"   "` passes; add `.strip()` check to match the spirit of "non-empty".
+- [ ] **Defend SQLite read-path against a stored `"null"` string** (`src/trellis/stores/sqlite/graph.py:944`). `json.loads(raw) if raw else []` treats `"null"` as truthy, then `json.loads("null")` returns `None` and leaks upward. Use `json.loads(raw) or []`.
+- [ ] **Add a `get_node_history()` test for pre-migration rows** returning `document_ids: []` — analogous to `TestSQLiteBackfillGracefulDegrade` but covering the history path, which the current suite misses.
+
+### Substrate (post-Kuzu-archive) — RESOLVED 2026-05-11
+
+> **Status:** Closed by the ArcadeDB substrate selection (see [docs/design/adr-arcadedb-blessed-substrate.md](../design/adr-arcadedb-blessed-substrate.md)). ArcadeDB chosen over SurrealDB, DuckDB + DuckPGQ + VSS, FalkorDB, Dgraph, Neo4j Community, Neptune Database, and LadybugDB/Kuzu — won on Apache 2.0 license + predictable AWS hosting + Bolt drop-in compatibility (97.8% TCK openCypher) + native HNSW.
+
+- [x] **Substrate ADR written.** [docs/design/adr-arcadedb-blessed-substrate.md](../design/adr-arcadedb-blessed-substrate.md).
+- [x] **ArcadeDB spike validated.** Docker container, 76/76 contract tests pass against `ArcadeDBGraphStore`, 17/17 vector tests pass against `ArcadeDBVectorStore`.
+- [x] **BoltOpenCypherGraphStore extracted** from Neo4j (`src/trellis/stores/bolt_opencypher/`). Neo4j + ArcadeDB share ~1000 LOC of Cypher payload + SCD-2 logic.
+- [x] **`[arcadedb]` extra added** to `pyproject.toml`; registered under `_BUILTIN_BACKENDS["knowledge"]["graph"]` and `["vector"]`; `_inject_arcadedb_driver` + `_resolve_arcadedb_vector_params` resolvers added to `StoreRegistry`; `arcadedb` pytest marker added; `--include-arcadedb` flag added to conftest.
+
+**Follow-up backlog (not blocking the substrate adoption):**
+- [ ] **Load characterization on ECS Fargate.** Run a representative trace-ingestion + pack-build workload against ArcadeDB on a single Fargate task with EFS journal; compare to AuraDB Free baseline (per memory `project_neo4j_bulk_upsert_findings.md`).
+- [ ] **HA-Raft replication.** Single-writer covers current deployments; revisit if a customer needs failover.
+- [ ] **DocumentStore consolidation.** ArcadeDB has FTS; could host the `DocumentStore` too. Out of scope until the operational simplification value is concrete.
+- [ ] **Evaluate consolidating `DocumentStore` onto the same backend** once the graph+vector substrate stabilizes. The value is reduced operational surface (one DB to back up / tune / authorize); the risk is FTS quality (SQLite FTS5 vs SurrealDB FTS vs Postgres `tsvector`).
+- [x] **Assess downstream license implications of BSL-1.1** — *Resolved 2026-04-20.* SurrealDB 3.0 is BSL 1.1 (LICENSE last updated 2025-12-17), Change Date 2030-01-01 → auto-converts to Apache 2.0. Python SDK `surrealdb.py` is Apache-2.0. The Additional Use Grant forbids only offerings "that enable third parties to create, manage, or control schemas or tables" — i.e. competing DBaaS/Supabase-style products. Trellis consumers embedding SurrealDB as a hidden storage backend (users never see SurrealQL) are **allowed**: internal SaaS, self-hosted bundles, and embedded-mode agent products all pass. Required posture if SurrealDB is picked:
+  - Gate behind `[surrealdb]` optional extra so non-adopters never pull BSL code.
+  - Document the DBaaS carve-out in the backend-selection ADR (one sentence: "Don't pick SurrealDB if you're building a multi-tenant DBaaS where tenants author their own schemas").
+  - Keep Postgres+pgvector as the default blessed production substrate; SurrealDB is an opt-in alternative for teams who want unified graph+vector with embedded mode.
+
+### Branch convergence housekeeping
+- [ ] **Migrate the 17 internal callers** from flat `registry.graph_store` etc. to `registry.knowledge.graph_store` / `registry.operational.trace_store`. Phase-2 deprecation warnings currently flag each site; the migration was deferred per the Phase 2 commit message to minimize merge-conflict surface during this convergence batch.
+- [ ] **Fix the 6 Windows path portability test failures** (`tests/integration/obsidian/test_{indexer,vault}.py`, `tests/unit/cli/test_admin.py::test_init_json_format`, `tests/unit/learning/test_scoring.py::test_artifacts_root_stored`). Root cause: `pathlib` emits `\` on Windows; assertions + JSON emission assume `/`. Linux CI is green; these fail only on local Windows development.
+
+## Quickstart polish follow-ups (2026-05-04)
+
+Captured during the smoke-test + simplify + review pass on [PR #99](https://github.com/ronsse/trellis-ai/pull/99) (`fix: unbreak README quickstart end-to-end`). None block merge; flagged for separate work.
+
+### From PR #99 — Quickstart polish
+- [ ] **Promote `LOCAL_SOURCE_SYSTEM` out of `trellis_cli/stores.py`** into `trellis.stores` (or `trellis.stores.aliases`) if/when the REST ingest path (`src/trellis_api/routes/ingest.py:274`) or MCP server adopt the same convention. Today only the CLI demo + `retrieve entity` use it; library-level isn't justified yet.
+- [ ] **Unit-test `_doc_preview`** in `src/trellis_cli/retrieve.py:30` — three branches (snippet present, content-only, both missing) plus the whitespace-collapse behavior. Today the function is exercised indirectly via `test_search` / `test_pack_request` but those fixtures don't seed documents, so all three branches go untested. The earlier docstring/behavior drift ("newlines collapsed" vs actual all-whitespace) is exactly what a unit test would have caught.
+- [ ] **JSON-format coverage for the `retrieve entity` alias-fallback path** — `test_entity_resolves_via_local_alias` only covers the text path. Add a sibling test that asserts `--format json` emits a valid result document when resolution is via alias.
+- [ ] **Verify demo loader actually seeds aliases** — add a one-line assertion in `tests/unit/cli/test_quickstart.py` (or wherever demo-load is exercised) that `graph.get_aliases(<known_eid>, source_system=LOCAL_SOURCE_SYSTEM)` returns the expected mapping. Belt-and-braces against silent demo-loader regressions.
+- [x] **Wider XPG-rename sweep — done.** All live user-visible spots, library code, agent-guide docs, design docs, plans, research notes, example-integration templates, and the Graphiti-comparison subsection of this file have been scrubbed across PRs #99, #101, and the historical-sweep PR. Historical naming context lives in git history.
+- [ ] **CLI default log level** — every `trellis retrieve …` and `trellis demo load` interleaves `[info ] store_instantiated …` structlog lines with the friendly Rich output. Default level should be WARNING for CLI commands, with `--verbose` to opt into INFO/DEBUG. PR #76 routed structlog to stderr but on a normal terminal both streams remain visible.
+
+## Legacy-compat sweep (2026-05-08)
+
+Triggered by the `tag_filters` simplification: confirmed that the **specific** "accept two shapes for the same input" pattern that `tag_filters` had does not leak anywhere else (grep for `isinstance.*list.*dict` found only the tag_filters file pre-cleanup, now clean). The broader codebase still carries other legacy-compat patterns from earlier "phased rollout with deprecation cycle" thinking. Pre-roll-out the deprecation cycles aren't earning anything — drop them.
+
+Listed by risk × effort. Each item is small enough to land independently.
+
+### Tier 1 — re-export shims (~1 hour total, very low risk)
+
+- [ ] **Delete `src/trellis/stores/{document,event_log,graph,trace,vector}.py`** — 5 files of "backward-compatible re-exports" pointing at `trellis.stores.{base,sqlite}.<x>`. Migrate ~25 import sites across `src/`, `tests/`, `eval/` to the canonical submodule paths (`trellis.stores.sqlite.document`, `trellis.stores.base.event_log`, etc.). Pure import rename — `git grep -l` then `sed`.
+- [ ] **Delete `src/trellis_api/models.py`** — "backward-compatibility shim" re-exporting `trellis_wire` DTOs under their old names. Migrate the ~6 route imports (`src/trellis_api/routes/{admin,curate,ingest,mutations,retrieve,version}.py`) to `from trellis_wire import …`. The shim's docstring already says "New code should prefer trellis_wire directly" — it's been waiting for someone to finish the migration.
+
+### Tier 2 — back-compat fallbacks for older event/item shapes (~half day total)
+
+These are runtime branches that exist solely to handle pre-migration data shapes. Pre-roll-out there's no pre-migration data.
+
+- [ ] **`src/trellis/retrieve/effectiveness.py:135-164,233-295`** — three back-compat branches that fall back to `pack_feedback` (rating/success) when `FEEDBACK_RECORDED` events lack `helpful_item_ids`. Today every emitter populates `helpful_item_ids` via `PackFeedback.to_event_payload()`. Drop the fallback path; the noise loop becomes usage-rate-only with no `usage_signal_present` gate.
+- [ ] **`src/trellis/learning/pack_observations.py:59`** — handles events without `pack_id` "(legacy / hand-emitted)". Drop the missing-pack_id path, require `pack_id` at parse time.
+- [ ] **`src/trellis/classify/refresh.py:166`** — refresh path that re-runs classification when `content_tags.classified_at` is missing "(legacy or hand-edited)". Acceptable to leave as-is (the refresh is idempotent) but a `# TODO: drop after first migration pass` comment would prevent the path from quietly becoming load-bearing.
+
+### Tier 3 — config/registry legacy plane (~1-2 days, touches deployment)
+
+The user's memory file flags this as "Phase 6 PR 2 pending — gated on v0.5.3 PyPI release; delete alias machinery + ~38 test sites + 5 deprecation tests; bump to v0.6.0". The PyPI gating concern was about external consumers — there are none. Drop now.
+
+- [ ] **`src/trellis/stores/registry.py`** — remove (a) `TRELLIS_PG_DSN` legacy env var fallback (lines 144-179, 316-346), (b) flat `stores:` config block support (lines 222-293), (c) flat property accessors `registry.graph_store` etc. (lines 1051+ marked "Deprecated flat aliases"), (d) the `_LEGACY_PG_DSN_*` and `_reset_deprecation_guards` machinery, (e) the ~5 deprecation tests. Force every caller to plane-split shape.
+- [ ] **`src/trellis_cli/admin.py:218`** — remove `trellis admin migrate-config` CLI subcommand. Without flat-shape support there's nothing to migrate.
+- [ ] **`src/trellis_cli/stores.py:45`** — remove the "cloud YAML and the legacy flat shape both work" parsing branch.
+
+### Tier 4 — deprecation infrastructure (currently unused, ~30 min)
+
+- [ ] **`src/trellis_api/deprecation.py`** + **`src/trellis_wire/dtos.py:49 DeprecationNotice`** + **`src/trellis_api/routes/version.py:40` deprecations field** — RFC 9745 route-deprecation header machinery. `ROUTE_DEPRECATIONS = {}` is empty; the infrastructure has never been used. Either delete it (consistent with "no deprecation cycle, just rip the bandaid") or keep but document that it's reserved for post-roll-out. Pre-roll-out it's dead weight.
+
+### Out of scope — keep these
+
+The audit also flagged but **deliberately** keeps:
+
+- **Graph ontology aliases** (`schemas/well_known.py`, `schemas/enums.py`, `retrieve/strategies.py:304`, `extract/llm.py:314`). Phased canonical-name migration per `adr-graph-ontology.md` and `adr-canonical-graph-layer.md`. Different pattern: "translate old vocabulary to new", not "support two input shapes". Pre-roll-out we *could* drop the legacy enums too, but the alias machinery also serves as defensive parsing for LLM output that may emit non-canonical names. Keep.
+- **`stores/base/graph.py:661,708`** — `execute_node_query` / `execute_subgraph_query` default ABC routes through legacy `query()` / `get_subgraph()`. Transitional plugin contract; backends in-tree all override, so the default is only exercised by hypothetical third-party plugins. Low cost to keep, complexity to remove.
+- **`trellis_cli/retrieve.py:102,216`** — "Preserve backward-compatible JSON structure" comments on CLI output. CLI output is the *one* surface where breaking the JSON shape would actually bite a script in the wild. Keep.
+
+## Docker / cloud-deploy follow-ups (2026-05-08)
+
+Captured during the docker-compose smoke-test pass. The stack now boots clean and `deploy/smoke.sh` returns 10/10 pass against `/healthz`, `/readyz`, `/api/version`, `/ui/`, and a real POST→GET round-trip through Postgres. Items below were noticed in passing.
+
+- [ ] **`POST /api/v1/vectors` swallows per-row errors.** The handler in [`src/trellis_api/routes/ingest.py:79`](../../src/trellis_api/routes/ingest.py:79) wraps each upsert in `except Exception: errors += 1` with no log line. Caught during the smoke pass when an 8-dim test vector hit the 1536-dim pgvector column — the response said `"errors": 2` with no clue why. At minimum the handler should `logger.warning("vector_upsert_failed", item_id=..., exc_info=True)`; ideally surface the rejection reason in the response body so callers can debug dimension mismatches without shell access to the API container.
+- [ ] **Document the pgvector column dimension as part of the cloud-deploy contract.** The `vectors.embedding` column is hardcoded to `vector(1536)` (matches OpenAI `text-embedding-3-small`). A caller using a different embedder will silently lose every upsert. Either expose the dim as a config value the ingest path validates against, or surface it in `/readyz` so an operator can spot the mismatch before traffic hits.
+- [ ] **AWS ECS + RDS dry-run.** Compose stack is the offline rehearsal; the actual cloud-deploy is the next step. Known infra deltas: blob backend flips from `local` (compose volume) to `s3` (`TRELLIS_S3_BUCKET`), and the Postgres DSN points at RDS. Volume-ownership fix from this pass (`mkdir -p /var/lib/trellis && chown trellis:trellis`) carries over — EFS mount-target must respect it or ECS hits the same `RegistryValidationError` we just caught locally.
+
+## GitHub corpus seed-extraction follow-ups (2026-05-08)
+
+- [ ] **Revisit body-token indexing on a richer corpus.** Hypothesis was: extending `_title_tokens_and_phrases` (in `eval/corpora/github_trellis/loader.py`) to also pull unique tokens/phrases from PR *bodies* would raise `multi_pr_series` Q1's hit rate from 0/4 to 4/4 by surfacing phrases like `harness skeleton` / `multi-backend equivalence` that the intent supposedly references.
+
+  **Evaluated 2026-05-08 — rejected on the trellis-ai snapshot.** A clean two-pass impl (titles first via `setdefault`, then bodies as a fill-only pass) grew the index 26x (1.1k → 30k entries) but produced **zero new true-positive seeds across all 12 ground-truth queries** and added **two new false-positive seeds** (reverse_lineage and one bug_fix_identification query). Three reasons it didn't pan out on this corpus:
+
+  1. The intents reference **paraphrased / range / plural** language ("Phase 1 through Phase 4", "scenarios 5.1, 5.2, and 5.3") that no PR title or body contains literally.
+  2. Phrases unique-per-PR in titles (`harness skeleton`, `multi-backend equivalence`, `synthetic traces`, `populated-graph performance`) **don't appear in this intent** — it asks about "eval-framework Phase N", which appears in 6 PRs' bodies → not unique → still not indexed.
+  3. Bodies are full-paragraph stacked-PR prose with extensive cross-references; the unique-to-one-PR filter correctly drops most of it, leaving body-derived entries that are mostly per-PR detail (URLs, method names, code snippets) that no hand-authored intent keys on.
+
+  **Worth revisiting when:** the corpus contains PRs whose body text is more topically distinctive than its title (research papers, design docs, PR templates with consistent structured sections). A future curated corpus where bodies carry per-entity "key topics" content would benefit. For now, title-only is the right tool for trellis-ai's PR shape. Negative-result note left in `build_pr_name_index`'s docstring so the path doesn't get re-tried.
+
+- [ ] **Architectural follow-up — semantic-seed extraction.** The deeper finding is that `extract_seed_ids` is a literal-substring matcher. Bodies are good food for embedding-based search (paraphrase-tolerant) but bad food for literal-phrase indexing (too noisy, too overlapping). Real fix is a path that converts SemanticSearch's top-k matches into `seed_ids` for `GraphSearch` so paraphrased intents reach the graph traversal. Sketch: at retrieval time, embed the intent → top-K most-similar entity-summary docs → use their entity_ids as graph-traversal seeds. Cross-references the curation-engine work in `agent_loop_convergence_degraded` (the "improves with use" claim still depends on cheap literal indexing for now). Estimate: 1-2 days, plus an eval pass to confirm no regression on existing queries.
+- [x] **Investigate `(source_system, raw_id)` collision semantics for user-managed aliases** — captured in [`docs/design/adr-alias-resolution.md`](../design/adr-alias-resolution.md) (Accepted 2026-05-05). Documents the SCD-2 rebind footgun, sanctions the demo loader's name-as-raw-id pattern, and pins three deferred shapes (namespacing, strict-mode upsert, detection-only event). Contract tests `test_alias_rebind_{repoints_to_new_entity, preserves_history_via_as_of}` landed alongside the ADR.

@@ -935,7 +935,7 @@ Stay client-side unless you need:
 - A custom classifier that reads stored state to decide tags.
 - A policy gate that evaluates cross-entity rules.
 
-Those run in the API process — they're the plugin-loader path from Step 5 (tracked in [TODO.md](../../TODO.md)), not this playbook.
+Those run in the API process — they're the plugin-loader path from Step 5 (tracked in [TODO.md](../archive/TODO.md)), not this playbook.
 
 See [examples/trellis_example_extractor/](../../examples/trellis_example_extractor/) for a complete working skeleton.
 

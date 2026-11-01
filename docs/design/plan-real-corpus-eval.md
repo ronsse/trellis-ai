@@ -468,5 +468,5 @@ Anchored on three deliberate constraints:
   — the existing synthetic scenario. Phase A reuses it as-is.
 - [`src/trellis_workers/extract/dbt_manifest.py`](../../src/trellis_workers/extract/dbt_manifest.py)
   — the dbt extractor Phase B-1 builds on.
-- [`TODO.md`](../../TODO.md) rows 58, 65, 66, 68, 72 — open eval
+- [`TODO.md`](../archive/TODO.md) rows 58, 65, 66, 68, 72 — open eval
   items this plan supersedes or defers explicitly.

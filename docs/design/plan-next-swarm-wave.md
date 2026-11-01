@@ -1,6 +1,6 @@
 # Plan: Next swarm wave — close M-severity backlog + L-severity sweep + 3 architectural follow-ups
 
-**Status:** Proposed 2026-05-16
+**Status:** Executed 2026-05 (waves 1-5; the last unit merged as #179). Follow-ups it deferred are tracked as issues, not here. The text below is the original plan, kept as design history.
 
 > *Historical note: references to WorkflowEngine below predate its retirement (2026-05-18); see `docs/research/workflow-engine-disposition.md`.*
 

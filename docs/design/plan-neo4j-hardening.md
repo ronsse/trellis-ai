@@ -149,7 +149,7 @@ Do not pre-build any of these. Each lands cleanly when its signal arrives.
 | Backup/restore docs (self-hosted) | Self-hosted user asks; AuraDB users have managed backups | Not fired |
 | Provenance fields as first-class edge columns ([roadmap B.3](./implementation-roadmap.md)) | Policy or retrieval consumer wants to gate on these | Not fired |
 | Vector DSL Phase 4 ([roadmap C.1](./implementation-roadmap.md)) | Vector contract drift surfaces, OR plugin author asks for strongly-typed vector filters | Not fired |
-| Graph compaction automation ([TODO.md exploratory item](../../TODO.md)) | `as_of` query latency degradation observed | Not fired |
+| Graph compaction automation ([TODO.md exploratory item](../archive/TODO.md)) | `as_of` query latency degradation observed | Not fired |
 | Bookmark management for read-after-write consistency in Neo4j clusters | Multi-instance Neo4j deployment with consistency complaints | Not fired |
 | Tracing / metrics emission (Prometheus, OTel) on Neo4j queries | Operator asks for query observability beyond structlog | Not fired |
 

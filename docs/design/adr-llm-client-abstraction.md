@@ -277,7 +277,7 @@ Deferred — not yet needed:
 
 Features that can now target `LLMClient` directly.
 
-**Shipped (Phase 2 of the Tiered Extraction Pipeline — see [TODO.md §Phase 2 Plan](../../TODO.md#tiered-extraction-pipeline--phase-2-plan)):**
+**Shipped (Phase 2 of the Tiered Extraction Pipeline — see [TODO.md §Phase 2 Plan](../archive/TODO.md#tiered-extraction-pipeline--phase-2-plan)):**
 
 - **Prompt scaffolding** (`PromptTemplate`, `render`, `ENTITY_EXTRACTION_V1`, `MEMORY_EXTRACTION_V1`) — Phase 2 Step 3. Plain `str.format`-based, deliberately minimal; lives in [`src/trellis/extract/prompts/`](../../src/trellis/extract/prompts/).
 - **`LLMExtractor`** — Phase 2 Step 4. Tier=`LLM`, consumes `LLMClient.generate()`, tolerant JSON parsing, per-draft validation, never raises. See [`src/trellis/extract/llm.py`](../../src/trellis/extract/llm.py).
