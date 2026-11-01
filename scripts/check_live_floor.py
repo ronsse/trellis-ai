@@ -47,6 +47,14 @@ FLOORS: dict[str, tuple[int, int]] = {
     "tests/unit/stores/contracts/test_neo4j_graph_contract.py": (158, 0),
     "tests/unit/stores/contracts/test_pgvector_contract.py": (44, 0),
     "tests/unit/stores/contracts/test_arcadedb_vector_contract.py": (44, 0),
+    # The event log contract under a Los Angeles session: 53 contract cases plus
+    # the case that reads the session's zone. Read off a run against a
+    # ``pgvector/pgvector:pg16`` container, this job's own image; re-read it
+    # against the first green live-infra run that carries the file.
+    "tests/unit/stores/contracts/test_postgres_event_log_session_zone_contract.py": (
+        54,
+        0,
+    ),
 }
 
 
