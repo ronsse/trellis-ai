@@ -285,7 +285,7 @@ def _migrate_aborted_by_a_store_error(tmp_path, monkeypatch):
 
 
 def _show_proposal_blank_id(tmp_path, monkeypatch):
-    return ["admin", "show-proposal", ""], "proposal_id is required", EXIT_INTERNAL
+    return ["admin", "show-proposal", ""], "proposal_id is required", EXIT_VALIDATION
 
 
 _CANDIDATE_ID = "wkc_ent_test1234567890ab"
@@ -533,7 +533,7 @@ def test_list_proposals_refuses_a_limit_below_one_in_its_format(
         list_proposals_command(limit=0, since=None, output_format=fmt)
 
     out = capsys.readouterr().out
-    assert raised.value.exit_code == EXIT_INTERNAL
+    assert raised.value.exit_code == EXIT_VALIDATION
     if fmt == "json":
         payload = json.loads(out)
         assert payload["status"] == "error"

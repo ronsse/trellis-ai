@@ -307,32 +307,6 @@ CORRUPT_CALLS: dict[str, tuple[str, str, dict[str, Any]]] = {
     "search-absent": ("GET", "/api/v1/search", {"params": {"q": "absentwordq"}}),
 }
 
-#: Measured: every one of those calls answers 500 for every corrupt shape, so a
-#: stored row the SQLite filter cannot read takes down every public read, a
-#: query for a word nobody holds (``pack-absent``, ``search-absent``) included.
-#: Written out, not derived, so a change in either direction is a decision.
-EXPECTED_FAILING_CALLS: dict[str, list[str]] = {
-    shape: [
-        "documents",
-        "documents-q",
-        "documents-q-1",
-        "documents-q-runbook",
-        "pack",
-        "pack-1",
-        "pack-2",
-        "pack-absent",
-        "pack-word",
-        "pack-word-1",
-        "search",
-        "search-1",
-        "search-2",
-        "search-absent",
-        "search-runbook-1",
-        "sectioned",
-    ]
-    for shape in CORRUPT_RAW
-}
-
 
 def _corrupt_world(raw: str, content: str) -> Callable[[StoreRegistry], None]:
     def seed(reg: StoreRegistry) -> None:
@@ -356,16 +330,15 @@ class TestACorruptHiddenRowDoesNotAnswerByTheQueriedWord:
     queried word: for every call, the status is the same with and without the
     word, and a 200 is the same payload as the world with no such row.
 
-    What is left, and is pinned below rather than hidden: the SQLite store's
-    *filtered* listing (the one the label predicate runs through) cannot read a
-    row whose ``metadata_json`` is not JSON (``json_extract`` raises ``malformed
-    JSON``) or is valid JSON that is not an object (``[1]``, ``null``, ``"str"``,
-    ``5``: the store's own filter function raises). Every public read then
-    answers 500, whoever the row belongs to and whatever it holds, a query for a
-    word nobody holds included. A caller can tell that such a row exists, never
-    what it holds, and the answer is the same for every query word. The
-    unfiltered listing and ``search`` tolerate valid non-object JSON, so a key
-    that reads more than ``public`` answers 200 for the same store.
+    The label predicate scans hidden rows, and the SQLite store's filter used to
+    raise on one it could not read (``json_extract`` raises ``malformed JSON`` on
+    text that is not JSON; the store's own filter function raised on valid JSON
+    that is not an object: ``[1]``, ``null``, ``"str"``, ``5``). That took down
+    every public read, whoever the row belonged to, a query for a word nobody
+    holds included. The public filter is now a :class:`~trellis.stores.base.
+    document.ReadableMatch`: a row whose metadata cannot be read does not match,
+    so it is withheld and every other row is served, and every call answers 200
+    with the payload of the world without the row.
     """
 
     @pytest.fixture(scope="class")
@@ -448,17 +421,152 @@ class TestACorruptHiddenRowDoesNotAnswerByTheQueriedWord:
             assert "h-corrupt" not in blob
             assert "tomatoes" not in blob
 
-    def test_what_is_left_is_a_store_fault_visible_as_a_500(
-        self, outcomes: dict[tuple[str, str], dict[str, Any]]
+    @pytest.mark.parametrize("name", sorted(CORRUPT_RAW))
+    def test_no_call_fails_and_every_call_answers_the_world_without_the_row(
+        self, outcomes: dict[tuple[str, str], dict[str, Any]], name: str
     ) -> None:
-        """Pin which calls answer 500 for each corrupt shape, word or none."""
-        failing = {
-            name: sorted(
-                c for c, r in outcomes[(name, "with")].items() if r["status"] == 500
-            )
-            for name in CORRUPT_RAW
-        }
-        assert failing == EXPECTED_FAILING_CALLS
+        """A row the store cannot read is withheld; it does not fail the read."""
+        base = outcomes[("none", "base")]
+        for tag in ("with", "without"):
+            statuses = {c: r["status"] for c, r in outcomes[(name, tag)].items()}
+            assert statuses == dict.fromkeys(CORRUPT_CALLS, 200), (name, tag)
+            for call, result in outcomes[(name, tag)].items():
+                assert not differences(base[call], result), (name, tag, call)
+
+
+def _hidden_row_with_an_id_that_is_not_utf8(reg: StoreRegistry) -> None:
+    conn = reg.knowledge.document_store._get_conn()
+    conn.execute(
+        "INSERT INTO documents VALUES (CAST(x'ff' AS TEXT), 'tomatoes failover',"
+        " 'h', ?, '2020', '2020')",
+        ('{"title": "closed"}',),
+    )
+    conn.commit()
+
+
+class TestAHiddenRowWithAnIdThatIsNotUtf8:
+    """CPython cannot pass such an id to a SQL callback, so it must not be passed."""
+
+    @pytest.fixture(scope="class")
+    def outcomes(
+        self, tmp_path_factory: pytest.TempPathFactory
+    ) -> dict[str, dict[str, Any]]:
+        monkeypatch = pytest.MonkeyPatch()
+        root = tmp_path_factory.mktemp("docid")
+        try:
+            return {
+                name: _capture(
+                    root / name,
+                    monkeypatch,
+                    seed,
+                    ["read", "external"],
+                    raise_server_exceptions=False,
+                    walk=False,
+                    calls=CORRUPT_CALLS,
+                )
+                for name, seed in (
+                    ("row", _hidden_row_with_an_id_that_is_not_utf8),
+                    ("base", lambda reg: None),
+                )
+            }
+        finally:
+            monkeypatch.undo()
+
+    def test_no_call_fails_and_every_call_answers_the_world_without_the_row(
+        self, outcomes: dict[str, dict[str, Any]]
+    ) -> None:
+        statuses = {c: r["status"] for c, r in outcomes["row"].items()}
+        assert statuses == dict.fromkeys(CORRUPT_CALLS, 200)
+        for call, result in outcomes["row"].items():
+            assert not differences(outcomes["base"][call], result), call
+
+
+#: What a ``read`` key (clearance ``internal``) gets from the same calls over a
+#: store holding one corrupt row, as ``(status, body names the row)`` per call.
+#: Measured on the commit before the public filter learned to withhold an
+#: unreadable row, and written out so that this change moves none of it: four of
+#: the five shapes answer alike, and ``null`` (which the unfiltered listing
+#: tolerates) differs.
+_READ_KEY_ON_A_BROKEN_ROW: dict[str, tuple[int, bool]] = {
+    "documents": (500, False),
+    "documents-q": (500, False),
+    "documents-q-1": (500, False),
+    "documents-q-runbook": (500, False),
+    "pack": (200, True),
+    "pack-1": (200, True),
+    "pack-2": (200, True),
+    "pack-absent": (200, True),
+    "pack-word": (200, True),
+    "pack-word-1": (200, True),
+    "search": (500, False),
+    "search-1": (200, False),
+    "search-2": (200, False),
+    "search-absent": (200, False),
+    "search-runbook-1": (200, False),
+    "sectioned": (200, True),
+}
+
+_READ_KEY_ON_A_NULL_ROW: dict[str, tuple[int, bool]] = {
+    "documents": (200, True),
+    "documents-q": (200, True),
+    "documents-q-1": (200, False),
+    "documents-q-runbook": (200, True),
+    "pack": (200, True),
+    "pack-1": (200, True),
+    "pack-2": (200, True),
+    "pack-absent": (200, True),
+    "pack-word": (200, True),
+    "pack-word-1": (200, True),
+    "search": (200, True),
+    "search-1": (200, False),
+    "search-2": (200, False),
+    "search-absent": (200, False),
+    "search-runbook-1": (200, False),
+    "sectioned": (200, True),
+}
+
+READ_KEY_OUTCOMES: dict[str, dict[str, tuple[int, bool]]] = {
+    "not-json": _READ_KEY_ON_A_BROKEN_ROW,
+    "list": _READ_KEY_ON_A_BROKEN_ROW,
+    "number": _READ_KEY_ON_A_BROKEN_ROW,
+    "string": _READ_KEY_ON_A_BROKEN_ROW,
+    "null": _READ_KEY_ON_A_NULL_ROW,
+}
+
+
+class TestACorruptRowChangesNothingForAKeyAbovePublic:
+    """Only the public filter withholds an unreadable row; no other read moves."""
+
+    @pytest.fixture(scope="class")
+    def outcomes(
+        self, tmp_path_factory: pytest.TempPathFactory
+    ) -> dict[str, dict[str, tuple[int, bool]]]:
+        monkeypatch = pytest.MonkeyPatch()
+        root = tmp_path_factory.mktemp("corrupt-read")
+        out: dict[str, dict[str, tuple[int, bool]]] = {}
+        try:
+            for name, raw in CORRUPT_RAW.items():
+                captured = _capture(
+                    root / name,
+                    monkeypatch,
+                    _corrupt_world(raw, WITH_THE_WORD),
+                    ["read"],
+                    raise_server_exceptions=False,
+                    walk=False,
+                    calls=CORRUPT_CALLS,
+                )
+                out[name] = {
+                    c: (r["status"], "h-corrupt" in repr(r["body"]))
+                    for c, r in captured.items()
+                }
+            return out
+        finally:
+            monkeypatch.undo()
+
+    def test_every_status_and_whether_the_row_is_served_is_as_it_was(
+        self, outcomes: dict[str, dict[str, tuple[int, bool]]]
+    ) -> None:
+        assert outcomes == READ_KEY_OUTCOMES
 
 
 class TestThePublicCeilingIsAFunctionOfPublicRows:

@@ -89,6 +89,23 @@ def encode_filter_value(key: str, value: Any) -> str:
         raise TypeError(message) from exc
 
 
+class ReadableMatch(dict[str, Any]):
+    """A dict filter value that only a *readable* row can match.
+
+    A metadata filter is equality over a top-level key, and a row whose stored
+    metadata cannot be read (not JSON, or JSON that is not an object) has no key
+    to compare. The SQLite store's ordinary dict-valued filter raises on such a
+    row, which fails the whole read; Postgres' ``metadata -> key`` is NULL there,
+    so the row simply does not match. A filter value of this type asks every
+    backend for the Postgres answer: the row does not match and the read goes on.
+
+    It is the same dict to everything else (equal to a plain dict, encoded as
+    one), so a backend that does not know the type behaves as it always did. It
+    exists for a caller whose filter is a *gate*: a row that cannot be judged must
+    be withheld, not take the read down.
+    """
+
+
 class DocumentStore(ABC):
     """Abstract interface for document storage.
 

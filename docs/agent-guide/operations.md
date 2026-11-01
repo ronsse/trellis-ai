@@ -4719,8 +4719,16 @@ SQLite not valid UTF-8, and on Postgres a JSONB string that is not JSON): on RES
 fault (an outage, a failed query) still answers 500, because it does not depend on
 the id, and a key above `public` still sees the 500 for such a row.
 
-Status and body do not depend on hidden rows apart from a store fault; response time
-does. On SQLite, `/documents?limit=5` over 200 public rows took 6.2 ms with no hidden
+In a list, a search page or a pack the same row is withheld, not failed: the public label
+filter does not match a row whose metadata cannot be read as a JSON object, so every other
+row is still served. SQLite records it as a `public_read_unparseable_row` warning, one per
+such row per read (the event the by-id read uses); on Postgres a JSONB value that is not an
+object never matches the filter, so there is nothing to record. A key above `public` is
+unchanged. This covers unreadable *metadata* only: a row labelled public whose `doc_id`,
+`content`, `content_hash`, `created_at` or `updated_at` is not valid UTF-8 cannot be decoded
+into a page, and still makes every external read answer 500 on SQLite while it exists.
+
+Status and body do not depend on hidden rows; response time does. On SQLite, `/documents?limit=5` over 200 public rows took 6.2 ms with no hidden
 row, 90.3 ms with 20,000 and 432.3 ms with 100,000, because the label filter scans
 every row. That time is also how long a read holds one of the two slots, so it moves
 how often other external keys are answered 429.
@@ -4779,18 +4787,20 @@ guard:
   corrupt row cannot answer differently by whether it holds the word (measured: for
   each corrupt shape below, every status and every body is the same with and without
   the queried words in the row, and no body carries the row or its text).
-  What is left: the SQLite store's *filtered* listing, which is how the label
-  predicate reads public rows, fails on a row whose `metadata_json` is not JSON
-  (`json_extract` raises `malformed JSON`) and on a row that is valid JSON but not an
-  object (`[1]`, `null`, `"str"`, `5`; the store's own filter function raises). Every
-  public read then answers 500 for every external key, whoever the row belongs to and
-  whatever it holds: `GET /search`, `GET /documents` with and without `q`, a pack and a
-  sectioned pack, for a word nobody holds as for one the row holds. A caller can tell
-  that such a row exists, and nothing about it. No `put` writes one; it is a store
-  fault. The unfiltered listing and `search` still read valid non-object JSON, so a key
-  that reads more than `public` answers 200 over the same store, while a row of
-  non-JSON text fails an unfiltered listing and a `search` that matches it for every
-  key, as before. The failure is the whole request, not a failed axis.
+  The SQLite store's *filtered* listing, which is how the label predicate reads public
+  rows, withholds such a row rather than failing on it: the predicate parses the column
+  the way the read that follows does (`json.loads`), so a row whose `metadata_json` is not
+  JSON, is JSON that is not an object (`[1]`, `null`, `"str"`, `5`), is not valid UTF-8,
+  has bytes after a NUL, is JSON5 rather than JSON, or is nested past the parser's limit
+  does not match, and every other row is served. It is recorded as a
+  `public_read_unparseable_row` warning, one per row per read. A row `json.loads` reads
+  but SQLite's strict JSON check would not (`NaN`, `Infinity`) is a readable row and is
+  judged by its label. Not covered: a row labelled public whose `doc_id`, `content`,
+  `content_hash`, `created_at` or `updated_at` is not valid UTF-8 still makes every
+  external read answer 500 while it exists, because the page cannot be built. No `put` writes any of these; they are store
+  faults. A key that reads more than `public` is unchanged: its unfiltered listing and
+  `search` still read valid non-object JSON, while a row of non-JSON text fails an
+  unfiltered listing and a `search` that matches it for every key, as before.
 
 Two answers no longer reveal a document the caller cannot read. A superseded
 document whose declared successor the caller may not read is served, as it would
