@@ -57,7 +57,7 @@ from trellis.auth import (
     SCOPE_INGEST,
     SCOPE_MUTATE,
     SCOPE_READ,
-    api_key_public_row,
+    public_listing_row,
 )
 from trellis.core.access_log import note_printed_items, note_served_items
 from trellis.core.document_write import put_document
@@ -5376,7 +5376,7 @@ def list_api_keys() -> str:
     """
     try:
         rows = [
-            api_key_public_row(r)
+            public_listing_row(r)
             for r in _get_registry().operational.api_key_store.list()
         ]
     # GRACEFUL-DEGRADATION: MCP tool surface -- never raises to the client.

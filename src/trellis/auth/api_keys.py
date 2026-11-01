@@ -247,7 +247,7 @@ KEY_PRESETS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
-def api_key_public_row(record: ApiKeyRecord) -> dict[str, Any]:
+def public_listing_row(record: ApiKeyRecord) -> dict[str, Any]:
     """The listable shape of a key: never the secret hash, never any of the secret."""
     return {
         "key_id": record.key_id,

@@ -43,7 +43,7 @@ from trellis.auth import (
     KEY_PRESETS,
     SCOPE_ADMIN,
     SHOWN_ONCE_WARNING,
-    api_key_public_row,
+    public_listing_row,
     scopes_satisfy,
 )
 from trellis.core.error_sanitize import sanitize_error_message
@@ -154,7 +154,7 @@ def _refuse(result: CommandResult, statuses: dict[str, int]) -> HTTPException:
 async def list_api_keys() -> dict[str, Any]:
     """Every key, live and revoked, plus the scope presets a UI can offer."""
     store = get_registry().operational.api_key_store
-    rows = [api_key_public_row(r) for r in store.list()]
+    rows = [public_listing_row(r) for r in store.list()]
     return {
         "keys": rows,
         "count": len(rows),
@@ -191,7 +191,7 @@ async def mint_api_key(
     return {
         "token": token,
         "warning": SHOWN_ONCE_WARNING,
-        **api_key_public_row(record),
+        **public_listing_row(record),
         **({"warnings": list(result.warnings)} if result.warnings else {}),
     }
 

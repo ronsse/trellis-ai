@@ -39,7 +39,7 @@ from rich.table import Table
 from trellis.auth import (
     SCOPE_EXTERNAL,
     SHOWN_ONCE_WARNING,
-    api_key_public_row,
+    public_listing_row,
 )
 from trellis.core.error_sanitize import sanitize_error_message
 from trellis.mutate import (
@@ -180,7 +180,7 @@ def create_api_key_command(
                 {
                     "token": token,
                     "warning": SHOWN_ONCE_WARNING,
-                    **api_key_public_row(record),
+                    **public_listing_row(record),
                     **_warnings(result),
                 }
             )
@@ -206,7 +206,7 @@ def list_api_keys_command(*, output_format: str) -> None:
     """CLI body for ``api-keys list``."""
     try:
         store = get_api_key_store()
-        rows = [api_key_public_row(r) for r in store.list()]
+        rows = [public_listing_row(r) for r in store.list()]
     except typer.Exit:
         raise
     except Exception as exc:
