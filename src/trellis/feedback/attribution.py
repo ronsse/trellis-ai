@@ -162,6 +162,28 @@ def lookup_pack_item_ids(event_log: EventLog, pack_id: str) -> list[str]:
     return _served_item_ids(payload)
 
 
+def lookup_pack_membership(event_log: EventLog, pack_id: str) -> set[str] | None:
+    """The ids ``pack_id`` is recorded as having served, or ``None`` if unknown.
+
+    The one lookup that tells an unknown pack from one with no recorded
+    membership, which :func:`lookup_pack_item_ids` cannot: both are ``[]``
+    there. ``None`` means no ``PACK_ASSEMBLED`` event was found (an unknown id,
+    or an event-log outage, which this read cannot tell apart). An **empty
+    set** means the pack is known and records no served ids, so a caller must
+    not read it as "every cited id is a stray": a withheld pack, a pack that
+    was assembled empty, one older than the payload key and a sectioned pack
+    from before #958 all read this way. A non-empty set is
+    :func:`served_item_ids` of the same event, so a flat and a sectioned pack
+    both answer, and the learning join and this lookup agree on membership.
+    Reads only the *served* keys: a withheld pack's would-be items are never
+    consulted.
+    """
+    payload = _pack_payload(event_log, pack_id)
+    if payload is None:
+        return None
+    return served_item_ids(payload)
+
+
 def lookup_pack_bodied_item_ids(event_log: EventLog, pack_id: str) -> list[str]:
     """Return the ids ``pack_id`` served *with an excerpt*, or ``[]``.
 

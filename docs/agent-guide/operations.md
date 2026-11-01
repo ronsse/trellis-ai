@@ -4399,7 +4399,10 @@ in the same position.
 With `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on,
 MCP `record_feedback` names, and counts, only the served ids the caller may
 read; a pack that served none reads as an unknown pack and the call is
-recorded. A trusted-local caller sees every id.
+recorded. A trusted-local caller sees every id. The ids a refusal names are in
+its message text, capped at 20 with the count of the rest stated, because
+the error's `data` does not reach an MCP client; the same list is what the
+clearance rule above applies to.
 
 The same clearance governs writes, under one rule: **a key cannot write a label
 above its own clearance, and cannot touch a document it may not read.**
@@ -4959,6 +4962,25 @@ When an agent finishes the task, it calls `record_feedback` with the copied IDs:
 These element-level signals land in the `FEEDBACK_RECORDED` event payload so the fitness loops (`trellis analyze apply-noise-tags`, `trellis analyze advisory-effectiveness`) can attribute outcomes more precisely than pack-level success alone.
 
 The cited ids are *not* written as `items_served` — they are what the agent referenced, not what the pack contained. The payload leaves `items_served` empty so the reference-rate metric keeps joining against the pack's own `PACK_ASSEMBLED` `injected_item_ids`; synthesizing it from the citations would report a 100% reference rate for every attributed pack.
+
+**What the MCP reply says about the ids you cited.** The reply's first line is unchanged. When the
+call names a `pack_id`, a further line starting `note:` can follow it, written after the feedback is
+recorded and changing neither the event, the `pack_feedback.jsonl` row, the exit nor whether the
+call is refused:
+
+- Ids in `helpful_item_ids`, `unhelpful_item_ids` or `ignored_item_ids` that the pack did not serve
+  are listed (the first ten, with the count of the rest) and stated to earn no credit. They are
+  still recorded as cited. `followed_advisory_ids` is not checked.
+- A `pack_id` with no assembled-pack record gets a note that the pack is unknown and the feedback
+  joins to no item. It is recorded as before, and the attribution refusals still fail open for it.
+- A pack whose record holds no served ids (assembled empty, or recorded before served ids were
+  written) gets no note, so a citation on it reads like any other reply.
+- An id the pack served but the caller may not read is treated as unserved, and a pack whose served
+  ids are all unreadable reads as unknown, so the note never confirms an id the caller cannot read.
+  A trusted-local caller is not restricted.
+
+The note reads only a pack's served ids, never anything held back from it, so it is the same on any
+pack that serves nothing.
 
 The MCP tool and `POST /api/v1/packs/{pack_id}/feedback` share both the mapping (`PackFeedback.from_agent_signal`) and the writer (`trellis.feedback.recording.record_feedback`), so identical inputs mean the same thing on either surface: one call appends the durable `pack_feedback.jsonl` row under `<stores_dir>/feedback/` **and** emits the authoritative `FEEDBACK_RECORDED` event. The emit fails soft — when the event sink is down the tool still returns, the audit row is on disk, and `trellis admin reconcile-feedback` (which reads `<stores_dir>/feedback` by default; or `worker curate --reconcile-first`, which scans that directory) replays it.
 

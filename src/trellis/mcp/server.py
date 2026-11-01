@@ -76,6 +76,7 @@ from trellis.extract.trace_ingest_hook import (
 from trellis.feedback.attribution import (
     lookup_pack_bodied_item_ids,
     lookup_pack_item_ids,
+    lookup_pack_membership,
 )
 from trellis.feedback.models import PackFeedback
 from trellis.feedback.recording import feedback_log_dir
@@ -3650,6 +3651,33 @@ def get_file_context(
 #: against a pathological pack, it is not a normal truncation point.
 _MAX_CITABLE_IDS_IN_ERROR = 60
 
+#: Most ids written into the *text* of an attribution refusal. ``McpError.data``
+#: (which carries up to :data:`_MAX_CITABLE_IDS_IN_ERROR`) is dropped by FastMCP
+#: before a client sees the result, so the message is the only place a caller
+#: can read them. Twenty is enough to choose among and keeps the text near a
+#: couple of hundred tokens; the count of the rest is stated beside the list.
+_MAX_CITABLE_IDS_IN_MESSAGE = 20
+
+#: Most ids named in the note on a feedback reply, and the longest one echoed.
+#: These are the caller's own strings, so the cap bounds the reply and says
+#: nothing about the pack.
+_MAX_UNSERVED_IDS_IN_NOTE = 10
+_MAX_ECHOED_ID_CHARS = 100
+
+
+def _id_list_clause(label: str, item_ids: list[str]) -> str:
+    """`` <label>: `a`, `b`, ...`` for a refusal's text, capped, rest counted.
+
+    ``item_ids`` must already be the ones this caller may read
+    (:func:`_readable_served_ids`); nothing here re-checks clearance.
+    """
+    shown = item_ids[:_MAX_CITABLE_IDS_IN_MESSAGE]
+    listed = ", ".join(f"`{item_id}`" for item_id in shown)
+    clause = f" {label}: {listed}"
+    if len(item_ids) > len(shown):
+        clause += f" (and {len(item_ids) - len(shown)} more not listed)"
+    return f"{clause}."
+
 
 def _readable_served_ids(registry: StoreRegistry, item_ids: list[str]) -> list[str]:
     """The ids of a named pack's items that the caller may read (#1029).
@@ -3687,10 +3715,11 @@ def _require_pack_attribution(
     rating into a lost one and teach the agent that the tool is
     unreliable — the opposite of the intent.
 
-    Nothing here writes attribution. The served ids ride the error so the
-    caller can *choose* among them; which of them helped is a judgement
-    only the caller holds, and synthesising it would manufacture exactly
-    the signal this whole change exists to measure honestly.
+    Nothing here writes attribution. The served ids ride the error's message
+    (its ``data`` does not reach a client) so the caller can *choose* among
+    them; which of them helped is a judgement only the caller holds, and
+    synthesising it would manufacture exactly the signal this whole change
+    exists to measure honestly.
 
     ``ignored_count`` is not a citation and does not satisfy this gate —
     it only changes what the refusal *says*. The trigger deliberately
@@ -3744,7 +3773,8 @@ def _require_pack_attribution(
     )
     _raise_invalid_params(
         f"feedback on pack {pack_id} must cite at least one item — it served "
-        f"{len(item_ids)} and {detail}. {remedy}.",
+        f"{len(item_ids)} and {detail}. {remedy}."
+        + _id_list_clause("Served ids", item_ids),
         data={
             "pack_id": pack_id,
             "item_ids": item_ids[:_MAX_CITABLE_IDS_IN_ERROR],
@@ -3755,6 +3785,81 @@ def _require_pack_attribution(
             ],
         },
     )
+
+
+_UNKNOWN_PACK_NOTE = (
+    "note: pack {pack_id} is unknown (no assembled pack with that id was "
+    "found), so this feedback joins to no item and earns no credit"
+)
+
+
+def _echo_id(item_id: str) -> str:
+    """A caller's own id, clipped so a pasted blob cannot bloat the reply."""
+    if len(item_id) <= _MAX_ECHOED_ID_CHARS:
+        return item_id
+    return item_id[:_MAX_ECHOED_ID_CHARS] + "…"
+
+
+def _unserved_citation_note(
+    registry: StoreRegistry, pack_id: str, cited: list[str]
+) -> str | None:
+    """A line for the reply saying which cited ids the pack did not serve.
+
+    Advisory only: it is read after the feedback is written and changes
+    neither the event, the JSONL row nor whether the call is refused. It is
+    the same stray test the learning join applies
+    (:func:`~trellis.feedback.attribution.stray_citations`), moved to the
+    moment the caller can still fix the id.
+
+    * An **unknown pack** (no assembled-pack record) says so; the call was
+      recorded as it always was.
+    * A pack with **no recorded membership** (assembled empty, withheld, older
+      than the payload key) says nothing. A withheld pack must not read any
+      differently from one assembled empty, so nothing here reads its
+      would-be items, and an empty membership is never subtracted from.
+    * Clearance: an id the pack served that this caller may not read counts as
+      unserved, the way :func:`_readable_served_ids` leaves it out of a
+      refusal, and a pack whose served ids are all unreadable reads as unknown.
+      The note never confirms that an id the caller cannot read is in the pack.
+
+    Wrapped whole. It runs on the write path and an escaped exception would
+    fail a call whose feedback is already recorded.
+    """
+    try:
+        served = lookup_pack_membership(registry.operational.event_log, pack_id)
+        if served is None:
+            return _UNKNOWN_PACK_NOTE.format(pack_id=_echo_id(pack_id))
+        if not served:
+            return None
+        # An id the pack served but this caller may not read is a stray to
+        # them: neither named as served nor told apart from one never served.
+        in_pack = [item_id for item_id in cited if item_id in served]
+        unreadable = set(in_pack) - set(_readable_served_ids(registry, in_pack))
+        strays = [
+            item_id
+            for item_id in cited
+            if item_id not in served or item_id in unreadable
+        ]
+        if not strays:
+            return None
+        if not _readable_served_ids(registry, sorted(served)):
+            return _UNKNOWN_PACK_NOTE.format(pack_id=_echo_id(pack_id))
+        shown = strays[:_MAX_UNSERVED_IDS_IN_NOTE]
+        listed = ", ".join(f"`{_echo_id(item_id)}`" for item_id in shown)
+        rest = len(strays) - len(shown)
+        more = f" (and {rest} more)" if rest else ""
+        noun = "id was" if len(strays) == 1 else "ids were"
+        return (
+            f"note: {len(strays)} cited {noun} not among the items this pack "
+            f"served and earn no credit: {listed}{more}"
+        )
+    except Exception:
+        # GRACEFUL-DEGRADATION: wrapped whole, not by exception type. The
+        # note is advice on a reply whose feedback is already recorded, and
+        # one escaped exception here would turn a recorded call into a
+        # failed one.
+        logger.exception("unserved_citation_note_failed", pack_id=pack_id)
+        return None
 
 
 def _require_bodied_attribution(
@@ -3823,7 +3928,8 @@ def _require_bodied_attribution(
         f"excerpt — {len(unjudged)} of {len(bodied)} carry no verdict. Put each "
         "remaining id in helpful_item_ids, unhelpful_item_ids, or "
         "ignored_item_ids; 'ignored' is the honest answer for one you did not "
-        "use. Items served as one-line pointers are not being asked about.",
+        "use. Items served as one-line pointers are not being asked about."
+        + _id_list_clause("Ids still owed a verdict", unjudged),
         data={
             "pack_id": pack_id,
             "item_ids": unjudged[:_MAX_CITABLE_IDS_IN_ERROR],
@@ -4030,6 +4136,25 @@ def record_feedback(
             " — event log unavailable, audit row kept;"
             " run `trellis admin reconcile-feedback` to replay it"
         )
+    if has_pack:
+        # A further line, never an edit to the first: the feedback above is
+        # already recorded, and the note only tells the caller which of its
+        # ids joined to nothing.
+        note = _unserved_citation_note(
+            registry,
+            pack_id.strip(),
+            list(
+                dict.fromkeys(
+                    (
+                        *(helpful_item_ids or ()),
+                        *(unhelpful_item_ids or ()),
+                        *(ignored_item_ids or ()),
+                    )
+                )
+            ),
+        )
+        if note is not None:
+            message += f"\n{note}"
     return message
 
 

@@ -88,7 +88,26 @@ All notable changes to Trellis will be documented in this file.
   table is eligible-task counts per build and arm. Default output and exit codes
   are unchanged, and there is no REST or OpenAPI surface for the flag yet.
 
+- **MCP `record_feedback` says when a cited id joined to nothing.** The reply keeps its first
+  line and gains a further `note:` line when the call names a pack and cites an id in
+  `helpful_item_ids`, `unhelpful_item_ids` or `ignored_item_ids` that the pack did not serve
+  (the first ten, the rest counted), or names a pack with no assembled-pack record. The ids
+  are still recorded as cited. The event, the `pack_feedback.jsonl` row, the exit status and the
+  attribution refusals (flag on or off, unknown packs still failing open) are unchanged. A pack
+  that records no served ids gets no note, and the note reads no item a pack held back, so a
+  held-out pack answers as an empty one does. A served id the caller may not read counts as
+  unserved. `trellis.feedback.attribution.lookup_pack_membership` is the lookup behind it.
+
 ### Fixed
+
+- **An attribution refusal now puts the ids it promises in the text the client receives.**
+  With `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on, MCP
+  `record_feedback` refused an uncited call and said the served ids were available, but they
+  rode only the error's `data`, which FastMCP drops before a client sees the result. The message
+  now ends with the ids (`Served ids:` for the pack gate, `Ids still owed a verdict:` for the
+  bodied gate), capped at 20 with the count of the rest stated. They are the ids the caller may
+  read, so a pack's items above its clearance are neither listed nor counted. `data` and its
+  60-id cap are unchanged, and no refusal is added or removed.
 
 - **`trellis admin migrate-graph` now says what it copies and what it leaves behind.** The
   command reads current rows and writes them through the destination's `upsert_*` methods, so a
