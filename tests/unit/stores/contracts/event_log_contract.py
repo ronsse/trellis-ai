@@ -43,7 +43,7 @@ from trellis.schemas.memory_op import (
     MemoryOpJudgedPayload,
     SubjectRef,
 )
-from trellis.stores.base.event_log import Event, EventLog, EventType
+from trellis.stores.base.event_log import Event, EventLog, EventType, scan_events
 
 
 def _sleep_for_ordering() -> None:
@@ -61,6 +61,22 @@ def _event_at(source: str, occurred_at: datetime) -> Event:
         event_type=EventType.TRACE_INGESTED,
         source=source,
         occurred_at=occurred_at,
+    )
+
+
+def _future_event_at(source: str, occurred_at: datetime) -> Event:
+    """An event as a build newer than this one would have written it.
+
+    The ``event_type`` is a string this build's :class:`EventType` lacks.
+    ``Event(...)`` refuses such a type, so the model is constructed without
+    validation; ``append`` stores ``str(event_type)``, which is exactly what a
+    newer build's own append stores.
+    """
+    return Event.model_construct(
+        event_type="future.kind",
+        source=source,
+        occurred_at=occurred_at,
+        recorded_at=occurred_at,
     )
 
 
@@ -879,3 +895,107 @@ class EventLogContractTests:
         assert store.has_idempotency_key("key\x00_1") is True
         assert store.has_idempotency_key(f"key{REPLACEMENT_CHAR}_1") is True
         assert store.has_idempotency_key("key_1") is False
+
+    # ------------------------------------------------------------------
+    # A row whose type this build does not know
+    # ------------------------------------------------------------------
+    #
+    # A newer build can append an ``event_type`` an older one lacks. One such
+    # row must not fail a read that happens to reach it, and must not change
+    # what a reader sees of the rows it can read. The row itself stays stored.
+
+    def test_unknown_event_type_row_is_skipped_by_an_unfiltered_read(
+        self, store: EventLog
+    ) -> None:
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        first = _event_at("a", base)
+        newer = _future_event_at("newer", base + timedelta(seconds=1))
+        last = _event_at("a", base + timedelta(seconds=2))
+        for event in (first, newer, last):
+            store.append(event)
+
+        assert [e.event_id for e in store.get_events()] == [
+            first.event_id,
+            last.event_id,
+        ]
+        assert [e.event_id for e in store.get_events(order="desc")] == [
+            last.event_id,
+            first.event_id,
+        ]
+        assert store.get_events(source="newer") == []
+        assert [
+            e.event_id for e in store.get_events(event_type=EventType.TRACE_INGESTED)
+        ] == [first.event_id, last.event_id]
+        got = store.get_event(first.event_id)
+        assert got is not None
+        assert got.event_id == first.event_id
+        # Absent to a reader, not an error; the row is still stored.
+        assert store.get_event(newer.event_id) is None
+        assert store.count() == 3
+
+    def test_unknown_event_type_rows_do_not_use_up_a_page(
+        self, store: EventLog
+    ) -> None:
+        """``limit`` is still met from the rows that can be read.
+
+        A caller that reads ``len(events) >= limit`` as "there may be more"
+        (``scan_events`` does) must not see a page the unknown rows shortened
+        as the end of the log.
+        """
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        known = [_event_at("a", base + timedelta(seconds=i)) for i in range(5)]
+        for event in known:
+            store.append(event)
+        # The three newest rows are all unknown: a newest-first page of three
+        # holds nothing this build can read.
+        for i in range(5, 8):
+            store.append(_future_event_at("newer", base + timedelta(seconds=i)))
+
+        page = store.get_events(limit=3, order="desc")
+        assert [e.event_id for e in page] == [e.event_id for e in known[:1:-1]]
+        # Unknown rows beyond the page are not in the way of an ascending one.
+        page = store.get_events(limit=3)
+        assert [e.event_id for e in page] == [e.event_id for e in known[:3]]
+        # Fewer readable rows than ``limit``: all of them, no more.
+        assert len(store.get_events(limit=50)) == 5
+
+    def test_unknown_event_type_rows_do_not_change_what_a_scan_counts(
+        self, store: EventLog
+    ) -> None:
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        for i in range(5):
+            store.append(_event_at("a", base + timedelta(seconds=i)))
+        typed_before = scan_events(store, event_type=EventType.TRACE_INGESTED)
+        untyped_before = scan_events(store, limit=3)
+
+        for i in range(5, 8):
+            store.append(_future_event_at("newer", base + timedelta(seconds=i)))
+
+        typed_after = scan_events(store, event_type=EventType.TRACE_INGESTED)
+        assert [e.event_id for e in typed_after.events] == [
+            e.event_id for e in typed_before.events
+        ]
+        assert typed_after.coverage == typed_before.coverage
+        untyped_after = scan_events(store, limit=3)
+        assert [e.event_id for e in untyped_after.events] == [
+            e.event_id for e in untyped_before.events
+        ]
+        assert untyped_after.coverage.scanned == 3
+        assert untyped_after.coverage.truncated is True
+
+    def test_unknown_event_type_row_is_not_an_executed_mutation(
+        self, store: EventLog
+    ) -> None:
+        """``has_idempotency_key`` answers from ``mutation.executed`` rows only."""
+        future = _future_event_at("mutation_executor", datetime(2026, 1, 1, tzinfo=UTC))
+        future.payload = {"idempotency_key": "key_1"}
+        store.append(future)
+        assert store.has_idempotency_key("key_1") is False
+
+        store.emit(
+            EventType.MUTATION_EXECUTED,
+            "mutation_executor",
+            payload={"idempotency_key": "key_1"},
+        )
+        assert store.has_idempotency_key("key_1") is True
+        assert store.has_idempotency_key("key_2") is False

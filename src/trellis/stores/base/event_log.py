@@ -8,10 +8,12 @@ should use instead of calling :meth:`EventLog.get_events` with a bare
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections import Counter
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 import structlog
 from pydantic import Field
@@ -869,6 +871,15 @@ class EventLog(ABC):
         (``payload->>K`` on Postgres, ``json_extract(payload, '$.K')`` on
         SQLite), so callers comparing against ints / bools must coerce
         to ``str`` at the call site.
+
+        **A row whose type this build does not know is skipped, never fatal.**
+        A newer build can write an ``event_type`` an older one lacks. Rows of
+        such a type are left out of the result and the read logs
+        ``event_log.unknown_event_type_skipped`` (the type strings and how many
+        rows, never a payload). They are neither deleted nor rewritten. A read
+        that names an ``event_type`` is unaffected, and ``limit`` still returns
+        up to ``limit`` readable rows: skipped rows do not use up the page.
+        A field of a *readable* row that fails to parse still raises.
         """
 
     @abstractmethod
@@ -878,7 +889,12 @@ class EventLog(ABC):
         event_type: EventType | None = None,
         since: datetime | None = None,
     ) -> int:
-        """Count events with optional filters."""
+        """Count events with optional filters.
+
+        Counts every stored row, including rows of a type this build cannot
+        read, so an unfiltered ``count()`` can exceed the number of events
+        :meth:`get_events` returns (see its note on unknown types).
+        """
 
     @abstractmethod
     def close(self) -> None:
@@ -1076,6 +1092,11 @@ def scan_events(
 
     A non-positive ``limit`` is passed through untouched and never
     reported as truncated; backends treat it as their own no-op.
+
+    With no ``event_type``, ``matched`` comes from :meth:`EventLog.count`, which
+    also counts rows of a type this build cannot read, while ``scanned`` does
+    not; ``dropped`` is then too large by the number of such rows in the window.
+    Every shipped caller names an ``event_type``, which no such row can match.
     """
     events = event_log.get_events(
         event_type=event_type,
@@ -1185,4 +1206,64 @@ def merge_coverage(*coverages: ScanCoverage) -> ScanCoverage:
         truncated_event_types=types,
         covered_since=covered_since,
         note=note,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rows of a type this build does not know
+# ---------------------------------------------------------------------------
+
+_Row = TypeVar("_Row")
+
+#: Every ``event_type`` string this build can read, sorted. A backend binds
+#: these to re-read a full page of readable rows after a page that held some
+#: it cannot.
+KNOWN_EVENT_TYPE_VALUES: tuple[str, ...] = tuple(sorted(e.value for e in EventType))
+
+_KNOWN_EVENT_TYPE_SET = frozenset(KNOWN_EVENT_TYPE_VALUES)
+
+#: A warning names at most this many distinct unknown types, each cut to
+#: ``_MAX_TYPE_CHARS`` characters: the string came from a stored row, not from
+#: this build, so it is bounded before it reaches a log line.
+_MAX_NAMED_TYPES = 10
+_MAX_TYPE_CHARS = 64
+
+
+def partition_known_event_rows(
+    rows: Iterable[_Row], type_of: Callable[[_Row], object]
+) -> tuple[list[_Row], Counter[str]]:
+    """Split stored rows into those whose type this build knows and a tally
+    of the stored type strings of the rest.
+
+    Only the type is judged; no other field of a skipped row is parsed, and
+    a malformed field of a known row is left for ``_row_to_event`` to raise.
+    """
+    known: list[_Row] = []
+    skipped: Counter[str] = Counter()
+    for row in rows:
+        raw = type_of(row)
+        if raw in _KNOWN_EVENT_TYPE_SET:
+            known.append(row)
+        else:
+            skipped[str(raw)] += 1
+    return known, skipped
+
+
+def warn_skipped_event_types(skipped: Mapping[str, int], *, operation: str) -> None:
+    """Say that a read left rows out because their type is unknown here.
+
+    Names the stored type strings and how many rows of each, never a payload
+    or any other field. The count is of the rows this read met: a read that
+    refilled its page past them does not count the ones beyond it.
+    """
+    named: Counter[str] = Counter()
+    for event_type, rows in sorted(skipped.items(), key=lambda kv: (-kv[1], kv[0])):
+        if len(named) < _MAX_NAMED_TYPES or event_type[:_MAX_TYPE_CHARS] in named:
+            named[event_type[:_MAX_TYPE_CHARS]] += rows
+    logger.warning(
+        "event_log.unknown_event_type_skipped",
+        operation=operation,
+        rows_skipped=sum(skipped.values()),
+        distinct_types=len(skipped),
+        event_types=dict(named),
     )

@@ -457,6 +457,30 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A row whose event type this build does not know no longer fails every read
+  that reaches it.** A newer build can append an `event_type` an older one lacks,
+  and both event logs turned the stored string into `EventType(...)` strictly, so
+  `GET /api/v1/events` (and any read with no `event_type` filter) answered 500 until
+  the older server was redeployed. `SQLiteEventLog` and `PostgresEventLog` now leave
+  such a row out of `get_events` and log `event_log.unknown_event_type_skipped` at
+  warning level: the operation, the number of rows skipped, and the stored type
+  strings with a count each (at most 10 types, each cut to 64 characters). It never
+  carries a payload, entity id or any other field. `get_event` reads such a row as
+  absent (`GET /api/v1/events/{id}` answers 404) and logs the same way. Nothing
+  deletes or rewrites a row. A page that held a skipped row is read again restricted
+  to the types this build knows, so `limit` still returns up to `limit` readable rows
+  and `scan_events` still reads a full page as possibly truncated; a page with no
+  such row sends the one statement it always did. A read that names an `event_type`
+  is unchanged. A field of a readable row that fails to parse still raises, as it
+  did. **`count()` is unchanged and counts every stored row**, so an unfiltered
+  `count()` (and `total` in `GET /api/v1/events`) can exceed the rows `get_events`
+  returns, and `scan_events` with no `event_type` over-reports `matched` and `dropped`
+  by the skipped rows; every shipped caller names a type. This helps only builds that
+  carry it: an older build still raises on a type it does not know. The
+  Postgres statements are covered by a no-database test of what is sent and returned
+  and by new cases in the live contract suite, which run against a real server only in
+  the live-infra job.
+
 - **A document row whose metadata cannot be read no longer fails every read by
   an `external` key on SQLite.** The label predicate the public path runs
   through `DocumentStore.list_documents` raised on a row whose `metadata_json`

@@ -10,7 +10,15 @@ from typing import Any
 import structlog
 
 from trellis.core.text_safety import scrub_jsonb_unsafe
-from trellis.stores.base.event_log import Event, EventLog, EventOrder, EventType
+from trellis.stores.base.event_log import (
+    KNOWN_EVENT_TYPE_VALUES,
+    Event,
+    EventLog,
+    EventOrder,
+    EventType,
+    partition_known_event_rows,
+    warn_skipped_event_types,
+)
 from trellis.stores.sqlite.base import SQLiteStoreBase
 from trellis.stores.sqlite.instant import (
     MigrationEvents,
@@ -217,11 +225,21 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
     # -- queries -------------------------------------------------------------
 
     def get_event(self, event_id: str) -> Event | None:
-        """Direct primary-key lookup -- reaches the whole log, not a window."""
+        """Direct primary-key lookup -- reaches the whole log, not a window.
+
+        A row whose type this build does not know reads as absent, as it does
+        from :meth:`get_events`, and is logged the same way.
+        """
         cur = self._conn.cursor()
         cur.execute("SELECT * FROM events WHERE event_id = ?", (event_id,))
         row = cur.fetchone()
-        return self._row_to_event(row) if row is not None else None
+        if row is None:
+            return None
+        known, skipped = partition_known_event_rows([row], lambda r: r["event_type"])
+        if skipped:
+            warn_skipped_event_types(skipped, operation="get_event")
+            return None
+        return self._row_to_event(known[0])
 
     def get_events(
         self,
@@ -247,6 +265,11 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
         ``payload_filters`` keys are left alone: they are JSON field
         names chosen by code, not caller free text, and no shipped
         caller names one containing either hazard.
+
+        A row whose ``event_type`` this build does not know is left out and
+        logged (see :meth:`EventLog.get_events`). When such a row sat in a full
+        page, the page is read again restricted to the types this build knows,
+        so ``limit`` still returns up to ``limit`` readable rows.
         """
         clauses: list[str] = []
         params: list[Any] = []
@@ -286,19 +309,35 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
 
         where = " AND ".join(clauses) if clauses else "1=1"
         direction = "DESC" if order == "desc" else "ASC"
-        # ``rowid`` in the same direction breaks ties among events at one
-        # instant, so ``limit`` cuts the same rows whichever plan runs (the
-        # indexes, or the inline expression on a file that could not migrate).
-        # Every index on the instant carries ``rowid`` last, so it adds no sort.
-        sql = (
-            f"SELECT * FROM events WHERE {where} "
-            f"ORDER BY {instant} {direction}, rowid {direction} LIMIT ?"
-        )
-        params.append(limit)
 
-        cur = self._conn.cursor()
-        cur.execute(sql, params)
-        return [self._row_to_event(row) for row in cur.fetchall()]
+        def read(where_sql: str, bound: list[Any]) -> list[sqlite3.Row]:
+            # ``rowid`` in the same direction breaks ties among events at one
+            # instant, so ``limit`` cuts the same rows whichever plan runs (the
+            # indexes, or the inline expression on a file that could not
+            # migrate). Every index on the instant carries ``rowid`` last, so
+            # it adds no sort.
+            sql = (
+                f"SELECT * FROM events WHERE {where_sql} "
+                f"ORDER BY {instant} {direction}, rowid {direction} LIMIT ?"
+            )
+            cur = self._conn.cursor()
+            cur.execute(sql, [*bound, limit])
+            return cur.fetchall()
+
+        rows = read(where, params)
+        known, skipped = partition_known_event_rows(rows, lambda r: r["event_type"])
+        if skipped:
+            warn_skipped_event_types(skipped, operation="get_events")
+            if limit > 0 and len(rows) >= limit:
+                # The page was full, so the skipped rows used up some of it and
+                # a caller reading ``len(events) >= limit`` as "there is more"
+                # would read it as the end. Ask for readable rows only.
+                marks = ", ".join("?" * len(KNOWN_EVENT_TYPE_VALUES))
+                known = read(
+                    f"{where} AND event_type IN ({marks})",
+                    [*params, *KNOWN_EVENT_TYPE_VALUES],
+                )
+        return [self._row_to_event(row) for row in known]
 
     def count(
         self,
@@ -306,7 +345,11 @@ class SQLiteEventLog(SQLiteStoreBase, EventLog):
         event_type: EventType | None = None,
         since: datetime | None = None,
     ) -> int:
-        """Count events with optional filters."""
+        """Count events with optional filters.
+
+        Counts every stored row, including rows of a type this build cannot
+        read, so it can exceed what :meth:`get_events` returns.
+        """
         clauses: list[str] = []
         params: list[Any] = []
 
