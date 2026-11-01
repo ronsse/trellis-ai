@@ -101,6 +101,112 @@ two keys are returned by `GET /api/v1/stats`, field for field.
 > that wants that number reads `document_rows`. Nothing errors on the change —
 > a reader that is not updated silently reports a different population.
 
+### Per-key access log (`trellis admin access-log`, `GET /api/v1/access-log/keys`)
+
+Answers "what did this key read, and when did it last run?" from `access.key_read`
+events. **Off by default**: set `TRELLIS_ACCESS_LOG=1` (or the `access_log` setting) to turn
+it on. Read the retention paragraph below first. When on, one row is written per
+authenticated read by an API key:
+
+- **REST:** any `GET` under `/api/v1/` and `POST /api/v1/packs` and `/api/v1/packs/sectioned`,
+  when the answer is 200. A 403, 404 or 422 returned nothing and records nothing.
+- **MCP:** each tool registered at the `read` scope (`tests/unit/mcp/test_access_log.py`
+  pins the list against `server.py`). A tool that raises records nothing.
+
+Payload: `{key_id, surface, route, item_count, item_ids, item_ids_truncated}`. `route` is the
+matched route template (`GET /api/v1/documents/{doc_id:path}`) or the MCP tool name, never
+the raw path. `item_ids` keeps the first 25 ids; `item_count` counts the ids the boundary
+could name, so a cut is visible (`item_ids_truncated`): on REST the items in the answer's body,
+on MCP the pack ids the answer printed. A row carries no document text, no query or intent text and
+no secret.
+
+**Which ids, and where they come from.** No id is read out of an answer's text.
+
+- *REST* reads ids from an allowlist of item-serving routes, each with an exact path to its
+  id field, keyed on the route template (`ITEM_ROUTES` in `trellis_api/access_log.py`):
+  `GET /search` (`results[].doc_id`), `POST /packs` (`items[].item_id`),
+  `POST /packs/sectioned` (`sections[].items[].item_id`), `GET /documents/{doc_id:path}`
+  (`document.doc_id`), `GET /graph/search` (`results[].entity_id`),
+  `GET /entities/{entity_id:path}` (`entity.node_id`), `GET /traces` (`traces[].trace_id`) and
+  `GET /traces/{trace_id}` (`trace.trace_id`). Every other route records `item_count: null`
+  and no ids, as does an allowlisted route whose answer is over 1 MiB, is not JSON, or does
+  not have the expected shape. An empty list is a real `0`; `null` means unknown.
+- *MCP* tools name the ids they served from the structured pack or items they already hold,
+  so no tool's output changes. A pack tool (`get_context`, `get_sectioned_context` and the tools
+  built on them) names its answer's ids after formatting and keeps only those the answer prints
+  as `` `id` ``, because a formatter stops listing items when its token budget runs out and
+  an id the reader never received is not logged. This looks known ids up in the answer;
+  it does not read ids from it. Known bound: the whole answer is searched, so a pack item's id
+  quoted in backticks anywhere in it counts as printed even if that item's own entry was cut.
+  An item's body can do this, and so can the caller's own `intent` or a section name, with no
+  document involved. `item_count` and `item_ids` can therefore name ids the answer never
+  listed; they never name an id outside the pack. `get_items` names the ids
+  its formatter reports it served (`note_served_items`). `get_file_context`,
+  `get_lessons`, `get_graph` and `query_observations` do not name ids and record `item_count: null`.
+
+A call with no key id records nothing: auth mode `off`, an anonymous call, the legacy shared
+secret, and stdio.
+
+```bash
+trellis admin access-log --hours 168 --format json
+trellis admin access-log --key-id <id>
+```
+
+One entry per key that read inside the window: `reads`, `items_returned`, `by_surface`,
+`last_read_at`, plus the key's current `name` and `revoked` flag read from the key store (the
+store is never written). A key with no read inside the window is absent. Exit codes: 0, 2 for
+`--hours` outside (0, 2160], 5 for a store failure, in both formats.
+
+The scan reads at most 5000 rows. `truncated` is `true` when it bit and `note` says what that
+means. In an all-keys answer a key missing from the list **may still have been used** in the
+window; `--key-id` asks the store for that key's own rows, so a quiet key is not hidden behind
+a noisy one. `GET /api/v1/access-log/keys?hours=&key_id=` returns the same document; it needs
+the `admin` scope and an `external` key is refused. A read through it is itself logged for the
+key that made it.
+
+**How rows are written.** A read never waits for its row. After the response has been sent
+(REST) or the tool has returned (MCP), one entry is put on a bounded in-process queue that a
+single daemon thread drains; the thread does the parsing of REST bodies and the store write.
+A pack tool's id search runs on the tool's own worker thread (about 1 ms for 50 ids in a 64 KB
+answer). The one store call on the request path is the knob itself: `access_log_enabled` reads
+`settings.json` once per keyed read, on the event loop on both surfaces (about 50 microseconds
+with no settings file; a populated one was not measured); nothing else touches a store before
+the answer is sent. The queue holds
+at most 1024 entries and 16 MiB (an entry is charged its answer size plus 512 bytes, the
+cost of its row), and a full queue drops the read and counts it. Shutdown drains for at most 2
+seconds and never holds up exit. A slow or hung store therefore delays rows, not reads.
+
+**It is advisory.** The step is wrapped whole, so a read never fails because it could not be
+logged. When reads go unrecorded (the queue was full, or the store write raised) the process
+emits one `access.log_failed` event as soon as the store can next take a write, at most once a
+minute, carrying `{surface, error_type, dropped_reads, failed_reads}` and a `warning` log
+line. The report shows `failure_signals`, the count of those events (rate limited, so not a
+count of reads), and `dropped_reads` / `failed_reads`, the sums of the counts they carry: lower
+bounds on the reads that went unrecorded, since a process that died first never wrote its count.
+
+**Retention: there is none.** Nothing in this repository deletes events (the event log has no
+prune; `RETENTION_PRUNED` archives documents). Rows accrue without bound. Measured on SQLite a
+row is about 1.6 KB, so 1,000 keyed reads a day is about 590 MB a year. This is why the log is
+off by default; turn it on knowing the volume you will keep.
+
+**Not covered.** The UI events tab (`list_events`, `trellis_api/routes/explore.py`) and the
+base `EventLog.get_event` read events without a type filter: with the log on, the events tab's
+newest rows include access rows, and viewing it adds rows for the key that views it. Neither
+was changed. Three more readers count events without a type, so access rows
+inflate two of them: `GET /api/v1/stats` (`events`, `trellis_api/routes/admin.py`) and
+`trellis admin stats` (`trellis_cli/admin.py`) report a total that includes access rows, and
+the readiness probe in `trellis_api/routes/health.py` calls `event_log.count()` as a liveness
+check, which is unaffected in meaning. The other aggregate readers filter by type, and
+`tests/unit/test_access_log_event_readers_rule.py` pins the ones it names.
+
+**Knob parsing.** `access_log` follows the `write_config` convention for a default-off flag:
+only `1`, `true`, `yes` and `on` (any case) turn it on; `0`, an empty value, `n`, `f`,
+`disabled` or any other spelling reads off. Like every `write_config` field it is stamped into
+`write_provenance.env_flags` on every event, so `env_flags_digest` changes once for every
+process after the build that adds it, whatever the flag's value. The digest is read only by
+the provenance stamp and `trellis admin` (`write_provenance.py`, `admin.py`); holdout assignment
+hashes the pack id, so no holdout arm is affected.
+
 ### `trellis admin backup`
 
 Copy the SQLite stores to a directory while they are in use.
@@ -1069,6 +1175,12 @@ label is the owner's decision, made through the existing route:
 ```bash
 trellis curate classify-sensitivity <doc_id> --sensitivity <level>
 ```
+
+The Memories tab of the UI (`/ui/`) shows the same label and relabels through
+`POST /api/v1/documents/{id}/sensitivity`; `GET /documents` rows and
+`GET /documents/{id}` carry it as `label` (`sensitivity`, `stored`, `corrupt`,
+`external_readable`). Its "readable by" lines hold when auth is required: with
+auth off every caller holds every scope and reads every label.
 
 This is a `classify` command, beside the other propose-for-a-human commands
 (`tag-candidates`, `domain-candidates`), rather than a `curate` command, because
@@ -4713,8 +4825,16 @@ SQLite not valid UTF-8, and on Postgres a JSONB string that is not JSON): on RES
 fault (an outage, a failed query) still answers 500, because it does not depend on
 the id, and a key above `public` still sees the 500 for such a row.
 
-Status and body do not depend on hidden rows apart from a store fault; response time
-does. On SQLite, `/documents?limit=5` over 200 public rows took 6.2 ms with no hidden
+In a list, a search page or a pack the same row is withheld, not failed: the public label
+filter does not match a row whose metadata cannot be read as a JSON object, so every other
+row is still served. SQLite records it as a `public_read_unparseable_row` warning, one per
+such row per read (the event the by-id read uses); on Postgres a JSONB value that is not an
+object never matches the filter, so there is nothing to record. A key above `public` is
+unchanged. This covers unreadable *metadata* only: a row labelled public whose `doc_id`,
+`content`, `content_hash`, `created_at` or `updated_at` is not valid UTF-8 cannot be decoded
+into a page, and still makes every external read answer 500 on SQLite while it exists.
+
+Status and body do not depend on hidden rows; response time does. On SQLite, `/documents?limit=5` over 200 public rows took 6.2 ms with no hidden
 row, 90.3 ms with 20,000 and 432.3 ms with 100,000, because the label filter scans
 every row. That time is also how long a read holds one of the two slots, so it moves
 how often other external keys are answered 429.
@@ -4773,18 +4893,20 @@ guard:
   corrupt row cannot answer differently by whether it holds the word (measured: for
   each corrupt shape below, every status and every body is the same with and without
   the queried words in the row, and no body carries the row or its text).
-  What is left: the SQLite store's *filtered* listing, which is how the label
-  predicate reads public rows, fails on a row whose `metadata_json` is not JSON
-  (`json_extract` raises `malformed JSON`) and on a row that is valid JSON but not an
-  object (`[1]`, `null`, `"str"`, `5`; the store's own filter function raises). Every
-  public read then answers 500 for every external key, whoever the row belongs to and
-  whatever it holds: `GET /search`, `GET /documents` with and without `q`, a pack and a
-  sectioned pack, for a word nobody holds as for one the row holds. A caller can tell
-  that such a row exists, and nothing about it. No `put` writes one; it is a store
-  fault. The unfiltered listing and `search` still read valid non-object JSON, so a key
-  that reads more than `public` answers 200 over the same store, while a row of
-  non-JSON text fails an unfiltered listing and a `search` that matches it for every
-  key, as before. The failure is the whole request, not a failed axis.
+  The SQLite store's *filtered* listing, which is how the label predicate reads public
+  rows, withholds such a row rather than failing on it: the predicate parses the column
+  the way the read that follows does (`json.loads`), so a row whose `metadata_json` is not
+  JSON, is JSON that is not an object (`[1]`, `null`, `"str"`, `5`), is not valid UTF-8,
+  has bytes after a NUL, is JSON5 rather than JSON, or is nested past the parser's limit
+  does not match, and every other row is served. It is recorded as a
+  `public_read_unparseable_row` warning, one per row per read. A row `json.loads` reads
+  but SQLite's strict JSON check would not (`NaN`, `Infinity`) is a readable row and is
+  judged by its label. Not covered: a row labelled public whose `doc_id`, `content`,
+  `content_hash`, `created_at` or `updated_at` is not valid UTF-8 still makes every
+  external read answer 500 while it exists, because the page cannot be built. No `put` writes any of these; they are store
+  faults. A key that reads more than `public` is unchanged: its unfiltered listing and
+  `search` still read valid non-object JSON, while a row of non-JSON text fails an
+  unfiltered listing and a `search` that matches it for every key, as before.
 
 Two answers no longer reveal a document the caller cannot read. A superseded
 document whose declared successor the caller may not read is served, as it would
@@ -5754,20 +5876,23 @@ These paths ask the same predicate, `trellis.llm.egress`, and report what they s
 | `trellis classify shadow` | `skipped_egress_withheld` / `egress_withheld:` line |
 | MCP reconcile-on-write | `fallback_reason: egress_withheld` on the reconcile outcome; the memory is stored as a plain ADD and the reason is not a judge failure |
 | Session-capture reconcile pass | `candidates_skipped_egress_withheld` in the capture report and text line |
+| Precedent mining (`trellis worker mine-precedents`) | `skipped_egress_withheld` in the JSON report (dry run and live run) and an `egress_withheld:` text line: failure traces citing a labelled evidence document are left out of what the model sees. A store that could not answer is `skipped_egress_unreadable` (an `egress_unreadable:` line), makes the run `status: partial`, and fails `--strict`. A run where every failure trace was kept back is outcome `all_withheld`; `below_min_traces_due_to_egress` is true when withheld traces put it under the minimum |
+| Session-capture distillation | `sessions_skipped_egress_withheld` in the capture report and text line: a session served a labelled document is not distilled and stays un-watermarked, so a sweep over a local route distils it. A store that could not answer is `sessions_skipped_egress_unreadable` instead (a pack event with no readable item list is withheld, not unreadable, because it never will be readable): a warning, a `partial` run, and a failed run under strict mode. `analyze health` reads both from the capture funnel |
 | Memory extraction (`save_memory`, `ingest-corpus`, `ingest-conversations`) | skipped whatever the route, because the entity names it mints land in an unlabelled graph: the `save_memory` note, and `extraction_skipped_labelled` in the sync reports |
 
-A skip never carries document text, a title or an id into a report beyond what the report already printed. Unlabelled and `internal` documents are sent as before, prompt included, with two exceptions: a chunk-shaped id with no parent row is withheld whatever its own label, and a reconcile pair is judged only if both sides may be sent, so an unlabelled memory whose nearest stored row is labelled is not judged.
+A skip never carries document text, a title or an id into a report beyond what the report already printed. Unlabelled and `internal` documents are sent as before, prompt included, with these exceptions. Three hold content back with nothing labelled: a chunk-shaped id with no parent row is withheld whatever its own label, a session whose pack event records no readable item list is withheld, and a document the store could not be asked about is held back as unreadable. The fourth is that a reconcile pair is judged only if both sides may be sent, so an unlabelled memory whose nearest stored row is labelled is not judged. A row whose stored bytes do not parse (a document's metadata, or a pack event's payload) is withheld, not unreadable, because it will not parse on a retry; a chunk whose parent row does not parse is withheld on the same ground.
 
 ### What changes for a labelled document
 
 - **Corpus sync.** For a document whose metadata carries a label above `internal` (supplied by the handler in this run, or stored on the row and kept by an update), `ingest-corpus` no longer sends the text to the extractor, whatever the route is declared (the entities land in the graph, which carries no label), so such a document mints no graph entities. It used to send it. A moved or renamed file is the exception, see below.
-- **Orphan chunks.** A chunk-shaped id whose parent row is absent is withheld, where retrieval judges it by its own label.
+- **Orphan chunks.** A chunk-shaped id whose parent row is absent is withheld, where retrieval judges it by its own label. This holds for precedent mining and session distillation too, and it is one of three cases where content is held back with nothing labelled (the others are a pack event with no readable item list, withheld, and a store that cannot answer, unreadable): such a session is counted as withheld (not unreadable, because it does not pass on a retry) and is withheld again on every sweep.
 
 ### What this does not cover
 
 - **Embedding.** Stored content, labelled content included, still goes to the configured embedder, and an operator with a hosted embedder must treat that as egress. The gate covers chat and generate routes only; gating the embedder would change which vectors exist, and so what a pack can serve.
-- **A labelled document that reaches a transcript.** A labelled document served to a session can appear in that session's transcript. The session-capture pass distills the transcript (`distill_session`), the memories it captures carry no label, and they can later become enrichment candidates. The predicate is not asked on that path.
+- **`get_items` and `get_file_context`.** The results of these MCP calls carry no pack header, so a transcript cannot name the documents they returned, and a session that read a labelled document through them is distilled as before.
+- **A labelled document that reaches a transcript, by a route the log cannot show.** Distillation is gated on the packs a session was served, read from the transcript's pack ids and their `PACK_ASSEMBLED` events. A retrieval result the parser could not read a pack id from (`pack_ids_unparsed`), a pack whose event the log no longer holds, and a labelled document pasted into a session some other way are not followed, so the session is sent as before. A pack event the log could not return, or a served document whose row could not be read, keeps the session off the route and is counted as `sessions_skipped_egress_unreadable`, a fault a later sweep may clear. A pack event that records no readable item list (read from `injected_item_ids`, `injected_items[]` and `sections[].item_ids` together, so a sectioned pack from before `injected_items[]` existed is judged by its section ids) is a permanent fact of an immutable event: it keeps the session off the route, is counted as `sessions_skipped_egress_withheld`, and does not fail strict mode. A pack that truly served nothing, `injected_item_ids: []`, is fine. A session withheld on a label is re-read and re-counted by every sweep, with no age bound, until the route is declared local or the label changes.
 - **A relabel between scan and send.** `worker enrich` and `classify shadow` read the label when they scan for candidates. A document relabelled after the scan is not re-read before the send, and a chunk's parent label cached in that run stays permitted for the rest of it.
 - **Reconcile-on-write, flag on.** With `TRELLIS_ENABLE_RECONCILE_ON_WRITE` off nothing changes. With it on and a route not declared local, a pair with a labelled side is not judged: the new memory is stored as a plain ADD and both rows stay current, so a pack can serve the old fact. Nothing re-judges a withheld pair later.
 - **A moved or renamed corpus file loses a label set on the stored row.** `ingest-corpus` merges the stored metadata only when it updates a document; a move writes this run's metadata alone. A label set with `trellis curate classify-sensitivity` is therefore gone after a move, the document is treated as unlabelled by every gate, including the one that withholds labelled documents from retrieval, and its text can reach the extractor and a route that is not declared local. Apply the label again after a move. A handler that supplies the label on every run keeps it.
-- **Precedent mining.** `trellis_workers.learning.miner` sends stored trace summaries to a chat or generate route (`_ask_llm`) and does not ask the predicate. Traces carry no sensitivity label of their own.
+- **A trace that cites no stored document.** A trace carries no label of its own. Mining judges it by the documents in `evidence_used`, which the evidence writers store under the `evidence_id`; an id with no stored row (a graph entity, say) names nothing that carries a label, and a trace whose prose summarises a labelled document without citing it is sent as before. Withheld traces take no seat among the 20 shown to the model and are not counted in `failure_traces_in_scope`, but they do count against `--limit`, because the filter runs after the scan stops: a store whose newest failures are labelled can report `below_min_traces` or `all_withheld` while older unlabelled failures exist. The report says so (`below_min_traces_due_to_egress`, the `all_withheld` outcome) rather than reading as an empty store.

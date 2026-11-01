@@ -95,6 +95,14 @@ successful injection's damage to junk, not leakage.
   no-op. A sweep whose judge disappears part-way finishes, reports
   `sessions_judge_unavailable` (those sessions stay un-watermarked for the
   next run), and also exits non-zero.
+- **Labelled content stays off a hosted judge.** While the `session_capture`
+  route is not declared local (`local: true` in the `llm:` block), a session
+  whose served packs named a document labelled above `internal` is not
+  distilled: it is counted as `sessions_skipped_egress_withheld`, not treated
+  as a judge outage, and stays un-watermarked so a sweep over a local route
+  distils it. A store that could not answer is `sessions_skipped_egress_unreadable`
+  instead: a warning, a failed run under `TRELLIS_CAPTURE_STRICT`. See
+  [Keeping labelled content off a hosted model](operations.md#keeping-labelled-content-off-a-hosted-model).
 
 ## Three ways to run it
 
@@ -120,7 +128,7 @@ always emit the JSON `CaptureReport` on stdout.
 | `TRELLIS_CAPTURE_SAMPLE_DENOMINATOR` | `5` | Clean-session sampling (`1` = capture all clean sessions). |
 | `TRELLIS_CAPTURE_SOURCE_SYSTEM` | `claude-code` | Corpus namespace / doc-id prefix. |
 | `TRELLIS_DISTILL_MODEL` | `hermes3:8b` | Model id label recorded in training events. |
-| `TRELLIS_CAPTURE_STRICT` | `1` | When truthy (the default), a sweep that left any session unjudged, or in which a session raised, exits non-zero. Set `0`/`false`/`no`/`off` to report the counts and exit `0` instead — those sessions stay un-watermarked and are retried next sweep. A sweep with *no* judge at all always fails, strict or not. |
+| `TRELLIS_CAPTURE_STRICT` | `1` | When truthy (the default), a sweep that left any session unjudged, in which a session raised, or that kept a session off the route because a store could not be asked whether it may leave the host (`sessions_skipped_egress_unreadable`), exits non-zero. Set `0`/`false`/`no`/`off` to report the counts and exit `0` instead — those sessions stay un-watermarked and are retried next sweep. A sweep with *no* judge at all always fails, strict or not. |
 | `TRELLIS_CAPTURE_MAX_SALIENT_CHARS` | `8000` | Cap on conversation text sent to the judge. **Coupled to the judge endpoint's context window — read the warning below before raising it.** |
 | `TRELLIS_ENABLE_RECONCILE_ON_WRITE` | *(unset)* | When truthy, near-duplicate captures are adjudicated (ADD/UPDATE/SUPERSEDE/NOOP) instead of piling up. Off by default. |
 

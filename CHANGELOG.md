@@ -43,6 +43,47 @@ All notable changes to Trellis will be documented in this file.
   minting or revoking through the new build. A policy denial answers 400, like the other
   write routes.
 
+- **Per-key access log: what did this key read, and when did it last run?** Off by
+  default; `TRELLIS_ACCESS_LOG=1` (settings key `access_log`; only `1`, `true`, `yes`, `on`
+  enable it) writes one `access.key_read` event per authenticated read by an API key, on REST
+  (every `GET /api/v1/...` plus `POST /packs` and `POST /packs/sectioned`, answered 200) and
+  on MCP (each tool registered at the `read` scope). A row holds the key id, the surface,
+  the route template or tool name, the count of items it could name and the first 25 ids,
+  with `item_ids_truncated` beside them: on REST the items in the answer's body, on MCP the
+  pack ids the answer printed (a formatter that runs out of token budget drops the rest, and
+  those are not counted). Ids come from an allowlist of item-serving REST
+  routes and from ids the MCP tools already hold, kept only if the answer prints them; any other route or tool records
+  `item_count: null`. It holds no document text, query or intent text, or secret. A call
+  with no key id (auth mode `off`, an anonymous call, the legacy shared secret, stdio)
+  records nothing. Rows are written after the response by one bounded background writer
+  (1024 entries, 16 MiB, drop-and-count when full), so a slow store delays rows and never
+  reads. `trellis admin access-log [--hours] [--key-id] [--format json]` and the admin-only
+  `GET /api/v1/access-log/keys` read it back as one row per key (an `external` key is
+  refused the route); unrecorded reads leave an `access.log_failed` event, shown as
+  `failure_signals`, `dropped_reads` and `failed_reads`. **Rows have no retention path**:
+  nothing deletes events, and a row is about 1.6 KB on SQLite, so 1,000 reads a day is about
+  590 MB a year. The new `access_log` field joins every event's `write_provenance.env_flags`,
+  so `env_flags_digest` changes once for every process after upgrade, whatever the flag's
+  value. Retrieval, `PACK_ASSEMBLED` and every pack are unchanged. See
+  `docs/agent-guide/operations.md`.
+
+- **The Memories tab shows a document's sensitivity label and relabels it.** The list has a
+  Label column and the detail view a badge and a "Relabel as" control that calls the existing
+  `POST /documents/{id}/sensitivity`, showing the server's refusal text (a key without the
+  `mutate` scope, a label above the key's clearance, a store fault). An unlabelled document is
+  badged "unlabelled (internal)" with a title saying an `external` key cannot read it, and a
+  bare `{"sensitivity": "public"}` that an `external` key does not read is badged as such.
+  Lowering a label, or making a document readable by `external` keys, asks first and names who
+  can read it before and after; raising applies at once. A chunk is badged with the label it
+  reads (its parent document's, raised to its own), and a stored record that cannot be parsed is
+  badged "corrupt label (reads as restricted)". To make that possible for every key,
+  `GET /documents` rows and `GET /documents/{id}` carry `label` (`sensitivity`, `stored`,
+  `corrupt`, `external_readable`), computed from the stored row before an `external` key's
+  metadata is cut down, for rows the caller may already read; `external_readable` is the same
+  test the read gate applies, so it is false for a chunk. The "readable by" wording holds when
+  auth is required; with auth off every caller holds every scope. No pack, search or write
+  route changes.
+
 - **An `external` key reads only what someone labelled `public`.** `trellis admin api-keys
   create --scopes read,external` mints a key whose clearance is a new lowest rung, `public`.
   A pack, search, `GET /documents` or `get_items` serves it only a stored document labelled
@@ -131,10 +172,9 @@ All notable changes to Trellis will be documented in this file.
   so the semantic axis cannot read them (`axes.semantic` reads `ran`); the keyword axis still
   finds them. The ceiling is the newest 2000 public documents, a function of public rows alone;
   above it older public documents are out of reach of both axes and `total_exact` is `false`.
-  A stored row whose `metadata_json` is not JSON, or is JSON that is not an object, makes the
-  SQLite store's filtered listing fail, so every public read answers 500 for every external key
-  whoever the row belongs to and whatever it holds (the same for every query word, a word nobody
-  holds included): a caller can tell such a row exists and nothing about it. One
+  A stored row whose `metadata_json` is not JSON, or is JSON that is not an object, is withheld
+  from a public read and every other row is served; the SQLite store records it as a
+  `public_read_unparseable_row` warning, the event a by-id read of the same row uses. One
   `VectorStore.get` per public document on a networked backend is reasoned, not measured.
   A by-id read (`GET /documents/{id}`, `get_items`) of a row whose metadata cannot be parsed
   answers a public-only key exactly as a missing id (a hidden corrupt row cannot confirm a
@@ -235,6 +275,58 @@ All notable changes to Trellis will be documented in this file.
   50/50 split (`analytic_mde` takes a `share`, default 0.5, so existing calls
   are unchanged). The primary estimator, strata, exclusions, assignment and
   serving are untouched; `--operational` prints none of the new figures.
+
+- **Precedent mining and session distillation ask the egress predicate.** Two senders that
+  `trellis.llm.egress` rostered as exempt now go through it. `trellis worker mine-precedents`
+  leaves a failure trace out of what the model sees when any document in its `evidence_used`
+  is labelled above `internal` and the `precedent_mining` route is not declared local; the
+  skip is counted as `skipped_egress_withheld` in the JSON report (dry run and live) with an
+  `egress_withheld:` text line. Such traces take no seat among the 20 shown to the model, but
+  they do count against `--limit`, because the filter runs after the scan stops, so a store
+  whose newest failures are labelled can report fewer traces than it holds. A run where every
+  failure trace found was kept back is outcome `all_withheld`, not `no_failures`, and
+  `below_min_traces` says (`below_min_traces_due_to_egress` in JSON) when withheld traces are
+  what put it under the minimum. Session capture does not distil a session whose served packs
+  (the transcript's pack ids, read through their `PACK_ASSEMBLED` events) named such a
+  document while the `session_capture` route is not declared local:
+  `sessions_skipped_egress_withheld`, an `egress_withheld:` line, the session left
+  un-watermarked so a sweep over a local route distils it, and not counted as a judge outage.
+  **A store that could not answer is not a label.** A document row, a chunk's parent, or a
+  pack event that a store raised on, or a gate handed no document store, is counted apart as
+  `sessions_skipped_egress_unreadable` / `skipped_egress_unreadable`, logs a warning, makes the
+  run `partial`, and fails a strict run (the capture sweep's `TRELLIS_CAPTURE_STRICT`,
+  `mine-precedents --strict`); a mine run where every trace was unreadable is `all_withheld`.
+  A pack event is read from `injected_item_ids`, `injected_items[]` and `sections[].item_ids`
+  together (a sectioned pack written before `injected_items[]` existed carries only the
+  section ids); an event that records none of them, or whose lists are malformed, is a
+  permanent fact of an immutable event, so the session is withheld (counted as withheld, never
+  failing a strict run) and not reported as an outage. A pack that truly served nothing
+  (`injected_item_ids: []`) is permitted. A row whose stored bytes do not parse (a pack
+  event's payload that is not a JSON object, a document's metadata that is not JSON) is
+  withheld too, as is a chunk whose parent row does not parse, because none of them parses on
+  a retry. `CaptureFunnel`
+  gains the two counts, so `analyze health` reports sessions kept off the route instead of
+  calling them sampled out (two zero-valued keys appear in the funnel payload even when
+  nothing is withheld; no existing value or text changes). A trace or transcript carries no
+  label, so the label is propagated from the documents it cites or was served; gating on the
+  route alone would have withheld unlabelled content too. `EgressGate.stored_verdict(doc_id)`
+  reads a document's row by id and answers `permitted`, `withheld` or `unreadable`.
+  **Unchanged when nothing is labelled, or the route is declared local:** the prompts sent, the
+  digest, the candidates and the mined events are byte-identical (tests compare both against
+  an ungated run), and a local gate reads nothing. Three cases keep content off a route that
+  is not local with nothing labelled: a chunk-shaped id whose parent row is gone (as since
+  #1129, where retrieval would judge it by the chunk's own label) and a pack event with no
+  readable item list, both counted as withheld because neither passes on a retry, and a store
+  that could not answer, or a gate handed no document store, counted as unreadable; so a
+  session that was served such a chunk is withheld
+  on every sweep, and one withheld session is re-read and re-counted by each sweep with no age
+  bound. `PrecedentMiner` now requires its `egress=` gate, and the rule test rosters
+  `PrecedentMiner(` and the `_ask_llm` sender (its exempt roster is empty). **Not covered:** a
+  pack id the transcript parser could not read, a pack whose event the log no longer holds, a
+  trace that summarises a labelled document without citing it, and the MCP `get_items` /
+  `get_file_context` calls (their results carry no pack header, so a transcript cannot name
+  the documents they returned) are sent as before. No file under `src/trellis/retrieve/`
+  changed.
 
 - **Content labelled above `internal` no longer reaches a chat or generate LLM
   route that is not declared local, on the paths listed here.** One predicate, `trellis.llm.egress` (`may_reach_route` for a
@@ -401,6 +493,32 @@ All notable changes to Trellis will be documented in this file.
   siblings it raises on a failed read, so that `None` keeps meaning "no such pack".
 
 ### Fixed
+
+- **A document row whose metadata cannot be read no longer fails every read by
+  an `external` key on SQLite.** The label predicate the public path runs
+  through `DocumentStore.list_documents` raised on a row whose `metadata_json`
+  is not JSON, is JSON that is not an object (`[1]`, `null`, `"str"`, `5`), is
+  not UTF-8, has bytes after a NUL, is JSON5 rather than JSON, or is nested past
+  the parser's limit, so a pack, `GET /search` and `GET /documents` answered 500
+  for every external key while one such row existed, whoever it belonged to. It
+  also read a JSON string whose text is the public label record as that record,
+  so such a row matched the filter (the later per-row gate withheld it). The
+  public filter is now a `trellis.stores.base.document.ReadableMatch`, a dict
+  that only a readable row can match: the SQLite store parses the column as the
+  read that follows does (`json.loads`), withholds a row that does not parse as an
+  object, serves every other row (a row holding `NaN` is readable), and records
+  each withheld row as a `public_read_unparseable_row` warning (the event a
+  by-id read of the same row already uses). **Not covered:** a row labelled
+  public whose `doc_id`, `content`, `content_hash`, `created_at` or
+  `updated_at` is not valid UTF-8 still makes every external read answer 500
+  while it exists, on SQLite as before.
+  Postgres needed no change for unreadable metadata: its predicate is
+  `metadata -> key = value`, which is NULL, not an error, on a row that is not
+  an object. Every other read is unchanged, row by row: a plain dict filter, a
+  scalar filter, no filter and every call by a key above `public` answer as
+  before, including the malformed row. `ReadableMatch` is a `dict`, so a store
+  that does not know it behaves as it did.
+
 
 - **`trellis admin draft-promotion-adr` no longer reads a broken `--output` as
   free.** The overwrite check used `Path.exists()`, which answers absent for a
@@ -852,6 +970,19 @@ All notable changes to Trellis will be documented in this file.
   archives.
 
 ### Changed
+
+- **BREAKING: `trellis admin list-proposals` (a `--limit` below 1, reached by a
+  direct call of the command body) and `trellis admin show-proposal` (a blank or
+  whitespace-only id) exit 2, not 1.** Both are a refused request, as
+  `generate-proposals --dry-run` is, so they now answer with `EXIT_VALIDATION`
+  in both formats (the JSON payload is unchanged: `{"status": "error", "error":
+  "validation_error", ...}`). `list-proposals --limit 0` on the command line
+  already exited 2 (Typer's `min=1` refuses it before the command runs), so for
+  a shell caller only `show-proposal ""` and a whitespace-only id move. An id
+  that names no proposal still exits 1: the lookup ran and found nothing. A
+  script that treated exit 1 from either call as "the request was refused" must
+  read 2; none in this repository does.
+
 
 - **BREAKING: `trellis admin generate-proposals --dry-run` exits 2 and answers
   as an error.** The generator has no dry-run mode, so the flag was refused with

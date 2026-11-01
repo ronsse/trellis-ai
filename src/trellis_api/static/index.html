@@ -2376,6 +2376,7 @@
                             <th scope="col" class="num">Time</th>
                             <th scope="col">Doc ID</th>
                             <th scope="col">Preview</th>
+                            <th scope="col">Label</th>
                             <th scope="col">Content tags</th>
                             <th scope="col" class="num">Chars</th>
                         </tr>
@@ -3241,6 +3242,7 @@
             draftAdr, copyAdr, downloadAdr,
             loadTraceDetail, navigateToEntity, navigateToDocument,
             loadMemoryDetail, loadEventDetail, navigateToPack, loadPackDetail,
+            beginRelabelDocument,
             confirmDeletePolicy,
             showEditJobForm, cancelEditJobForm, confirmRunJob, cancelRunJob, runJob,
             toggleJobEnabled, confirmEditJob,
@@ -5755,12 +5757,83 @@
             return chips.join(' ');
         }
 
+        // Sensitivity labels (DataClassification.sensitivity), lowest to
+        // highest. The server reports how each document is labelled in
+        // `label` ({sensitivity, stored, corrupt, external_readable}), computed
+        // from the stored row: a key that reads only public documents is sent
+        // metadata with no classification in it, so this page never works the
+        // label out from `metadata` itself. A document nobody labelled reads
+        // as internal and is invisible to an external key, which is why it is
+        // worded that way and not shown blank.
+        const SENSITIVITY_LEVELS = ['public', 'internal', 'confidential', 'restricted'];
+        const SENSITIVITY_READERS = {
+            public: 'every key, external keys included',
+            internal: 'keys cleared for internal or above (an external key cannot read it)',
+            confidential: 'keys cleared for confidential or above',
+            restricted: 'keys cleared for restricted, and admin keys',
+        };
+        const SENSITIVITY_BADGE = {
+            public: 'badge-ok',
+            internal: 'badge-info',
+            confidential: 'badge-warn',
+            restricted: 'badge-danger',
+        };
+        const PUBLIC_NOT_EXTERNAL = 'public (not for external keys)';
+        const CHUNK_DOC_ID = /^.+#chunk-\d+$/;
+
+        // `docId` is only used to word a chunk's badge: a chunk has no label of
+        // its own to choose, it reads its parent's.
+        function labelState(label, docId) {
+            if (!label || !SENSITIVITY_LEVELS.includes(label.sensitivity)) return null;
+            const s = label.sensitivity;
+            const chunk = CHUNK_DOC_ID.test(String(docId || ''));
+            if (label.corrupt) {
+                return { text: 'corrupt label (reads as restricted)', cls: 'badge-danger',
+                    readers: SENSITIVITY_READERS.restricted,
+                    title: 'The label stored on this document cannot be parsed, so it reads as restricted until it is replaced. Relabelling it restricted leaves the stored record as it is; choose another label to replace it.' };
+            }
+            if (!label.stored && s === 'internal') {
+                return { text: 'unlabelled (internal)', cls: 'badge-warn',
+                    readers: SENSITIVITY_READERS.internal,
+                    title: 'No label is stored on this document, so it reads as internal. A key that reads only public documents (an external key) cannot read it.' };
+            }
+            if (!label.stored) {
+                // No label of its own and not internal: a chunk reading its
+                // parent's, which is higher than the default.
+                return { text: s, cls: SENSITIVITY_BADGE[s], readers: SENSITIVITY_READERS[s],
+                    title: `No label is stored on this row, so it reads as ${s}, its parent document's label: readable by ${SENSITIVITY_READERS[s]}.` };
+            }
+            if (s === 'public' && !label.external_readable) {
+                return { text: PUBLIC_NOT_EXTERNAL, cls: 'badge-warn',
+                    readers: chunk
+                        ? 'keys cleared for internal or above (an external key is never served a chunk)'
+                        : 'keys cleared for internal or above (the stored public label is not the record an external key reads)',
+                    title: chunk
+                        ? 'Labelled public, but an external key is only ever served a whole document, never a chunk.'
+                        : 'Labelled public, but not the exact record an external key reads, so an external key cannot read it. Applying public writes that record, unless the stored one carries tags or other fields it would discard: the server then refuses and names them.' };
+            }
+            return { text: s, cls: SENSITIVITY_BADGE[s], readers: SENSITIVITY_READERS[s],
+                title: chunk
+                    ? `A chunk reads its parent document's label, raised to its own when that is higher. This one reads as ${s}: readable by ${SENSITIVITY_READERS[s]}.`
+                    : `Labelled ${s}: readable by ${SENSITIVITY_READERS[s]}.` };
+        }
+
+        function sensitivityBadge(label, docId) {
+            const st = labelState(label, docId);
+            if (!st) {
+                return '<span class="badge badge-info" title="This server did not report a label for the document.">label not reported</span>';
+            }
+            return `<span class="badge ${escHtml(st.cls)}" title="${escHtml(st.title)}">${escHtml(st.text)}</span>`;
+        }
+
         async function loadMemories() {
             const q = document.getElementById('mem-search').value.trim();
             const limit = parseInt(document.getElementById('mem-limit').value);
             const body = document.getElementById('memories-body');
-            body.innerHTML = `<tr><td colspan="5">${loadingHtml('Loading documents...')}</td></tr>`;
+            body.innerHTML = `<tr><td colspan="6">${loadingHtml('Loading documents...')}</td></tr>`;
             document.getElementById('memory-detail-container').innerHTML = '';
+            memDetailWanted = null;
+            memRelabelOpen = null;
 
             try {
                 let url = `/documents?limit=${limit}&offset=${memOffset}`;
@@ -5769,7 +5842,7 @@
                 const docs = data.documents || [];
 
                 if (docs.length === 0) {
-                    body.innerHTML = `<tr><td colspan="5">${emptyStateHtml({
+                    body.innerHTML = `<tr><td colspan="6">${emptyStateHtml({
                         icon: '<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5A2 2 0 0 1 6 4h6v16H6a2 2 0 0 1-2-2z"/><path d="M20 5.5A2 2 0 0 0 18 4h-6v16h6a2 2 0 0 0 2-2z"/></svg>',
                         title: 'No documents found',
                         bodyHtml: `None match the search, or none have been saved yet. Ingest one with <code>trellis ingest evidence</code> or <code>trellis ingest corpus</code>, or save one via the <code>save_memory</code> MCP tool.`,
@@ -5783,6 +5856,7 @@
                         <td class="num" style="white-space:nowrap">${fmtTimeCell(d.created_at)}</td>
                         <td class="mono truncate fs-2" style="max-width:220px" title="${escHtml(d.doc_id)}">${escHtml(d.doc_id)}</td>
                         <td class="truncate" style="max-width:420px" title="${escHtml(d.preview)}">${escHtml(d.preview)}</td>
+                        <td class="mem-label-cell">${sensitivityBadge(d.label, d.doc_id)}</td>
                         <td>${tagChips(d.metadata)}</td>
                         <td class="num" style="white-space:nowrap" title="${escHtml('approximately ' + fmtNum(Math.round(d.content_length / 4), 0) + ' tokens at ~4 characters per token, the same estimate used when assembling a context pack')}">${fmtNum(d.content_length, 0)}</td>
                     </tr>
@@ -5806,7 +5880,7 @@
                     && memOffset + limit > MEM_FILTERED_OFFSET_CEILING;
                 document.getElementById('mem-next').disabled = memOffset + docs.length >= total || pastCeiling;
             } catch (err) {
-                body.innerHTML = `<tr><td colspan="5" class="text-danger" style="text-align:center; padding:2rem">Failed to load documents: ${escHtml(err.message)}</td></tr>`;
+                body.innerHTML = `<tr><td colspan="6" class="text-danger" style="text-align:center; padding:2rem">Failed to load documents: ${escHtml(err.message)}</td></tr>`;
             }
         }
 
@@ -5816,17 +5890,131 @@
             loadMemories();
         }
 
+        // The label of the document open in the detail pane, which the relabel
+        // control reads to say what a change would do.
+        let memRelabelOpen = null;
+        // The document the detail pane was last asked to show. A relabel that
+        // returns after the operator opened another document checks it, so it
+        // never writes into, or reloads over, the wrong pane.
+        let memDetailWanted = null;
+
+        // The list row shows the same label as the pane; keep it current.
+        function refreshMemoryRowLabel(docId, label) {
+            for (const row of document.querySelectorAll('#memories-body tr[data-id]')) {
+                if (row.dataset.id === docId) {
+                    const cell = row.querySelector('.mem-label-cell');
+                    if (cell) cell.innerHTML = sensitivityBadge(label, docId);
+                }
+            }
+        }
+
+        function relabelControlHtml(d) {
+            if (CHUNK_DOC_ID.test(String(d.doc_id))) {
+                return '<p class="fs-3 text-dim mb-lg">A chunk reads its parent document\'s label. Relabel the parent document.</p>';
+            }
+            // No label from the server: nothing to say a change would do, so the
+            // control is off rather than defaulting to the first option.
+            const usable = !!labelState(d.label, d.doc_id);
+            const off = usable ? '' : ' disabled';
+            const current = d.label && d.label.sensitivity;
+            const options = SENSITIVITY_LEVELS.map(l =>
+                `<option value="${escHtml(l)}"${l === current ? ' selected' : ''}>${escHtml(l)}</option>`).join('');
+            return `<div class="fs-3 mb-lg" id="mem-relabel">
+                <label for="mem-relabel-select">Relabel as</label>
+                <select id="mem-relabel-select"${off}>${options}</select>
+                <button type="button" class="btn btn-sm" id="mem-relabel-apply" data-action="beginRelabelDocument" data-id="${escHtml(d.doc_id)}"${off}>Apply label</button>
+                <span id="mem-relabel-status" role="status" aria-live="polite">${usable ? '' : 'This server did not report the label, so it cannot be changed from here.'}</span>
+            </div>`;
+        }
+
+        function memRelabelStatus(html) {
+            const el = document.getElementById('mem-relabel-status');
+            if (el) el.innerHTML = html;
+        }
+
+        function beginRelabelDocument(docId) {
+            const sel = document.getElementById('mem-relabel-select');
+            if (!sel || !memRelabelOpen || memRelabelOpen.docId !== docId) return;
+            const target = sel.value;
+            if (!SENSITIVITY_LEVELS.includes(target)) return;
+            const label = memRelabelOpen.label;
+            if (!labelState(label, docId)) return;
+            const st = labelState(label, docId);
+            if (label.corrupt && target === 'restricted') {
+                memRelabelStatus('The stored label is corrupt and reads as restricted. Relabelling it restricted leaves it as it is; choose another label to replace it.');
+                return;
+            }
+            const isNoop = label.stored && !label.corrupt && label.sensitivity === target
+                && (target !== 'public' || label.external_readable);
+            if (isNoop) { memRelabelStatus(`Already labelled ${escHtml(target)}.`); return; }
+            const lowering = SENSITIVITY_LEVELS.indexOf(target) < SENSITIVITY_LEVELS.indexOf(label.sensitivity);
+            const opensToExternal = target === 'public' && !label.external_readable;
+            if (!lowering && !opensToExternal) { relabelDocument(docId, target); return; }
+            openConfirmDialog({
+                title: target === 'public' ? 'Make this document public?' : `Lower the label to ${target}?`,
+                body: `Relabel ${docId} from ${st.text} to ${target}.`,
+                consequences: [
+                    `After: readable by ${SENSITIVITY_READERS[target]}.`,
+                    `Before: readable by ${st.readers}.`,
+                ],
+                confirmLabel: `Label ${target}`,
+                onConfirm: () => relabelDocument(docId, target),
+            });
+        }
+
+        async function relabelDocument(docId, target) {
+            // The operator may open another document while this request is out;
+            // only the pane still showing this one is written to or reloaded.
+            const stillOpen = () => memDetailWanted === docId;
+            const btn = document.getElementById('mem-relabel-apply');
+            if (btn) btn.disabled = true;
+            memRelabelStatus('Applying...');
+            try {
+                await postJSON(`/documents/${encodeURIComponent(docId)}/sensitivity`, { sensitivity: target });
+            } catch (err) {
+                // The server's own refusal text: a key below the label's
+                // clearance, a document it cannot read, a store fault.
+                if (stillOpen()) {
+                    memRelabelStatus(`<span class="text-danger">Not relabelled: ${escHtml(err.message)}</span>`);
+                    const again = document.getElementById('mem-relabel-apply');
+                    if (again) again.disabled = false;
+                }
+                return;
+            }
+            // The relabel applied (a whole document's own label is then the
+            // target), whether or not the pane can be reloaded.
+            refreshMemoryRowLabel(docId, { sensitivity: target, stored: true, corrupt: false, external_readable: target === 'public' });
+            if (!stillOpen()) return;
+            const loaded = await loadMemoryDetail(docId);
+            if (!stillOpen()) return;
+            if (!loaded) {
+                document.getElementById('memory-detail-container').insertAdjacentHTML('afterbegin',
+                    `<p class="text-danger">${escHtml(`Relabelled ${docId} as ${target}, but reloading the document failed, so what is shown may be out of date. Open it again to check.`)}</p>`);
+                return;
+            }
+            memRelabelStatus(`Labelled ${escHtml(target)}.`);
+        }
+
         async function loadMemoryDetail(docId) {
+            // Resolves true when the document was drawn and false when it could
+            // not be: a relabel reloads through here and has to say so.
             const container = document.getElementById('memory-detail-container');
+            memDetailWanted = docId;
+            memRelabelOpen = null;
             container.innerHTML = `<div class="trace-detail">${loadingHtml('Loading document...')}</div>`;
 
             try {
                 const data = await fetchJSON(`/documents/${encodeURIComponent(docId)}`);
+                // A later open replaced this one while it was loading.
+                if (memDetailWanted !== docId) return false;
                 const d = data.document;
                 if (!d) {
                     container.innerHTML = `<div class="trace-detail"><p class="text-dim">Document <span class="mono">${escHtml(docId)}</span> was not found.</p></div>`;
-                    return;
+                    return false;
                 }
+
+                memRelabelOpen = { docId: d.doc_id, label: d.label };
+                refreshMemoryRowLabel(d.doc_id, d.label);
 
                 let metaHtml = '';
                 const meta = d.metadata || {};
@@ -5849,18 +6037,23 @@
                             Created ${escHtml(fmtTime(d.created_at))}${d.updated_at && d.updated_at !== d.created_at ? ` &middot; Updated ${escHtml(fmtTime(d.updated_at))}` : ''}
                             ${d.content_hash ? ` &middot; <span class="mono">${escHtml(String(d.content_hash).slice(0, 16))}…</span>` : ''}
                         </div>
+                        <div class="fs-3 mb-lg">Sensitivity ${sensitivityBadge(d.label, d.doc_id)}</div>
+                        ${relabelControlHtml(d)}
                         ${metaHtml}
                         <h4 class="fs-4" style="margin:1rem 0 0.5rem">Content</h4>
                         <pre class="fs-3" style="white-space:pre-wrap; word-break:break-word; max-height:480px; overflow:auto; background:var(--surface-sunken); padding:1rem; border-radius: var(--r-1)">${escHtml(d.content || '')}</pre>
                     </div>
                 `;
                 container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                return true;
             } catch (err) {
+                if (memDetailWanted !== docId) return false;
                 const notFound = /^404\b/.test(err.message);
                 const msg = notFound
                     ? `Document ${docId} was not found.`
                     : `Failed to load document ${docId}: ${err.message}`;
                 container.innerHTML = `<div class="trace-detail"><p style="color:${notFound ? 'var(--text-dim)' : 'var(--danger)'}">${escHtml(msg)}</p></div>`;
+                return false;
             }
         }
 

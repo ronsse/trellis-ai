@@ -74,6 +74,7 @@ ROUTER_SCOPE_ROSTER: dict[str, frozenset[str]] = {
     "admin": frozenset({SCOPE_ADMIN}),
     "settings": frozenset({SCOPE_ADMIN}),
     "api-keys": frozenset({SCOPE_ADMIN}),
+    "access-log": frozenset({SCOPE_ADMIN}),
     "ingest": frozenset({SCOPE_INGEST}),
     "retrieve": frozenset({SCOPE_READ}),
     "explore": frozenset({SCOPE_READ}),
