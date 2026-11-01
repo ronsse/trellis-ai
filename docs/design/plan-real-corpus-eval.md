@@ -1,6 +1,9 @@
 # Plan: Real-corpus end-to-end evaluation
 
-**Status:** Proposed 2026-05-06
+**Status:** Proposed 2026-05-06. Code for the real-LLM runs and the dbt and GitHub corpora (`eval/_real_llm.py`, `eval/corpora/dbt_loader.py`, `eval/corpora/github_trellis/`) was written in this repo before the evaluation program moved to the `trellis-evals` repo on 2026-07-12; whether each phase met its §8 criteria is not recorded here. The text below is the original plan.
+
+> Paths under `eval/` named below, and the `make eval-phase-a` target, moved to the `trellis-evals` repo on 2026-07-12.
+
 **Owner:** rotating
 **Self-contained:** yes — read this top to bottom; you do not need any prior conversation context.
 

@@ -10,6 +10,10 @@ chart-renderable artefact the program promised at design time.
 This page is the operator-facing reference. For the design rationale,
 see [`docs/design/plan-program-level-eval.md`](../design/plan-program-level-eval.md).
 
+> The harness is not in this repo: it moved to the private `trellis-evals` repo on
+> 2026-07-12. Every `eval/` path and `python -m eval.runner` command on this page refers
+> to a checkout of that repo.
+
 ## What the scenario produces
 
 For each of N rounds (default 30; set via `rounds=`) the scenario
