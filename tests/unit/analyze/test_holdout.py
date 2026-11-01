@@ -29,6 +29,7 @@ from tests.unit.analyze._holdout_fixture import (
     outcome_payload,
     seed_experiment,
     timing_payload,
+    unchecked_window,
 )
 from trellis.analyze.holdout import (
     DETECTED_VERDICT,
@@ -572,7 +573,8 @@ class TestFinished:
         log.task(start=sweep_at + timedelta(hours=1))
         log.sweep(at=sweep_at + timedelta(hours=12), dry_run=True)
 
-        report = _analyze(log)
+        with unchecked_window():
+            report = _analyze(log)
 
         assert report.funnel.unfinished == 2
         assert report.funnel.eligible == 2
@@ -581,7 +583,8 @@ class TestFinished:
         log.task(start=MONDAY)
         log.task(start=MONDAY + timedelta(hours=1))
 
-        report = _analyze(log)
+        with unchecked_window():
+            report = _analyze(log)
 
         assert report.funnel.unfinished == 2
         assert report.funnel.eligible == 0
@@ -829,7 +832,8 @@ class TestExclusions:
             timing=timing_payload(hook_before=True),
         )
 
-        report = _analyze(log)
+        with unchecked_window():
+            report = _analyze(log)
 
         assert report.funnel.unfinished == 1
         assert report.funnel.pre_treatment_excluded == 1
@@ -1499,7 +1503,7 @@ class TestCovariateAdjusted:
         assert block.status == "ok"
         assert [(a.name, a.preregistered) for a in block.adjustments] == [
             ("brief_length", True),
-            ("brief_length_and_agent_type", False),
+            ("brief_length_and_agent_type", True),
         ]
         brief, both = block.adjustments
         assert (brief.n_used, brief.n_missing_covariate) == (48, 0)
@@ -1516,7 +1520,7 @@ class TestCovariateAdjusted:
         self, log: HoldoutLog
     ) -> None:
         """Within strata the outcome follows the agent type and not the arm:
-        the exploratory adjustment's interval must be well inside the
+        the agent-type adjustment's interval must be well inside the
         primary's. Without residualising it would be the primary's."""
         types = (TYPE_A, TYPE_B, TYPE_C)
         _write_covariate_tasks(
@@ -1650,7 +1654,7 @@ class TestCovariateAdjusted:
             "0 lacked a covariate"
         ) in note
         assert (
-            "brief-length and agent type (exploratory): 44 of 48 analysed tasks "
+            "brief-length and agent type (pre-registered): 44 of 48 analysed tasks "
             "used, 4 lacked a covariate"
         ) in note
         assert "holds the fitted coefficients fixed" in note
@@ -1696,7 +1700,7 @@ class TestCovariateAdjusted:
         self, log: HoldoutLog
     ) -> None:
         """Three strata of three tasks: 9 tasks less a rank of 4 leaves 5 for
-        the brief alone, and the exploratory fit's two agent-type indicators
+        the brief alone, and the agent-type fit's two agent-type indicators
         (each type once per stratum, so none is a stratum's copy) leave 3,
         under the floor of 4."""
         types = (TYPE_A, TYPE_B, TYPE_C)  # one of each in every stratum
@@ -2001,7 +2005,7 @@ class TestCovariateAdjusted:
         self, log: HoldoutLog
     ) -> None:
         """Served tasks all one type and withheld tasks all another: the
-        exploratory adjustment is refused and the brief-length one stands."""
+        agent-type adjustment is refused and the brief-length one stands."""
         _write_covariate_tasks(
             log,
             y_of=lambda p, t, withheld, rng: (

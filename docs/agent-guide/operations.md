@@ -3671,7 +3671,7 @@ trellis analyze holdout [--days N] [--until ISO] [--rate R] [--outcome NAME] [--
 | `--rate` | the single rate present | The `holdout_rate` to analyse; several rates in the window without it exit `2` |
 | `--outcome` | `log1p_turns` | `log1p_turns`, `prs_created`, `log1p_tokens`, `commits`, or the guardrails `log1p_commits` and `any_commit` |
 | `--itt` | off | Keep usage-limit cut-offs (the first sensitivity analysis) |
-| `--by-commit` | off | Add `by_commit`, a per-build table of the analysed tasks with each arm's outcome mean; no interval or p-value, and no other figure changes |
+| `--by-commit` | off | Add `by_commit`, a per-build table of the analysed tasks with each arm's outcome mean and the served-minus-withheld difference, builds under 5 withheld tasks pooled as `other`; descriptive and non-decisive, with no interval or p-value, and no other figure changes |
 | `--operational` | off | Report only what shows the experiment is running, reading no outcome value; see [`--operational`](#operational-mode) |
 | `--permutations` | `10000` | Within-stratum permutations for the two-sided p-value |
 | `--bootstraps` | `4000` | Stratified bootstrap replicates for the 95% CI |
@@ -3773,7 +3773,10 @@ an id). The exact specification:
   differ by Monte Carlo noise. It is `null` when the fit is refused for too few
   residual degrees of freedom or for no stratum holding both arms.
 - **Covariates.** `log1p(brief_chars)` (`brief_length`, pre-registered), and
-  that plus the sub-agent type (`brief_length_and_agent_type`, exploratory).
+  that plus the sub-agent type (`brief_length_and_agent_type`, also pre-registered).
+  Both are secondary and non-decisive, and each reports `n_used` and
+  `n_missing_covariate`, the analysed tasks it fitted and the ones it dropped for a
+  missing covariate.
 - **Fit.** Least squares of the outcome on one indicator per stratum (parent
   session x ISO week), the covariates and, for the agent type, one indicator per
   level. Types with fewer than 3 tasks pool into a single level first, and the
@@ -3805,19 +3808,23 @@ an id). The exact specification:
   under no outcome-mean key; `mean_served` and `mean_withheld` are there only on
   the unadjusted run, where they are outcome means.
 
-`--by-commit` adds a descriptive table of how the analysed tasks split across the
-builds that served them, so a reader can judge whether a deploy inside the window
+`--by-commit` adds a descriptive, non-decisive table of how the analysed tasks split across the
+builds that served them (`verdict` reads `descriptive, not decisive`), so a reader can judge whether a deploy inside the window
 confounds the comparison. It is not a second estimate: no p-value, interval or
 verdict per build, and every other figure is what it is without the flag (the
 JSON carries no `by_commit` key unless it is passed, and the text table follows
-the descriptive block). A task's build is the `(version, commit)` in
+the descriptive block). A task's build is the commit in
 `metadata.write_provenance` on its first pack, the first id its join lists,
 which is the pack that sets its arm. `build` is the label `analyze health`
-gives that pair in `serve.serving_builds` (`1.0.0 @ <commit>`,
-`1.0.0 @ commit unknown`, or `no provenance` when the row has no usable stamp),
-and rows are grouped on the full pair, so one commit under two versions is two
-rows. `rows` come in first-seen order, each with `build`, `first_seen` and
-`last_seen` (the earliest and latest first-pack times of the tasks counted under
+gives that stamp in `serve.serving_builds` (`1.0.0 @ <commit>`,
+`1.0.0 @ commit unknown`, or `no provenance` when the row has no usable stamp).
+Rows are grouped on the commit, so one commit under two versions is one row
+labelled with both (`1.0.0, 1.1.0 @ <commit>`) and pooled once; a build with no
+commit is keyed by its version. `analyze health` keys on the full
+`(version, commit)` pair, so its rows can split a commit that this table joins;
+`--operational` keys and labels its rows as this table does, so the two agree on
+what a row is. `rows` come in first-seen order, each with `build`, `first_seen`
+and `last_seen` (the earliest and latest first-pack times of the tasks counted under
 it) and, per arm, `n` and
 `outcome_mean`, the mean of the primary's outcome column (`null` for an empty
 arm). The rows cover the same tasks as the primary: the analysed set, so cut-offs
@@ -3826,6 +3833,109 @@ from more than one build is counted once, under its first pack's build, and also
 `units_spanning_builds`, so the table never sums to more than the analysed
 tasks. The commit is the one the build stamped at install, so an editable
 install on a moved working tree names the commit it was installed at.
+
+Each `by_commit` row also carries `difference`, the served mean minus the withheld mean of the
+tasks it counts, `null` (never 0) when either arm holds none, and `by_commit.verdict` names the
+table descriptive and non-decisive: it describes heterogeneity across builds and cannot overturn
+or rescue the primary, which averages over the build mix in the window. A build serving fewer than
+`pool_threshold` (5) withheld analysed tasks joins one final row named `other`, whose figures and
+difference are computed over the pooled tasks, and `pooled_builds` counts the builds in it. The
+rows are counts and means of the same tasks as the primary, so `--operational` still prints none
+of them.
+
+**Pinned readout and the settled window.** The experiment is read once, at its horizon, with
+
+```bash
+trellis analyze holdout --until 2026-12-23T22:47:00Z --days 60 --rate 0.2 --by-commit --limit 20000 --format json
+```
+
+`settled_window` says whether that read is complete, and it is checked only when `--until` is
+given (`checked: false` otherwise, and the text prints a `window not checked` line; the JSON of
+such a read is unchanged). A task whose first pack came just before `--until` is joined
+by the first completed capture sweep at or after it, and counts as finished only when a later
+sweep ran `--settle-hours` after that join. A sweep that parsed no session and lost some to an
+error (`sessions_parsed` 0, `sessions_errored` above 0) settles nothing, in this report and in
+`--operational`; a sweep that parsed none and lost none had nothing to do and counts. The window
+is also unsettled while any in-window, in-rate task is unfinished, whatever its source: a join
+stamped after its source's last sweep (a join-only re-parse, or a long task the second sweep
+rewrote) is dropped from the read, so `reason` says so and a later sweep that runs
+`--settle-hours` after the latest such join settles it. A join-only re-parse must therefore
+precede the settling sweeps. Only sources that wrote an in-scope task (a task with a parent session, in the
+window and at the rate, whose first pack is non-empty, served or withheld, and whose join has an
+outcome block) are waited on, so a retired source whose tasks are outside the
+analysis does not hold the read open, and a stopped source with an in-scope task does, named in
+`reason`, at any distance from `--until`. There is no override flag.
+
+Until the window settles the read is refused. The payload is an allow-list: `status` reads
+`window not settled`; `window_days`, `since`, `until`, `rate` (as given, `null` when not given),
+`outcome`, `itt` and `settle_hours` say what was asked; `planned_mde` and `planned_n` are the
+constants; `settled_window` carries `checked`, `settled: false`, `needs_sweep_after`,
+`latest_sweep` and `reason`; and one note names `--operational` as the early check. Every other
+key (`funnel`, `descriptive`, `by_commit`, `guardrails`, `power`, `inference`,
+`covariate_adjusted`, `sessions`, `scan` and the rest) is absent, not `null`. The evidence is
+gathered before the check, so the funnel counts and the task units are computed and then
+discarded and none of it is published; the rest never runs. The text prints an `INCOMPLETE READ` line,
+the time a completed sweep must reach and the note, and no table: `--by-commit` on such a read
+prints the refusal. The exit code is `0` either way and does not depend on `--format`.
+
+Why a refusal rather than a read with the figures withheld: who is analysed is decided by whether
+a session ended on a usage limit and whether a value exists, and a count of tasks, a rate or a
+timestamp moves with how many pack calls a task made, how long it ran and when its join was
+written, so listing the keys to blank left each pass a key behind. `tests/unit/analyze/
+test_holdout_readout_form.py` pins the allow-list and compares whole payloads of store pairs
+that differ in the withheld arm's values, usage-limit flags and missing outcomes, its pack calls
+and join times, the timing's tool-call and hook-message counts and an outcome block. The library,
+the CLI in both formats and the REST route read them the same, and the same pairs read settled
+differ (all but the join-time pair), so the comparison is not vacuous.
+
+The read is not free of behaviour, and three values still move with the store. `needs_sweep_after`
+is one timestamp, the latest of the window end (for a source with no sweep after it), each
+source's first sweep after the window end plus `--settle-hours`, and the latest unfinished
+in-scope join plus `--settle-hours`, so it moves with when the latest unfinished join was
+written. `latest_sweep` moves with the sweeps' own times, not with the sessions they parsed.
+`reason` carries no count, task id or join time; it moves only with which sources
+wrote an in-scope task (and so have to be waited on), the times of the sweeps it names, and whether
+an in-scope task is unfinished at all, which adds one fixed clause. Those are the only ways, and
+`tests/unit/analyze/test_holdout_readout_form.py` shows a pair that differs only in them.
+
+A join is in scope only if it has an outcome block, and scope reads that block's presence, not its
+contents. A missing block can therefore turn a refusal into a full report: a second source with no
+sweep whose one in-window task has no block is not waited on, and neither is an unfinished join
+that has none. That is accepted. The analysed set never holds a task without a block, so the block
+changes who is waited on and nothing the read analyses, and current capture always writes it. A
+test pins the flip and names it as accepted.
+
+A checked read whose event scan was truncated (`--limit` cut off the oldest events before the
+window start) is refused too, and `reason` gains one fixed clause naming `--limit`, with no count.
+Without that, a task making more pack calls could move where the scan stops, and with it which
+unfinished task a read sees. Whether a scan truncates still moves with row volume, so that is a
+residual: the read turns on whether the cap was reached, not on a figure. Sliding `--until` and
+reading `needs_sweep_after` can narrow that pooled timestamp to a few unfinished tasks. It shows no
+arm. That was read from the code and not run.
+
+A rate that cannot be resolved (several rates in the window and no `--rate`) still raises its error
+before the check, as it does for a settled read. A checked read lists the rates without row counts,
+so the message follows the configured rates, not what a task did; which rates it names still
+depends on a row existing at that rate. A read with no `--until` does not run the check and keeps
+its message with the counts, and is not otherwise changed, and neither is a settled read. The refusal fires for a window the sweeps have not settled, whatever its distance
+from the data's last sweep, so it is not a horizon gate, and `--settle-hours 0` settles on one
+sweep. With daily sweeps (say at 10:00Z, as an example only) and `--until 2026-12-23T22:47:00Z`,
+the first sweep at or after the horizon is the next morning's and the earliest complete read
+follows the sweep after it.
+
+A later run of the same command reads the same window: the window is bounded by `--until`, and
+`--limit 20000` is the per-event-type scan cap. The scan reads newest first from now and the cap
+drops the oldest rows, so a later run reproduces the same pack rows only while `scan.truncated` is
+`false`; once enough events accumulate to truncate it, the window start moves and the figures can
+change, so raise `--limit`. Joins and sweeps after `--until` are read on purpose, so a task still
+running at the horizon appears in a later run once its join is written.
+
+`inference.top_stratum_weight_share` is the share of the estimator's weight (`n1*n0/n` summed over
+the strata, not a share of tasks) held by the heaviest stratum, `null` when the primary does not
+run. The descriptive block's MDE and N-for-10% size at the analysed `--rate`
+(`descriptive.mde_withheld_share`): `(t(.975) + t(.80)) * sd * sqrt(1 / (n * p * (1 - p)))`,
+which is the 50/50 `sqrt(4 / n)` at `p = 0.5`. The main-session MDE keeps the planned 50/50 split,
+because main sessions pool packs from every rate.
 
 <a id="operational-mode"></a>
 `--operational` checks that the experiment is running without opening its
@@ -3848,7 +3958,7 @@ only from a join that names no pack. That bounds what the fixtures read, not the
 store: a reader of the events can still read them. Joins and sweeps are paged to completion, so there is no
 scan cap and `--limit` with `--operational` is a usage error (exit 2 in both
 formats). Joins stamped at one instant are ordered by event id, and
-`--by-commit` rows first seen together by build label.
+`--by-commit` rows first seen together by row label.
 
 **The rule.** An operational figure depends only on values fixed when a task's
 first pack was assembled, and on capture sweep times, which no one task drives.
@@ -3956,8 +4066,10 @@ split by arm. `--outcome` and `--itt` are accepted and change nothing;
 `--permutations`, `--bootstraps`, `--power-sims`, `--planned-*` and `--seed` are
 validated as for the full report and then unused, so an invalid one exits
 alike with and without `--operational`. With `--by-commit`, `by_commit` holds
-counts only: per build the eligible tasks that were `served` and `withheld`,
-each under its first pack's build. The text and JSON are an inspection aid, not
+counts only: per commit the eligible tasks that were `served` and `withheld`,
+each under its first pack's build, keyed and labelled as the `--by-commit` table
+of the full report keys and labels its rows (one commit stamped under two versions
+is one row, named with both). The text and JSON are an inspection aid, not
 a pause control: nothing here stops a run.
 
 The guardrails block
@@ -4278,8 +4390,11 @@ reads that stamp in three places (`src/trellis/analyze/holdout.py`):
 1. **Settle.** `_finished` requires a completed, non-dry-run sweep at least
    `trellis analyze holdout --settle-hours` (default 3) after the session's latest
    join, so every rewritten session reads `unfinished` until the next sweep that
-   completes that long after the rejoin. Run the rejoin at least 3 hours before a
-   nightly sweep, and read the holdout only after that sweep.
+   completes that long after the rejoin. A read given `--until` is also refused
+   (`settled_window.settled: false`, `reason` saying that in-window tasks are unfinished) while any in-window
+   task is unfinished, so run the rejoin before the settling sweeps, at least 3
+   hours before a sweep, and read the holdout only after that sweep. Without
+   `--until` the refusal does not apply.
 2. **Main-session rollup.** `_sessions` windows on the latest join's `occurred_at`,
    so the rollup re-dates to the rejoin time, and a run with `--until` earlier than
    the rejoin drops every rewritten session from the rollup. The rollup is

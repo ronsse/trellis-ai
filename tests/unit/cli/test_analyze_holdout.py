@@ -748,7 +748,7 @@ def test_the_covariate_adjusted_block_is_printed_in_both_formats(
     assert block["status"] == "ok"
     assert [(a["name"], a["preregistered"]) for a in block["adjustments"]] == [
         ("brief_length", True),
-        ("brief_length_and_agent_type", False),
+        ("brief_length_and_agent_type", True),
     ]
     assert all(a["n_used"] == 24 for a in block["adjustments"])
     assert all(a["n_missing_covariate"] == 0 for a in block["adjustments"])
@@ -758,7 +758,7 @@ def test_the_covariate_adjusted_block_is_printed_in_both_formats(
     )
     second = flat.index(
         "Secondary (covariate-adjusted, not decisive): "
-        "brief-length and agent type (exploratory)"
+        "brief-length and agent type (pre-registered)"
     )
     assert first < second
     assert "served minus withheld" in flat[first:second]
