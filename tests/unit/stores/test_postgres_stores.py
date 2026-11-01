@@ -9,6 +9,8 @@ All tests are marked with ``@pytest.mark.postgres`` for easy selection.
 
 from __future__ import annotations
 
+import itertools
+import json
 import threading
 import time
 from typing import Any
@@ -275,6 +277,75 @@ def _wait_for_advisory_lock_queue(dsn: str, holder_pid: int) -> bool:
                 return True
             time.sleep(0.01)
     return False
+
+
+def _wait_for_backend_blocked_by(dsn: str, holder_pid: int) -> bool:
+    """Poll until some backend waits on a lock ``holder_pid`` holds (20 s cap).
+
+    Any lock kind counts, so a test need not name the statement that waits:
+    a row lock, a tuple lock and an advisory lock all show in
+    ``pg_blocking_pids``.
+    """
+    deadline = time.monotonic() + 20
+    with psycopg.connect(dsn, autocommit=True) as watcher:
+        while time.monotonic() < deadline:
+            blocked = watcher.execute(
+                "SELECT count(*) > 0 FROM pg_stat_activity"
+                " WHERE %s = ANY(pg_blocking_pids(pid))",
+                (holder_pid,),
+            ).fetchone()[0]
+            if blocked:
+                return True
+            time.sleep(0.005)
+    return False
+
+
+def _wait_until_done_or_waiting(dsn: str, thread: threading.Thread, table: str) -> None:
+    """Poll until ``thread`` ends or a statement on ``table`` waits on a lock
+    (20 s cap). Callers assert on the outcome, so the reason it stopped is not
+    returned.
+    """
+    sql = (
+        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+        " AND wait_event_type = 'Lock' AND query LIKE '%%' || %s || '%%'"
+    )
+    deadline = time.monotonic() + 20
+    with psycopg.connect(dsn, autocommit=True) as mon:
+        while time.monotonic() < deadline:
+            thread.join(timeout=0.005)
+            if not thread.is_alive():
+                return
+            row = mon.execute(sql, (table,)).fetchone()
+            if row and row[0]:
+                return
+
+
+def _hold_the_bulk_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[threading.Event, threading.Event]:
+    """Pause the thread named ``bulk-writer`` right after its first clock read.
+
+    Returns ``(clock_read, resume)``: ``clock_read`` is set once that thread
+    has read the clock, and it goes on when ``resume`` is set (20 s cap). The
+    stamp it returns is the one read before the pause.
+    """
+    import trellis.stores.postgres.graph as graph_mod
+
+    real_utc_now = graph_mod.utc_now
+    clock_read = threading.Event()
+    resume = threading.Event()
+
+    def clock_held_for_the_bulk_writer() -> Any:
+        stamp = real_utc_now()
+        if threading.current_thread().name == "bulk-writer" and (
+            not clock_read.is_set()
+        ):
+            clock_read.set()
+            resume.wait(20)
+        return stamp
+
+    monkeypatch.setattr(graph_mod, "utc_now", clock_held_for_the_bulk_writer)
+    return clock_read, resume
 
 
 def _rows_left(dsn: str, node_id: str) -> dict[str, int]:
@@ -609,6 +680,139 @@ class TestPostgresGraphStore:
         assert len(versions) == 2, versions
         assert versions[1][0] >= released_at, versions
 
+    def test_upsert_nodes_bulk_stamps_its_versions_after_the_lock_wait(
+        self, store
+    ) -> None:
+        """A bulk write that waits for a node's row lock stamps its versions
+        after the wait, as ``upsert_node`` does.
+
+        A clock read before the transaction lets the bulk write close the
+        current version at an earlier time than that version's
+        ``valid_from``, so an ``as_of`` read in the gap serves two versions
+        of one node.
+        """
+        from trellis.core.base import utc_now
+
+        node_id = "bulk-lock-synthetic-node"
+        store.upsert_node(node_id, "synthetic_type", {"writer": "seed"})
+
+        outcome: dict[str, Any] = {}
+
+        def call_bulk() -> None:
+            try:
+                outcome["ids"] = store.upsert_nodes_bulk(
+                    [
+                        {
+                            "node_id": node_id,
+                            "node_type": "synthetic_type",
+                            "properties": {"writer": "queued"},
+                        }
+                    ]
+                )
+            except Exception as exc:
+                outcome["ids"] = exc
+
+        writer = threading.Thread(target=call_bulk)
+        holder = psycopg.connect(PG_DSN)
+        try:
+            holder.execute(
+                "SELECT 1 FROM nodes WHERE node_id = %s AND valid_to IS NULL"
+                " FOR UPDATE",
+                (node_id,),
+            )
+            writer.start()
+            waited = _wait_for_backend_blocked_by(PG_DSN, holder.info.backend_pid)
+            released_at = utc_now()
+            holder.commit()
+        finally:
+            holder.close()
+        writer.join(timeout=20)
+
+        assert waited, "upsert_nodes_bulk did not wait for the row lock"
+        assert not writer.is_alive()
+        assert not isinstance(outcome["ids"], Exception), outcome["ids"]
+        with psycopg.connect(PG_DSN, autocommit=True) as conn:
+            versions = conn.execute(
+                "SELECT valid_from, valid_to FROM nodes"
+                " WHERE node_id = %s ORDER BY valid_from",
+                (node_id,),
+            ).fetchall()
+        assert len(versions) == 2, versions
+        assert versions[1][0] >= released_at, versions
+
+    def test_upsert_nodes_bulk_does_not_close_a_newer_version_with_an_older_stamp(
+        self, store, monkeypatch
+    ) -> None:
+        """A concurrent ``upsert_node`` that commits after the bulk write
+        took its timestamp leaves a chain of versions with no gap, overlap or
+        inverted row.
+
+        The bulk write is held right after it reads the clock. Taken before
+        its transaction, that stamp predates the concurrent version, which
+        the bulk ``UPDATE`` then closes with a ``valid_to`` earlier than the
+        version's own ``valid_from``: no ``as_of`` query can see that row.
+        Taken after the row lock, the stamp is later than any version the
+        concurrent writer committed first, and a writer that arrives later
+        waits and writes after the bulk version.
+        """
+        node_id = "bulk-clock-synthetic-node"
+        store.upsert_node(node_id, "synthetic_type", {"writer": "seed"})
+        clock_read, resume = _hold_the_bulk_clock(monkeypatch)
+
+        outcome: dict[str, Any] = {}
+
+        def call_bulk() -> None:
+            try:
+                outcome["bulk"] = store.upsert_nodes_bulk(
+                    [
+                        {
+                            "node_id": node_id,
+                            "node_type": "synthetic_type",
+                            "properties": {"writer": "bulk"},
+                        }
+                    ]
+                )
+            except Exception as exc:
+                outcome["bulk"] = exc
+
+        def call_upsert() -> None:
+            try:
+                outcome["single"] = store.upsert_node(
+                    node_id, "synthetic_type", {"writer": "single"}
+                )
+            except Exception as exc:
+                outcome["single"] = exc
+
+        bulk = threading.Thread(target=call_bulk, name="bulk-writer")
+        single = threading.Thread(target=call_upsert, name="single-writer")
+        try:
+            bulk.start()
+            assert clock_read.wait(20), "the bulk write never read the clock"
+            single.start()
+            # Either the single writer commits at once (the bulk write holds
+            # nothing yet) or it waits for the row lock the bulk write holds.
+            _wait_until_done_or_waiting(PG_DSN, single, "nodes")
+        finally:
+            resume.set()
+        bulk.join(timeout=20)
+        single.join(timeout=20)
+
+        assert not bulk.is_alive()
+        assert not single.is_alive()
+        for name in ("bulk", "single"):
+            assert not isinstance(outcome[name], Exception), outcome[name]
+        with psycopg.connect(PG_DSN, autocommit=True) as conn:
+            versions = conn.execute(
+                "SELECT valid_from, valid_to FROM nodes"
+                " WHERE node_id = %s ORDER BY valid_from",
+                (node_id,),
+            ).fetchall()
+        assert len(versions) == 3, versions
+        assert all(end is None or end >= start for start, end in versions), versions
+        assert versions[-1][1] is None, versions
+        for version, successor in itertools.pairwise(versions):
+            assert version[1] == successor[0], versions
+
     def test_upsert_node_other_unique_violation_is_not_retried(
         self, store, monkeypatch
     ) -> None:
@@ -668,26 +872,39 @@ class TestPostgresGraphStore:
         """``upsert_nodes_bulk`` does not retry: a racing create rolls the
         batch back and raises a type-only :class:`StoreError` instead of a
         raw ``UniqueViolation``.
+
+        The bulk write has found no row for the node when a concurrent
+        ``upsert_node`` creates it and commits; the bulk ``INSERT`` then
+        races that current row.
         """
         from trellis.errors import StoreError
-        from trellis.stores.postgres.graph import PostgresGraphStore
 
         node_id = "race-node-synthetic-bulk"
-        store.upsert_node(node_id, "t", {})
+        clock_read, resume = _hold_the_bulk_clock(monkeypatch)
 
-        # Make the bulk path blind to the row that already exists, so its
-        # INSERT (no preceding UPDATE) races the real current row.
-        monkeypatch.setattr(
-            PostgresGraphStore,
-            "get_nodes_bulk",
-            lambda self, node_ids, as_of=None: [],
-        )
+        outcome: dict[str, Any] = {}
 
-        with pytest.raises(StoreError) as exc_info:
-            store.upsert_nodes_bulk(
-                [{"node_id": node_id, "node_type": "t", "properties": {}}]
-            )
-        assert node_id not in str(exc_info.value)
+        def call_bulk() -> None:
+            try:
+                outcome["bulk"] = store.upsert_nodes_bulk(
+                    [{"node_id": node_id, "node_type": "t", "properties": {}}]
+                )
+            except Exception as exc:
+                outcome["bulk"] = exc
+
+        bulk = threading.Thread(target=call_bulk, name="bulk-writer")
+        try:
+            bulk.start()
+            assert clock_read.wait(20), "the bulk write never read the clock"
+            store.upsert_node(node_id, "t", {})
+        finally:
+            resume.set()
+        bulk.join(timeout=20)
+
+        assert not bulk.is_alive()
+        assert isinstance(outcome["bulk"], StoreError), outcome["bulk"]
+        assert node_id not in str(outcome["bulk"])
+        assert store.get_node(node_id) is not None
 
     def test_upsert_nodes_bulk_other_unique_violation_is_not_caught(
         self, store, monkeypatch
@@ -889,6 +1106,74 @@ class TestPostgresGraphStore:
             ).fetchall()
         assert len(versions) == 2, versions
         assert versions[1][0] >= released_at, versions
+
+    def test_upsert_edges_bulk_stamps_its_versions_after_the_lock_wait(
+        self, store
+    ) -> None:
+        """A bulk edge write that waits for an edge lock stamps its versions
+        after the wait, as ``upsert_edge`` does.
+
+        A clock read before the lock lets a queued writer close the winner's
+        version at an earlier time than that version's ``valid_from``, so an
+        ``as_of`` read in the gap serves two versions of one edge.
+        """
+        from trellis.core.base import utc_now
+        from trellis.stores.postgres.graph import _edge_lock_key
+
+        key = (
+            "bulk-lock-clock-synthetic-src",
+            "bulk-lock-clock-synthetic-tgt",
+            "synthetic_rel",
+        )
+        store.upsert_node(key[0], "synthetic_type", {})
+        store.upsert_node(key[1], "synthetic_type", {})
+        store.upsert_edge(*key, {"writer": "seed"})
+
+        outcome: dict[str, Any] = {}
+
+        def call_bulk() -> None:
+            try:
+                outcome["edge_ids"] = store.upsert_edges_bulk(
+                    [
+                        {
+                            "source_id": key[0],
+                            "target_id": key[1],
+                            "edge_type": key[2],
+                            "properties": {"writer": "queued"},
+                        }
+                    ]
+                )
+            except Exception as exc:
+                outcome["edge_ids"] = exc
+
+        writer = threading.Thread(target=call_bulk)
+        holder = psycopg.connect(PG_DSN)
+        try:
+            holder.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (_edge_lock_key(*key),),
+            )
+            writer.start()
+            queued = _wait_for_advisory_lock_queue(PG_DSN, holder.info.backend_pid)
+            released_at = utc_now()
+            holder.commit()
+        finally:
+            holder.close()
+        writer.join(timeout=20)
+
+        assert queued, "upsert_edges_bulk did not wait for the edge lock"
+        assert not writer.is_alive()
+        assert not isinstance(outcome["edge_ids"], Exception), outcome["edge_ids"]
+        with psycopg.connect(PG_DSN, autocommit=True) as conn:
+            versions = conn.execute(
+                "SELECT valid_from, valid_to FROM edges"
+                " WHERE source_id = %s AND target_id = %s AND edge_type = %s"
+                " ORDER BY valid_from",
+                key,
+            ).fetchall()
+        assert len(versions) == 2, versions
+        assert versions[1][0] >= released_at, versions
+        assert versions[0][1] == versions[1][0], versions
 
     def test_upsert_edges_bulk_overlapping_batches_leave_one_current_row(
         self, store
@@ -1370,6 +1655,109 @@ class TestPostgresGraphStore:
             ).fetchall()
         assert len(versions) == 2, versions
         assert versions[1][0] >= released_at, versions
+
+    def test_bind_alias_if_absent_keeps_an_owner_a_concurrent_write_just_closed(
+        self, store
+    ) -> None:
+        """An owner whose node row another transaction has closed but not yet
+        committed is still the owner, so its alias is not taken.
+
+        The ``FOR SHARE`` read of the owner waits for that transaction and
+        then finds the row it waited on closed. The new version is not
+        visible to the same statement, so the read returns nothing. That is
+        not a missing owner: the owner has the same name, and a call that
+        read it as gone would rebind the alias to the claimant.
+        """
+        from trellis.schemas.well_known import normalize_entity_name
+        from trellis.stores.base.graph import AliasBindStatus
+
+        source_system = "unity_catalog"
+        raw_id = "main.analytics.race_owner_closed_synthetic"
+        owner_id = "race-owner-closed-synthetic-owner"
+        claimant_id = "race-owner-closed-synthetic-claimant"
+
+        store.upsert_node(owner_id, "table", {"name": "Owner One"})
+        store.upsert_node(claimant_id, "table", {"name": "Claimant"})
+        seed = store.bind_alias_if_absent(owner_id, source_system, raw_id)
+        assert seed.status == AliasBindStatus.BOUND
+
+        outcome: dict[str, Any] = {}
+
+        def call_bind() -> None:
+            try:
+                outcome["result"] = store.bind_alias_if_absent(
+                    claimant_id,
+                    source_system,
+                    raw_id,
+                    raw_name="queued",
+                    stale_owner_name_key=normalize_entity_name("Owner One"),
+                )
+            except Exception as exc:
+                outcome["result"] = exc
+
+        binder = threading.Thread(target=call_bind)
+        writer = psycopg.connect(PG_DSN)
+        try:
+            # A new version of the owner under the same name, uncommitted:
+            # it has closed the current row and inserted its successor.
+            store._write_node_version(
+                writer,
+                owner_id,
+                "table",
+                "semantic",
+                None,
+                None,
+                json.dumps({"name": "Owner One", "touched": True}),
+            )
+            binder.start()
+            blocked = _wait_for_backend_blocked_by(PG_DSN, writer.info.backend_pid)
+            writer.commit()
+        finally:
+            writer.close()
+        binder.join(timeout=20)
+
+        assert blocked, "bind_alias_if_absent did not wait for the owner row"
+        assert not binder.is_alive()
+        result = outcome["result"]
+        assert not isinstance(result, Exception), result
+        assert result.status == AliasBindStatus.CONFLICT
+        assert result.entity_id == owner_id
+        alias = store.resolve_alias(source_system, raw_id)
+        assert alias is not None
+        assert alias["entity_id"] == owner_id
+        assert len(store.get_aliases(owner_id)) == 1
+
+    def test_bind_alias_if_absent_rebinds_an_owner_with_no_current_node(
+        self, store
+    ) -> None:
+        """An owner that has no current node row at all is gone, and its
+        alias goes to the claimant.
+
+        Pins the other side of the owner re-read: reading nothing twice
+        still means no owner.
+        """
+        from trellis.schemas.well_known import normalize_entity_name
+        from trellis.stores.base.graph import AliasBindStatus
+
+        source_system = "unity_catalog"
+        raw_id = "main.analytics.race_owner_gone_synthetic"
+        claimant_id = "race-owner-gone-synthetic-claimant"
+
+        store.upsert_node(claimant_id, "table", {"name": "Claimant"})
+        seed = store.bind_alias_if_absent(
+            "race-owner-gone-synthetic-owner", source_system, raw_id
+        )
+        assert seed.status == AliasBindStatus.BOUND
+
+        result = store.bind_alias_if_absent(
+            claimant_id,
+            source_system,
+            raw_id,
+            stale_owner_name_key=normalize_entity_name("Owner One"),
+        )
+
+        assert result.status == AliasBindStatus.REBOUND
+        assert result.entity_id == claimant_id
 
     def test_compact_versions_drops_old_closed_rows(self, store) -> None:
         """Gap 4.2 — Postgres SCD2 retention."""
