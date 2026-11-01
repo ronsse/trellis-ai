@@ -202,6 +202,27 @@ def build_classify_rules_executor(registry: StoreRegistry) -> MutationExecutor:
     )
 
 
+def build_api_keys_executor(registry: StoreRegistry) -> MutationExecutor:
+    """Build a :class:`MutationExecutor` wired with ONLY the API-key handlers.
+
+    Mirrors :func:`build_settings_executor`, and for a sharper reason:
+    ``Operation.API_KEY_MINT`` / ``API_KEY_REVOKE`` are absent from
+    :func:`build_curate_executor`'s handler dict, so ``POST /commands/batch``
+    and MCP ``execute_mutation`` answer "no handler registered" and an agent
+    cannot mint a credential through them. The admin REST routes, ``trellis
+    admin api-keys`` and the MCP revoke tool build their executor here. Stage 2
+    runs as everywhere (``tests/unit/test_policy_gate_rule.py``).
+    """
+    from trellis.mutate.handlers import create_api_key_handlers  # noqa: PLC0415
+    from trellis.mutate.policy_source import build_policy_gate  # noqa: PLC0415
+
+    return MutationExecutor(
+        event_log=registry.operational.event_log,
+        handlers=create_api_key_handlers(registry),
+        policy_gate=build_policy_gate(registry),
+    )
+
+
 def redirect_unreachable_settings_update(result: CommandResult) -> CommandResult:
     """Point a caller at the real settings write path; ``status`` unchanged.
 
@@ -267,6 +288,7 @@ __all__ = [
     "Operation",
     "OperationRegistry",
     "ReservedMetadataKeyError",
+    "build_api_keys_executor",
     "build_classify_rules_executor",
     "build_curate_executor",
     "build_evidence_ingest_command",

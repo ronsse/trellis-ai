@@ -24,19 +24,33 @@ Exit codes follow :mod:`trellis_cli.exit_codes`:
 from __future__ import annotations
 
 import json
-from typing import Any
 
 import structlog
 import typer
 from rich.markup import escape
 from rich.table import Table
 
-from trellis.auth import KEY_SCOPES, SCOPE_EXTERNAL, generate_api_key
+from trellis.auth import (
+    SCOPE_EXTERNAL,
+    SHOWN_ONCE_WARNING,
+    api_key_public_row,
+)
 from trellis.core.error_sanitize import sanitize_error_message
-from trellis.stores.base.api_key import ApiKeyRecord
-from trellis_cli.exit_codes import EXIT_OK, EXIT_STORE, EXIT_VALIDATION
+from trellis.mutate import (
+    Command,
+    CommandResult,
+    CommandStatus,
+    build_api_keys_executor,
+)
+from trellis.mutate.api_key_commands import build_mint_command, build_revoke_command
+from trellis_cli.exit_codes import (
+    EXIT_OK,
+    EXIT_STORE,
+    EXIT_VALIDATION,
+    refusal_exit_code,
+)
 from trellis_cli.output import build_console
-from trellis_cli.stores import get_api_key_store
+from trellis_cli.stores import _get_registry, get_api_key_store
 
 logger = structlog.get_logger(__name__)
 console = build_console()
@@ -46,28 +60,13 @@ api_keys_app = typer.Typer(
     help="Manage scoped REST API credentials.",
 )
 
-# Operator guidance shown beside the freshly-minted token (not a secret).
-_SHOWN_ONCE_WARNING = (
-    "Store this token now - it is shown once and cannot be recovered. "
-    "Only a hash of the secret is persisted."
-)
+#: The actor on the audit events the CLI's governed writes emit.
+_CLI_ACTOR = "cli:api-keys"
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _record_to_row(record: ApiKeyRecord) -> dict[str, Any]:
-    """Project a record to the wire/list shape. Never includes the hash."""
-    return {
-        "key_id": record.key_id,
-        "name": record.name,
-        "scopes": list(record.scopes),
-        "created_at": record.created_at.isoformat(),
-        "revoked": record.revoked_at is not None,
-        "revoked_at": (record.revoked_at.isoformat() if record.revoked_at else None),
-    }
 
 
 def _store_error(exc: Exception, output_format: str) -> typer.Exit:
@@ -81,17 +80,27 @@ def _store_error(exc: Exception, output_format: str) -> typer.Exit:
     return typer.Exit(code=EXIT_STORE)
 
 
-def _parse_scopes(scopes: str) -> list[str]:
-    """Split + validate a comma-separated scope list; loud on unknowns."""
-    parsed = [s.strip() for s in scopes.split(",") if s.strip()]
-    unknown = [s for s in parsed if s not in KEY_SCOPES]
-    if unknown or not parsed:
-        msg = (
-            f"Unknown or empty scope(s): {unknown or '(none given)'}; "
-            f"valid scopes: {sorted(KEY_SCOPES)}"
+def _execute(command: Command) -> CommandResult:
+    """Submit *command* through the governed API-key executor."""
+    return build_api_keys_executor(_get_registry()).execute(command)
+
+
+def _render_refusal(result: CommandResult, key_id: str, output_format: str) -> None:
+    """Print why a governed write was refused or failed (exit is the caller's).
+
+    A refusal the operator can fix (unknown or already-revoked key) keeps the
+    ``{"error": reason, "key_id", "message"}`` shape this command has always
+    printed; anything else carries the executor's own message.
+    """
+    reason = str(result.metadata.get("rejection_reason") or result.status.value)
+    message = sanitize_error_message(result.message)
+    if output_format == "json":
+        print(json.dumps({"error": reason, "key_id": key_id, "message": message}))
+    else:
+        console.print(
+            f"[red]Cannot change {escape(repr(key_id))}: {escape(message)}[/red]",
+            soft_wrap=True,
         )
-        raise ValueError(msg)
-    return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -107,8 +116,9 @@ def create_api_key_command(
 ) -> None:
     """CLI body for ``api-keys create``."""
     try:
-        scope_list = _parse_scopes(scopes)
-        token, record = generate_api_key(name, scope_list)
+        token, record, command = build_mint_command(
+            name, scopes, requested_by=_CLI_ACTOR
+        )
     except ValueError as exc:
         if output_format == "json":
             print(
@@ -124,20 +134,22 @@ def create_api_key_command(
         raise typer.Exit(code=EXIT_VALIDATION) from exc
 
     try:
-        store = get_api_key_store()
-        store.create(record)
+        result = _execute(command)
     except typer.Exit:
         raise
     except Exception as exc:
         raise _store_error(exc, output_format) from exc
+    if result.status not in (CommandStatus.SUCCESS, CommandStatus.DUPLICATE):
+        _render_refusal(result, record.key_id, output_format)
+        raise typer.Exit(code=refusal_exit_code(result))
 
     if output_format == "json":
         print(
             json.dumps(
                 {
                     "token": token,
-                    "warning": _SHOWN_ONCE_WARNING,
-                    **_record_to_row(record),
+                    "warning": SHOWN_ONCE_WARNING,
+                    **api_key_public_row(record),
                 }
             )
         )
@@ -153,7 +165,7 @@ def create_api_key_command(
                 "it does not hide unlabelled content from other keys.[/dim]"
             )
         console.print(f"  token:  [bold green]{token}[/bold green]")
-        console.print(f"[yellow]{_SHOWN_ONCE_WARNING}[/yellow]")
+        console.print(f"[yellow]{SHOWN_ONCE_WARNING}[/yellow]")
     raise typer.Exit(code=EXIT_OK)
 
 
@@ -161,7 +173,7 @@ def list_api_keys_command(*, output_format: str) -> None:
     """CLI body for ``api-keys list``."""
     try:
         store = get_api_key_store()
-        rows = [_record_to_row(r) for r in store.list()]
+        rows = [api_key_public_row(r) for r in store.list()]
     except typer.Exit:
         raise
     except Exception as exc:
@@ -196,36 +208,15 @@ def list_api_keys_command(*, output_format: str) -> None:
 def revoke_api_key_command(*, key_id: str, output_format: str) -> None:
     """CLI body for ``api-keys revoke``."""
     try:
-        store = get_api_key_store()
-        existing = store.get(key_id)
-        revoked = store.revoke(key_id)
+        result = _execute(build_revoke_command(key_id, requested_by=_CLI_ACTOR))
     except typer.Exit:
         raise
     except Exception as exc:
         raise _store_error(exc, output_format) from exc
 
-    if not revoked:
-        # Loud: distinguish unknown vs already-revoked for the operator.
-        reason = "already_revoked" if existing is not None else "unknown_key_id"
-        if output_format == "json":
-            print(
-                json.dumps(
-                    {
-                        "error": reason,
-                        "key_id": key_id,
-                        "message": (
-                            f"Cannot revoke {key_id!r}: {reason.replace('_', ' ')}."
-                        ),
-                    }
-                )
-            )
-        else:
-            console.print(
-                f"[red]Cannot revoke {escape(repr(key_id))}: "
-                f"{reason.replace('_', ' ')}.[/red]",
-                soft_wrap=True,
-            )
-        raise typer.Exit(code=EXIT_VALIDATION)
+    if result.status not in (CommandStatus.SUCCESS, CommandStatus.DUPLICATE):
+        _render_refusal(result, key_id, output_format)
+        raise typer.Exit(code=refusal_exit_code(result))
 
     if output_format == "json":
         print(json.dumps({"status": "revoked", "key_id": key_id}))

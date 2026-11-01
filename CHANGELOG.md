@@ -6,6 +6,18 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **API keys can be listed, minted and revoked from the REST API, the UI and MCP.**
+  `GET`/`POST /api/v1/api-keys` and `DELETE /api/v1/api-keys/{key_id}` (admin scope), a
+  **Keys** tab in the web UI with scope presets, a one-time token display and a
+  typed-confirmation revoke, and the MCP tools `list_api_keys` and `revoke_api_key`. There is
+  deliberately no MCP tool that mints a key. Mint and revoke are governed operations
+  (`api_key.mint`, `api_key.revoke`), so a denying policy blocks every surface, and each emits
+  an `api_key.minted` / `api_key.revoked` event, the CLI's included; the payload names the key
+  id, name, scopes and actor and never the token, secret or hash. Scope validation is one shared
+  parser (`trellis.auth.parse_scope_list`), so `read,admin,external` is refused identically
+  everywhere. A caller cannot revoke the key it is authenticated with (the CLI still can). An
+  `external` key is refused on all of it. No change to the `trellis_api_keys` table.
+
 - **An `external` key reads only what someone labelled `public`.** `trellis admin api-keys
   create --scopes read,external` mints a key whose clearance is a new lowest rung, `public`.
   A pack, search, `GET /documents` or `get_items` serves it only a stored document labelled

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -172,6 +172,58 @@ def external_scope_refusal(scopes: Iterable[str]) -> str | None:
             "mint it as 'read,external'"
         )
     return None
+
+
+#: Shown beside a freshly minted token on every surface that mints one.
+SHOWN_ONCE_WARNING = (
+    "Store this token now - it is shown once and cannot be recovered. "
+    "Only a hash of the secret is persisted."
+)
+
+
+def parse_scope_list(scopes: str | Iterable[str]) -> list[str]:
+    """Split a comma-separated scope list and validate it; loud on unknowns.
+
+    The one parse every mint surface (``trellis admin api-keys create``, the
+    REST route) calls before :func:`generate_api_key`, so a scope that is
+    unknown or empty is refused the same way on each. ``external`` beside
+    anything but ``read`` is refused by :func:`generate_api_key` itself.
+    """
+    raw = scopes.split(",") if isinstance(scopes, str) else list(scopes)
+    parsed = [s.strip() for s in raw if isinstance(s, str) and s.strip()]
+    unknown = [s for s in parsed if s not in KEY_SCOPES]
+    if unknown or not parsed:
+        msg = (
+            f"Unknown or empty scope(s): {unknown or '(none given)'}; "
+            f"valid scopes: {sorted(KEY_SCOPES)}"
+        )
+        raise ValueError(msg)
+    return parsed
+
+
+#: Scope combinations an operator mints most often, in the order a picker shows
+#: them. A convenience over :data:`KEY_SCOPES`, not a second vocabulary: every
+#: entry passes :func:`generate_api_key` (``tests/unit/api/test_api_keys_routes.py``).
+KEY_PRESETS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Read only", (SCOPE_READ,)),
+    ("Read, public documents only (external)", (SCOPE_READ, SCOPE_EXTERNAL)),
+    ("Read and confidential", (SCOPE_READ, SCOPE_CONFIDENTIAL)),
+    ("Read and restricted", (SCOPE_READ, SCOPE_RESTRICTED)),
+    ("Read and write (ingest, mutate)", (SCOPE_READ, SCOPE_INGEST, SCOPE_MUTATE)),
+    ("Admin (implies every other scope)", (SCOPE_ADMIN,)),
+)
+
+
+def api_key_public_row(record: ApiKeyRecord) -> dict[str, Any]:
+    """The listable shape of a key: never the secret hash, never any of the secret."""
+    return {
+        "key_id": record.key_id,
+        "name": record.name,
+        "scopes": list(record.scopes),
+        "created_at": record.created_at.isoformat(),
+        "revoked": record.revoked_at is not None,
+        "revoked_at": (record.revoked_at.isoformat() if record.revoked_at else None),
+    }
 
 
 def hash_secret(secret: str) -> str:

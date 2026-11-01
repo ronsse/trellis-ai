@@ -315,6 +315,32 @@ components:
       - timeout_seconds
       title: AdminJobSummary
       type: object
+    ApiKeyMintRequest:
+      additionalProperties: false
+      description: 'Body for ``POST /api/v1/api-keys``.
+
+
+        ``scopes`` is a comma-separated string or a list, checked by the same
+
+        parser ``trellis admin api-keys create`` uses, so ``external`` is valid
+
+        only as ``read,external`` on both surfaces.'
+      properties:
+        name:
+          title: Name
+          type: string
+        scopes:
+          anyOf:
+          - type: string
+          - items:
+              type: string
+            type: array
+          title: Scopes
+      required:
+      - name
+      - scopes
+      title: ApiKeyMintRequest
+      type: object
     AxisReportResponse:
       additionalProperties: false
       description: 'Which retrieval axes this pack has, ran, and did not.
@@ -3753,6 +3779,85 @@ paths:
       summary: Get Analyze Report
       tags:
       - analyze
+  /api/v1/api-keys:
+    get:
+      description: Every key, live and revoked, plus the scope presets a UI can offer.
+      operationId: list_api_keys_api_v1_api_keys_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response List Api Keys Api V1 Api Keys Get
+                type: object
+          description: Successful Response
+      security:
+      - APIKeyHeader: []
+      summary: List Api Keys
+      tags:
+      - api-keys
+    post:
+      description: Mint a key. The full token is in this response and never again.
+      operationId: mint_api_key_api_v1_api_keys_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiKeyMintRequest'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response Mint Api Key Api V1 Api Keys Post
+                type: object
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Mint Api Key
+      tags:
+      - api-keys
+  /api/v1/api-keys/{key_id}:
+    delete:
+      description: Revoke a live key. Unknown, already-revoked and own-key are refused.
+      operationId: revoke_api_key_api_v1_api_keys__key_id__delete
+      parameters:
+      - in: path
+        name: key_id
+        required: true
+        schema:
+          title: Key Id
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties:
+                  type: string
+                title: Response Revoke Api Key Api V1 Api Keys  Key Id  Delete
+                type: object
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Revoke Api Key
+      tags:
+      - api-keys
   /api/v1/classify/candidates:
     get:
       description: 'Recent tag/domain candidates, deduped to each one''s latest emission.

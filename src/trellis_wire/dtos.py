@@ -777,6 +777,18 @@ class RuntimeResponse(WireModel):
 # -- Settings (PR 3, governed settings write) --
 
 
+class ApiKeyMintRequest(WireRequestModel):
+    """Body for ``POST /api/v1/api-keys``.
+
+    ``scopes`` is a comma-separated string or a list, checked by the same
+    parser ``trellis admin api-keys create`` uses, so ``external`` is valid
+    only as ``read,external`` on both surfaces.
+    """
+
+    name: str
+    scopes: str | list[str]
+
+
 class SettingUpdateRequest(WireRequestModel):
     """Body for ``PUT``/``POST /api/v1/settings/{name}``.
 

@@ -168,6 +168,9 @@ ROSTER: dict[str, str] = {
     "retrieve:list_precedent_domains": FREE,  # GET /precedents/domains
     "settings:list_settings": ADMIN,  # GET /settings
     "settings:update_setting": ADMIN,  # PUT /settings/{name}
+    "api_keys:list_api_keys": ADMIN,  # GET /api-keys
+    "api_keys:mint_api_key": ADMIN,  # POST /api-keys
+    "api_keys:revoke_api_key": ADMIN,  # DELETE /api-keys/{key_id}
     "version:api_version": FREE,  # GET /api/version
 }
 
@@ -472,7 +475,7 @@ def test_every_rest_route_is_rostered_and_its_claim_holds() -> None:
     # handler functions (one handler carries two routes).
     assert_hand_read_floor(
         len(route_names(sources)),
-        76,
+        79,
         subject="REST route handlers",
         hint="a route module was skipped, or the decorator spelling changed",
     )

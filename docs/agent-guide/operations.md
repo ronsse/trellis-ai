@@ -5061,6 +5061,50 @@ trellis admin api-keys list --format json
 trellis admin api-keys revoke <KEY_ID> --format json
 ```
 
+### API key management
+
+Keys can be listed, minted and revoked from the REST API and the UI's **Keys**
+tab as well as the CLI. Every surface goes through the same governed path
+(`Operation.API_KEY_MINT` / `API_KEY_REVOKE`, `build_api_keys_executor`), so a
+denying policy blocks all of them alike and one scope check decides what is
+valid: `external` is accepted only as `read,external`, and
+`trellis admin api-keys create`, `POST /api-keys` and the UI refuse
+`read,admin,external` with the same message.
+
+| Surface | List | Mint | Revoke |
+|---|---|---|---|
+| REST (admin scope) | `GET /api/v1/api-keys` | `POST /api/v1/api-keys` `{"name", "scopes"}` (201) | `DELETE /api/v1/api-keys/{key_id}` |
+| CLI | `trellis admin api-keys list` | `trellis admin api-keys create` | `trellis admin api-keys revoke <KEY_ID>` |
+| MCP (admin scope) | `list_api_keys` | none, by design | `revoke_api_key` |
+| UI | Keys tab | Keys tab, with scope presets | Keys tab, typed confirmation |
+
+- **The token is returned once**, in the mint response (`token`, with a
+  `Cache-Control: no-store` header). Only a hash is stored, so a lost token is
+  revoked and replaced, never recovered. `GET /api-keys` and `list_api_keys`
+  return `key_id`, `name`, `scopes`, `created_at`, `revoked` and `revoked_at`,
+  never a hash or any part of a secret. The list also carries the scope
+  `presets` the UI offers.
+- **An `external` key is refused on every route and tool above.** They need the
+  `admin` scope, which an `external` key does not hold.
+- **No MCP tool mints a key.** A token is a credential, and a mint tool would
+  give an agent a way to widen its own access. Mint from the CLI, the REST route
+  or the UI.
+- **Errors.** An unknown key id answers 404, an already-revoked one 409, and an
+  invalid scope list 400; the CLI exits 2 for all three, as before.
+- **A caller cannot revoke the key it is authenticated with.** The REST route and
+  the MCP tool answer with a refusal (409 on REST) and the key stays live, so an
+  admin cannot lock itself out by a misclick. The CLI has no authenticated key
+  and can revoke any key, which makes it the recovery path.
+- **Audit events.** A mint emits `api_key.minted` and a revoke emits
+  `api_key.revoked`, from whichever surface did the work, the CLI included. The
+  payload is `key_id`, `name`, `scopes`, `minted_by` / `revoked_by` and, when the
+  caller was an API key, `actor_key_id` and `actor_key_name`. It never holds the
+  token, the secret or its hash. A refused attempt emits `mutation.rejected`
+  instead. The generic `execute_mutation` tool and `POST /commands/batch` have no
+  handler for these operations, so neither can mint or revoke a key.
+- Not covered: expiry, a last-used stamp, editing a key's scopes, per-key domain
+  limits.
+
 ### Production exposure
 
 Three env toggles control what an unauthenticated caller can reach.
