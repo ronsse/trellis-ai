@@ -1580,10 +1580,13 @@ record merely reads `public` (a corpus file's frontmatter is stored bare as
 `external` key does not read it until it is. A record that carries regulatory tags,
 a jurisdiction, another classification version or a field the schema does not know
 is refused (exit `2`, reason `classification_public_discards`, naming those
-fields, `Nothing was written.`) rather than cleared silently: take the tags off on
-purpose, or leave the document unserved. Only a stored record that already is the
-exact one answers `unchanged`. A target other than `public` keeps the prior fields,
-as it always did. The exit code is the same under `--format text` and
+fields, `Nothing was written.`) rather than cleared silently. Neither the CLI nor
+REST can clear a record's tags, so such a document stays unserved to `external` keys
+until a command that clears them exists (a known gap). Only a stored record that
+already is the exact one answers `unchanged`. A relabel to `public` replaces
+`classified_by` with the exact record's value (the refusal does not name it); a
+target other than `public` keeps the prior fields and its message says nothing about
+a rewrite, as it always did. The exit code is the same under `--format text` and
 `--format json`. The CLI is a trusted-local surface and holds `restricted`
 clearance; the REST route is the credentialed equivalent:
 
@@ -4573,7 +4576,8 @@ alone: every other key is served exactly what it was.
   served to no `external` key until a person relabels it:
   `trellis curate classify-sensitivity <doc_id> --sensitivity public` (or
   `POST /api/v1/documents/{doc_id}/sensitivity`). That command writes the exact
-  record, or refuses with the names of the tags it would discard. A test pins a
+  record, or refuses with the names of the fields it would discard (it replaces
+  `classified_by` and does not refuse over it). A test pins a
   hand-written copy of the record against both the filter and the gate
   (`tests/unit/retrieve/test_public_label_pin.py`), so a schema change that would
   turn every stored `public` document into an empty answer fails on purpose.
@@ -4701,7 +4705,19 @@ scope (it holds no `read`, its clearance is `internal`, and every route answers
 is judged on the stored document row, never on the metadata a pack item carries.
 
 An existence probe by id stays closed: a document the key may not read, a chunk and
-an id that does not exist answer in the same words.
+an id that does not exist answer in the same words. So does a row whose stored
+metadata cannot be parsed (not JSON, empty, nested past the recursion limit, or on
+SQLite not valid UTF-8, and on Postgres a JSONB string that is not JSON): on REST
+`GET /documents/{id}` and in `get_items` it answers as a missing id, and a mixed
+`get_items` call lists it among the not-found ids without failing the call. A store
+fault (an outage, a failed query) still answers 500, because it does not depend on
+the id, and a key above `public` still sees the 500 for such a row.
+
+Status and body do not depend on hidden rows apart from a store fault; response time
+does. On SQLite, `/documents?limit=5` over 200 public rows took 6.2 ms with no hidden
+row, 90.3 ms with 20,000 and 432.3 ms with 100,000, because the label filter scans
+every row. That time is also how long a read holds one of the two slots, so it moves
+how often other external keys are answered 429.
 
 What this does **not** guard: a `read` key, and every key that existed before,
 still reads everything unlabelled. Nothing labels a document `public`
@@ -4725,15 +4741,19 @@ guard:
   `GET /documents/{id}` answers in about 3 ms when idle and about 40 a second
   complete, and the same under four concurrent `read`-key pack loops (median 3.8 ms).
   Under four external `/search` loops about 4 to 5 a second completed, with the limit
-  off, at 2 or at 1 when the loops honour `Retry-After`, and over those requests the
-  median was 211 ms at 1 and 249 ms at 2 (p90 348 and 362 ms; 8 ms with the limit off,
-  whose p90 was 599 ms because the slow requests are most of the window). A client that
+  off, at 2 or at 1 when the loops honour `Retry-After`, and the limit
+  leaves a tail on internal requests (p90 about 300 ms at 2) with a median that varies
+  by run: in one 20 s run per mode at a limit of 2, hot loops gave p50 12.3 ms and p90
+  290 ms over 224 samples (81% under 50 ms), and loops waiting `Retry-After` gave p50
+  64.8 ms and p90 320 ms over 123 samples (50% under 50 ms), against an idle p50 of
+  5.1 ms; with the limit off the p50 was 8 ms and the p90 599 ms, because the slow
+  requests are most of the window. A client that
   ignores `Retry-After` and retries at once is held to the limit: across four loops it
   drew about 120 refusals a second at 2 and about 210 at 1, and the slowest internal
   request fell from 755 ms to 534 ms and 464 ms, at a median of 14 and 18 ms against
-  8 ms with the limit off, because the refusals themselves cost. Neither 2 nor 1 brings
-  internal latency near idle while external reads run (a read in flight plausibly holds
-  the GIL in long stretches; that is reasoned, not profiled), so the limit stays at 2:
+  8 ms with the limit off, because the refusals themselves cost. Neither 2 nor 1 removes
+  the tail while external reads run (a read in flight plausibly holds the GIL in long
+  stretches; that is reasoned, not profiled), so the limit stays at 2:
   it caps the amplification, not the baseline. An operator who serves a large
   public corpus to many external keys should run them in a separate process. One
   `VectorStore.get` per public document on a networked backend is reasoned, not

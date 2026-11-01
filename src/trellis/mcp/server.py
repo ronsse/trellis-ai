@@ -174,6 +174,7 @@ from trellis.retrieve.sensitivity import (
     SensitivityLabelError,
     conceal_node_pointers,
     is_public_only,
+    read_document_row,
     readable_ids,
     refuse_overwrite,
     stamp_sensitivity,
@@ -212,8 +213,8 @@ MUTATION_FAILED = -32003
 
 #: A read for a key that reads only public documents was refused because the
 #: process is at its limit on concurrent public reads
-#: (:class:`~trellis.errors.PublicReadBusyError`). ``data.retry_after_seconds``
-#: says when to retry; nothing ran.
+#: (:class:`~trellis.errors.PublicReadBusyError`). The error text
+#: carries ``retry_after_seconds=N`` (the wire has the text only); nothing ran.
 PUBLIC_READ_BUSY = -32004
 
 
@@ -3601,7 +3602,9 @@ def _render_fetched_item(
     ``get_graph`` renders, so a fetched entity carries the ``document_ids``
     evidence pointers that make it a hop rather than a dead end.
     """
-    doc = registry.knowledge.document_store.get(item_id)
+    doc = read_document_row(
+        registry.knowledge.document_store, item_id, current_clearance()
+    )
     if doc is not None:
         # Above the caller's clearance answers exactly as not-found: no other
         # kind is tried, so the reply cannot say the document exists (#194).

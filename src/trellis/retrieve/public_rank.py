@@ -5,8 +5,10 @@ depends on a document it may not read. A strategy that ranks the whole corpus
 cannot promise that, however the page is cut afterwards: a hidden row can
 outrank a public one, and a hidden row moves the corpus statistics (document
 frequency, vector width) every score is computed from. So the public path
-never ranks, matches or counts a hidden row, and never asks a store a question
-a hidden row can answer:
+never ranks, matches or counts a hidden row, and does not search the store. The
+label filter still scans hidden rows, so status and body depend on hidden rows only
+through a store fault (a row the store cannot read fails the read, whatever the
+query holds), and the time a read takes grows with them:
 
 * **Which rows.** One read, :func:`read_public_documents`: the newest
   :data:`PUBLIC_ROW_CEILING` documents the label predicate selects
@@ -256,7 +258,7 @@ class PublicRead:
 
     @property
     def truncated(self) -> bool:
-        """Whether the read reached the ceiling, so older public rows exist."""
+        """Whether the read reached the ceiling, so older public rows may exist."""
         _ = self.rows
         return self._truncated
 

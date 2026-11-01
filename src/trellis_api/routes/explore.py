@@ -27,6 +27,7 @@ from trellis.retrieve.sensitivity import (
     conceal_document_successor,
     conceal_node_pointers,
     is_public_only,
+    read_document_row,
 )
 from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, Event, EventType
 from trellis_api.app import get_registry
@@ -370,7 +371,7 @@ def get_document(
     registry = get_registry()
     store = registry.knowledge.document_store
     clearance = request_clearance(ctx)
-    doc = store.get(doc_id)
+    doc = read_document_row(store, doc_id, clearance)
     if doc is not None and not DocumentClearance(store, clearance).permits(
         doc_id, doc.get("metadata")
     ):

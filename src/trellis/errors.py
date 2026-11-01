@@ -102,7 +102,8 @@ class PublicReadBusyError(TrellisError):
     so the refusal says nothing about hidden documents or other traffic.
 
     ``retry_after`` is the seconds a caller should wait: ``Retry-After`` on
-    REST (HTTP 429) and ``data.retry_after_seconds`` on MCP.
+    REST (HTTP 429); on MCP the seconds are in the error text only, because the
+    wire carries the text and no ``data`` field.
     """
 
     def __init__(self, message: str, *, retry_after: int = 1) -> None:

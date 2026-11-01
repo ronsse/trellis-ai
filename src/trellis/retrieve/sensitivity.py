@@ -70,6 +70,8 @@ A ``public`` caller is refused those surfaces outright instead.
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -322,6 +324,52 @@ class DocumentClearance:
         if is_public_only(self.clearance):
             return not _is_chunk_id(doc_id) and is_public_label(metadata)
         return permits(self.clearance, self.sensitivity(doc_id, metadata))
+
+
+#: What CPython's ``sqlite3`` raises when a stored text column is not UTF-8.
+_SQLITE_UNDECODABLE = "Could not decode to UTF-8"
+
+
+def _row_cannot_be_parsed(exc: BaseException) -> bool:
+    """Whether ``exc`` is a stored row's own bytes failing to parse.
+
+    The shapes reproduced against a raw row, and nothing else: ``metadata_json``
+    that is not JSON (``json.JSONDecodeError``, which also covers empty text and a
+    control character in a string), JSON nested past the recursion limit
+    (``RecursionError``), and a SQLite text column that is not UTF-8 (a
+    ``sqlite3.OperationalError`` whose text names the decode; any other
+    ``OperationalError`` is a store fault and is not matched). All four depend on the
+    row, never on the store, so none of them is an outage.
+    """
+    if isinstance(exc, json.JSONDecodeError | RecursionError):
+        return True
+    return isinstance(exc, sqlite3.OperationalError) and str(exc).startswith(
+        _SQLITE_UNDECODABLE
+    )
+
+
+def read_document_row(
+    document_store: DocumentStore, doc_id: str, clearance: Sensitivity
+) -> dict[str, Any] | None:
+    """``document_store.get(doc_id)``, for a by-id read at ``clearance``.
+
+    A public-only caller must receive nothing that depends on a row it may not
+    read, and a hidden row whose stored metadata cannot be parsed would otherwise
+    answer a guessed id with a 500 where a missing id answers 404. So for that
+    clearance alone, a row that fails to parse (:func:`_row_cannot_be_parsed`)
+    reads as ``None``, exactly as an absent id does. Any other failure is a store
+    fault, does not depend on the id, and propagates; every other clearance
+    propagates the parse failure too, as it always did.
+    """
+    try:
+        return document_store.get(doc_id)
+    except (json.JSONDecodeError, RecursionError, sqlite3.OperationalError) as exc:
+        if not is_public_only(clearance) or not _row_cannot_be_parsed(exc):
+            raise
+        logger.warning(
+            "public_read_unparseable_row", doc_id=doc_id, error=type(exc).__name__
+        )
+        return None
 
 
 def readable_ids(

@@ -535,9 +535,11 @@ class ClassificationSetHandler:
             metadata,
             preserve_updated_at=True,
         )
+        # Only a relabel to public rewrites into the exact record; any other
+        # target keeps the prior fields, so the suffix would state something false.
         rewritten = (
             " (record rewritten to the exact public record)"
-            if (previous == sensitivity)
+            if (sensitivity == "public" and previous == sensitivity)
             else ""
         )
         return (

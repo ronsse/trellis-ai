@@ -168,6 +168,19 @@ class TestRelabellingOverRest:
         assert self._relabel(world, "plain").status_code == 200
         assert "plain" in world.served(world.key(EXTERNAL))["pack"]
 
+    def test_a_non_public_relabel_claims_no_rewrite(self, world: World) -> None:
+        """An unlabelled document relabelled ``internal`` keeps its fields."""
+        response = self._relabel(world, "plain", "internal")
+        assert response.status_code == 200, response.text
+        assert "Classification set: plain internal -> internal" in response.text
+        assert "rewritten" not in response.text
+
+    def test_a_relabel_to_public_says_when_it_rewrote_the_record(
+        self, world: World
+    ) -> None:
+        response = self._relabel(world, "near-bare")
+        assert "record rewritten to the exact public record" in response.text
+
 
 def _hold_slots(count: int) -> tuple[list[threading.Thread], threading.Event]:
     """``count`` other threads each holding one public-read slot until released."""

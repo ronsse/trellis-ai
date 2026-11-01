@@ -17,9 +17,10 @@ served.
 WHAT A PERSON HAS TO DO when a test in this file fails:
 
 1. Decide whether the change to ``DataClassification`` is wanted. If it is,
-   existing ``public`` documents carry the old record and must be relabelled
-   (``trellis curate classify-sensitivity <doc_id> --sensitivity public``, or
-   ``POST /api/v1/documents/<doc_id>/sensitivity``), or the stores migrated.
+   existing ``public`` documents carry the old record and the stores must be
+   migrated. A relabel (``trellis curate classify-sensitivity``) does not do it
+   when ``classification_version`` changes: ``_public_record_discards`` refuses
+   a prior record of a different version, so a version bump needs a migration.
    Plan that before merging.
 2. Only then update ``LITERAL_PUBLIC_RECORD`` to the new record, in the same
    change as the migration. Never edit the literal to make the test pass first.
@@ -63,8 +64,9 @@ _WHAT_TO_DO = (
     "public documents. Do NOT edit LITERAL_PUBLIC_RECORD to make this pass. "
     "Existing public documents carry the old record and will stop being "
     "served by every external read (an empty 200). Decide whether the schema "
-    "change is wanted; if so, relabel or migrate the documents "
-    "(`trellis curate classify-sensitivity <doc_id> --sensitivity public`), "
+    "change is wanted; if so, migrate the documents (a relabel with "
+    "`trellis curate classify-sensitivity` refuses a record of another "
+    "classification_version, so a version bump needs a migration), "
     "and only then update the literal in the same change. See the docstring "
     "of tests/unit/retrieve/test_public_label_pin.py."
 )

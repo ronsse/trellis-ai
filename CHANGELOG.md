@@ -51,7 +51,8 @@ All notable changes to Trellis will be documented in this file.
   unchanged. Relabelling a document `public` (`POST /documents/{id}/sensitivity`,
   `trellis curate classify-sensitivity`) now writes that exact record, or refuses with
   `classification_public_discards` and writes nothing when the earlier record holds
-  regulatory tags, a jurisdiction or other fields the record would discard; it never reports
+  regulatory tags, a jurisdiction, another classification version or a field the schema does
+  not know (it replaces `classified_by` and does not refuse over it); it never reports
   success on a document that is still not served. A corpus file's `sensitivity: public`
   frontmatter is stored bare and is not enough: it is served to no external key until a
   person runs `trellis curate classify-sensitivity <doc_id> --sensitivity public`. A test
@@ -96,6 +97,11 @@ All notable changes to Trellis will be documented in this file.
   whoever the row belongs to and whatever it holds (the same for every query word, a word nobody
   holds included): a caller can tell such a row exists and nothing about it. One
   `VectorStore.get` per public document on a networked backend is reasoned, not measured.
+  A by-id read (`GET /documents/{id}`, `get_items`) of a row whose metadata cannot be parsed
+  answers a public-only key exactly as a missing id (a hidden corrupt row cannot confirm a
+  guessed id); a store fault still answers 500 and a key above `public` is unchanged. Status
+  and body do not depend on hidden rows apart from a store fault; response time does (SQLite,
+  `/documents?limit=5` over 200 public rows: 6.2 ms with none hidden, 432 ms with 100,000).
 
   A differential test builds stores that hold the same public documents, one also holding
   documents the key may not read, and asserts every REST and MCP surface the key can reach

@@ -2682,6 +2682,26 @@ class TestCurateClassifySensitivity:
         assert data["operation"] == "classification.set"
         assert self._label() == "restricted"
 
+    def test_a_non_public_relabel_of_an_unlabelled_document_claims_no_rewrite(
+        self,
+    ) -> None:
+        self._seed()
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "classify-sensitivity",
+                "doc-1",
+                "--sensitivity",
+                "internal",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Classification set: doc-1 internal -> internal" in result.stdout
+        assert "rewritten" not in result.stdout
+
     def test_a_refusal_exits_non_zero_in_both_formats(self) -> None:
         self._seed()
         codes = []
