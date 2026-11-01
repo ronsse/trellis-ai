@@ -118,8 +118,8 @@ if TYPE_CHECKING:
     from trellis.ops import ParameterRegistry
     from trellis.stores.base.document import DocumentStore
     from trellis.stores.base.event_log import EventLog
-    from trellis.stores.base.trace import TraceStore
     from trellis.stores.base.vector import VectorStore
+    from trellis_workers.learning.miner import MiningReport
 
 logger = structlog.get_logger(__name__)
 
@@ -2150,21 +2150,46 @@ def mine_precedents_cmd(
     min_traces: int = typer.Option(
         3, "--min-traces", help="Minimum failure/partial traces required to mine."
     ),
-    limit: int = typer.Option(100, "--limit", help="Max traces to analyze."),
+    limit: int = typer.Option(
+        100, "--limit", min=1, help="Max failure/partial traces to analyze."
+    ),
+    scan_cap: int | None = typer.Option(
+        None,
+        "--scan-cap",
+        min=1,
+        help=(
+            "Most traces to read, newest first, looking for failure/partial "
+            "ones; a scan stopped here says so. Defaults to the miner's own "
+            "cap, reported as scan_cap."
+        ),
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="Report how many failure traces are in scope without calling the LLM.",
+        help=(
+            "Report how many failure traces are in scope, and whether a run "
+            "would skip them as already mined, without calling the LLM."
+        ),
     ),
     output_format: str = typer.Option("text", "--format", help="Output format."),
 ) -> None:
     """Mine precedent candidates from failure / partial traces.
 
-    Wraps :meth:`PrecedentMiner.generate_precedent_candidates`. Candidates
-    are surfaced (and persisted as ``PRECEDENT_CANDIDATE_MINED`` events,
-    one per candidate). They are **not** promoted: ``get_lessons`` and
-    ``GET /precedents`` do not serve them, and nothing routes them into the
-    Review queue yet.
+    Wraps :meth:`PrecedentMiner.mine`. Candidates are surfaced (and
+    persisted as ``PRECEDENT_CANDIDATE_MINED`` events, one per candidate).
+    They are **not** promoted: ``get_lessons`` and ``GET /precedents`` do not
+    serve them, and nothing routes them into the Review queue yet.
+
+    ``--limit`` counts failure/partial traces. The store is read newest
+    first, in widening reads of at most ``--scan-cap`` traces, until that many
+    are found, so a run of recent successes does not hide older failures. A run
+    that stopped at the cap reports ``read_bound_hit``: that is not "no
+    failures", it means older traces were not read.
+
+    A run over the same failure traces as an earlier one that minted
+    candidates mints nothing and reports ``skipped_unchanged``. A new failure
+    among the newest analysed changes the input, so it mines again. It does not
+    judge whether two candidates mean the same thing.
 
     Requires an LLM extra. Without a configured client this command exits
     loudly (the miner would otherwise return an empty list silently).
@@ -2175,35 +2200,43 @@ def mine_precedents_cmd(
         LLMConsumer.PRECEDENT_MINING, command="worker mine-precedents"
     )
 
+    from trellis_workers.learning.miner import (  # noqa: PLC0415
+        DEFAULT_TRACE_SCAN_CAP,
+        PrecedentMiner,
+    )
+
+    miner = PrecedentMiner(trace_store, event_log=event_log, llm=llm)
+    cap = DEFAULT_TRACE_SCAN_CAP if scan_cap is None else scan_cap
+
     if dry_run:
-        in_scope = _count_failure_traces(trace_store, domain=domain, limit=limit)
+        plan = miner.plan(
+            domain=domain, min_traces=min_traces, limit=limit, scan_cap=cap
+        )
         if output_format == "json":
             emit_json(
                 {
                     "status": "ok",
                     "dry_run": True,
                     "domain": domain,
-                    "failure_traces_in_scope": in_scope,
+                    "failure_traces_in_scope": plan.failures_in_scope,
                     "min_traces": min_traces,
-                    "would_mine": in_scope >= min_traces,
+                    "would_mine": plan.outcome == "would_mine",
+                    **_mining_scan_fields(plan),
                 }
             )
         else:
             console.print(
                 f"[bold]worker mine-precedents[/bold] DRY-RUN — "
-                f"{in_scope} failure/partial trace(s) in scope "
+                f"{plan.failures_in_scope} failure/partial trace(s) in scope "
                 f"(min_traces={min_traces})"
             )
+            _print_mining_outcome(plan, min_traces=min_traces)
         return
 
-    from trellis_workers.learning.miner import PrecedentMiner  # noqa: PLC0415
-
-    miner = PrecedentMiner(trace_store, event_log=event_log, llm=llm)
-    precedents = asyncio.run(
-        miner.generate_precedent_candidates(
-            domain=domain, min_traces=min_traces, limit=limit
-        )
+    report = asyncio.run(
+        miner.mine(domain=domain, min_traces=min_traces, limit=limit, scan_cap=cap)
     )
+    precedents = report.candidates
 
     if output_format == "json":
         emit_json(
@@ -2220,6 +2253,8 @@ def mine_precedents_cmd(
                     }
                     for p in precedents
                 ],
+                "failure_traces_in_scope": report.failures_in_scope,
+                **_mining_scan_fields(report),
             }
         )
         return
@@ -2228,7 +2263,8 @@ def mine_precedents_cmd(
         f"{len(precedents)} candidate(s) generated"
     )
     for p in precedents:
-        console.print(f"  - [{p.confidence:.2f}] {p.title}")
+        console.print(f"  - [{p.confidence:.2f}] {escape(p.title)}")
+    _print_mining_outcome(report, min_traces=min_traces)
     if precedents:
         console.print(
             "[dim]Candidates are surfaced, not promoted. Review before "
@@ -2236,22 +2272,44 @@ def mine_precedents_cmd(
         )
 
 
-def _count_failure_traces(
-    trace_store: TraceStore,
-    *,
-    domain: str | None,
-    limit: int,
-) -> int:
-    """Count failure/partial traces in scope — the miner's eligibility input."""
-    from trellis.schemas.enums import OutcomeStatus  # noqa: PLC0415
+def _mining_scan_fields(report: MiningReport) -> dict[str, Any]:
+    """The part of a mining payload that says what was read and why it stopped."""
+    return {
+        "outcome": report.outcome,
+        "traces_examined": report.traces_examined,
+        "scan_cap": report.scan_cap,
+        "read_bound_hit": report.read_bound_hit,
+        "skipped_unchanged": report.outcome == "skipped_unchanged",
+        "source_digest": report.source_digest,
+        "already_mined_candidate_ids": list(report.already_mined),
+    }
 
-    traces = trace_store.query(domain=domain, limit=limit)
-    return sum(
-        1
-        for t in traces
-        if t.outcome
-        and t.outcome.status in (OutcomeStatus.FAILURE, OutcomeStatus.PARTIAL)
-    )
+
+def _print_mining_outcome(report: MiningReport, *, min_traces: int) -> None:
+    """Say why a mining run produced what it did, when the count alone cannot."""
+    if report.outcome == "skipped_unchanged":
+        console.print(
+            f"[yellow]skipped:[/yellow] these {report.failures_in_scope} "
+            f"failure/partial trace(s) were already mined into "
+            f"{len(report.already_mined)} candidate(s) "
+            f"({escape(', '.join(report.already_mined))}); nothing was minted. "
+            f"A new failure trace changes the input."
+        )
+    elif report.outcome == "no_failures":
+        console.print(
+            f"No failure/partial traces: read {report.traces_examined} trace(s) "
+            f"and the store holds no more."
+        )
+    elif report.outcome == "below_min_traces":
+        console.print(
+            f"Below --min-traces ({min_traces}): the store was read to its end."
+        )
+    if report.read_bound_hit:
+        console.print(
+            f"[yellow]read stopped at the {report.scan_cap}-trace cap with "
+            f"{report.failures_in_scope} failure/partial trace(s) found; older "
+            f"traces were not read (raise --scan-cap)[/yellow]"
+        )
 
 
 # ---------------------------------------------------------------------------

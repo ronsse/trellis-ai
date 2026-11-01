@@ -6,6 +6,30 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`worker mine-precedents` counts failures against `--limit` and no longer mints duplicates
+  on a rerun.** The miner read the newest `--limit` traces and only then kept the
+  failure/partial ones, so a run of recent successes hid every older failure and the command
+  reported nothing found (`--dry-run` shared the shape). `--limit` now counts failure/partial
+  traces: the store is read newest first in widening reads (100, 200, 400, ...) until that many
+  are found, the store ends, or the new `--scan-cap` (default 5,000 traces) is reached. The read
+  has no cursor because `until` is inclusive and traces can share a `created_at`; a scan that
+  reaches the cap reads about twice `--scan-cap` rows in all. Both formats carry an `outcome`
+  that says why a run produced nothing: `no_failures` (the store was read to its end),
+  `read_bound_hit` (the cap stopped the read short of `--min-traces`, so older traces were not
+  read; not the same as none), `below_min_traces`, `skipped_unchanged`, `no_candidates` (the model
+  returned none) and `llm_error`, with `traces_examined`, `scan_cap` and `read_bound_hit`. A
+  malformed model reply still raises. The exit code is `0` for every outcome in both formats.
+  Each mined candidate event now records `source_digest`, a digest of the (at most 20) newest
+  failure traces the model was shown and the `--domain` scope. A run whose digest matches an
+  earlier candidate asks no model, writes nothing and reports `skipped_unchanged` with
+  `already_mined_candidate_ids`, in text and JSON; `--dry-run` reports it as `would_mine: false`.
+  A new failure among the newest 20 changes the digest, so the next run mines again. The key is
+  the input, not the output: two candidates with different wording are never judged to mean the
+  same thing, a run that minted nothing leaves nothing to skip against, and candidates minted
+  before this change carry no digest, so the first rerun over the same failures mints once more.
+  `PrecedentMiner.mine` and `.plan` return the report the command prints;
+  `generate_precedent_candidates` is unchanged for callers that want only the candidates.
+
 - **Entity retention no longer stalls behind rows it cannot select.** `retention.prune`
   (`trellis curate prune`) read the newest `max_items` graph nodes and only then applied
   its criteria, so archived, too-young and wrong-state rows used up the window and a

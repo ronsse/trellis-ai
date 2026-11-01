@@ -3844,22 +3844,42 @@ trellis worker enrich [--concurrency N] [--limit N] \
 
 ### `trellis worker mine-precedents`
 
-Mine precedent candidates from failure / partial traces (wraps `PrecedentMiner.generate_precedent_candidates`).
+Mine precedent candidates from failure / partial traces (wraps `PrecedentMiner.mine`; `generate_precedent_candidates` is the same run returning only the candidates).
 
 ```bash
 trellis worker mine-precedents [--domain D] [--min-traces N] \
-  [--limit N] [--dry-run] [--format text|json]
+  [--limit N] [--scan-cap N] [--dry-run] [--format text|json]
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--domain` | (all) | Restrict mining to this trace domain. |
 | `--min-traces` | `3` | Minimum failure/partial traces required to mine. |
-| `--limit` | `100` | Max traces to analyze. |
-| `--dry-run` | off | Report how many failure/partial traces are in scope without calling the LLM. |
+| `--limit` | `100` | Max **failure/partial** traces to analyze. It counts failures, not traces read. |
+| `--scan-cap` | `5000` | Most traces to read, newest first, looking for failure/partial ones. |
+| `--dry-run` | off | Report how many failure/partial traces are in scope, and whether a run would skip them as already mined, without calling the LLM. |
 | `--format` | `text` | `text` or `json`. |
 
 Candidates are **surfaced** as `PRECEDENT_CANDIDATE_MINED` events (one per candidate) but **not promoted**: `get_lessons`, `trellis retrieve precedents` and `GET /precedents` read `PRECEDENT_PROMOTED` only and never serve a mined candidate, and nothing routes one into the Review queue yet. Older versions emitted candidates as `PRECEDENT_PROMOTED` with `source="precedent_miner"`; readers skip those rows. Like `enrich`, this requires an LLM extra and exits loudly when none is configured.
+
+**How far it reads.** `TraceStore.query` has no outcome filter, so the miner reads the newest traces and keeps the failure/partial ones, widening the read (the newest 100, then 200, 400, ...) until it has `--limit` of them, the store ends, or `--scan-cap` traces have been read. A stretch of recent successes therefore no longer hides older failures. A scan that reaches the cap reads about twice `--scan-cap` rows in all, because each widening re-reads the window before it; a store of exactly `--scan-cap` traces is not reported as cut off.
+
+**Why a run produced nothing.** `--format json` carries `outcome` in both the dry-run and the real-run payload, with `traces_examined`, `scan_cap`, `read_bound_hit`, `skipped_unchanged`, `source_digest` and `already_mined_candidate_ids`; `would_mine` (dry run) is true only for `outcome: would_mine`. `outcome` is one of:
+
+| `outcome` | Meaning |
+|---|---|
+| `mined` | The model returned candidates; they were written. |
+| `would_mine` | Dry run only: a real run would ask the model. |
+| `skipped_unchanged` | The same failure traces were mined before; nothing was asked or written. |
+| `no_failures` | The store was read to its end and holds no failure/partial trace. |
+| `below_min_traces` | The store was read to its end; it holds fewer than `--min-traces`. |
+| `read_bound_hit` | The read stopped at `--scan-cap` short of `--min-traces` failures. Older traces were not read, so this is **not** "no failures"; raise `--scan-cap`. |
+| `no_candidates` | The model answered and returned no usable candidate. |
+| `llm_error` | The model call failed; nothing was written, and the next run retries. |
+
+`read_bound_hit: true` also appears on a `mined` run that found fewer than `--limit` failures at the cap. These are reports, not failures: the exit code is `0` for every outcome and is the same in both formats. A malformed model reply still raises, as before.
+
+**A rerun over unchanged failures mints nothing.** Each candidate event records `source_digest`, a digest of the (at most 20) newest failure traces the model was shown plus the `--domain` scope. A run whose digest matches an earlier candidate's skips: no model call, no event, `outcome: skipped_unchanged`, and the earlier candidates' ids in `already_mined_candidate_ids`. A new failure among the newest 20 changes the digest, so the next run mines again; a new success does not. The key is the input, not the output: it does not judge whether two candidates mean the same thing, and it cannot skip against a run that minted nothing (a malformed reply, `no_candidates`, `llm_error`) or against candidates minted before the digest was recorded, which carry no key. There is no flag to force a re-mine of unchanged failures.
 
 ### `trellis worker capture-sessions`
 
