@@ -24,7 +24,11 @@ from rich.markup import escape
 from rich.table import Table
 
 from trellis.core.base import utc_now
-from trellis.core.error_sanitize import describe_yaml_error, sanitize_error_message
+from trellis.core.error_sanitize import (
+    describe_os_error,
+    describe_yaml_error,
+    sanitize_error_message,
+)
 from trellis.core.path_presence import path_is_present
 from trellis.core.version import (
     STALENESS_FRESH,
@@ -41,7 +45,13 @@ from trellis.core.write_config import (
     resolve_overridden_by,
 )
 from trellis.core.write_provenance import build_write_provenance
-from trellis.errors import BackendNotInstalledError, ConfigError, StoreWriteRefusedError
+from trellis.errors import (
+    BackendNotInstalledError,
+    ConfigError,
+    StoreError,
+    StoreWriteRefusedError,
+    TrellisError,
+)
 from trellis.llm.routing import LLMConsumer, LLMRoute, LLMRoutingError
 from trellis.schedule.catalog import JOB_CATALOG
 from trellis.stores.base.event_log import EventLog, EventType
@@ -691,10 +701,13 @@ def serve(
             "or pass --host 0.0.0.0 for container deployments."
         ),
     ),
-    port: int = typer.Option(
-        8420,
-        envvar="TRELLIS_API_PORT",
-        help="Port to bind",
+    port: int | None = typer.Option(
+        None,
+        "--port",
+        help=(
+            "Port to bind. Defaults to TRELLIS_API_PORT, else 8420; "
+            "a TRELLIS_API_PORT that is not a port number exits 5."
+        ),
     ),
 ) -> None:
     """Start the Trellis REST API server.
@@ -703,6 +716,11 @@ def serve(
     ``TRELLIS_API_PORT``, as ``trellis serve`` and ``trellis-api`` do; a flag
     beats the variable, and an empty variable is the default. The variable
     only picks the address: the bind check below runs on whatever it names.
+    ``--host`` reads its variable through Typer, which has nothing to refuse.
+    ``--port`` leaves its variable to
+    :func:`trellis_api.app.resolve_api_port`, the reader ``trellis serve`` and
+    ``trellis-api`` use, so a bad value is the same ``ConfigError`` and exit 5
+    on all three. Typer's ``envvar=`` read it as an ``int`` and exited 2.
 
     Delegates to :func:`trellis_api.app.main` — the same entrypoint
     ``trellis serve`` uses — so there is exactly one place that calls
@@ -716,6 +734,7 @@ def serve(
     """
     try:
         from trellis_api.app import main as run_api_server  # noqa: PLC0415
+        from trellis_api.app import resolve_api_port  # noqa: PLC0415
     except ImportError:
         console.print(
             "[red]FastAPI/uvicorn not installed."
@@ -723,10 +742,16 @@ def serve(
         )
         raise typer.Exit(code=EXIT_INTERNAL)  # noqa: B904
 
-    def _announce_bind_ok() -> None:
-        console.print(f"[green]Starting Trellis API server on {host}:{port}[/green]")
+    # Resolved here, not left to ``run_api_server``, because the banner below
+    # names the port; ``main`` resolves an int to itself.
+    bind_port = resolve_api_port(port)
 
-    run_api_server(host=host, port=port, on_bind_ok=_announce_bind_ok)
+    def _announce_bind_ok() -> None:
+        console.print(
+            f"[green]Starting Trellis API server on {host}:{bind_port}[/green]"
+        )
+
+    run_api_server(host=host, port=bind_port, on_bind_ok=_announce_bind_ok)
 
 
 @admin_app.command()
@@ -1272,13 +1297,19 @@ def _print_graph_health_report(report: dict[str, Any]) -> None:
 def _init_stores_if_needed(config_dir: Path, data_dir: Path) -> str:
     """Create ``data_dir/stores`` and write ``config_dir/config.yaml``.
 
-    Does nothing if ``config.yaml`` already exists. Returns the step
-    name. ``config.yaml`` names ``data_dir``, which pins it: a truthy
-    ``data_dir`` in ``config.yaml`` overrides ``TRELLIS_DATA_DIR`` in
+    Leaves an existing ``config.yaml`` alone, but loads it: a file the registry
+    refuses (an unknown key, an unresolved ``${VAR}``) raises ``ConfigError``
+    here, so quickstart exits ``EXIT_STORE`` before it writes ``.gitignore`` or
+    prints a register command for a server every later command would refuse to
+    start. Returns the step name. ``config.yaml`` names ``data_dir``, which pins
+    it: a truthy ``data_dir`` in ``config.yaml`` overrides ``TRELLIS_DATA_DIR`` in
     ``StoreRegistry.from_config_dir``, so project stores stay in the
     project even when a global ``TRELLIS_DATA_DIR`` is set.
     """
     if (config_dir / "config.yaml").exists():
+        from trellis.stores.registry import StoreRegistry  # noqa: PLC0415
+
+        StoreRegistry.from_config_dir(config_dir=config_dir)
         return "stores_already_initialized"
     (data_dir / "stores").mkdir(parents=True, exist_ok=True)
     TrellisConfig(data_dir=str(data_dir)).save(config_dir=config_dir)
@@ -2066,6 +2097,36 @@ def _print_check_plugins_report(report: Any) -> None:
     console.print(table)
 
 
+def _graph_open_failure(path: Path, exc: Exception) -> TrellisError:
+    """The typed error for a graph store that would not open from *path*.
+
+    ``TypeError`` is a ``graph:`` value the backend cannot use, so it is a
+    ``ConfigError``; anything else is the store failing to open, a
+    ``StoreError``. Both exit ``EXIT_STORE`` through the CLI boundary, in
+    either ``--format``, as a refused or unreachable Bolt store already does.
+    The message carries a fixed description for each class of error: an OS
+    reason, a SQLite error's own text (which names no path or value), or only
+    the class name for a driver whose text can quote a host, a DSN or a row.
+    The error stays on ``__cause__``.
+    """
+    if isinstance(exc, TypeError):
+        detail = sanitize_error_message(str(exc))
+        msg = (
+            f"The 'graph:' block in {path} has a value its backend cannot use: {detail}"
+        )
+        return ConfigError(msg, setting="graph")
+    if isinstance(exc, OSError):
+        reason = describe_os_error(exc)
+    elif isinstance(exc, sqlite3.Error):
+        reason = f"{type(exc).__name__}: {exc}"
+    else:
+        reason = type(exc).__name__
+    return StoreError(
+        f"Could not open the graph store described by {path}: {reason}",
+        store="graph",
+    )
+
+
 def _load_graph_store_from_yaml(path: Path) -> Any:
     """Build a ``GraphStore`` from a single-block YAML config file.
 
@@ -2130,7 +2191,19 @@ def _load_graph_store_from_yaml(path: Path) -> Any:
     if graph_block.get("backend") == "sqlite" and "db_path" not in graph_block:
         stores_dir = path.parent / "migrate-stores"
     registry = StoreRegistry(config=config, stores_dir=stores_dir)
-    return registry, registry.knowledge.graph_store
+    try:
+        return registry, registry.knowledge.graph_store
+    except TrellisError:
+        registry.close()
+        raise
+    except Exception as exc:
+        # The backend opens its store here and raises its driver's own class:
+        # ``sqlite3.DatabaseError`` for a file that is not a database,
+        # ``OSError`` for a directory it cannot create, ``TypeError`` for a
+        # value of the wrong type. None is a ``TrellisError``, so the CLI
+        # boundary let each out as a traceback and exit 1.
+        registry.close()
+        raise _graph_open_failure(path, exc) from exc
 
 
 #: A ``valid_to`` cutoff past every closed row, so a dry-run ``compact_versions``
