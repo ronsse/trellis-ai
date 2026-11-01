@@ -65,7 +65,7 @@ from trellis_cli.config import (
     get_default_data_dir,
 )
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE, EXIT_VALIDATION
-from trellis_cli.output import build_console, emit_json
+from trellis_cli.output import active_output_format, build_console, emit_json
 from trellis_cli.prompts import (
     DEFAULT_VARIANT,
     PROMPT_VARIANTS,
@@ -2102,6 +2102,42 @@ def _print_check_plugins_report(report: Any) -> None:
     console.print(table)
 
 
+def _report_refusal(message: str, *, output_format: str | None = None) -> None:
+    """Report a refused command on the caller's ``--format``.
+
+    ``--format json`` gets the ``{"status": "error", "message": ...}`` object
+    its neighbours emit; text keeps its Rich line. The exit stays at each call
+    site, below this branch, so both formats reach it
+    (``tests/unit/test_format_exit_parity_rule.py``). A helper that exits on
+    some paths has no format to take, so ``output_format=None`` reads the
+    running command's (``active_output_format``).
+    """
+    if (output_format or active_output_format()) == "json":
+        emit_json({"status": "error", "message": message})
+    else:
+        console.print(f"[red]{escape(message)}[/red]", soft_wrap=True)
+
+
+def _report_migration_abort(sanitized: str, *, output_format: str) -> None:
+    """Report a ``migrate-graph`` run a store error stopped, on its ``--format``.
+
+    Text is two lines (the message, then the next step); JSON is one object
+    with the next step under ``hint``, so the message reads as a sentence.
+    """
+    hint = "Re-run with --continue-on-error to capture all failures in one pass."
+    if output_format == "json":
+        emit_json(
+            {
+                "status": "error",
+                "message": f"Migration aborted: {sanitized}",
+                "hint": hint,
+            }
+        )
+        return
+    console.print(f"[red]Migration aborted: {escape(sanitized)}[/red]", soft_wrap=True)
+    console.print(f"[yellow]{hint}[/yellow]")
+
+
 def _graph_open_failure(path: Path, exc: Exception) -> TrellisError:
     """The typed error for a graph store that would not open from *path*.
 
@@ -2149,45 +2185,30 @@ def _load_graph_store_from_yaml(path: Path) -> Any:
     # a path through a regular file absent and raises on an unsearchable parent
     # or an overlong name. The read below reports each with the OS's reason.
     if not path_is_present(path):
-        console.print(
-            f"[red]Config file not found: {escape(str(path))}[/red]", soft_wrap=True
-        )
+        _report_refusal(f"Config file not found: {path}")
         raise typer.Exit(code=EXIT_VALIDATION)
 
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
-        reason = escape(exc.strerror or str(exc))
-        console.print(
-            f"[red]Could not read {escape(str(path))}: {reason}[/red]", soft_wrap=True
-        )
+        _report_refusal(f"Could not read {path}: {exc.strerror or str(exc)}")
         raise typer.Exit(code=EXIT_VALIDATION) from None
     except UnicodeDecodeError as exc:
-        console.print(
-            f"[red]Could not read {escape(str(path))}: it is not valid"
-            f" {escape(exc.encoding)} text (byte offset "
-            f"{escape(str(exc.start))})[/red]",
-            soft_wrap=True,
+        _report_refusal(
+            f"Could not read {path}: it is not valid {exc.encoding} text "
+            f"(byte offset {exc.start})"
         )
         raise typer.Exit(code=EXIT_VALIDATION) from None
     try:
         data = yaml.safe_load(text) or {}
     except Exception as exc:
         # ``str(exc)`` prints the offending line, which can hold a password.
-        reason = escape(describe_yaml_error(exc))
-        console.print(
-            f"[red]Invalid YAML in {escape(str(path))}: {reason}[/red]",
-            soft_wrap=True,
-        )
+        _report_refusal(f"Invalid YAML in {path}: {describe_yaml_error(exc)}")
         raise typer.Exit(code=EXIT_VALIDATION) from None
 
     graph_block = data.get("graph") if isinstance(data, dict) else None
     if not isinstance(graph_block, dict) or "backend" not in graph_block:
-        console.print(
-            f"[red]{escape(str(path))} must contain a 'graph:' block with a"
-            " 'backend' key[/red]",
-            soft_wrap=True,
-        )
+        _report_refusal(f"{path} must contain a 'graph:' block with a 'backend' key")
         raise typer.Exit(code=EXIT_VALIDATION)
 
     config: dict[str, Any] = {"graph": graph_block}
@@ -2431,9 +2452,10 @@ def migrate_graph(
     feedback and the policy file are not moved by this command, and none of
     them has a migration tool. A run that finishes states these limits beside
     its counts in either ``--format``. A run aborted by a store error (exit 5)
-    prints text in either format and no JSON, and the destination may hold a
-    partial copy. ``--dry-run`` still creates the destination database
-    and its schema, and a read-only snapshot cannot be the source.
+    answers with a ``{"status": "error", ...}`` object under ``--format json``
+    and no ``copy_scope``, and the destination may hold a partial copy.
+    ``--dry-run`` still creates the destination database and its schema, and a
+    read-only snapshot cannot be the source.
 
     POC scope: current versions only, in-memory snapshot up to
     ``--max-nodes``. Idempotent on retry — a destination that already
@@ -2491,18 +2513,16 @@ def migrate_graph(
             try:
                 report = migrator.run(dry_run=dry_run, strategy=strategy)
             except MigrationCapacityExceededError as exc:
-                console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
-                raise typer.Exit(code=EXIT_INTERNAL) from exc
+                # A refusal of the arguments given, not a bug: re-run with a
+                # larger ``--max-nodes``. ``EXIT_INTERNAL`` reads "file this
+                # with a traceback" (``docs/design/adr-cli-exit-codes.md``).
+                _report_refusal(str(exc), output_format=output_format)
+                raise typer.Exit(code=EXIT_VALIDATION) from exc
             except MigrationStepError as exc:
                 # str(exc) embeds the destination store's own error
                 # text, which can quote the row value that tripped it.
-                sanitized = escape(sanitize_error_message(str(exc)))
-                console.print(
-                    f"[red]Migration aborted: {sanitized}[/red]", soft_wrap=True
-                )
-                console.print(
-                    "[yellow]Re-run with --continue-on-error to capture all "
-                    "failures in one pass.[/yellow]"
+                _report_migration_abort(
+                    sanitize_error_message(str(exc)), output_format=output_format
                 )
                 raise typer.Exit(code=EXIT_STORE) from exc
             # Read while the source is still open. The migration writes no
@@ -3356,7 +3376,7 @@ def _lookup_candidate_payload(event_log: Any, candidate_id: str) -> dict[str, An
         f"No WELL_KNOWN_CANDIDATE event found with candidate_id="
         f"{candidate_id!r}. Run 'trellis analyze schema-evolution' first."
     )
-    console.print(f"[red]{escape(msg)}[/red]", soft_wrap=True)
+    _report_refusal(msg)
     # Not-found is a workflow state (operator must run schema-evolution
     # first), not a malformed input — surface as EXIT_INTERNAL rather
     # than EXIT_VALIDATION.
@@ -3607,7 +3627,7 @@ def draft_promotion_adr(
             f"Refusing to overwrite existing ADR at {output_path}. "
             "Pass --force to overwrite (the prior content will be replaced)."
         )
-        console.print(f"[red]{escape(msg)}[/red]", soft_wrap=True)
+        _report_refusal(msg, output_format=output_format)
         # Overwrite-without-force is a destructive-action guard rather
         # than a malformed-input error — surface as EXIT_INTERNAL.
         raise typer.Exit(code=EXIT_INTERNAL)
@@ -3620,9 +3640,13 @@ def draft_promotion_adr(
             path=str(output_path),
             candidate_id=candidate_id,
         )
-        console.print(
-            f"[yellow]Overwriting existing file at {escape(str(output_path))}.[/yellow]"
-        )
+        # Text only: under ``--format json`` a prose line on stdout ahead of the
+        # payload leaves stdout unparseable. The warning above still records it.
+        if output_format != "json":
+            console.print(
+                "[yellow]Overwriting existing file at "
+                f"{escape(str(output_path))}.[/yellow]"
+            )
 
     drafted_date = datetime.now(tz=UTC).date().isoformat()
     rendered = _render_promotion_adr(

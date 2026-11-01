@@ -318,8 +318,27 @@ All notable changes to Trellis will be documented in this file.
   byte-identical. The three LLM-client and config helpers keep their signatures:
   they read the running command's `--format` through
   `trellis_cli.output.active_output_format`, which answers `text` outside a
-  command. Still prose under `--format json`, left as is because tests pin it:
-  `trellis admin migrate-graph`'s config-file, step and capacity refusals.
+  command. `trellis admin migrate-graph`'s config-file, step and capacity
+  refusals were left as prose; the next entry covers them.
+- **The remaining refusals under `--format json` answer with one JSON object
+  too.** `trellis admin migrate-graph` (its five `--from-config` / `--to-config`
+  refusals, a source over `--max-nodes`, and a run a store error aborted),
+  `trellis admin show-proposal` and `trellis admin list-proposals` on a blank id
+  or a non-positive `--limit`, `trellis admin draft-promotion-adr` on an unknown
+  candidate or an existing output file without `--force`, and the learning
+  parameter file guard shared by `trellis analyze learning-candidates` and
+  `trellis worker curate` each printed prose on stdout and exited non-zero. They
+  now emit `{"status": "error", "message": ...}`. An aborted `migrate-graph`
+  run also carries the next step under `hint`, where text prints it as a second
+  line, and still carries no `copy_scope`. The proposal commands add
+  `"error": "validation_error"` so their existing `error` key stays populated.
+  Exit codes are unchanged by this entry (`migrate-graph` config file `2`, step
+  abort `5`, the others `1`); a source over `--max-nodes` changes in the entry
+  under Changed. The human-format text is byte-identical. One success path
+  changes: `draft-promotion-adr --force` under
+  `--format json` no longer prints its "Overwriting existing file" line ahead of
+  the JSON object, which made stdout unparseable at exit `0`; the warning is
+  still logged and text still prints it.
 - **`trellis admin quickstart` stops on a config path it cannot read instead of
   initializing over it.** `config.yaml` as a dangling or looping symlink read as
   absent (`Path.exists()` answers `False` on `ENOENT`/`ELOOP`/`ENOTDIR`), so the
@@ -635,6 +654,18 @@ All notable changes to Trellis will be documented in this file.
   archives.
 
 ### Changed
+
+- **`trellis admin migrate-graph` exits `2`, not `1`, for a source with more
+  current nodes than `--max-nodes`.** Breaking for a script that branches on the
+  code. Old `1`, new `2` (`EXIT_VALIDATION`), in both formats. `1` is the
+  "unexpected error, file it with a traceback" code
+  (`docs/design/adr-cli-exit-codes.md`), and this is a deliberate refusal of the
+  arguments given: re-run with a larger `--max-nodes`, as for the command's other
+  input refusals, which already exit `2`. It is not `5`:
+  `MigrationCapacityExceededError` is a `RuntimeError`, not a `TrellisError`, and
+  no store or backend failed. Every other `migrate-graph` exit code is
+  unchanged (`0`, `2` for a config file, `5` for a step failure or a bad
+  backend); nothing was written before the refusal, as before.
 
 - **The repeated-rejection health signal is rated against each tool's attempts and
   no longer asserts a cause.** `trellis analyze health` warned once any `(kind, loc)`
