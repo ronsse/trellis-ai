@@ -121,25 +121,29 @@ def _document_label(
     rows the caller already passed the read gate for come here, so each answer
     is about a document the caller may read.
 
-    A row whose ``metadata`` is not an object is judged as ``sensitivity_of``
-    judges it (no label, so ``internal``): ``DocumentClearance.sensitivity``
-    would raise on it, and a label must never fail a route that answered
-    before it existed.
+    A row whose ``metadata`` is not an object holds no label to read.
+    ``DocumentClearance.sensitivity`` judges it as it judges the read gate, so a
+    shape it refuses (a number, a string, ``true``) reads ``restricted`` and is
+    ``corrupt``, and what it converts (``null``, an empty value) reads as the
+    unlabelled row it always did. The record checks below use no bag for it.
     """
     metadata = doc.get("metadata")
     bag = metadata if isinstance(metadata, Mapping) else None
     doc_id = str(doc.get("doc_id"))
     stored = bag is not None and DATA_CLASSIFICATION_KEY in bag
     record = bag[DATA_CLASSIFICATION_KEY] if bag is not None and stored else None
+    # The gate gets the stored value, not ``bag``, so the label is the verdict
+    # ``permits`` reached for this row.
+    effective = gate.sensitivity(doc_id, metadata)
     corrupt = (
         stored
         and sensitivity_of(bag) == "restricted"
         and not (
             isinstance(record, Mapping) and record.get("sensitivity") == "restricted"
         )
-    )
+    ) or (bag is None and metadata is not None and effective == "restricted")
     return {
-        "sensitivity": gate.sensitivity(doc_id, bag),
+        "sensitivity": effective,
         "stored": stored,
         "corrupt": corrupt,
         "external_readable": external.permits(doc_id, bag),

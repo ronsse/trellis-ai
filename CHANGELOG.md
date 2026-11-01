@@ -457,6 +457,37 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A stored row whose metadata is JSON but not an object no longer fails every
+  document read by a `read` or `confidential` key.** `metadata_json` of `[1]`,
+  `5`, `"str"` or `true` parses, so the store returns it, and
+  `DocumentClearance.sensitivity` raised on it (`dict(5)`): `GET /documents`
+  (with or without `q`), `GET /search` and `GET /documents/{id}` answered 500 for
+  those keys while one such row existed, whoever it belonged to. The row holds no
+  label the gate can read, so it now reads `restricted`, the same fail-closed
+  reading a present-but-malformed label record gets. A `read` or `confidential`
+  key is served every other row and not this one (by id: 404, as a missing id
+  answers); a `restricted` or `admin` key is served it, as it is every row; an
+  `external` key never was. Only what `dict()` refuses reads this way: `null`, an
+  empty value (`[]`, `""`, `0`, `false`) and a list of pairs are judged as they
+  always were, so no row is more visible than before to any clearance. The
+  `label` that `GET /documents` and `GET /documents/{id}` attach for a
+  `restricted` or `admin` key reports such a row as `sensitivity: restricted`,
+  `corrupt: true` (it said `internal`, a clearance that cannot read it). The same
+  change stops the precedent listing, the MCP `get_items` call and the overwrite
+  refusal raising on one such row (each now judges that id as `restricted`). A
+  pack is unchanged: it never calls `DocumentClearance.sensitivity` (`PackBuilder`
+  judges the item's own metadata), pinned by a test that builds packs through
+  `builder_factory` for an unscoped caller over each shape.
+- **A by-id read by an `external` key answers 404 for a row whose `metadata_json`
+  is bytes that are not UTF-8 or an integer past `json.loads`'s digit limit.**
+  `GET /documents/{id}` and `get_items` answered 500 for such a row where the list
+  already withheld it, so a key could tell a row from a missing id.
+  `_row_cannot_be_parsed` now matches `UnicodeDecodeError` and a `ValueError` whose
+  text is the digit-limit message; any other `ValueError` is still a store fault
+  and still answers 500. Not covered: a key above `public` still answers 500 for
+  such a row, because the store cannot return it; a public row whose own text
+  column is not UTF-8 still fails every external list, search and pack.
+
 - **A document row whose metadata cannot be read no longer fails every read by
   an `external` key on SQLite.** The label predicate the public path runs
   through `DocumentStore.list_documents` raised on a row whose `metadata_json`

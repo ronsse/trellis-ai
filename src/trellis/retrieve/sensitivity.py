@@ -312,10 +312,21 @@ class DocumentClearance:
     def sensitivity(
         self, doc_id: str, metadata: Mapping[str, Any] | None
     ) -> Sensitivity:
-        """The document's effective label: its own, raised to its parent's."""
-        item = PackItem(
-            item_id=doc_id, item_type="document", metadata=dict(metadata or {})
-        )
+        """The document's effective label: its own, raised to its parent's.
+
+        A row whose stored ``metadata`` is JSON that is not an object (a number,
+        a string, ``true``, a list that is not pairs) holds no label this gate
+        can read, and reads ``restricted``: a caller below ``restricted`` is not
+        served it, and one at ``restricted`` is, as it is every row. It used to
+        raise, which failed the whole read it sat in. Only what ``dict()``
+        refuses reads this way: the shapes it converts (``None`` and every
+        other empty value, a list of pairs) are judged as they always were.
+        """
+        try:
+            bag = dict(metadata or {})
+        except (TypeError, ValueError):
+            return "restricted"
+        item = PackItem(item_id=doc_id, item_type="document", metadata=bag)
         return effective_sensitivity(item, self._cache)
 
     def permits(self, doc_id: str, metadata: Mapping[str, Any] | None) -> bool:
@@ -329,20 +340,31 @@ class DocumentClearance:
 #: What CPython's ``sqlite3`` raises when a stored text column is not UTF-8.
 _SQLITE_UNDECODABLE = "Could not decode to UTF-8"
 
+#: How the ``ValueError`` begins that ``json.loads`` raises for an integer of more
+#: digits than ``sys.set_int_max_str_digits`` allows: valid JSON, refused by the
+#: parser, and not a ``json.JSONDecodeError``. The limit itself is configurable,
+#: so only the lead is matched.
+_INT_DIGIT_LIMIT = "Exceeds the limit ("
+
 
 def _row_cannot_be_parsed(exc: BaseException) -> bool:
     """Whether ``exc`` is a stored row's own bytes failing to parse.
 
     The shapes reproduced against a raw row, and nothing else: ``metadata_json``
     that is not JSON (``json.JSONDecodeError``, which also covers empty text and a
-    control character in a string), JSON nested past the recursion limit
-    (``RecursionError``), and a SQLite text column that is not UTF-8 (a
-    ``sqlite3.OperationalError`` whose text names the decode; any other
-    ``OperationalError`` is a store fault and is not matched). All four depend on the
-    row, never on the store, so none of them is an outage.
+    control character in a string), one held as bytes that are not UTF-8
+    (``UnicodeDecodeError``), valid JSON the parser refuses (an integer of more
+    than 4300 digits raises a bare ``ValueError`` whose text names the limit), JSON
+    nested past the recursion limit (``RecursionError``), and a SQLite text column
+    that is not UTF-8 (a ``sqlite3.OperationalError`` whose text names the decode;
+    any other ``OperationalError`` is a store fault and is not matched). All of
+    them depend on the row, never on the store, so none is an outage. Any other
+    ``ValueError`` is not matched: nothing reproduced shows it is the row's.
     """
-    if isinstance(exc, json.JSONDecodeError | RecursionError):
+    if isinstance(exc, json.JSONDecodeError | UnicodeDecodeError | RecursionError):
         return True
+    if isinstance(exc, ValueError):
+        return str(exc).startswith(_INT_DIGIT_LIMIT)
     return isinstance(exc, sqlite3.OperationalError) and str(exc).startswith(
         _SQLITE_UNDECODABLE
     )
@@ -363,7 +385,7 @@ def read_document_row(
     """
     try:
         return document_store.get(doc_id)
-    except (json.JSONDecodeError, RecursionError, sqlite3.OperationalError) as exc:
+    except (ValueError, RecursionError, sqlite3.OperationalError) as exc:
         if not is_public_only(clearance) or not _row_cannot_be_parsed(exc):
             raise
         logger.warning(
