@@ -33,10 +33,9 @@ tmp*
 .claude/worktrees/
 .claude/scheduled_tasks.lock
 
-# Eval harness — runtime reports only; the dir itself stays via .gitkeep.
-# Renderer sources (``*.py``) and ``__init__`` are tracked; generated
-# artifacts (PNG charts, JSON dumps) are not.
-# Phase A/B run records (`phase_*.json`) are citable artifacts — keep them.
+# Eval harness — lives in the separate trellis-evals repo, not here. eval/
+# holds only reports/, whose committed run reports are tracked; no rule here
+# ignores them.
 
 # Coverage artefacts
 .coverage

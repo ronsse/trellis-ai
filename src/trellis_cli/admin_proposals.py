@@ -25,6 +25,8 @@ Exit codes follow :mod:`trellis_cli.exit_codes`:
   ``list-proposals``.
 * :data:`EXIT_INTERNAL` (1) — uncaught exception. Operators should
   file a bug.
+* :data:`EXIT_VALIDATION` (2) — ``generate-proposals --dry-run``, which
+  the generator cannot honour; the run is refused, not ignored.
 * :data:`EXIT_STORE` (5) — backend / EventLog failure during read.
 
 This module is the first CLI surface to actually consume the
@@ -45,7 +47,12 @@ from rich.markup import escape
 
 from trellis.core.error_sanitize import render_exception_detail
 from trellis.stores.base.event_log import EventType
-from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE
+from trellis_cli.exit_codes import (
+    EXIT_INTERNAL,
+    EXIT_OK,
+    EXIT_STORE,
+    EXIT_VALIDATION,
+)
 from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import _get_registry, get_event_log
 
@@ -247,17 +254,18 @@ def generate_proposals_command(
 ) -> None:
     """CLI body — wraps the generator with output + exit codes."""
     if dry_run:
-        # Phase 0 generator has no dry-run knob. Documented in the
-        # ``--help`` of the registered command; the flag remains
+        # Phase 0 generator has no dry-run knob. The flag remains
         # because the original Phase 1 brief asked for it. Refuse
-        # rather than silently ignoring so operators know.
-        console.print(
-            "[yellow]--dry-run is not supported in Phase 1: the Phase 0 "
+        # rather than silently ignoring: a caller that asked for a
+        # preview must not read exit 0 as "the request was honoured".
+        _refuse_invalid_argument(
+            "--dry-run is not supported in Phase 1: the Phase 0 "
             "ProposalGenerator does not expose a dry-run knob. Re-run "
             "without --dry-run, or pin --window-hours 0 to short-circuit "
-            "every cluster outside the window.[/yellow]"
+            "every cluster outside the window.",
+            output_format,
         )
-        raise typer.Exit(code=EXIT_OK)
+        raise typer.Exit(code=EXIT_VALIDATION)
 
     try:
         event_log = get_event_log()
@@ -525,7 +533,8 @@ def register(admin_app: typer.Typer) -> None:
             help=(
                 "Currently unsupported — the Phase 0 generator does not "
                 "expose a dry-run knob. Flag remains for forward "
-                "compatibility; passing it short-circuits with a warning."
+                "compatibility; passing it is refused (exit 2) without "
+                "running the generator."
             ),
         ),
     ) -> None:

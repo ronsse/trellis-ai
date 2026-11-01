@@ -3622,7 +3622,11 @@ def draft_promotion_adr(
         output if output is not None else Path("docs/design") / f"adr-promote-{slug}.md"
     )
 
-    if output_path.exists() and not force:
+    # ``path_is_present``, not ``Path.exists()``, which calls a symlink loop, a
+    # dangling link or a path through a regular file absent and lets the write
+    # below walk into it. The write reports each with the OS's reason.
+    already_present = path_is_present(output_path)
+    if already_present and not force:
         msg = (
             f"Refusing to overwrite existing ADR at {output_path}. "
             "Pass --force to overwrite (the prior content will be replaced)."
@@ -3632,7 +3636,7 @@ def draft_promotion_adr(
         # than a malformed-input error — surface as EXIT_INTERNAL.
         raise typer.Exit(code=EXIT_INTERNAL)
 
-    if output_path.exists() and force:
+    if already_present and force:
         # Loud-on-misuse: an operator overwriting a previously-drafted
         # ADR is doing something destructive; surface it as a WARN.
         logger.warning(
@@ -3656,8 +3660,18 @@ def draft_promotion_adr(
         thresholds=dict(RECOMMENDED_SEED_VALUES),
     )
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(rendered, encoding="utf-8")
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(rendered, encoding="utf-8")
+    except OSError as exc:
+        # A link loop, a missing link target, a parent that is a file or a
+        # read-only directory: the operator's ``--output`` cannot hold the ADR.
+        _report_refusal(
+            f"Could not write the ADR at {output_path}: {describe_os_error(exc)}. "
+            "Pass a different --output.",
+            output_format=output_format,
+        )
+        raise typer.Exit(code=EXIT_VALIDATION) from None
 
     if output_format == "json":
         print(

@@ -138,6 +138,20 @@ All notable changes to Trellis will be documented in this file.
   neither refused nor listed as answering to this key. The ADR sentence saying there is no
   `public` clearance tier is corrected.
 
+- **`live-infra` runs the Postgres event log contract under a non-UTC session.**
+  `tests/unit/stores/contracts/test_postgres_event_log_session_zone_contract.py`
+  runs `EventLogContractTests` against `PostgresEventLog` on a connection opened
+  with `options=-c timezone=America/Los_Angeles`, and adds one case that reads
+  `SHOW TimeZone` so a connection that dropped the option cannot pass the suite
+  as a UTC run. The existing Postgres event log contract runs under the server's
+  default session, UTC, where a naive and an aware UTC value are the same
+  instant whether or not the store converts, so a regression in
+  `_bound_instant` passed it. The new file needs no workflow edit, because
+  `live-infra` already selects `tests/unit/stores/contracts/` and the file
+  carries the `postgres` marker the job sets. It has a row in
+  `scripts/check_live_floor.py`'s `FLOORS`, so a run that skips it fails the
+  job rather than leaving it green. Test-only: nothing under `src/` changes.
+
 - **`trellis analyze holdout` reads as the one-shot readout.** With
   `--by-commit`, each build's row carries the served-minus-withheld mean
   difference (null when an arm is empty), builds serving fewer than 5 withheld
@@ -349,6 +363,19 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`trellis admin draft-promotion-adr` no longer reads a broken `--output` as
+  free.** The overwrite check used `Path.exists()`, which answers absent for a
+  symlink loop, a dangling link and a path under a regular file, so the command
+  went on to write and died with a Python traceback in both formats. A path with
+  anything at it is now present: without `--force` the run is refused ("Refusing
+  to overwrite existing ADR", exit 1, as for a regular file). That now includes a
+  dangling link, which used to be written through when its target directory
+  existed and to crash when it did not. With `--force`, a write that
+  fails answers `Could not write the ADR at <path>: <reason>` (text), or
+  `{"status": "error", "message": ...}` under `--format json`, and exits 2
+  (`EXIT_VALIDATION`); both formats exit alike. A forced write through a dangling
+  link whose target directory exists still creates the target.
+
 - **The Postgres event log reads a naive timestamp as UTC, whatever the
   session's time zone.** `PostgresEventLog` bound a naive `datetime` as it
   came, which psycopg sends as `timestamp` and the server reads in the
@@ -380,8 +407,8 @@ All notable changes to Trellis will be documented in this file.
   deduplicated out of the next pack, and so what a pack serves. The new
   mocked-pool test (`tests/unit/stores/test_postgres_event_log_binding.py`)
   runs wherever psycopg is installed; `live-infra` runs the contract suite
-  under the server's default session, which is UTC, so only the mocked test
-  and a local run in another zone cover the fix.
+  under the server's default session, which is UTC, and under
+  `America/Los_Angeles` too (see the session-zone contract entry under Added).
 
 - **Docs no longer say the eval harness is in this repo, or that roadmap gate N3
   is open.** `docs/design/eval.md` described `eval/runner.py`, `eval/scenarios/`
@@ -786,6 +813,16 @@ All notable changes to Trellis will be documented in this file.
   archives.
 
 ### Changed
+
+- **BREAKING: `trellis admin generate-proposals --dry-run` exits 2 and answers
+  as an error.** The generator has no dry-run mode, so the flag was refused with
+  a yellow warning and exit 0, which a caller that asked for a preview read as
+  success. It now exits 2 (`EXIT_VALIDATION`; was 0) without running the
+  generator, prints the same sentence as a plain error line in text, and under
+  `--format json` prints one `{"status": "error", "error": "validation_error",
+  "message": ...}` object (was a prose line on stdout, so the stream did not
+  parse). The `--dry-run` help says so. A script that passed the flag and
+  treated exit 0 as success must drop it.
 
 - **`trellis admin migrate-graph` exits `2`, not `1`, for a source with more
   current nodes than `--max-nodes`.** Breaking for a script that branches on the
