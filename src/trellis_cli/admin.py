@@ -947,7 +947,9 @@ def reconcile_feedback(
         else:
             console.print(f"  [green]Emitted: {payload['emitted']}[/green]")
             if payload["failed"]:
-                console.print(f"  [red]Failed: {payload['failed']}[/red]")
+                console.print(
+                    f"  [red]Failed: {payload['failed']}[/red]", soft_wrap=True
+                )
                 for fid in payload["missing_feedback_ids"]:
                     console.print(f"    - {fid}")
 
