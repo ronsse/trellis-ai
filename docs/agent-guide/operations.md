@@ -3566,7 +3566,7 @@ even a meta-trace.
 
 ```bash
 trellis analyze holdout [--days N] [--until ISO] [--rate R] [--outcome NAME] [--itt] \
-    [--by-commit] [--permutations N] [--bootstraps N] [--power-sims N] [--planned-mde X] \
+    [--by-commit] [--operational] [--permutations N] [--bootstraps N] [--power-sims N] [--planned-mde X] \
     [--planned-n N] [--settle-hours H] [--seed N] [--limit N] [--format text|json]
 ```
 
@@ -3577,7 +3577,8 @@ trellis analyze holdout [--days N] [--until ISO] [--rate R] [--outcome NAME] [--
 | `--rate` | the single rate present | The `holdout_rate` to analyse; several rates in the window without it exit `2` |
 | `--outcome` | `log1p_turns` | `log1p_turns`, `prs_created`, `log1p_tokens`, `commits`, or the guardrails `log1p_commits` and `any_commit` |
 | `--itt` | off | Keep usage-limit cut-offs (the first sensitivity analysis) |
-| `--by-commit` | off | Add `by_commit`, a descriptive per-build table of the analysed tasks; no estimate, and no other figure changes |
+| `--by-commit` | off | Add `by_commit`, a per-build table of the analysed tasks with each arm's outcome mean; no interval or p-value, and no other figure changes |
+| `--operational` | off | Report only what shows the experiment is running, reading no outcome value; see [`--operational`](#operational-mode) |
 | `--permutations` | `10000` | Within-stratum permutations for the two-sided p-value |
 | `--bootstraps` | `4000` | Stratified bootstrap replicates for the 95% CI |
 | `--power-sims` | `600` | Simulated experiments per power estimate |
@@ -3585,7 +3586,7 @@ trellis analyze holdout [--days N] [--until ISO] [--rate R] [--outcome NAME] [--
 | `--planned-n` | `114` | Planned analysed tasks (the pre-registration's) |
 | `--settle-hours` | `3` | Hours a completed capture sweep must follow a task's latest join before the task counts as finished |
 | `--seed` | `20261004` | Seed for every random draw, so a report reproduces |
-| `--limit` | `5000` | Max events scanned per event type |
+| `--limit` | `5000` | Max events scanned per event type; with `--operational` it is refused (exit `2`), since that mode pages to completion |
 
 A unit is a finished sub-agent task (its join names a parent session) whose
 first pack is non-empty in its own arm's terms: a withheld row's
@@ -3731,6 +3732,139 @@ from more than one build is counted once, under its first pack's build, and also
 `units_spanning_builds`, so the table never sums to more than the analysed
 tasks. The commit is the one the build stamped at install, so an editable
 install on a moved working tree names the commit it was installed at.
+
+<a id="operational-mode"></a>
+`--operational` checks that the experiment is running without opening its
+results, so a reader can ask the question before the pre-registered analysis is
+due. The outcome-derived figures are never computed, not computed and hidden: the
+report is its own model (`mode: "operational"`), with no field that could carry
+one.
+
+**The structure.** Operational mode reads the capture joins, the capture
+sweeps and, for each join, the one pack row its first pack id names, fetched by
+id. It does not scan `PACK_ASSEMBLED`: later packs, the number of packs and the
+volume of pack rows never enter the computation, so there is nothing to filter
+out of the output. A test enforces this with an event log (`_FirstPackOnlyLog`) that
+allows only the join and sweep events and a first pack by id, and raises on any
+other event type or attribute. The payloads it hands back are a separate wrapper
+(`_GatedLog`) whose join and sweep payloads serve only the keys the report
+reads, and refuse the others, including `pop`, `setdefault`, `len`, `repr` and
+`==`; `retrieval_results`, `retrieval_errors` and `pack_ids_unparsed` are served
+only from a join that names no pack. That bounds what the fixtures read, not the
+store: a reader of the events can still read them. Joins and sweeps are paged to completion, so there is no
+scan cap and `--limit` with `--operational` is a usage error (exit 2 in both
+formats). Joins stamped at one instant are ordered by event id, and
+`--by-commit` rows first seen together by build label.
+
+**The rule.** An operational figure depends only on values fixed when a task's
+first pack was assembled, and on capture sweep times, which no one task drives.
+The first pack's values are its time, its arm draw, its build stamp and rate,
+and, from the session's anchor join, the agent type, the brief and covariates
+and the two timing flags set before the first retrieval. The anchor is the
+earliest join that names a pack, and the earliest of all only when none does:
+capture writes a join for any transcript with a turn or a tool call, so a sweep
+that lands before the first retrieval writes one that names no pack, and
+anchoring on it would lose the task. The anchor is the one read because a later
+join for the same session can change the flags, the covariates and the first
+pack id; a later join is looked at only while the anchor names no pack, and
+only for whether it does. A session with a pack-naming join before the window
+start is skipped, so a join written again inside the window cannot bring it in
+with other values; so is one whose anchor names no pack when any join of the
+session precedes the window, so a pack-free join written again cannot count a
+session in a later window. Everything after the first pack is post-treatment and is
+never read: later packs, the pack count, a session's length and every outcome
+value. Pooling does not make a post-treatment figure safe, because a pooled
+count differenced against `eligible_by_arm` across windows recovers it by arm,
+so pooled counts of them are absent too. Nothing read is one of those values, so neither one
+report nor the differences between reports over several windows (`--until`,
+`--days`, or stored nightly output) vary with them. They do vary with when a
+join or a sweep was written, as the limits below say.
+
+**One disclosed exception.** Whether a task's join carries an outcome block at
+all is read, as presence only: a join without one is dropped before eligibility
+(`funnel.no_outcome`), which moves `eligible_by_arm`. Current capture always
+writes the block, so such a join comes from an older build. The bound is on the
+report, not the store: a reader of the events can still read them.
+
+**Stated limits.** These are not fixed here.
+
+- A session none of whose joins names a pack, or whose first pack has no row,
+  has no first pack to anchor on and no arm. It is windowed on its join time
+  and counted pooled (`funnel.first_pack_not_found` and the other
+  pre-eligibility stages). A join that names no pack is counted only once a
+  sweep ran `settle_hours` after it, as the full report admits a join, so a join
+  that names a pack and follows within that time replaces it first; one written
+  later leaves the session pooled as `no_retrieval` for the nights between
+  (`no_outcome` when that join carries no outcome block; a main session's join
+  is in no pooled stage).
+- A join that names no pack and is too close to a window's end to have settled
+  is missing from that night's report. The next window skips it, because the
+  session then has a join before its start, so a stored nightly series
+  undercounts it. The count is pooled and depends on join time, not on a
+  treatment value.
+- A task whose first join is written later than the sweep that would admit it
+  enters on the first night the join exists, not the night its first pack
+  settled. A night asked about again later shows a larger `eligible` only if a
+  sweep ran between the first pack's settling time and the join's write. Under
+  healthy capture the join is written at the first sweep after the first pack,
+  so only a parse or write failure makes it later.
+  Three causes are known: a per-session parse error that capture retries at a
+  later sweep, a failed join write, and a `--rejoin-since` backfill, which
+  stamps the join when it is written.
+- A first pack at another rate is counted under `funnel.other_rate`, and a
+  later pack at another rate is not read, so it cannot raise the "several
+  holdout rates" error that the full report raises. The note for a rate that
+  no pack carries then says no first pack was written at it.
+- A page or more of joins (or of sweeps) stamped at one instant cannot be paged
+  through: this mode refuses (exit 2) where the full report, which reads a
+  capped scan, exits 0. The pile carries no arm, and only an imported or
+  crafted log reaches it.
+- One command line has one exit status across `--format`, not across modes.
+  `--limit N` exits 0 on the full report and 2 here, a later pack at another
+  rate exits 2 there and 0 here, and a page of joins tied at one timestamp
+  exits 0 there and 2 here.
+
+**First-pack admission.** A task is windowed on its first pack's time and
+admitted once a completed sweep ran `settle_hours` after that pack. The full
+report windows on the first pack too but admits on the latest join, which
+capture writes again whenever a session continues, so a continued session moves
+the night it counts. The two anchors differ, so operational `eligible`, the
+funnel counts and `sessions` can differ from the full report's on the same
+night. They are not the same number and neither stands in for the other; the
+full report's counts are the preregistered ones. `task_window_since` is the
+earliest admitted first pack at the rate, and `task_window_days` runs from it
+to the window end.
+
+It keeps `status`, the window and task-window fields, `rate`, `settle_hours` and
+`notes`, with no `scan` block and no `effective_window_days`, which describe the
+pack scan this mode does not make; the `funnel` stages from
+the sub-agent joins admitted on their first pack up to eligibility, without the
+join, session, outside-window and unfinished counts, and without the cut-off,
+outcome-missing, analysed, post-hoc, hook-feedback-seen and unparsed pack id
+counts; the first two `exclusions` (the population and the pre-treatment rule),
+without the cut-off one; and `descriptive`: the eligible task count and rate,
+`eligible_by_arm`, `arm_ratio` (with its p and the pause-and-fix note), the
+top-parent share and `sessions`. The `arm_ratio` populations are `assigned`, the
+first pack of each admitted join at the rate, main transcripts and joins with no
+outcome block included, which keeps the sample-ratio check; `tasks`, the
+eligible tasks; and `assigned YYYY-Wnn`, the first packs by week. No pack row
+count is reported: the `rows` block and the `rows YYYY-Wnn` populations are
+gone, because packs per task by arm is the input of the recall guardrail.
+`sessions` counts main transcripts on their own first pack (`with_first_pack`,
+and `eligible` when that pack is non-empty), with no arm and no roll-up of
+sub-agent joins. It adds `covariate_coverage`, how many eligible tasks carry
+each adjustment's covariates, with no fit. It drops `seed`, `inference`,
+`covariate_adjusted`, `power`, `guardrails`, the `outcome` and `itt` echoes, and
+from `descriptive` every outcome mean or SD, the MDE and sample-size horizons,
+and every count that follows the first pack: analysed tasks, packs per task,
+tasks with several packs or both arms, the post-hoc share, and the cut-offs
+split by arm. `--outcome` and `--itt` are accepted and change nothing;
+`--permutations`, `--bootstraps`, `--power-sims`, `--planned-*` and `--seed` are
+validated as for the full report and then unused, so an invalid one exits
+alike with and without `--operational`. With `--by-commit`, `by_commit` holds
+counts only: per build the eligible tasks that were `served` and `withheld`,
+each under its first pack's build. The text and JSON are an inspection aid, not
+a pause control: nothing here stops a run.
 
 The guardrails block
 (`guardrails`) gives each pre-registered guardrail per arm with its n and no
@@ -3889,22 +4023,45 @@ trellis worker enrich [--concurrency N] [--limit N] \
 
 ### `trellis worker mine-precedents`
 
-Mine precedent candidates from failure / partial traces (wraps `PrecedentMiner.generate_precedent_candidates`).
+Mine precedent candidates from failure / partial traces (wraps `PrecedentMiner.mine`; `generate_precedent_candidates` is the same run returning only the candidates).
 
 ```bash
 trellis worker mine-precedents [--domain D] [--min-traces N] \
-  [--limit N] [--dry-run] [--format text|json]
+  [--limit N] [--scan-cap N] [--strict] [--dry-run] [--format text|json]
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--domain` | (all) | Restrict mining to this trace domain. |
-| `--min-traces` | `3` | Minimum failure/partial traces required to mine. |
-| `--limit` | `100` | Max traces to analyze. |
-| `--dry-run` | off | Report how many failure/partial traces are in scope without calling the LLM. |
+| `--min-traces` | `3` | Minimum failure/partial traces required to mine (at least 1). |
+| `--limit` | `100` | Max **failure/partial** traces to find (at least `--min-traces`; below it the command exits `2` in both formats). It counts failures, not traces read. At most 20 of them, the newest, are shown to the model per run; older ones are not paged. |
+| `--scan-cap` | `5000` | Most traces to read, newest first, looking for failure/partial ones. |
+| `--strict` | off | Exit `1` when the model call failed (`outcome: llm_error`), in both formats. Off by default: the failure is reported (`status: "partial"`) and the exit is `0`. |
+| `--dry-run` | off | Report how many failure/partial traces are in scope, and whether a run would skip them as already mined, without calling the LLM. |
 | `--format` | `text` | `text` or `json`. |
 
 Candidates are **surfaced** as `PRECEDENT_CANDIDATE_MINED` events (one per candidate) but **not promoted**: `get_lessons`, `trellis retrieve precedents` and `GET /precedents` read `PRECEDENT_PROMOTED` only and never serve a mined candidate, and nothing routes one into the Review queue yet. Older versions emitted candidates as `PRECEDENT_PROMOTED` with `source="precedent_miner"`; readers skip those rows. Like `enrich`, this requires an LLM extra and exits loudly when none is configured.
+
+**How far it reads.** `TraceStore.query` has no outcome filter, so the miner reads the newest traces and keeps the failure/partial ones, widening the read (the first read is at least 100 wide, then it doubles) until it holds enough to analyse, the store ends, or `--scan-cap` traces have been read. "Enough" is `max(min(--limit, 20), --min-traces)`: at most 20 failures are shown to the model per run, so reading on for the rest of a large `--limit` would change nothing. A stretch of recent successes therefore no longer hides older failures. A scan that reaches the cap reads up to three times `--scan-cap` rows in all, because each widening re-reads the window before it; a store of exactly `--scan-cap` traces is not reported as cut off. `failure_traces_in_scope` is the failures found (at most `--limit`); because the read stops once it has enough, it is not a count of the store's failures.
+
+**Why a run produced nothing.** `--format json` carries `outcome` in both the dry-run and the real-run payload, with `traces_examined`, `scan_cap`, `read_bound_hit`, `skipped_unchanged`, `source_digest` and `already_mined_candidate_ids`; `would_mine` (dry run) is true only for `outcome: would_mine`. `outcome` is one of:
+
+| `outcome` | Meaning |
+|---|---|
+| `mined` | The model returned candidates; they were written. |
+| `would_mine` | Dry run only: a real run would ask the model. |
+| `skipped_unchanged` | The same failure traces were mined before; nothing was asked or written. |
+| `no_failures` | The store was read to its end and holds no failure/partial trace (zero found is this whatever `--min-traces` is). |
+| `below_min_traces` | The store was read to its end; it holds fewer than `--min-traces`. |
+| `read_bound_hit` | The read stopped at `--scan-cap` before it held enough failures. Older traces were not read, so this is **not** "no failures"; raise `--scan-cap`. |
+| `no_candidates` | The model answered and returned no usable candidate. |
+| `llm_error` | The model call failed; nothing was written. |
+
+`no_candidates` and `llm_error` write nothing, so they leave nothing for a later run to skip against: every scheduled run pays for the call again.
+
+`read_bound_hit: true` also appears on a `mined` run that found fewer failures than it wanted at the cap. Text output prints one sentence for every outcome. These are reports, not failures: the exit code is `0` for every outcome and is the same in both formats, and `status` is `"ok"` except on `llm_error`, where it is `"partial"` (the `trellis worker capture-sessions` convention). `--strict` makes `llm_error` exit `1` in both formats; unlike `capture-sessions` it is off by default, so a scheduled run does not go red on a model outage unless asked. A malformed model reply still raises, as before.
+
+**A rerun over unchanged failures mints nothing.** Each candidate event records `source_digest`, a digest of the (at most 20) newest failure traces the model was shown plus the `--domain` scope, and `mining_run_id` and `run_candidate_count`, which say which run wrote it and how many events that run meant to write. The events are written only after every item in the model's reply has validated. A run whose digest matches a *complete* earlier run (some one `mining_run_id` with all `run_candidate_count` events present) skips: no model call, no event, `outcome: skipped_unchanged`, and that run's ids in `already_mined_candidate_ids`. A run cut off part-way by a failed write is not complete, so the next run retries. The lookup reads the newest 200 events for the digest; a run that minted more than 200 candidates cannot be shown complete and mines again every time. A new failure among the newest 20 changes the digest, so the next run mines again. A new success does not, unless it pushes a failure out of the read window, which can only happen when the read stopped at `--scan-cap`: the failures the window holds are the input, so a shrunken set is a different input and mines again (there is no subset check). Failures beyond the newest 20 are not paged. The key is the input, not the output: it does not judge whether two candidates mean the same thing, and it cannot skip against a run that wrote nothing (a malformed reply, `no_candidates`, `llm_error`) or against candidates minted before the digest was recorded, which carry no key. There is no flag to force a re-mine of unchanged failures.
 
 ### `trellis worker capture-sessions`
 

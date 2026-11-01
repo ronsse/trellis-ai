@@ -103,6 +103,7 @@ if TYPE_CHECKING:
         HoldoutExclusion,
         HoldoutGuardrailArm,
         HoldoutHorizon,
+        HoldoutOperationalReport,
         HoldoutReport,
         HoldoutSecondaryInference,
     )
@@ -1457,8 +1458,8 @@ def value(
     This measures the PRECISION OF WHAT WAS SERVED — a value-density
     proxy. It is not benefit: it cannot say whether memory improved an
     outcome, only what share of the tokens it injected the caller went on
-    to cite. Answering the benefit question needs a withhold arm this
-    system does not have.
+    to cite. Answering the benefit question needs a withhold arm; the pack
+    holdout is that arm, and ``trellis analyze holdout`` reports it.
 
     Every ratio is reported with the number of attributed packs behind it,
     and a ratio computed from fewer than the stated minimum is refused
@@ -1971,13 +1972,16 @@ def _render_holdout_guardrails(report: HoldoutReport) -> None:
     console.print(f"    [dim]{escape(block.note)}[/dim]")
 
 
-def _render_holdout(report: HoldoutReport) -> None:
+def _render_holdout_title(
+    report: HoldoutReport | HoldoutOperationalReport, qualifiers: str
+) -> None:
+    """The title and windows both modes open with.
+
+    ``qualifiers`` is the markup after the rate in the title: the full report
+    names its outcome and cut-off handling, the operational one neither.
+    """
     rate = "none" if report.rate is None else f"{report.rate:g}"
-    cut_offs = "kept (ITT)" if report.itt else "excluded"
-    console.print(
-        f"[bold]Pack Holdout[/bold] (rate {rate}, outcome "
-        f"{escape(report.outcome)}, cut-offs {cut_offs})"
-    )
+    console.print(f"[bold]Pack Holdout[/bold] (rate {rate}, {qualifiers})")
     console.print(
         f"  window {escape(report.since)} to {escape(report.until)} "
         f"({report.window_days} days)"
@@ -1986,6 +1990,11 @@ def _render_holdout(report: HoldoutReport) -> None:
         f"  task window {escape(report.task_window_since)} to "
         f"{escape(report.until)} ({report.task_window_days:g} days)"
     )
+
+
+def _render_holdout_header(report: HoldoutReport, qualifiers: str) -> None:
+    """The title, window, row counts and funnel of the full report."""
+    _render_holdout_title(report, qualifiers)
     if report.scan.truncated:
         console.print(
             f"  [yellow]window[/yellow] evidence covers "
@@ -2013,6 +2022,26 @@ def _render_holdout(report: HoldoutReport) -> None:
         f"first pack, {f.unfinished} unfinished, {f.pre_treatment_excluded} "
         "first retrieval after a stop hook's feedback or a commit"
     )
+
+
+def _render_holdout_exclusions(
+    report: HoldoutReport | HoldoutOperationalReport,
+) -> None:
+    console.print()
+    console.print("  [bold]Exclusions[/bold]")
+    for exclusion in report.exclusions:
+        console.print(
+            f"    {escape(exclusion.timing)} ({escape(exclusion.name)}): "
+            f"{_holdout_exclusion_state(exclusion)}. {escape(exclusion.note)}"
+        )
+
+
+def _render_holdout(report: HoldoutReport) -> None:
+    cut_offs = "kept (ITT)" if report.itt else "excluded"
+    _render_holdout_header(
+        report, f"outcome {escape(report.outcome)}, cut-offs {cut_offs}"
+    )
+    f = report.funnel
     console.print(
         f"    eligible {f.eligible} "
         f"({escape(str(f.eligible_with_unparsed_pack_ids))} with an unparsed "
@@ -2022,17 +2051,102 @@ def _render_holdout(report: HoldoutReport) -> None:
     )
     _render_holdout_descriptive(report)
     _render_holdout_by_commit(report)
-    console.print()
-    console.print("  [bold]Exclusions[/bold]")
-    for exclusion in report.exclusions:
-        console.print(
-            f"    {escape(exclusion.timing)} ({escape(exclusion.name)}): "
-            f"{_holdout_exclusion_state(exclusion)}. {escape(exclusion.note)}"
-        )
+    _render_holdout_exclusions(report)
     _render_holdout_inference(report)
     _render_holdout_guardrails(report)
     for note in report.notes:
         console.print(f"  [dim]note: {escape(note)}[/dim]")
+
+
+def _render_holdout_operational(report: HoldoutOperationalReport) -> None:
+    """The operational view: counts fixed by each task's first pack, no outcome."""
+    _render_holdout_title(report, "operational")
+    f = report.funnel
+    console.print()
+    console.print(
+        "  [bold]Funnel[/bold] (sub-agent joins, admitted on their first pack)"
+    )
+    console.print(
+        f"    {f.no_outcome} without an outcome, "
+        f"{f.no_retrieval} without a pack ({f.no_retrieval_never_called} never "
+        f"retrieved, {f.no_retrieval_errored} errored, "
+        f"{f.no_retrieval_unparsed} unparsed, {f.no_retrieval_empty_answer} "
+        f"empty answer), {f.first_pack_not_found} first pack not found, "
+        f"{f.first_pack_old_build} from a build without the holdout, "
+        f"{f.other_rate} at another rate, {f.empty_first_pack} with an empty "
+        f"first pack, {f.pre_treatment_excluded} first retrieval after a stop "
+        "hook's feedback or a commit"
+    )
+    console.print(
+        f"    eligible {f.eligible} "
+        f"({f.pre_treatment_unknown} with no retrieval timing)"
+    )
+    d = report.descriptive
+    why = d.not_measurable.get
+    console.print()
+    console.print("  [bold]Counts[/bold] (no outcome value read)")
+    console.print(
+        f"    eligible tasks {d.eligible_tasks} "
+        f"({_per_30_days(d.eligible_per_30d, why('eligible_per_30d'))})"
+    )
+    console.print(
+        "    top parent's share of eligible tasks "
+        f"{_fig(d.top_parent_share, why('top_parent_share'))}"
+    )
+    console.print(
+        f"    served / withheld eligible: {d.eligible_by_arm.served} / "
+        f"{d.eligible_by_arm.withheld}"
+    )
+    for check in d.arm_ratio:
+        console.print(
+            f"    arm ratio, {escape(check.population)}: {check.withheld} of "
+            f"{check.n} withheld against {check.expected_share:g}, binomial p "
+            f"{_num(check.p_value, '.4g')}"
+        )
+    s = d.sessions
+    swhy = s.not_measurable.get
+    with_pack = _per_30_days(s.with_first_pack_per_30d, swhy("with_first_pack_per_30d"))
+    eligible = _per_30_days(s.eligible_per_30d, swhy("eligible_per_30d"))
+    console.print(
+        f"    main transcripts with a first pack {s.with_first_pack} "
+        f"({with_pack}), with a non-empty first pack {s.eligible} ({eligible})"
+    )
+    console.print(f"    [dim]{escape(s.note)}[/dim]")
+    console.print()
+    console.print("  [bold]Covariate coverage[/bold] (eligible tasks, no fit)")
+    for item in report.covariate_coverage:
+        label = _ADJUSTMENT_LABELS.get(item.name, item.name)
+        console.print(
+            f"    {escape(label)}: {item.n_used} tasks used, "
+            f"{item.n_missing_covariate} missing a covariate"
+        )
+    _render_holdout_operational_by_commit(report)
+    _render_holdout_exclusions(report)
+    for note in report.notes:
+        console.print(f"  [dim]note: {escape(note)}[/dim]")
+
+
+def _render_holdout_operational_by_commit(report: HoldoutOperationalReport) -> None:
+    """The per-build counts of eligible tasks."""
+    table = report.by_commit
+    if table is None:
+        return
+    console.print()
+    console.print("  [bold]By serving build[/bold] (eligible task counts only)")
+    width = max([len("build"), *(len(row.build) for row in table.rows)])
+    if not table.rows:
+        console.print("    no eligible task")
+    else:
+        console.print(
+            f"    {'build'.ljust(width)}  {'first':10}  {'last':10}  "
+            f"{'served':>6}  withheld"
+        )
+    for row in table.rows:
+        console.print(
+            f"    {escape(row.build.ljust(width))}  {escape(row.first_seen[:10])}  "
+            f"{escape(row.last_seen[:10])}  {row.served:>6}  {row.withheld}"
+        )
+    console.print(f"    [dim]{escape(table.note)}[/dim]")
 
 
 def _holdout_exclusion_state(exclusion: HoldoutExclusion) -> str:
@@ -2075,8 +2189,27 @@ def holdout(
         False,
         "--by-commit",
         help=(
-            "Add a descriptive table of the analysed tasks per arm and serving "
-            "build. No estimate; no other figure changes."
+            "Add a table of the analysed tasks per arm and serving build, with "
+            "each arm's outcome mean; no interval, no p-value, no other figure "
+            "changes."
+        ),
+    ),
+    operational: bool = typer.Option(
+        False,
+        "--operational",
+        help=(
+            "Check the experiment is running without reading its outcomes: the "
+            "funnel, arm counts and ratio checks and covariate coverage. It "
+            "reads the capture joins, the capture sweeps and each join's "
+            "first pack, fetched by id, and does not scan the pack stream, so "
+            "no later pack or pack count reaches a figure. A task is admitted "
+            "on its first pack, so its counts can differ from the full "
+            "report's. No outcome value is read (only whether a join has an "
+            "outcome block), and no mean, estimate, CI, p-value, power, SD, "
+            "guardrail or fit is computed. --outcome, --itt, --permutations, "
+            "--bootstraps, --power-sims, --planned-* and --seed are validated "
+            "as for the full report and change no figure; with --by-commit the "
+            "table holds counts only. --limit does not apply and is refused."
         ),
     ),
     permutations: int = typer.Option(
@@ -2103,12 +2236,14 @@ def holdout(
         ),
     ),
     seed: int = typer.Option(20261004, "--seed", help="Seed for every random draw."),
-    limit: int = typer.Option(
-        DEFAULT_SCAN_LIMIT,
+    limit: int | None = typer.Option(
+        None,
         "--limit",
         help=(
-            "Max events to scan per event type. Raise it when the report says "
-            "the evidence covers less than the window."
+            "Max events to scan per event type (default "
+            f"{DEFAULT_SCAN_LIMIT}). Raise it when the report says the evidence "
+            "covers less than the window. Refused with --operational, which "
+            "pages the joins and sweeps to completion."
         ),
     ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
@@ -2123,13 +2258,53 @@ def holdout(
     stratified bootstrap CI and power at the realised N, and the
     guardrails per arm, which decide nothing. Counts and statistics only;
     writes nothing, not even a meta-trace.
+
+    With --operational the report holds only what shows the experiment is
+    running (funnel, arm counts, arm-ratio checks, coverage). It reads the
+    capture joins, the capture sweeps and each join's first pack, and nothing
+    else from the pack stream; the outcome-derived figures are not computed
+    and no pack count is reported.
     """
     from trellis.analyze.holdout import (  # noqa: PLC0415
         HoldoutAnalysisError,
         analyze_holdout,
+        analyze_holdout_operational,
     )
 
+    if operational and limit is not None:
+        message = (
+            "--limit does not apply with --operational: it reads no pack scan "
+            "and pages the joins and sweeps to completion."
+        )
+        if output_format == "json":
+            emit_json({"status": "error", "message": message})
+        else:
+            console.print(f"[red]{escape(message)}[/red]", soft_wrap=True)
+        raise typer.Exit(code=EXIT_VALIDATION)
+
     try:
+        if operational:
+            operational_report = analyze_holdout_operational(
+                get_event_log(),
+                days=days,
+                until=_parse_window_end(until),
+                rate=rate,
+                outcome=outcome,
+                itt=itt,
+                by_commit=by_commit,
+                permutations=permutations,
+                bootstraps=bootstraps,
+                power_sims=power_sims,
+                planned_mde=planned_mde,
+                planned_n=planned_n,
+                settle_hours=settle_hours,
+                seed=seed,
+            )
+            if output_format == "json":
+                emit_json(operational_report.model_dump())
+                return
+            _render_holdout_operational(operational_report)
+            return
         report = analyze_holdout(
             get_event_log(),
             days=days,
@@ -2145,7 +2320,7 @@ def holdout(
             planned_n=planned_n,
             settle_hours=settle_hours,
             seed=seed,
-            limit=limit,
+            limit=DEFAULT_SCAN_LIMIT if limit is None else limit,
         )
     except HoldoutAnalysisError as exc:
         message = str(exc)
