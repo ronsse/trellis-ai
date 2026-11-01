@@ -35,7 +35,9 @@ matrix a second time alongside the PR run.
 every workflow file and asserts that those declaring ``pull_request``
 declare it unfiltered. It does not check that a workflow *has* a
 ``pull_request`` trigger — ``claude.yml`` is comment-driven and
-``publish.yml`` is release-only, and neither should acquire one — but it
+``publish.yml`` is release-only, and neither should acquire one (nor should
+``upgrade-check.yml``, which installs two builds and runs on tags, nightly and
+on demand) — but it
 does pin which files are out of scope, so a quality workflow *losing* its
 trigger is a failure here rather than a silent loss of coverage.
 
@@ -60,9 +62,11 @@ WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
 
 #: Workflows that deliberately declare no ``pull_request`` trigger.
 #: ``claude.yml`` runs on ``@claude`` mentions in comments and reviews;
-#: ``publish.yml`` runs on a release tag. Pinned rather than inferred so a
-#: quality workflow that *loses* its trigger fails here.
-NO_PULL_REQUEST_TRIGGER = frozenset({"claude.yml", "publish.yml"})
+#: ``publish.yml`` runs on a release tag; ``upgrade-check.yml`` runs on a
+#: release tag, nightly and on demand, because it installs two builds. Pinned
+#: rather than inferred so a quality workflow that *loses* its trigger fails
+#: here.
+NO_PULL_REQUEST_TRIGGER = frozenset({"claude.yml", "publish.yml", "upgrade-check.yml"})
 
 #: Floor on the scan's own output. Every other assertion divides by what
 #: the scan found, so a scan that silently stops finding workflows would

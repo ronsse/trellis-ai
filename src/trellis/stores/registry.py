@@ -1376,8 +1376,18 @@ class StoreRegistry:
             return None
         return self._stores_dir / name
 
-    def _instantiate(self, store_type: str) -> Any:  # noqa: PLR0915
-        """Create a store instance from config."""
+    def _instantiate(  # noqa: PLR0915
+        self, store_type: str, *, construct: bool = True
+    ) -> Any:
+        """Create a store instance from config.
+
+        ``construct=False`` runs every check that precedes the constructor
+        and returns ``None`` without calling it. ``validate`` uses it for a
+        store whose URI its pre-flight refused: the constructor of a
+        Postgres store waits out a pool timeout on a DSN that cannot
+        connect, while an unknown backend, a missing driver package or a
+        key the backend does not accept are still reported.
+        """
         backend, params = self._resolve_backend(store_type)
 
         plane = _PLANE_OF.get(store_type)
@@ -1474,6 +1484,9 @@ class StoreRegistry:
                     f" {', '.join(sorted(accepted)) or 'no keys'}"
                 )
                 raise ConfigError(msg, setting=f"stores.{store_type}")
+
+        if not construct:
+            return None
 
         logger.info("store_instantiated", store_type=store_type, backend=backend)
         try:
@@ -1823,6 +1836,12 @@ class StoreRegistry:
         playing whack-a-mole one store at a time. The aggregate is
         raised as :class:`RegistryValidationError`.
 
+        A store whose ``dsn`` / ``uri`` the pre-flight URI check refused is
+        named by that error and its constructor is not called: a Postgres
+        pool would only wait out its timeout on a URI already refused.
+        The checks that precede the constructor still run for it, and every
+        other store is instantiated as before.
+
         Connectivity checks
         -------------------
 
@@ -1864,7 +1883,13 @@ class StoreRegistry:
         # the underlying typo behind a driver-level error). Aggregated
         # alongside instantiation failures so the operator sees one
         # consolidated report.
-        errors.extend(self._check_uri_formats(targets))
+        uri_failures = self._check_uri_formats(targets)
+        errors.extend(uri_failures)
+        # Keyed by store type, never by URI text or by every pre-flight
+        # label: each store reads its own ``dsn``/``uri``, so another store
+        # carrying the same string under a backend that accepts it, and a
+        # store a different pre-flight check names, are still instantiated.
+        refused_uri = {store_type for store_type, _ in uri_failures}
         errors.extend(self._check_embedding_dim_consistency())
         errors.extend(self._check_embeddings_shape())
 
@@ -1879,6 +1904,13 @@ class StoreRegistry:
         instantiated_ok: set[str] = set()
         for store_type in targets:
             try:
+                if store_type in refused_uri:
+                    # The pre-flight error above already names this store.
+                    # Connecting would only wait out a timeout on a URI
+                    # that error refused; the store is neither built,
+                    # cached nor counted as started.
+                    self._instantiate(store_type, construct=False)
+                    continue
                 self._get(store_type)
                 instantiated_ok.add(store_type)
             except Exception as exc:
