@@ -25,7 +25,7 @@ last-review: 2026-10-29
 | What is the state of the code, and in what order do the open phases execute | [`design/implementation-roadmap.md`](design/implementation-roadmap.md) | the live single-page hand-off: §1 state, §2 recently completed, §3 open phases A–H, §4 execution order |
 | I am an autonomous agent picking up work | [`design/swarm-handoff.md`](design/swarm-handoff.md) | the autonomy contract, the merge gate (§4), the traps that already cost time |
 | What did we decide, and what is still open | [`design/decision-ledger.md`](design/decision-ledger.md) | decisions taken and pending |
-| Where is the recursive-self-improvement work | [`design/plan-self-improvement-program.md`](design/plan-self-improvement-program.md) | the capability program: eight sub-plans, their dependencies, the POC hard rules |
+| Where is the recursive-self-improvement work | [`design/plan-self-improvement-program.md`](design/plan-self-improvement-program.md) | the capability program as built (Cohort 1 landed; Cohort 2 stays gated by its ADR amendment): eight sub-plans, their dependencies, the POC hard rules |
 | What is actually in flight *right now* | **the tracker and the open PRs** | — nothing in this repo can answer it, see §2 |
 
 Picking up implementation work starts at `implementation-roadmap.md`, exactly as
@@ -131,12 +131,6 @@ by attributed packs — so the gate is not met and the exporter is not built. Tw
 unblock it, in order: N2 (prod did not emit the stream; the tracker closed 2026-10-24, and whether prod now emits it is a production read), then attribution volume.
 
 - Acceptance: the strict-graded row count over a 30-day window clears 500.
-
-**X2 · Capability program, phases 1–3** —
-[`plan-self-improvement-program.md`](design/plan-self-improvement-program.md) §4 carries
-the execution order, §3 the eight sub-plans and their dependencies. Read §2 before
-proposing anything: the POC directive (no silent fallbacks, no compat shims, no
-half-finished features) supersedes `CLAUDE.md`'s softer defaults on that one dimension.
 
 **X3 · The remaining open phases** — `implementation-roadmap.md` §3 B/C/D/E/G/H and the
 execution order in §4. Nothing in this file reorders them.

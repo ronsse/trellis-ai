@@ -1,6 +1,6 @@
 # Plan: Coding-agent self-improvement loop
 
-**Status:** Proposed 2026-05-11
+**Status:** Cohort 1 landed 2026-05 (#134, #135; code in `src/trellis_workers/code_authoring/`); Cohort 2 (Phases 2-3) is gated by [`adr-coding-agent-loop-cohort2-amendment.md`](./adr-coding-agent-loop-cohort2-amendment.md) §2, and its plan is [`plan-coding-agent-loop-cohort2.md`](./plan-coding-agent-loop-cohort2.md). The text below is the original plan.
 **Owner:** swarm-pickable (Phases 0+1 first; Phases 2+3 only after Phases 0+1 have been live for a release)
 **ADR:** [`adr-coding-agent-loop.md`](./adr-coding-agent-loop.md)
 **Program:** [`plan-self-improvement-program.md`](./plan-self-improvement-program.md) item 7 (capstone)

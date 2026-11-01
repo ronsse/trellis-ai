@@ -56,6 +56,8 @@ from trellis.core.hashing import content_hash
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.ingest_corpus.models import is_chunk_doc_id
 from trellis.ingest_corpus.sync import record_landed
+from trellis.llm.egress import EgressGate
+from trellis.llm.routing import LLMConsumer
 from trellis.mcp.reconcile import (
     MARKER_SKIPPED,
     RECONCILIATION_KEY,
@@ -96,13 +98,21 @@ def _load_existing(
     registry: StoreRegistry,
     id_prefix: str,
     hidden_doc_ids: AbstractSet[str] = frozenset(),
-) -> dict[str, str]:
-    """Return ``{doc_id: content}`` for stored captures under *id_prefix*.
+    egress: EgressGate | None = None,
+) -> tuple[dict[str, str], set[str]]:
+    """Return ``({doc_id: content}, withheld)`` for stored captures under *id_prefix*.
 
     A doc id in *hidden_doc_ids* is left out; see :func:`adjudicate`.
+    ``withheld`` is the subset of the returned ids that *egress* refuses to
+    send to the judge (:mod:`trellis.llm.egress`): they are still loaded, so
+    a near-duplicate of one is recognised as a match, but the judge is never
+    shown their content. Omitted, *egress* is the gate for a route that is
+    not declared local.
     """
     doc_store = registry.knowledge.document_store
+    gate = egress if egress is not None else EgressGate(doc_store, local=False)
     existing: dict[str, str] = {}
+    withheld: set[str] = set()
     offset = 0
     while True:
         page = doc_store.list_documents(limit=_LIST_PAGE_SIZE, offset=offset)
@@ -117,12 +127,14 @@ def _load_existing(
                 and doc_id not in hidden_doc_ids
             ):
                 existing[doc_id] = doc.get("content", "")
+                if not gate.permits(doc_id, doc.get("metadata")):
+                    withheld.add(doc_id)
         if len(page) < _LIST_PAGE_SIZE:
             break
-    return existing
+    return existing, withheld
 
 
-def adjudicate(
+def adjudicate(  # noqa: PLR0912 - one branch per verdict path, as the docstring lays out
     registry: StoreRegistry,
     candidates: list[CandidateMemory],
     *,
@@ -150,6 +162,12 @@ def adjudicate(
     not start to: the ids are left out of the stored captures compared against
     and out of the exact-duplicate check, so a candidate is reconciled against
     what was stored before the sweep began and nothing else.
+
+    **A stored capture labelled above ``internal`` is never shown to the judge**
+    unless the ``session_capture`` route is declared local
+    (:mod:`trellis.llm.egress`). A candidate whose nearest match is such a
+    capture is not judged: it is a plain ADD and is counted in
+    ``report.candidates_skipped_egress_withheld``.
 
     **An exact duplicate counts only once it has landed.** The writer puts a
     document's parent row before its chunks, so a stored parent with this
@@ -185,7 +203,8 @@ def adjudicate(
     model_id = configured_model_id(registry)
     timeout = reconcile_timeout_seconds(registry)
 
-    existing = _load_existing(registry, id_prefix, hidden_doc_ids)
+    egress = EgressGate.for_route(registry, LLMConsumer.SESSION_CAPTURE, doc_store)
+    existing, withheld = _load_existing(registry, id_prefix, hidden_doc_ids, egress)
     index = MinHashIndex()
     for doc_id, content in existing.items():
         index.add(doc_id, content)
@@ -228,7 +247,13 @@ def adjudicate(
             for mid, sim in index.query(candidate.content)
             if sim < _NEAR_CEILING and mid in existing
         ]
-        if matches and client is not None:
+        if matches and client is not None and matches[0][0] in withheld:
+            # The nearest stored capture is labelled above ``internal`` and the
+            # judge's route is not declared local: its content is not sent, so
+            # there is no verdict and the candidate is a plain ADD.
+            report.candidates_skipped_egress_withheld += 1
+            candidate.reconciliation = ReconcileDecision.ADD.value
+        elif matches and client is not None:
             match_id, similarity = matches[0]
             outcome = judge_reconcile(
                 client,

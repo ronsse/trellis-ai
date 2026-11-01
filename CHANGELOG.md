@@ -40,6 +40,58 @@ All notable changes to Trellis will be documented in this file.
   are unchanged). The primary estimator, strata, exclusions, assignment and
   serving are untouched; `--operational` prints none of the new figures.
 
+- **Content labelled above `internal` no longer reaches a chat or generate LLM
+  route that is not declared local, on the paths listed here.** One predicate, `trellis.llm.egress` (`may_reach_route` for a
+  label, `EgressGate` for a stored document, a chunk judged by its parent's
+  label as retrieval judges it, and a chunk whose parent row is absent
+  withheld), answers "may this content reach this route?"
+  and only these paths ask it: `trellis worker
+  enrich`, `trellis classify shadow` (`shadow_classify_stale`), the MCP
+  reconcile-on-write judge, the session-capture reconcile pass, and memory
+  extraction in `save_memory`, `trellis ingest-corpus` and
+  `trellis ingest-conversations`. **Embedding is not gated:** stored content,
+  labelled content included, still goes to the configured embedder, and an
+  operator with a hosted embedder must treat that as egress. A route is cloud unless it says otherwise:
+  set `local: true` in the `llm:` block, or in a tier under `llm.tiers`
+  (a tier that keeps the parent's endpoint inherits the parent's declaration; a
+  tier that moves `provider` or `base_url` does not). `local` is on the route,
+  not a write-behaviour knob, and `trellis admin llm-routes --format json`
+  reports it. `local: true` is the operator's statement about where the
+  endpoint sends content, and only the presence of a URL is checked: it is rejected
+  (`llm.local`, `EXIT_STORE`) on a route that names `openai` or `anthropic` with no
+  `base_url`; a vendor URL written out, or any other provider name, passes, and a
+  local router that forwards to a hosted model is not local.
+  A document whose label cannot be read is skipped, not sent.
+  Skips are counted under the named reason `egress_withheld`, never only
+  logged: `skipped_egress_withheld` in the JSON report of `worker enrich` and
+  `classify shadow`, `candidates_skipped_egress_withheld` in the session-capture
+  report, `egress_withheld` as a reconcile fallback reason (not a judge
+  failure), and `extraction_skipped_labelled` in the corpus and conversation
+  sync reports; each text report prints a matching line when the count is
+  non-zero. Unlabelled and `internal` documents are sent as before, prompt included,
+  with two exceptions: a chunk-shaped id with no parent row is withheld whatever
+  its own label, and an unlabelled memory whose nearest stored row is labelled
+  is not judged by reconcile. `tests/unit/test_llm_egress_rule.py` is a tripwire for the
+  common shapes of a new sender (it derives `.generate(...)` sites off `src/` and
+  requires each to be rostered behind the predicate or exempt with a reason);
+  the behaviour tests beside each sender are the guard, and the test's docstring
+  names the evasions it does not catch. **Effects on what is served, by path.**
+  Enrichment and shadow tags on a labelled document stop updating on a route that
+  is not declared local; whatever tags it already carries keep being served
+  unchanged. `ingest-corpus` sent the text of a labelled document (its label from the handler, or stored on the row and kept by an update) to the extractor
+  before and no longer does, whatever the route is declared (the entities land in
+  the graph, which carries no label), so such a document stops minting graph
+  entities, which feeds the graph axis. With
+  `TRELLIS_ENABLE_RECONCILE_ON_WRITE` off nothing changes; with it on and a route
+  not declared local, a pair with a labelled side is not judged, the new memory
+  is stored as a plain ADD and both rows stay current, so a pack can serve the
+  old fact (a pair the judge would have called NOOP stores a second row too).
+  Nothing re-judges a withheld pair later. The label is read when a job scans, so
+  a relabel between scan and send is not re-read. A labelled document served to a
+  session can reach a transcript, be captured unlabelled and become an
+  enrichment candidate; that path is not gated. Precedent mining (`_ask_llm` in the learning miner) also sends stored trace summaries to a chat or generate route without asking the predicate. A moved or renamed corpus file loses a label set on the stored row (an update merges stored metadata, a move does not), so every gate, the read gate included, treats it as unlabelled until it is labelled again; a handler that supplies the label on every run keeps it. `trellis admin check-extractors`
+  no longer reports an env-key fallback for a route declared local. No file
+  under `trellis.retrieve` changed.
 - **`trellis classify label-candidates` points a person at documents they may
   want to label.** A read-only scan counts matches of four plain patterns (an email
   address, a US/Canada phone number with separators, a US SSN shape and a
@@ -154,6 +206,40 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A `TRELLIS_API_PORT` that is not a port number is a one-line configuration error
+  from `trellis serve` and `trellis-api`, and no longer takes down every `trellis`
+  command.** `trellis_api.app` ran `int()` on the variable at import, and
+  `trellis_cli.main` imports it for every command, so a value like `abc` ended
+  `trellis serve`, `trellis admin stats --format json` and the rest in a `ValueError`
+  traceback with exit `1`. The port is now resolved when a server starts
+  (`resolve_api_port`): an empty variable is the default `8420`, a flag beats it, and
+  anything that is not an integer from 0 to 65535 raises `ConfigError`, which
+  `trellis serve` prints and exits `5` on, as it does for any configuration error, and
+  `trellis-api` prints to stderr and exits `5` on. `trellis serve` has no `--format`
+  option, so its exit does not vary by format. `trellis admin serve` is unchanged: it
+  still reads the variable through its option and rejects a bad value as a usage error,
+  exit `2`, where before it never got that far. On `trellis serve`, a bad value beside
+  `--port` is ignored, as a flag beats the variable.
+
+- **The Precedents tab reads the learning-candidates route's `status: "error"` as the
+  Review tab does, and a failure shows its reason.** The empty state's line about
+  waiting candidates said "could not be checked just now" for every error answer and
+  for a failed request alike. The two "nothing written yet" codes
+  (`learning_artifacts_dir_missing`, `learning_candidates_missing`) now read as no
+  candidates awaiting a decision and keep the server's hint; any other code, or a
+  request that failed, reads "could not be checked" followed by the hint and code, or
+  the request's message. The two tabs share one list of codes. The REST response is
+  unchanged.
+
+- **`SchemaFingerprintMismatch` no longer tells an operator to "Run migrations".** No
+  such command exists (`docs/deployment/runbook.md`, "Upgrading", says so). The message
+  now says the store was last written under a different backend or schema version, and
+  names what can be done: set the store's `backend` back to the recorded one, run the
+  build that wrote the store, or restore a backup taken before the change. It adds that
+  `TRELLIS_SKIP_FINGERPRINT_CHECK=1` starts without the check and does not convert the
+  store, where it used to call that a way to "bypass during a migration window". The
+  check itself is unchanged.
+
 - **An attribution refusal now puts the ids it promises in the text the client receives.**
   With `TRELLIS_REQUIRE_PACK_ATTRIBUTION` or `TRELLIS_REQUIRE_BODIED_ATTRIBUTION` on, MCP
   `record_feedback` refused an uncited call and said the served ids were available, but they
@@ -176,7 +262,7 @@ All notable changes to Trellis will be documented in this file.
   one call site still passed it a string. The REST response is unchanged (same `status`, `code`
   and `hint`, so the OpenAPI spec and the CLI are untouched); a client that needs "not written
   yet" still reads `code`. The Precedents tab's one line about waiting candidates still reads
-  `status: "error"` as "could not be checked".
+  `status: "error"` as "could not be checked" (fixed in the entry above).
 
 - **`trellis admin serve` reads `TRELLIS_API_HOST` and `TRELLIS_API_PORT`, and the
   deployment docs describe the scoped-key auth that is built.** The operator

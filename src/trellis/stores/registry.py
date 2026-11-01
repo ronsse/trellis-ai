@@ -1738,9 +1738,15 @@ class StoreRegistry:
                 f"SchemaFingerprintMismatch: store '{store_type}' "
                 f"(plane={_PLANE_OF.get(store_type, '?')}): "
                 f"configured fingerprint '{want}' != stored fingerprint '{have}'. "
-                "Substrate schema may be out of date. Run migrations or switch "
-                f"substrate, or set {_FINGERPRINT_SKIP_ENV}=1 to bypass during a "
-                "migration window."
+                "The store was last written under a different backend or schema "
+                "version than this build is configured for, and there is no "
+                "migration command to convert it. If the backend changed, set "
+                f"stores.{store_type}.backend back to the recorded one. If the "
+                "schema version changed, run the build that wrote the store or "
+                "restore a backup taken before the change "
+                "(docs/deployment/runbook.md, 'Upgrading'). "
+                f"{_FINGERPRINT_SKIP_ENV}=1 starts without this check; it does "
+                "not convert or repair the store."
             )
             errors.append(
                 (store_type, ConfigError(msg, setting=f"stores.{store_type}.backend"))

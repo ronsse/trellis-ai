@@ -1669,9 +1669,10 @@ def _build_check_extractors_report() -> dict[str, Any]:
 
     env_fallback_available = any(os.environ.get(v) for v in _LLM_API_KEY_ENVS)
     # MCP's ``_build_llm_client`` skips the env-var fallback for a consumer
-    # ``llm.routes`` pins to a tier and for a malformed routing block: the
-    # operator chose a model, and ``OPENAI_API_KEY`` would run another one.
-    env_fallback_applies = route is not None and not route.routed
+    # ``llm.routes`` pins to a tier, for a route declared ``local`` and for a
+    # malformed routing block: the operator chose a model, and
+    # ``OPENAI_API_KEY`` would run another one.
+    env_fallback_applies = route is not None and not route.routed and not route.local
     env_fallback_usable = env_fallback_available and env_fallback_applies
     flag_raw = os.environ.get(MEMORY_EXTRACTION_FLAG, "").strip().lower()
     flag_set = flag_raw in TRUTHY

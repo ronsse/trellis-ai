@@ -32,6 +32,16 @@ Three rules carry the design.
   another. The same hazard runs the other way, so a tier that changes
   ``provider`` under a parent with a ``base_url`` must set its own
   ``base_url`` (``null`` for the provider's default).
+* **A route is cloud unless it says it is local.** ``local: true`` on the
+  parent block, or on a tier, declares that the endpoint it names runs on
+  hardware the operator controls. Nothing is inferred from a ``base_url``: a
+  ``localhost`` address can be a tunnel to a hosted service, so an undeclared
+  route is treated as cloud. A tier inherits the parent's declaration only
+  while it keeps the parent's endpoint; a tier that moves the endpoint must
+  declare for itself, because the parent's declaration says nothing about the
+  new service. The declaration is read by :mod:`trellis.llm.egress`, which
+  keeps content labelled above ``internal`` off a route that is not local; it
+  does not change which client is built.
 * **A defect in the block raises** :class:`LLMRoutingError` at build time,
   for every consumer, rather than degrading any of them to the parent block.
   Falling back is how a consumer the operator pinned to one model silently
@@ -55,6 +65,7 @@ __all__ = [
     "CREDENTIAL_KEYS",
     "ENDPOINT_KEYS",
     "LLM_BLOCK_KEYS",
+    "LOCAL_KEY",
     "LLMConsumer",
     "LLMRoute",
     "LLMRoutingError",
@@ -89,6 +100,9 @@ CREDENTIAL_KEYS: tuple[str, str] = ("api_key", "api_key_env")
 #: A tier that changes either of these talks to a different service.
 ENDPOINT_KEYS: tuple[str, str] = ("provider", "base_url")
 
+#: The one boolean a parent block or a tier may set: "this endpoint is local".
+LOCAL_KEY = "local"
+
 _TIERS_KEY = "tiers"
 _ROUTES_KEY = "routes"
 
@@ -114,6 +128,9 @@ class LLMRoute:
     consumer: LLMConsumer | None
     tier: str | None
     block: Mapping[str, Any] = field(repr=False)
+    #: ``True`` only when the parent block or the tier explicitly declares
+    #: ``local: true`` (see the module docstring); never inferred.
+    local: bool = False
 
     @property
     def routed(self) -> bool:
@@ -162,6 +179,7 @@ class LLMRoute:
             "provider": self.provider,
             "model": self.model,
             "base_url": _display_url(self.base_url),
+            "local": self.local,
             "api_key_env": None if not env_name else str(env_name),
             "credential_source": self.credential_source(environ),
         }
@@ -188,6 +206,9 @@ def validate_llm_routing(llm_config: Mapping[str, Any] | None) -> None:
         # error like every other malformed shape in this block.
         msg = f"llm: must be a mapping, got {type(parent).__name__}."
         raise LLMRoutingError(msg, setting="llm")
+    _validate_local("llm", parent)
+    if parent.get(LOCAL_KEY) is True:
+        _validate_local_endpoint("llm", parent.get("provider"), parent.get("base_url"))
     tiers = _tiers(parent)
     routes = _routes(parent)
     parent_endpoint = {key: parent.get(key) for key in ENDPOINT_KEYS}
@@ -209,14 +230,25 @@ def _validate_tier(name: str, body: Any, parent_endpoint: Mapping[str, Any]) -> 
             f" parent 'llm:' block, or use '{{}}' to alias the parent."
         )
         raise LLMRoutingError(msg, setting=setting)
-    unknown = sorted(str(key) for key in body if key not in LLM_BLOCK_KEYS)
+    allowed = LLM_BLOCK_KEYS | {LOCAL_KEY}
+    unknown = sorted(str(key) for key in body if key not in allowed)
     if unknown:
         msg = (
             f"LLM tier {name!r} has unknown key(s) {unknown}; a tier may set"
-            f" only {sorted(LLM_BLOCK_KEYS)}."
+            f" only {sorted(allowed)}."
         )
         raise LLMRoutingError(msg, setting=setting)
+    _validate_local(setting, body)
+    if body.get(LOCAL_KEY) is True:
+        # The endpoint the tier resolves to: its own key, else the parent's.
+        _validate_local_endpoint(
+            setting,
+            body["provider"] if "provider" in body else parent_endpoint["provider"],
+            body["base_url"] if "base_url" in body else parent_endpoint["base_url"],
+        )
     for key, value in body.items():
+        if key == LOCAL_KEY:
+            continue
         if value is not None and not isinstance(value, str):
             msg = (
                 f"LLM tier {name!r} key {key!r} must be a string or null,"
@@ -265,6 +297,46 @@ def _validate_tier(name: str, body: Any, parent_endpoint: Mapping[str, Any]) -> 
             " (null for the provider's default)."
         )
         raise LLMRoutingError(msg, setting=f"{setting}.base_url")
+
+
+def _validate_local(setting: str, body: Mapping[str, Any]) -> None:
+    """``local`` is a boolean or absent; anything else would read as cloud."""
+    if LOCAL_KEY not in body:
+        return
+    value = body[LOCAL_KEY]
+    if not isinstance(value, bool):
+        shape = "null" if value is None else type(value).__name__
+        msg = (
+            f"{setting}.{LOCAL_KEY} must be true or false, got a {shape} value."
+            " Omit the key to leave the route undeclared (treated as cloud)."
+        )
+        raise LLMRoutingError(msg, setting=f"{setting}.{LOCAL_KEY}")
+
+
+#: Providers whose default endpoint is a hosted service.
+_HOSTED_PROVIDERS = frozenset({"openai", "anthropic"})
+
+
+def _validate_local_endpoint(setting: str, provider: Any, base_url: Any) -> None:
+    """``local: true`` cannot sit on a hosted provider's default endpoint.
+
+    ``provider: openai`` (or ``anthropic``) with no ``base_url`` talks to the
+    provider's own hosted API, so declaring it local is a contradiction the
+    block itself shows. This reads only the block: a ``base_url`` that names a
+    local-looking router which forwards to a hosted model passes, because
+    ``local: true`` is the operator's statement about where the endpoint sends
+    data and nothing here can see past the URL.
+    """
+    named = str(provider).strip().lower() if isinstance(provider, str) else ""
+    if named in _HOSTED_PROVIDERS and not (
+        isinstance(base_url, str) and base_url.strip()
+    ):
+        msg = (
+            f"{setting}.{LOCAL_KEY} is true but the route names the hosted provider"
+            f" {named!r} with no base_url, which is that provider's hosted API."
+            f" Set base_url to the endpoint you run, or drop {LOCAL_KEY}."
+        )
+        raise LLMRoutingError(msg, setting=f"{setting}.{LOCAL_KEY}")
 
 
 def _validate_route(
@@ -320,8 +392,14 @@ def resolve_llm_route(
     parent = llm_config or {}
     validate_llm_routing(parent)
     tier = None if member is None else _routes(parent).get(member.value)
+    parent_local = parent.get(LOCAL_KEY) is True
     if tier is None:
-        return LLMRoute(consumer=member, tier=None, block=MappingProxyType(parent))
+        return LLMRoute(
+            consumer=member,
+            tier=None,
+            block=MappingProxyType(parent),
+            local=parent_local,
+        )
 
     body = _tiers(parent)[tier]
     effective: dict[str, Any] = {
@@ -331,7 +409,19 @@ def resolve_llm_route(
     credential_owner = body if any(key in body for key in CREDENTIAL_KEYS) else parent
     for key in CREDENTIAL_KEYS:
         effective[key] = credential_owner.get(key)
-    return LLMRoute(consumer=member, tier=tier, block=MappingProxyType(effective))
+    if LOCAL_KEY in body:
+        local = body[LOCAL_KEY] is True
+    else:
+        moved = any(
+            key in body and body[key] != parent.get(key) for key in ENDPOINT_KEYS
+        )
+        local = parent_local and not moved
+    return LLMRoute(
+        consumer=member,
+        tier=tier,
+        block=MappingProxyType(effective),
+        local=local,
+    )
 
 
 def _tiers(parent: Mapping[str, Any]) -> Mapping[Any, Any]:

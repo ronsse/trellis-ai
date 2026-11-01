@@ -286,7 +286,7 @@ Operational rule:
 - **`pack_feedback.jsonl` is an audit log**. Consumed by ad-hoc `compute_item_effectiveness` runs and by `reconcile_feedback_log_to_event_log()` for backfilling missing events.
 - A deployment that *only* writes JSONL gets the audit trail but does not drive promotion. That is by design.
 
-This closes option (c) of the [TODO.md "File-only JSONL → `learning.scoring` bridge"](../../TODO.md) entry: the dual-path framing is removed; the JSONL schema is not extended.
+This closes option (c) of the [TODO.md "File-only JSONL → `learning.scoring` bridge"](../archive/TODO.md) entry: the dual-path framing is removed; the JSONL schema is not extended.
 
 ## 9. References
 
