@@ -1151,9 +1151,13 @@ def replay(
             ],
         )
         if refusal is not None:
-            # Above the format branch: a refused invocation exits 2 whatever
-            # ``--format`` says (``tests/unit/test_format_exit_parity_rule.py``).
-            console.print(f"[red]{refusal}[/red]", soft_wrap=True)
+            # The exit sits below the format branch: a refused invocation
+            # exits 2 whatever ``--format`` says
+            # (``tests/unit/test_format_exit_parity_rule.py``).
+            if output_format == "json":
+                emit_json({"status": "error", "message": refusal})
+            else:
+                console.print(f"[red]{refusal}[/red]", soft_wrap=True)
             raise typer.Exit(code=2)
         _replay_graph_selection_command(
             graph_selection,
@@ -1215,7 +1219,10 @@ def replay(
             refill=not no_refill,
         )
     except ValueError as exc:
-        console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
+        if output_format == "json":
+            emit_json({"status": "error", "message": str(exc)})
+        else:
+            console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
         raise typer.Exit(code=2) from exc
 
     event_log = get_event_log()

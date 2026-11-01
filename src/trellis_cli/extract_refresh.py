@@ -56,7 +56,7 @@ from trellis_cli.exit_codes import (
     batch_outcome,
     refusal_exit_code,
 )
-from trellis_cli.output import build_console
+from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import _get_registry
 
 _logger = structlog.get_logger(__name__)
@@ -398,6 +398,26 @@ def _refresh_entry(
     )
 
 
+def _refuse(
+    output_format: str,
+    message: str,
+    *,
+    style: str = "red",
+    soft_wrap: bool = True,
+) -> None:
+    """Report a refused ``extract refresh`` on the caller's format.
+
+    ``--format json`` gets the ``{"status": "error", "message": ...}`` object
+    its neighbours emit; text keeps its Rich line. The exit stays at each call
+    site, below this branch, so both formats reach it
+    (``tests/unit/test_format_exit_parity_rule.py``).
+    """
+    if output_format == "json":
+        emit_json({"status": "error", "message": message})
+    else:
+        console.print(f"[{style}]{escape(message)}[/{style}]", soft_wrap=soft_wrap)
+
+
 @extract_app.command("refresh")
 def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by intent
     source: str | None = typer.Option(
@@ -433,11 +453,15 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
     emitted into the EventLog with the structured property diff.
     """
     if (source is None) == (extractor_type is None):
-        console.print("[red]Specify exactly one of --source or --type.[/red]")
+        _refuse(
+            output_format,
+            "Specify exactly one of --source or --type.",
+            soft_wrap=False,
+        )
         raise typer.Exit(code=EXIT_INTERNAL)
 
     if extractor_type is not None and path is None:
-        console.print("[red]--type requires --path.[/red]")
+        _refuse(output_format, "--type requires --path.", soft_wrap=False)
         raise typer.Exit(code=EXIT_INTERNAL)
 
     summary: dict[str, Any]
@@ -445,26 +469,19 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
     if source is not None:
         sources_path = Path(sources_file)
         if not sources_path.exists():
-            console.print(
-                f"[red]sources.yaml not found: {escape(str(sources_path))}[/red]",
-                soft_wrap=True,
-            )
+            _refuse(output_format, f"sources.yaml not found: {sources_path}")
             raise typer.Exit(code=EXIT_INTERNAL)
         config = load_sources(sources_path)
         entry = config.find(source)
         if entry is None:
-            console.print(
-                f"[red]Source {escape(repr(source))} not declared in "
-                f"{escape(str(sources_path))}[/red]",
-                soft_wrap=True,
-            )
+            _refuse(output_format, f"Source {source!r} not declared in {sources_path}")
             raise typer.Exit(code=EXIT_INTERNAL)
         if not entry.enabled:
-            console.print(
-                f"[yellow]Source {escape(repr(source))} is disabled in "
-                f"{escape(str(sources_path))} — "
-                f"refusing to refresh. Remove enabled: false to proceed.[/yellow]",
-                soft_wrap=True,
+            _refuse(
+                output_format,
+                f"Source {source!r} is disabled in {sources_path} — "
+                "refusing to refresh. Remove enabled: false to proceed.",
+                style="yellow",
             )
             raise typer.Exit(code=EXIT_INTERNAL)
         try:
@@ -474,7 +491,7 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
         except typer.Exit:
             raise
         except typer.BadParameter as exc:
-            console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
+            _refuse(output_format, str(exc))
             raise typer.Exit(code=EXIT_INTERNAL) from None
         except Exception as exc:
             if output_format == "json":
@@ -491,19 +508,11 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
         assert path is not None
         type_path = Path(path)
         if not type_path.exists():
-            # ``str()`` because ``type_path`` is a ``Path`` and
-            # ``rich.markup.escape`` raises ``TypeError`` on one.
-            # ``soft_wrap`` for the reason ``policy.py`` gives at its own
-            # path renders: Rich hard-wraps at the console width, so a path
-            # under a deep temp directory comes out as ``nope.jso\nn`` and
-            # the operator copies a filename with a newline in it. That is
-            # the third thing Rich does to operator output — #492 fixed
-            # substitution and deletion; wrapping was already solved here
-            # and the sweep did not reach this line.
-            console.print(
-                f"[red]Path not found: {escape(str(type_path))}[/red]",
-                soft_wrap=True,
-            )
+            # ``_refuse`` escapes the message and soft-wraps it: Rich hard-wraps
+            # at the console width, so a path under a deep temp directory would
+            # otherwise come out as ``nope.jso\nn`` and the operator would copy
+            # a filename with a newline in it.
+            _refuse(output_format, f"Path not found: {type_path}")
             raise typer.Exit(code=EXIT_INTERNAL)
         try:
             extractor = _resolve_extractor(extractor_type)
@@ -519,7 +528,7 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
         except typer.Exit:
             raise
         except typer.BadParameter as exc:
-            console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
+            _refuse(output_format, str(exc))
             raise typer.Exit(code=EXIT_INTERNAL) from None
         except Exception as exc:
             if output_format == "json":
