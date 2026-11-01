@@ -99,6 +99,20 @@ All notable changes to Trellis will be documented in this file.
   were not run, and ArcadeDB inherits the Bolt `compact_versions`, which has no ArcadeDB test and
   no live run here. It adds no migration command and changes nothing about
   what is copied or any exit code.
+
+- **`StoreRegistry.validate()` no longer builds a store whose URI its own pre-flight refused.**
+  A Postgres store configured with a `dsn` the check rejects (`postgres:///db`, `://host/db`)
+  was still constructed, so `validate()` waited out the connection pool's 30 s timeout and
+  added a second `PoolTimeout` entry for a store the `ConfigError` had already named. The
+  aggregate now names that store once, from the URI check, and returns without connecting.
+  The checks that precede the constructor still run for it (unknown backend, a missing driver
+  package, a config key the backend does not accept); a connection or schema error that only
+  the constructor raises is reported once the URI is fixed. The skip is keyed by store, so a
+  store carrying the same string under a backend that accepts it, and a store another
+  pre-flight check names, are built as before. The `RegistryValidationError` type, the
+  `(store_type, exception)` pairs and the `ConfigError` text are unchanged; its "for N
+  store(s)" count is of entries, so it is one lower for such a store.
+
 - **The `analyze holdout --by-commit` help and `holdout.py` docstring no longer
   say the table has "no estimate".** It prints each arm's outcome mean per
   build; what it omits is an interval and a p-value. `analyze value`'s help no
