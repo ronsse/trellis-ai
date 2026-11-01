@@ -1,6 +1,6 @@
 # Plan: Extraction-failure telemetry + analyzer
 
-**Status:** Proposed 2026-05-11
+**Status:** Landed 2026-05. Code: `EventType.EXTRACTION_FAILED` in `src/trellis/stores/base/event_log.py`. The text below is the original plan, kept as design history.
 **Owner:** swarm-pickable
 **ADR:** [`adr-extraction-failure-telemetry.md`](./adr-extraction-failure-telemetry.md)
 **Program:** [`plan-self-improvement-program.md`](./plan-self-improvement-program.md) item 4

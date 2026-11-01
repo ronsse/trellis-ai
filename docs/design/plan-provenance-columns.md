@@ -1,6 +1,6 @@
 # Plan: Provenance columns (Phase 3 of graph-ontology)
 
-**Status:** Proposed 2026-05-11
+**Status:** Landed 2026-05 (#126, #127). Code: `src/trellis/stores/base/edge_provenance.py`, consumed by every graph backend. The text below is the original plan, kept as design history.
 **Owner:** swarm-pickable
 **ADR:** [`adr-graph-ontology.md`](./adr-graph-ontology.md) §6.4 Phase 3 (already accepted; this plan executes it)
 **Program:** [`plan-self-improvement-program.md`](./plan-self-improvement-program.md) item 2

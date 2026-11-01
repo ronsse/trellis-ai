@@ -1,6 +1,6 @@
 # Plan: Observation / Measurement entity vocabulary
 
-**Status:** Proposed 2026-05-11
+**Status:** Landed 2026-05 (Phases 0-2: #121, #124, #125). Code: `src/trellis/schemas/well_known.py` (`Observation`, `Measurement`). The text below is the original plan, kept as design history.
 **Owner:** swarm-pickable
 **ADR:** [`adr-observation-entity-type.md`](./adr-observation-entity-type.md)
 **Program:** [`plan-self-improvement-program.md`](./plan-self-improvement-program.md) item 1

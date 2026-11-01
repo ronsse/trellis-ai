@@ -1,6 +1,6 @@
 # Plan: Dogfooding meta-traces
 
-**Status:** Proposed 2026-05-11
+**Status:** Landed 2026-05 (#132, #133). Code: `src/trellis/meta/`. The text below is the original plan, kept as design history.
 **Owner:** swarm-pickable
 **ADR:** [`adr-dogfooding-meta-traces.md`](./adr-dogfooding-meta-traces.md)
 **Program:** [`plan-self-improvement-program.md`](./plan-self-improvement-program.md) item 6
