@@ -185,6 +185,31 @@ All notable changes to Trellis will be documented in this file.
   on `POST /vectors` rows at an id naming no document, the graph-node id
   collision, and dedup-winner judging (a serving change).
 
+- **On Postgres, `upsert_nodes_bulk` no longer closes a newer node version with
+  an earlier timestamp.** It read the clock before its transaction, so a
+  concurrent `upsert_node` that committed in between left a current row the
+  bulk `UPDATE` then closed with a `valid_to` earlier than that row's own
+  `valid_from` ([#1106](https://github.com/ronsse/trellis-ai/issues/1106)). No
+  `as_of` query could see the closed row, and the bulk version's `valid_from`
+  sat before the version it replaced. The write now locks the current rows
+  (`FOR UPDATE`, in `node_id` order) and reads the clock after the lock, as
+  `upsert_node` does, and takes `created_at` from the locked rows. A bulk write
+  that loses a race to a concurrent create or update still raises `StoreError`
+  and rolls back. `upsert_edges_bulk` was checked for the same defect and does
+  not have it: it already reads the clock after its edge locks, and a test now
+  pins that.
+
+- **On Postgres, `bind_alias_if_absent` no longer takes an alias from an owner
+  that a concurrent write has just re-versioned.** On the conflict path it read
+  the owner's current node row with `FOR SHARE`. If another transaction had
+  closed that row and committed while the read waited, the read returned
+  nothing, because the new version is not visible to the same statement, and an
+  empty read was taken as "the owner is gone": the alias was rebound to the
+  claimant and the call returned `REBOUND`
+  ([#1107](https://github.com/ronsse/trellis-ai/issues/1107)). An empty read is
+  now repeated in a new statement before the owner is treated as gone. An owner
+  with no current row at all is still replaced.
+
 - **A `TRELLIS_API_PORT` that is not a port number is a one-line configuration error
   from `trellis serve` and `trellis-api`, and no longer takes down every `trellis`
   command.** `trellis_api.app` ran `int()` on the variable at import, and
