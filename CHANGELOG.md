@@ -217,6 +217,75 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **SQLite outcome store and graph store compare time by instant, not as
+  text.** `SQLiteOutcomeStore.query(since=..., until=...)`, `count` and the
+  `ORDER BY` behind `limit=` compared `occurred_at` as the writer's
+  `isoformat()` text, and `OutcomeEvent.occurred_at` accepts a naive datetime or
+  any offset that `append` writes as given, so a `-11:00` outcome that was newer
+  than `since` was dropped, a `+14:00` one fell outside `until`, a bound in
+  another zone sat on the wrong side of the instant it names, and `ORDER BY`
+  with `limit` kept the rows with the smallest digits, not the oldest. The store now filters and
+  orders on a generated `occurred_at_utc` column, added to an existing file on
+  open without rewriting a stored row, through the shared
+  `trellis.stores.sqlite.instant`. It carries three indexes: one on the
+  instant, one led by `params_version` (the rollback check) and one led by
+  `component_id` (the metrics command), because a virtual column is evaluated
+  per row wherever no index covers the read. Outcomes at one instant now come
+  back in insertion order on every plan (`rowid` ends the `ORDER BY`), because
+  without it a read that scans `idx_outcomes_scope` and then sorts hands the
+  sort its rows in scope order, so which rows a `limit` kept from a tie would
+  depend on the plan.
+  The migration is best effort, as the event log's is: a read-only file or one
+  under another connection's write lock opens as before, warns
+  (`outcome_schema_migration_skipped`, `outcome_index_creation_skipped`) and
+  reads through the same expression unindexed. `append` still writes the text
+  it is given. `SQLiteGraphStore` needed no column: every `valid_from`,
+  `valid_to` and `created_at` it writes is `utc_now().isoformat()`, so the
+  stored side is always one offset, and only the caller's bound was wrong. A
+  `-11:00` `as_of` returned the wrong version (or none), a naive `as_of` sat
+  below the `+00:00` stamp it equalled, and `compact_versions(before=...)` in
+  another zone cut at the digits of its offset, deleting history a `+14:00`
+  cutoff should keep or keeping history a `-11:00` cutoff should delete. The
+  bound is now converted to UTC before it is compared (`utc_stamp`), in
+  `get_node`, `get_nodes_bulk`, `get_edges`, `query`, `get_subgraph`,
+  `resolve_alias` and `compact_versions`; the SQL text and its plans are
+  unchanged. A test pins the premise, that no writer stamps another offset, so
+  a writer that did would fail it. On UTC-only data nothing moves: 56 outcome
+  `query` shapes (single and combined filters, `since`/`until`, limits of 1 to
+  1000, 300 outcomes on 12 instants) returned the same ids in the same order as
+  before, `count` agreed on 10 shapes, and 18 aware-UTC `as_of` probes and 18
+  `compact_versions` dry runs of the graph store agreed. Two things do change.
+  A naive `as_of` or `before` is now read as UTC, as the trace and event log
+  stores read one, and so is inclusive at the instant a version starts
+  (`valid_from == as_of` is visible; before, the stored `+00:00` suffix made the
+  text longer than the naive bound and it was not). The Postgres graph store
+  binds datetimes and is not changed (it reads a naive one in the session's
+  zone, as the Postgres event log does), and the Bolt stores are not touched.
+
+  **Upgrade note.** The first open of an existing SQLite outcome store builds
+  the column's three indexes while holding the write lock: 7.4 s on a
+  million-row file (351 MB growing to 463 MB), against 2.7 s for the single
+  instant index alone. Another process writing to the file waits for the build
+  and fails with `database is locked` once one build outlasts its 10-second busy
+  timeout. That would be at about 1.4 million rows if the build scales
+  linearly; only the million-row figure was measured. Take the first open after
+  upgrading a store of that size with no writer running. Read-only commands do
+  this migration too when the file allows it; under a held lock they skip it
+  and warn. Reads at a million rows (median of five, ms, before / after):
+  `params_version` plus a 30-day `since`, limit 1000, 84.7 / 20.4; its `count`,
+  65.5 / 0.7; one `component_id` with a 30-day `since`, limit 5000, 234.9 /
+  126.4; one `component_id`, no time bound, limit 1000, 120.6 / 20.4; a time
+  bound alone, limit 1000, 18.9 / 21.8; no filter, limit 1000, 22.7 / 17.6.
+  One read is slower: `component_id`, `domain`, `intent_family` and `phase`
+  with a 30-day `since`, limit 5000, went from 22.7 to 39.5 ms, because the
+  planner now takes the component-led index and scans about 55 thousand rows
+  where it used to take `idx_outcomes_scope` and sort a short list. Appends
+  carry three more indexes: one run at light load measured 536 and 553 µs per
+  event before and after, and interleaved runs under a load average near 4
+  measured 1.0 to 1.2 ms before and 1.3 to 1.7 ms after, so expect the cost of
+  an append to rise by a third or more on a loaded host. The graph store is
+  unaffected by any of this.
+
 - **SQLite event log time bounds compare `occurred_at` by instant, not as
   text.** `get_events(since=..., until=...)`, `count(since=...)` and the
   `ORDER BY` behind `order=` and `limit=` compared the writer's `isoformat()`

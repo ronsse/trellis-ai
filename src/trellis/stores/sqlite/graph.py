@@ -41,6 +41,7 @@ from trellis.stores.base.graph_query import (
     check_doc_link_clause,
 )
 from trellis.stores.sqlite.base import SQLiteStoreBase, json_key_path
+from trellis.stores.sqlite.instant import utc_stamp
 
 logger = structlog.get_logger(__name__)
 
@@ -380,10 +381,16 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
 
     @staticmethod
     def _temporal_params(as_of: datetime | None) -> list[str]:
-        """Return bind parameters for :func:`_temporal_filter`."""
+        """Return bind parameters for :func:`_temporal_filter`.
+
+        Every ``valid_from`` and ``valid_to`` is written as
+        ``utc_now().isoformat()``, so the bound is put in that form: an
+        ``as_of`` in another zone, or a naive one (read as UTC), compares by
+        instant instead of by the digits of its own offset.
+        """
         if as_of is None:
             return []
-        iso = as_of.isoformat()
+        iso = utc_stamp(as_of)
         return [iso, iso]
 
     # ------------------------------------------------------------------
@@ -1711,7 +1718,7 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
         dry_run: bool = False,
         event_log: EventLog | None = None,
     ) -> CompactionReport:
-        before_iso = before.isoformat()
+        before_iso = utc_stamp(before)
         start_ns = time.monotonic_ns()
 
         counts: dict[str, int] = {}

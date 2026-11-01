@@ -107,6 +107,21 @@ def instant_key(moment: datetime) -> str:
     return as_utc(moment).isoformat(timespec="microseconds")[: -len("+00:00")]
 
 
+def utc_stamp(moment: datetime) -> str:
+    """*moment* as ``datetime.isoformat()`` of its UTC instant, for a bound.
+
+    For a column every writer fills with ``utc_now().isoformat()`` (the graph
+    store's ``valid_from``, ``valid_to`` and ``created_at``), where the stored
+    text is already in one offset and needs no generated column, only a bound
+    in that offset: a ``-11:00`` ``as_of`` or a naive one would otherwise sort
+    against the digits of a UTC stamp. A naive *moment* is read as UTC, as
+    :func:`~trellis.stores.base.trace.as_utc` does. A stamp without a fraction
+    sorts before the same second with one (``+`` is below ``.``), so the text
+    order of two such stamps is their instant order.
+    """
+    return as_utc(moment).isoformat()
+
+
 def migrate_instant_column(
     conn: sqlite3.Connection,
     *,
