@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 
 from tests.cli_output import assert_coloured, force_colour, plain
 from trellis_cli import admin
+from trellis_cli.exit_codes import EXIT_STORE
 from trellis_cli.main import app
 from trellis_cli.output import build_console
 from trellis_cli.prompts import agent_rule_text
@@ -370,6 +371,52 @@ class TestQuickstart:
             "status": "error",
             "error": "--with-skills must be 'user' or 'project', got 'bogus'",
         }
+
+    @pytest.mark.parametrize("output_format", ["text", "json"])
+    @pytest.mark.parametrize(
+        "config_text",
+        [
+            pytest.param("bogus_key: 1\n", id="unknown-key"),
+            pytest.param(
+                "knowledge:\n  document:\n    backend: postgres\n"
+                "    dsn: ${UNSET_QUICKSTART_VAR}\n",
+                id="unresolved-placeholder",
+            ),
+        ],
+    )
+    def test_an_existing_config_the_registry_refuses_stops_quickstart(
+        self, monkeypatch, output_format, config_text
+    ):
+        """An existing ``config.yaml`` is loaded, not just found.
+
+        ``stores_already_initialized`` used to be answered from the file's
+        presence alone, so a file the registry refuses made quickstart exit 0
+        with ``status: ok``, write ``.gitignore`` and print a register command
+        for a server whose every later command exits 5. The refusal now
+        surfaces here, in both formats, before anything else is written.
+        """
+        project_dir = self._enter_project(monkeypatch)
+        config_dir = project_dir / ".trellis"
+        config_dir.mkdir(parents=True)
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(config_text, encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            ["admin", "quickstart", "--scope", "project", "--format", output_format],
+        )
+
+        assert result.exit_code == EXIT_STORE, result.output
+        assert isinstance(result.exception, SystemExit), result.exception
+        if output_format == "json":
+            payload = json.loads(result.stdout)
+            assert payload["status"] == "error"
+            assert payload["error_type"] == "ConfigError"
+            assert "steps" not in payload
+        else:
+            assert "CONFIG_ERROR" in plain(result.stdout)
+        assert config_path.read_text(encoding="utf-8") == config_text
+        assert not (project_dir / ".gitignore").exists()
 
     @pytest.mark.parametrize("output_format", ["text", "json"])
     def test_unknown_scope_exits_before_writing(self, monkeypatch, output_format):

@@ -217,6 +217,42 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`trellis admin quickstart` no longer reports `ok` on a `config.yaml` the
+  registry refuses, `trellis admin migrate-graph` no longer tracebacks on a
+  graph store that will not open, and `trellis admin serve` reads
+  `TRELLIS_API_PORT` the way `trellis serve` does.**
+  - Quickstart answered `stores_already_initialized` from the file's presence
+    alone, so an unknown top-level key or an unresolved `${VAR}` exited `0`
+    with `status: ok`, wrote `.gitignore` and printed a register command for a
+    server whose every later command exits `5`. It now loads the registry for
+    the config directory first: the refusal is a `ConfigError`, exit `5`, in
+    both `--format`s, before anything else is written.
+  - `migrate-graph` let the sqlite backend's own errors out of
+    `_load_graph_store_from_yaml` (`sqlite3.DatabaseError` on a file that is not
+    a database, `OSError` on an unwritable or impossible path, `TypeError` on a
+    `db_path` of the wrong type) as a traceback and exit `1`, for the source
+    and the destination alike. They are now a `StoreError` (or a `ConfigError`
+    for the wrong-type case), exit `5`, in both formats. A driver error we do
+    not recognise is named by class only; its text can quote a host or a row.
+  - `trellis admin serve` took `TRELLIS_API_PORT` through Typer's `envvar=`,
+    so a non-integer value exited `2` with a usage error while `trellis serve`
+    and `trellis-api` exited `5`. It now goes through `resolve_api_port` and
+    exits `5` with the same message; `--port` still beats the variable. The
+    runbook's `TRELLIS_API_PORT` row is corrected to match.
+
+- **MCP `save_memory` refuses a `lifecycle` or `evidence_ref` in its `metadata`
+  argument** (`INVALID_PARAMS`, whatever the value, nothing written, `data.field`
+  names the key). The tool stored the caller's metadata as given, so a
+  `lifecycle` written at a graph node's id withheld that node, and an
+  `evidence_ref` made the memory the successor another item's `superseded_by`
+  resolves to. It is the rule `POST /documents` already holds (#1082), taken from
+  the same table. It judges only what the caller sent, so `supersedes=`, a
+  reconcile SUPERSEDE verdict and `save_knowledge` write as before. Rows already
+  stored are not re-judged. Still open under #1057: a graph node's
+  `evidence_ref` through `entity.update` and `observation.record`, identity keys
+  on `POST /vectors` rows at an id naming no document, the graph-node id
+  collision, and dedup-winner judging (a serving change).
+
 - **On Postgres, `upsert_nodes_bulk` no longer closes a newer node version with
   an earlier timestamp.** It read the clock before its transaction, so a
   concurrent `upsert_node` that committed in between left a current row the
