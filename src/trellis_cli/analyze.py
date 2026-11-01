@@ -663,6 +663,14 @@ def _print_capture_coverage(capture: CaptureCoverageReport) -> None:
             f"{funnel.sessions_sampled_out} sampled out, "
             f"{funnel.sessions_judge_unavailable} judge down)"
         )
+        if funnel.sessions_skipped_egress_withheld or (
+            funnel.sessions_skipped_egress_unreadable
+        ):
+            console.print(
+                f"    egress: {funnel.sessions_skipped_egress_withheld} withheld, "
+                f"{funnel.sessions_skipped_egress_unreadable} unreadable "
+                f"(parsed sessions kept off the distillation route)"
+            )
     for note in capture.notes:
         console.print(f"    [dim]{note}[/dim]")
 

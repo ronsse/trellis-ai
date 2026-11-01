@@ -108,9 +108,12 @@ def strict_mode(settings: Mapping[str, Any] | None = None) -> bool:
 
     A sweep is partial when the judge went away part-way through and left
     sessions unjudged, or when a session raised and was skipped
-    (``CaptureReport.sessions_errored``). Default ``True``: such a sweep did
-    not do the job it was scheduled to do, and a green systemd unit would
-    hide that. Set ``TRELLIS_CAPTURE_STRICT=0`` (or store ``capture_strict:
+    (``CaptureReport.sessions_errored``), or when a session was kept off the
+    route because a store could not be asked whether it may leave the host
+    (``CaptureReport.sessions_skipped_egress_unreadable``). Default ``True``:
+    such a sweep did not do the job it was scheduled to do, and a green
+    systemd unit would hide that. Set ``TRELLIS_CAPTURE_STRICT=0`` (or store
+    ``capture_strict:
     false`` via the settings surface) to report the counts and exit zero
     instead — those sessions stay un-watermarked and are retried on the next
     sweep, so an operator who considers a single transient model timeout in

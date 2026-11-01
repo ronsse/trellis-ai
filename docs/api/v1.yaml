@@ -4356,6 +4356,15 @@ paths:
         that id.
 
 
+        Each row carries ``label`` (``sensitivity``, ``stored``, ``corrupt``,
+
+        ``external_readable``), computed from the stored row before a public-only
+
+        caller''s metadata is cut down, so the label is shown whoever asks and is
+
+        only ever about a row the caller may read.
+
+
         ``<parent>#chunk-N`` fragment rows are excluded by default; pass
 
         ``include_chunks=true`` for the unfiltered listing. ``total`` is
@@ -4580,11 +4589,15 @@ paths:
 
         A document labelled above the caller''s clearance answers 404, exactly
 
-        as a missing one does. A document whose ``lifecycle.superseded_by``,
+        as a missing one does. ``document.label`` says how the row is labelled
 
-        ``supersedes_doc_id`` or ``updates_doc_id`` names a document the caller may
+        (``sensitivity``, ``stored``, ``corrupt``, ``external_readable``), for a public-only
 
-        not read is served without that id.'
+        caller too, whose ``metadata`` carries no label. A document whose
+
+        ``lifecycle.superseded_by``, ``supersedes_doc_id`` or ``updates_doc_id``
+
+        names a document the caller may not read is served without that id.'
       operationId: get_document_api_v1_documents__doc_id__get
       parameters:
       - in: path

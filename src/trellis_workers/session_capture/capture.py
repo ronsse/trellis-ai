@@ -46,8 +46,9 @@ from __future__ import annotations
 
 import os
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -56,6 +57,8 @@ from trellis.core.hashing import content_hash
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.ingest_corpus.models import SyncRecord
 from trellis.ingest_corpus.sync import sync_records
+from trellis.llm.egress import EgressGate, EgressVerdict, failed_read_verdict
+from trellis.llm.routing import LLMConsumer
 from trellis.mcp.reconcile import (
     RECONCILIATION_KEY,
     SUPERSEDES_DOC_KEY,
@@ -683,6 +686,108 @@ def _emit_sweep_completed(
         logger.warning("capture_sweep_event_emit_failed", exc_info=True)
 
 
+def _readable_served_ids(payload: Mapping[str, Any]) -> set[str] | None:
+    """The item ids a ``PACK_ASSEMBLED`` payload records, or ``None`` if it has none.
+
+    ``served_item_ids`` answers an empty set both for "served nothing" and for
+    "no record of what it served". Here the two must differ: a payload that
+    carries none of the three item records, or one whose record is not a
+    well-formed list, cannot show the session was not served a labelled
+    document, so it is ``None``. A well-formed empty list is a pack that served
+    nothing. The three are read and united: ``injected_item_ids`` (flat packs),
+    ``injected_items`` (flat, and sectioned packs since they began to emit it)
+    and ``sections[].item_ids`` (every sectioned pack ever written, and the
+    only record in those written before ``injected_items`` existed).
+    """
+    ids = payload.get("injected_item_ids")
+    rows = payload.get("injected_items")
+    sections = payload.get("sections")
+    if ids is None and rows is None and sections is None:
+        return None
+    lists: list[Any] = []
+    if ids is not None:
+        lists.append(ids)
+    if rows is not None:
+        if not isinstance(rows, list):
+            return None
+        lists.extend(
+            [r.get("item_id") if isinstance(r, Mapping) else None] for r in rows
+        )
+    if sections is not None:
+        if not isinstance(sections, list):
+            return None
+        lists.extend(
+            s.get("item_ids") if isinstance(s, Mapping) else None for s in sections
+        )
+    served: set[str] = set()
+    for one in lists:
+        if not isinstance(one, list) or not all(isinstance(i, str) and i for i in one):
+            return None
+        served.update(one)
+    return served
+
+
+def _session_egress_verdict(
+    registry: StoreRegistry, digest: SessionDigest, egress: EgressGate
+) -> EgressVerdict:
+    """Whether the transcript digest may go to the route, by what the session read.
+
+    A transcript carries no label, but the packs its session was served name
+    documents that do, and the memory distilled from it is written unlabelled.
+    Any served document labelled above ``internal`` (:mod:`trellis.llm.egress`)
+    makes the verdict ``WITHHELD``, whatever else failed to read. So does a
+    pack event that records no readable item list: events are immutable, so
+    that is a permanent fact no retry can clear, and the session stays off the
+    route without failing a strict run. Otherwise a store that could not answer
+    (the event log, a served document's row) makes it ``UNREADABLE``: kept off
+    the route, reported as a fault a later sweep may clear. A pack whose event
+    the log no longer holds names nothing to read and is skipped.
+    """
+    if egress.local or not digest.pack_ids:
+        return EgressVerdict.PERMITTED
+    unreadable = False
+    try:
+        for pack_id in digest.pack_ids:
+            for event in registry.operational.event_log.get_events(
+                event_type=EventType.PACK_ASSEMBLED, entity_id=pack_id, limit=1
+            ):
+                served = _readable_served_ids(event.payload)
+                if served is None:
+                    return EgressVerdict.WITHHELD
+                for item_id in sorted(served):
+                    verdict = egress.stored_verdict(item_id)
+                    if verdict is EgressVerdict.WITHHELD:
+                        return verdict
+                    unreadable = unreadable or verdict is EgressVerdict.UNREADABLE
+    except Exception as exc:
+        # GRACEFUL-DEGRADATION: fail closed. A pack that cannot be read must
+        # not read as permission to send the transcript off the host. An event
+        # row whose own bytes do not parse never will, so it is withheld; an
+        # event log that could not answer is counted under
+        # ``sessions_skipped_egress_unreadable``, which strict mode fails on.
+        return failed_read_verdict(exc)
+    return EgressVerdict.UNREADABLE if unreadable else EgressVerdict.PERMITTED
+
+
+def _record_egress_skip(
+    report: CaptureReport, digest: SessionDigest, verdict: EgressVerdict
+) -> None:
+    """Count one session kept off the route; an unreadable one also warns.
+
+    ``WITHHELD`` is a label doing its job and only counts. ``UNREADABLE`` is a
+    store that could not answer, so it warns (visible on the default CLI, which
+    logs at WARNING), rides the sweep payload and fails a strict run.
+    """
+    if verdict is EgressVerdict.WITHHELD:
+        report.sessions_skipped_egress_withheld += 1
+        return
+    report.sessions_skipped_egress_unreadable += 1
+    report.warnings.append(
+        {"kind": "egress_unreadable", "session_id": digest.session_id}
+    )
+    logger.warning("capture_session_egress_unreadable", session_id=digest.session_id)
+
+
 def _capture_session(
     registry: StoreRegistry,
     digest: SessionDigest,
@@ -704,6 +809,23 @@ def _capture_session(
     still computed and reported — the plan a dry run prints has to be the plan
     the live sweep would execute.
     """
+    # Nothing is sent with no client, so the no-client path is not gated.
+    if llm_client is not None:
+        verdict = _session_egress_verdict(
+            registry,
+            digest,
+            EgressGate.for_route(
+                registry,
+                LLMConsumer.SESSION_CAPTURE,
+                registry.knowledge.document_store,
+            ),
+        )
+        if verdict is not EgressVerdict.PERMITTED:
+            # Not a judge outage: nothing was asked and nothing failed.
+            # Returning ``None`` leaves the session un-watermarked, so a sweep
+            # over a route declared local distils it.
+            _record_egress_skip(report, digest, verdict)
+            return None
     distill_result = distill.distill_session(llm_client, digest)
     if distill_result.outcome is distill.DistillOutcome.UNAVAILABLE:
         report.sessions_judge_unavailable += 1

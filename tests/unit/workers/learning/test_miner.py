@@ -10,6 +10,7 @@ import pytest
 
 import trellis_workers.learning.miner as miner_module
 from trellis.llm import LLMResponse, Message
+from trellis.llm.egress import EgressGate
 from trellis.schemas.enums import OutcomeStatus, TraceSource
 from trellis.schemas.precedent import Precedent
 from trellis.schemas.trace import (
@@ -55,6 +56,9 @@ def _make_trace(
         **extra,
     )
 
+
+#: A route that sends nowhere off the host: these tests are not about egress.
+_EGRESS = EgressGate(None, local=True)
 
 _MOCK_JSON = json.dumps(
     [
@@ -201,7 +205,7 @@ class TestExtractPrecedentHappy:
         )
         trace_store.append(trace)
 
-        miner = PrecedentMiner(trace_store)
+        miner = PrecedentMiner(trace_store, egress=_EGRESS)
         precedent = miner.extract_precedent_from_trace(trace.trace_id)
 
         assert precedent is not None
@@ -215,14 +219,14 @@ class TestExtractPrecedentHappy:
         assert precedent.evidence_refs == ["ev-1", "ev-2"]
 
     def test_trace_not_found_returns_none(self, trace_store: SQLiteTraceStore) -> None:
-        miner = PrecedentMiner(trace_store)
+        miner = PrecedentMiner(trace_store, egress=_EGRESS)
         assert miner.extract_precedent_from_trace("nonexistent") is None
 
     def test_no_outcome_returns_none(self, trace_store: SQLiteTraceStore) -> None:
         trace = _make_trace(no_outcome=True)
         trace_store.append(trace)
 
-        miner = PrecedentMiner(trace_store)
+        miner = PrecedentMiner(trace_store, egress=_EGRESS)
         assert miner.extract_precedent_from_trace(trace.trace_id) is None
 
 
@@ -252,7 +256,7 @@ class TestConfidenceMapping:
         trace = _make_trace(status=status)
         trace_store.append(trace)
 
-        miner = PrecedentMiner(trace_store)
+        miner = PrecedentMiner(trace_store, egress=_EGRESS)
         precedent = miner.extract_precedent_from_trace(trace.trace_id)
 
         assert precedent is not None
@@ -280,7 +284,7 @@ class TestExtractEventEmission:
         trace = _make_trace(status=OutcomeStatus.FAILURE)
         trace_store.append(trace)
 
-        miner = PrecedentMiner(trace_store, event_log=event_log)
+        miner = PrecedentMiner(trace_store, event_log=event_log, egress=_EGRESS)
         precedent = miner.extract_precedent_from_trace(trace.trace_id)
 
         assert precedent is not None
@@ -303,7 +307,7 @@ class TestExtractEventEmission:
         trace = _make_trace(status=OutcomeStatus.SUCCESS)
         trace_store.append(trace)
 
-        miner = PrecedentMiner(trace_store, event_log=None)
+        miner = PrecedentMiner(trace_store, event_log=None, egress=_EGRESS)
         precedent = miner.extract_precedent_from_trace(trace.trace_id)
         assert precedent is not None
 
@@ -318,7 +322,7 @@ class TestGenerateCandidatesEarlyReturn:
 
     @pytest.mark.asyncio
     async def test_no_llm_returns_empty(self, trace_store: SQLiteTraceStore) -> None:
-        miner = PrecedentMiner(trace_store, llm=None)
+        miner = PrecedentMiner(trace_store, llm=None, egress=_EGRESS)
         result = await miner.generate_precedent_candidates()
         assert result == []
 
@@ -334,7 +338,7 @@ class TestGenerateCandidatesEarlyReturn:
             )
             trace_store.append(trace)
 
-        miner = PrecedentMiner(trace_store, llm=_mock_llm())
+        miner = PrecedentMiner(trace_store, llm=_mock_llm(), egress=_EGRESS)
         result = await miner.generate_precedent_candidates()
         assert result == []
 
@@ -371,7 +375,7 @@ class TestGenerateCandidatesHappy:
     ) -> None:
         self._seed_failures(trace_store)
 
-        miner = PrecedentMiner(trace_store, llm=_mock_llm())
+        miner = PrecedentMiner(trace_store, llm=_mock_llm(), egress=_EGRESS)
         result = await miner.generate_precedent_candidates()
 
         assert len(result) == 1
@@ -407,7 +411,7 @@ class TestGenerateCandidatesHappy:
         )
 
         result = await PrecedentMiner(
-            trace_store, llm=_StubLLM(response)
+            trace_store, llm=_StubLLM(response), egress=_EGRESS
         ).generate_precedent_candidates()
 
         assert [(item.title, item.confidence) for item in result] == [
@@ -427,7 +431,7 @@ class TestGenerateCandidatesHappy:
             )
             trace_store.append(t)
 
-        miner = PrecedentMiner(trace_store, llm=_mock_llm())
+        miner = PrecedentMiner(trace_store, llm=_mock_llm(), egress=_EGRESS)
         result = await miner.generate_precedent_candidates(domain="backend")
 
         assert len(result) == 1
@@ -441,7 +445,9 @@ class TestGenerateCandidatesHappy:
     ) -> None:
         self._seed_failures(trace_store)
 
-        miner = PrecedentMiner(trace_store, event_log=event_log, llm=_mock_llm())
+        miner = PrecedentMiner(
+            trace_store, event_log=event_log, llm=_mock_llm(), egress=_EGRESS
+        )
         result = await miner.generate_precedent_candidates()
 
         assert len(result) == 1
@@ -501,7 +507,9 @@ class TestGenerateCandidatesNonFiniteConfidence:
             allow_nan=True,
         )
 
-        miner = PrecedentMiner(trace_store, event_log=event_log, llm=_StubLLM(response))
+        miner = PrecedentMiner(
+            trace_store, event_log=event_log, llm=_StubLLM(response), egress=_EGRESS
+        )
         result = await miner.generate_precedent_candidates()
 
         assert len(result) == 1
@@ -544,7 +552,7 @@ class TestGenerateCandidatesErrors:
 
         self._seed_failures(trace_store)
 
-        miner = PrecedentMiner(trace_store, llm=_bad_json_llm())
+        miner = PrecedentMiner(trace_store, llm=_bad_json_llm(), egress=_EGRESS)
         with pytest.raises(ExtractionFailureError) as excinfo:
             await miner.generate_precedent_candidates()
         assert excinfo.value.failure_kind == "parse_error"
@@ -556,7 +564,7 @@ class TestGenerateCandidatesErrors:
     ) -> None:
         self._seed_failures(trace_store)
 
-        miner = PrecedentMiner(trace_store, llm=_error_llm())
+        miner = PrecedentMiner(trace_store, llm=_error_llm(), egress=_EGRESS)
         result = await miner.generate_precedent_candidates()
         assert result == []
 
@@ -579,7 +587,7 @@ class TestGenerateCandidatesErrors:
         try:
             self._seed_failures(trace_store)
             miner = PrecedentMiner(
-                trace_store, event_log=event_log, llm=_bad_json_llm()
+                trace_store, event_log=event_log, llm=_bad_json_llm(), egress=_EGRESS
             )
             with pytest.raises(ExtractionFailureError):
                 await miner.generate_precedent_candidates()
@@ -627,7 +635,7 @@ class TestLimitCountsFailures:
         _seed_timeline(trace_store, statuses=[F] * 5 + [S] * 10)
         llm = _CountingLLM(_MOCK_JSON)
 
-        miner = PrecedentMiner(trace_store, llm=llm)
+        miner = PrecedentMiner(trace_store, llm=llm, egress=_EGRESS)
         result = await miner.generate_precedent_candidates(min_traces=3, limit=10)
 
         assert len(llm.prompts) == 1
@@ -641,7 +649,7 @@ class TestLimitCountsFailures:
         traces = _seed_timeline(trace_store, statuses=[F, S] * 10)
         newest_failures = [t.trace_id for t in traces if _is_f(t)][::-1][:4]
 
-        miner = PrecedentMiner(trace_store, llm=_mock_llm())
+        miner = PrecedentMiner(trace_store, llm=_mock_llm(), egress=_EGRESS)
         result = await miner.generate_precedent_candidates(min_traces=3, limit=4)
 
         assert result[0].source_trace_ids == newest_failures
@@ -722,7 +730,7 @@ class TestEmptyResultSaysWhy:
         _seed_timeline(trace_store, statuses=[S] * 8)
         llm = _CountingLLM(_MOCK_JSON)
 
-        report = await PrecedentMiner(trace_store, llm=llm).mine()
+        report = await PrecedentMiner(trace_store, llm=llm, egress=_EGRESS).mine()
 
         assert report.outcome == "no_failures"
         assert report.read_bound_hit is False
@@ -736,7 +744,9 @@ class TestEmptyResultSaysWhy:
         _seed_timeline(trace_store, statuses=[F] * 5 + [S] * 30)
         llm = _CountingLLM(_MOCK_JSON)
 
-        report = await PrecedentMiner(trace_store, llm=llm).mine(scan_cap=20)
+        report = await PrecedentMiner(trace_store, llm=llm, egress=_EGRESS).mine(
+            scan_cap=20
+        )
 
         assert report.outcome == "read_bound_hit"
         assert report.read_bound_hit is True
@@ -750,7 +760,9 @@ class TestEmptyResultSaysWhy:
     ) -> None:
         _seed_timeline(trace_store, statuses=[S] * 20)
 
-        report = await PrecedentMiner(trace_store, llm=_mock_llm()).mine(scan_cap=20)
+        report = await PrecedentMiner(
+            trace_store, llm=_mock_llm(), egress=_EGRESS
+        ).mine(scan_cap=20)
 
         assert report.outcome == "no_failures"
         assert report.read_bound_hit is False
@@ -762,7 +774,9 @@ class TestEmptyResultSaysWhy:
         # One failure inside the bound, more behind it: not "below min".
         _seed_timeline(trace_store, statuses=[F] * 4 + [S] * 14 + [F])
 
-        report = await PrecedentMiner(trace_store, llm=_mock_llm()).mine(scan_cap=15)
+        report = await PrecedentMiner(
+            trace_store, llm=_mock_llm(), egress=_EGRESS
+        ).mine(scan_cap=15)
 
         assert report.outcome == "read_bound_hit"
         assert report.failures_in_scope == 1
@@ -773,7 +787,9 @@ class TestEmptyResultSaysWhy:
     ) -> None:
         _seed_timeline(trace_store, statuses=[F, F, S, S])
 
-        report = await PrecedentMiner(trace_store, llm=_mock_llm()).mine()
+        report = await PrecedentMiner(
+            trace_store, llm=_mock_llm(), egress=_EGRESS
+        ).mine()
 
         assert report.outcome == "below_min_traces"
         assert report.read_bound_hit is False
@@ -786,9 +802,9 @@ class TestEmptyResultSaysWhy:
         # were not read, and the report says so.
         _seed_timeline(trace_store, statuses=[F] * 2 + [S] * 20 + [F] * 3)
 
-        report = await PrecedentMiner(trace_store, llm=_mock_llm()).mine(
-            min_traces=3, limit=10, scan_cap=22
-        )
+        report = await PrecedentMiner(
+            trace_store, llm=_mock_llm(), egress=_EGRESS
+        ).mine(min_traces=3, limit=10, scan_cap=22)
 
         assert report.outcome == "mined"
         assert report.read_bound_hit is True
@@ -799,8 +815,12 @@ class TestEmptyResultSaysWhy:
     ) -> None:
         _seed_timeline(trace_store, statuses=[F] * 4)
 
-        empty = await PrecedentMiner(trace_store, llm=_StubLLM("[]")).mine()
-        broken = await PrecedentMiner(trace_store, llm=_error_llm()).mine()
+        empty = await PrecedentMiner(
+            trace_store, llm=_StubLLM("[]"), egress=_EGRESS
+        ).mine()
+        broken = await PrecedentMiner(
+            trace_store, llm=_error_llm(), egress=_EGRESS
+        ).mine()
 
         assert empty.outcome == "no_candidates"
         assert broken.outcome == "llm_error"
@@ -823,7 +843,9 @@ class TestRerunMintsNoDuplicates:
         _seed_timeline(trace_store, statuses=[F] * 4)
         llm = _CountingLLM(_MOCK_JSON)
 
-        miner = PrecedentMiner(trace_store, event_log=event_log, llm=llm)
+        miner = PrecedentMiner(
+            trace_store, event_log=event_log, llm=llm, egress=_EGRESS
+        )
         first = await miner.mine()
         second = await miner.mine()
 
@@ -844,7 +866,9 @@ class TestRerunMintsNoDuplicates:
     ) -> None:
         traces = _seed_timeline(trace_store, statuses=[F] * 4)
 
-        miner = PrecedentMiner(trace_store, event_log=event_log, llm=_mock_llm())
+        miner = PrecedentMiner(
+            trace_store, event_log=event_log, llm=_mock_llm(), egress=_EGRESS
+        )
         await miner.generate_precedent_candidates(domain="testing")
 
         [event] = event_log.get_events(event_type=EventType.PRECEDENT_CANDIDATE_MINED)
@@ -859,7 +883,9 @@ class TestRerunMintsNoDuplicates:
         event_log: SQLiteEventLog,
     ) -> None:
         _seed_timeline(trace_store, statuses=[F] * 4)
-        miner = PrecedentMiner(trace_store, event_log=event_log, llm=_mock_llm())
+        miner = PrecedentMiner(
+            trace_store, event_log=event_log, llm=_mock_llm(), egress=_EGRESS
+        )
         await miner.mine()
 
         trace_store.append(_make_trace(status=F, created_at=_EPOCH + timedelta(days=1)))
@@ -878,7 +904,9 @@ class TestRerunMintsNoDuplicates:
         event_log: SQLiteEventLog,
     ) -> None:
         _seed_timeline(trace_store, statuses=[F] * 4)
-        miner = PrecedentMiner(trace_store, event_log=event_log, llm=_mock_llm())
+        miner = PrecedentMiner(
+            trace_store, event_log=event_log, llm=_mock_llm(), egress=_EGRESS
+        )
         await miner.mine()
 
         trace_store.append(_make_trace(status=S, created_at=_EPOCH + timedelta(days=1)))
@@ -894,7 +922,9 @@ class TestRerunMintsNoDuplicates:
         # The candidate's ``applicability`` is the domain, so a run scoped to
         # it is a different record, not a duplicate.
         _seed_timeline(trace_store, statuses=[F] * 4, domain="backend")
-        miner = PrecedentMiner(trace_store, event_log=event_log, llm=_mock_llm())
+        miner = PrecedentMiner(
+            trace_store, event_log=event_log, llm=_mock_llm(), egress=_EGRESS
+        )
 
         unscoped = await miner.mine()
         scoped = await miner.mine(domain="backend")
@@ -913,11 +943,13 @@ class TestRerunMintsNoDuplicates:
 
         _seed_timeline(trace_store, statuses=[F] * 4)
 
-        bad = PrecedentMiner(trace_store, event_log=event_log, llm=_bad_json_llm())
+        bad = PrecedentMiner(
+            trace_store, event_log=event_log, llm=_bad_json_llm(), egress=_EGRESS
+        )
         with pytest.raises(ExtractionFailureError):
             await bad.mine()
         good = await PrecedentMiner(
-            trace_store, event_log=event_log, llm=_mock_llm()
+            trace_store, event_log=event_log, llm=_mock_llm(), egress=_EGRESS
         ).mine()
 
         assert good.outcome == "mined"
@@ -942,7 +974,7 @@ class TestRerunMintsNoDuplicates:
         )
 
         report = await PrecedentMiner(
-            trace_store, event_log=event_log, llm=_mock_llm()
+            trace_store, event_log=event_log, llm=_mock_llm(), egress=_EGRESS
         ).mine()
 
         assert report.outcome == "mined"
@@ -954,7 +986,7 @@ class TestRerunMintsNoDuplicates:
         _seed_timeline(trace_store, statuses=[F] * 4)
         llm = _CountingLLM(_MOCK_JSON)
 
-        miner = PrecedentMiner(trace_store, llm=llm)
+        miner = PrecedentMiner(trace_store, llm=llm, egress=_EGRESS)
         await miner.mine()
         await miner.mine()
 
@@ -968,7 +1000,9 @@ class TestRerunMintsNoDuplicates:
         _seed_timeline(trace_store, statuses=[F] * 4)
         llm = _CountingLLM(_MOCK_JSON)
 
-        plan = PrecedentMiner(trace_store, event_log=event_log, llm=llm).plan()
+        plan = PrecedentMiner(
+            trace_store, event_log=event_log, llm=llm, egress=_EGRESS
+        ).plan()
 
         assert plan.outcome == "would_mine"
         assert plan.failures_in_scope == 4
@@ -1019,13 +1053,16 @@ class TestRunCompleteness:
             trace_store,
             event_log=event_log,
             llm=_StubLLM(_THREE_ITEMS_SECOND_MALFORMED),
+            egress=_EGRESS,
         )
         with pytest.raises(ExtractionFailureError):
             await bad.mine()
         assert _mined_events(event_log) == []
 
         llm = _CountingLLM(_MOCK_JSON)
-        good = await PrecedentMiner(trace_store, event_log=event_log, llm=llm).mine()
+        good = await PrecedentMiner(
+            trace_store, event_log=event_log, llm=llm, egress=_EGRESS
+        ).mine()
 
         assert good.outcome == "mined"
         assert len(llm.prompts) == 1
@@ -1050,14 +1087,16 @@ class TestRunCompleteness:
 
         monkeypatch.setattr(event_log, "emit", flaky_emit)
         cut_off = PrecedentMiner(
-            trace_store, event_log=event_log, llm=_StubLLM(_TWO_ITEMS)
+            trace_store, event_log=event_log, llm=_StubLLM(_TWO_ITEMS), egress=_EGRESS
         )
         with pytest.raises(RuntimeError, match="disk full"):
             await cut_off.mine()
         assert len(_mined_events(event_log)) == 1
 
         llm = _CountingLLM(_TWO_ITEMS)
-        retry = await PrecedentMiner(trace_store, event_log=event_log, llm=llm).mine()
+        retry = await PrecedentMiner(
+            trace_store, event_log=event_log, llm=llm, egress=_EGRESS
+        ).mine()
 
         assert retry.outcome == "mined"
         assert len(llm.prompts) == 1
@@ -1084,12 +1123,15 @@ class TestRunCompleteness:
         monkeypatch.setattr(event_log, "emit", flaky_emit)
         with pytest.raises(RuntimeError):
             await PrecedentMiner(
-                trace_store, event_log=event_log, llm=_StubLLM(_TWO_ITEMS)
+                trace_store,
+                event_log=event_log,
+                llm=_StubLLM(_TWO_ITEMS),
+                egress=_EGRESS,
             ).mine()
         monkeypatch.setattr(event_log, "emit", real_emit)
 
         miner = PrecedentMiner(
-            trace_store, event_log=event_log, llm=_StubLLM(_TWO_ITEMS)
+            trace_store, event_log=event_log, llm=_StubLLM(_TWO_ITEMS), egress=_EGRESS
         )
         complete = await miner.mine()
         skipped = await miner.mine()
@@ -1110,7 +1152,7 @@ class TestRunCompleteness:
     ) -> None:
         _seed_timeline(trace_store, statuses=[F] * 5)
         miner = PrecedentMiner(
-            trace_store, event_log=event_log, llm=_StubLLM(_TWO_ITEMS)
+            trace_store, event_log=event_log, llm=_StubLLM(_TWO_ITEMS), egress=_EGRESS
         )
         await miner.mine()
         trace_store.append(_make_trace(status=F, created_at=_EPOCH + timedelta(days=1)))
@@ -1137,7 +1179,9 @@ class TestRunCompleteness:
         _seed_timeline(trace_store, statuses=[F] * 5)
         llm = _CountingLLM(_TWO_ITEMS)
 
-        miner = PrecedentMiner(trace_store, event_log=event_log, llm=llm)
+        miner = PrecedentMiner(
+            trace_store, event_log=event_log, llm=llm, egress=_EGRESS
+        )
         await miner.mine()
         second = await miner.mine()
 
@@ -1156,7 +1200,7 @@ class TestRunCompleteness:
         _seed_timeline(trace_store, statuses=[F] * 5)
 
         miner = PrecedentMiner(
-            trace_store, event_log=event_log, llm=_StubLLM(_TWO_ITEMS)
+            trace_store, event_log=event_log, llm=_StubLLM(_TWO_ITEMS), egress=_EGRESS
         )
         await miner.mine()
 
@@ -1191,7 +1235,7 @@ class TestRunCompleteness:
         )
 
         report = await PrecedentMiner(
-            trace_store, event_log=event_log, llm=_mock_llm()
+            trace_store, event_log=event_log, llm=_mock_llm(), egress=_EGRESS
         ).mine()
 
         assert report.outcome == "mined"
@@ -1233,7 +1277,7 @@ class TestRunCompleteness:
         )
 
         report = await PrecedentMiner(
-            trace_store, event_log=event_log, llm=_mock_llm()
+            trace_store, event_log=event_log, llm=_mock_llm(), egress=_EGRESS
         ).mine()
 
         assert report.outcome == "mined"
@@ -1264,7 +1308,7 @@ class TestRunCompleteness:
                     },
                 )
 
-        report = PrecedentMiner(trace_store, event_log=event_log).plan()
+        report = PrecedentMiner(trace_store, event_log=event_log, egress=_EGRESS).plan()
 
         assert report.outcome == "skipped_unchanged"
         assert report.already_mined == ("n1", "n2")
@@ -1344,7 +1388,7 @@ class TestScanStopsWhenItHasEnough:
     async def test_the_api_refuses_what_it_cannot_read_instead_of_reporting_it_read(
         self, trace_store: SQLiteTraceStore
     ) -> None:
-        miner = PrecedentMiner(trace_store, llm=_mock_llm())
+        miner = PrecedentMiner(trace_store, llm=_mock_llm(), egress=_EGRESS)
 
         with pytest.raises(ValueError, match="at least 1"):
             await miner.mine(limit=0)
@@ -1361,7 +1405,7 @@ class TestScanStopsWhenItHasEnough:
         llm = _CountingLLM(_MOCK_JSON)
 
         result = await PrecedentMiner(
-            trace_store, llm=llm
+            trace_store, llm=llm, egress=_EGRESS
         ).generate_precedent_candidates(scan_cap=20)
 
         assert result == []
@@ -1374,7 +1418,7 @@ class TestScanStopsWhenItHasEnough:
         traces = _seed_timeline(trace_store, statuses=[F] * 25)
         llm = _CountingLLM(_MOCK_JSON)
 
-        report = await PrecedentMiner(trace_store, llm=llm).mine()
+        report = await PrecedentMiner(trace_store, llm=llm, egress=_EGRESS).mine()
 
         newest_twenty = [t.trace_id for t in traces][::-1][:20]
         assert report.failures_in_scope == 25
@@ -1391,7 +1435,9 @@ class TestScanStopsWhenItHasEnough:
         # Disclosed, not paged: failures past the newest 20 are never shown,
         # so adding one changes nothing the model would see.
         _seed_timeline(trace_store, statuses=[F] * 25)
-        miner = PrecedentMiner(trace_store, event_log=event_log, llm=_mock_llm())
+        miner = PrecedentMiner(
+            trace_store, event_log=event_log, llm=_mock_llm(), egress=_EGRESS
+        )
         await miner.mine()
 
         trace_store.append(_make_trace(status=F, created_at=_EPOCH - timedelta(days=1)))
@@ -1406,7 +1452,9 @@ class TestScanStopsWhenItHasEnough:
     ) -> None:
         _seed_timeline(trace_store, statuses=[F] * 25)
 
-        report = await PrecedentMiner(trace_store, llm=_mock_llm()).mine(limit=5)
+        report = await PrecedentMiner(
+            trace_store, llm=_mock_llm(), egress=_EGRESS
+        ).mine(limit=5)
 
         assert report.failures_in_scope == 5
         assert len(report.analyzed) == 5
@@ -1417,7 +1465,7 @@ class TestScanStopsWhenItHasEnough:
     ) -> None:
         _seed_timeline(trace_store, statuses=[F] * 5)
 
-        report = await PrecedentMiner(trace_store).mine(scan_cap=77)
+        report = await PrecedentMiner(trace_store, egress=_EGRESS).mine(scan_cap=77)
 
         assert report.outcome == "no_llm"
         assert report.scan_cap == 77
@@ -1432,7 +1480,7 @@ class TestMinTracesAndLimit:
         _seed_timeline(trace_store, statuses=[S] * 3)
         llm = _CountingLLM(_MOCK_JSON)
 
-        miner = PrecedentMiner(trace_store, llm=llm)
+        miner = PrecedentMiner(trace_store, llm=llm, egress=_EGRESS)
         mined = await miner.mine(min_traces=0)
         planned = miner.plan(min_traces=0)
 
@@ -1446,9 +1494,9 @@ class TestMinTracesAndLimit:
     ) -> None:
         _seed_timeline(trace_store, statuses=[F] * 3 + [S] * 30)
 
-        report = await PrecedentMiner(trace_store, llm=_mock_llm()).mine(
-            min_traces=0, scan_cap=10
-        )
+        report = await PrecedentMiner(
+            trace_store, llm=_mock_llm(), egress=_EGRESS
+        ).mine(min_traces=0, scan_cap=10)
 
         assert report.outcome == "read_bound_hit"
 
@@ -1461,7 +1509,9 @@ class TestMinTracesAndLimit:
         _seed_timeline(trace_store, statuses=[F] * 10)
         llm = _CountingLLM(_MOCK_JSON)
 
-        report = await PrecedentMiner(trace_store, llm=llm).mine(min_traces=5, limit=2)
+        report = await PrecedentMiner(trace_store, llm=llm, egress=_EGRESS).mine(
+            min_traces=5, limit=2
+        )
 
         assert report.outcome == "below_min_traces"
         assert report.failures_in_scope == 2
@@ -1498,9 +1548,9 @@ class TestMinTracesAndLimit:
     ) -> None:
         _seed_timeline(trace_store, statuses=[F] * 3)
 
-        report = await PrecedentMiner(trace_store, llm=_mock_llm()).mine(
-            min_traces=5, limit=2
-        )
+        report = await PrecedentMiner(
+            trace_store, llm=_mock_llm(), egress=_EGRESS
+        ).mine(min_traces=5, limit=2)
 
         assert report.outcome == "below_min_traces"
         assert report.read_to_end is True
@@ -1518,7 +1568,9 @@ class TestANewSuccessAndTheReadWindow:
         # subset check, because the next run is still a different question.
         _seed_timeline(trace_store, statuses=[S, F, S, F, S, F])
         llm = _CountingLLM(_MOCK_JSON)
-        miner = PrecedentMiner(trace_store, event_log=event_log, llm=llm)
+        miner = PrecedentMiner(
+            trace_store, event_log=event_log, llm=llm, egress=_EGRESS
+        )
         kwargs = {"min_traces": 2, "scan_cap": 6}
         assert (await miner.mine(**kwargs)).outcome == "mined"
 
