@@ -12,14 +12,23 @@ content to an LLM goes through one of them:
 
 * :func:`may_reach_route` takes a label and a locality.
 * :class:`EgressGate` takes a stored document (id plus metadata), so a chunk is
-  judged by its parent's label exactly as the retrieval gate judges it, and
-  fails closed: a label that cannot be read, or a parent that cannot be
-  fetched, answers "no". A gate over a local route reads nothing and answers
-  "yes" for everything, so a declared-local route behaves as it always did.
+  judged by its parent's label as the retrieval gate judges it, and fails
+  closed: a label that cannot be read, a parent that cannot be fetched, or a
+  chunk-shaped id whose parent row is absent, answers "no" (retrieval judges
+  that last case by the chunk's own label; egress does not, because an
+  unlabelled orphan is exactly what a deleted labelled parent leaves behind).
+  A gate over a local route reads nothing and answers "yes" for everything, so
+  a declared-local route behaves as it always did.
+
+**Scope: chat and generate routes only.** This gates what is sent to an LLM's
+``generate`` call. Embedding is not gated: stored content, labelled content
+included, still goes to the configured embedder, and an operator with a hosted
+embedder must treat that as egress.
 
 ``tests/unit/test_llm_egress_rule.py`` rosters the call sites and requires each
-to reference this module. A skip is counted in the job's own report under
-:data:`EGRESS_WITHHELD_REASON`, never only logged.
+to reference this module; it is a tripwire for the common shapes, and the
+behaviour tests beside each sender are the guard. A skip is counted in the
+job's own report under :data:`EGRESS_WITHHELD_REASON`, never only logged.
 
 This module reads labels; it does not edit them and sits outside
 ``trellis.retrieve`` so serving is untouched.
@@ -32,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 
 from trellis.llm.routing import LLMRoutingError
 from trellis.schemas.classification import sensitivity_of, sensitivity_rank
+from trellis.schemas.pack import PackItem
 
 if TYPE_CHECKING:
     from trellis.llm.routing import LLMConsumer
@@ -107,7 +117,8 @@ class EgressGate:
     def permits(self, doc_id: str, metadata: Mapping[str, Any] | None) -> bool:
         """Whether the stored document ``doc_id`` may be sent to the route.
 
-        Never raises: any failure to read the label is a refusal.
+        Never raises: any failure to read the label is a refusal, and so is a
+        chunk-shaped id whose parent row is absent.
         """
         if self.local:
             return True
@@ -116,6 +127,8 @@ class EgressGate:
         try:
             if self._clearance is None:
                 return self.permits_metadata(metadata)
+            if self._is_orphan_chunk(doc_id, metadata):
+                return False
             return bool(self._clearance.permits(doc_id, metadata))
         except Exception:
             # GRACEFUL-DEGRADATION: fail closed. A label that cannot be read
@@ -123,6 +136,23 @@ class EgressGate:
             # not read as permission to send the content off the host; the
             # job counts the skip under EGRESS_WITHHELD_REASON.
             return False
+
+    def _is_orphan_chunk(self, doc_id: str, metadata: Mapping[str, Any] | None) -> bool:
+        """A chunk-shaped id whose parent row cannot be read back.
+
+        The shape is the only signal, as in retrieval: a plain document whose
+        id merely resembles a chunk id is treated as one. The parent lookup
+        goes through the clearance's own cache, so it costs no extra read.
+        """
+        # Deferred for the reason given in ``__init__``.
+        from trellis.ingest_corpus.models import is_chunk_doc_id  # noqa: PLC0415
+
+        if not is_chunk_doc_id(doc_id):
+            return False
+        item = PackItem(
+            item_id=doc_id, item_type="document", metadata=dict(metadata or {})
+        )
+        return self._clearance._cache.resolve(item) is None
 
     def permits_metadata(self, metadata: Mapping[str, Any] | None) -> bool:
         """Whether content carrying ``metadata`` may be sent, by its own label.

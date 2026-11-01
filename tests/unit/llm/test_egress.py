@@ -18,14 +18,17 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 
 import trellis.mcp.server as server_mod
+from tests.llm_routes import per_consumer_config, route_from
 from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.llm.egress import EGRESS_WITHHELD_REASON, EgressGate, may_reach_route
 from trellis.llm.routing import (
     LLMConsumer,
     LLMRoutingError,
     resolve_llm_route,
+    validate_llm_routing,
 )
 from trellis.llm.types import LLMResponse
 from trellis.mcp.reconcile import (
@@ -112,14 +115,39 @@ class TestEgressGate:
         store.put(chunk, "fragment", {})
         assert EgressGate(store, local=False).permits(chunk, {}) is False
 
-    def test_an_orphan_chunk_is_judged_by_its_own_label_as_in_retrieval(
+    def test_an_orphan_chunk_is_withheld_whatever_its_own_label(
         self, store: SQLiteDocumentStore
     ) -> None:
-        """No parent row means no parent label to inherit; the chunk's own stands."""
+        """No parent row means no parent label to inherit, so nothing is sent.
+
+        Retrieval falls back to the chunk's own label here; egress does not,
+        because an unlabelled orphan would otherwise go out.
+        """
         chunk = chunk_doc_id("missing-parent", 0)
         gate = EgressGate(store, local=False)
-        assert gate.permits(chunk, {}) is True
+        assert gate.permits(chunk, {}) is False
+        assert gate.permits(chunk, _label("public")) is False
         assert gate.permits(chunk, _label("confidential")) is False
+        assert EgressGate(store, local=True).permits(chunk, {}) is True
+
+    def test_a_chunk_shaped_id_is_read_as_a_chunk_whatever_the_row_is(
+        self, store: SQLiteDocumentStore
+    ) -> None:
+        """A plain document whose id resembles a chunk id is judged by shape.
+
+        As in retrieval: the id is the signal, the row is not consulted. With
+        a parent row the stricter of its own label and the parent's applies;
+        with none it is an orphan and is withheld.
+        """
+        lookalike = chunk_doc_id("host-doc", 3)
+        store.put(lookalike, "body", {})
+        assert EgressGate(store, local=False).permits(lookalike, {}) is False
+        store.put("host-doc", "parent body", {})
+        assert EgressGate(store, local=False).permits(lookalike, {}) is True
+        own = _label("confidential")
+        assert EgressGate(store, local=False).permits(lookalike, own) is False
+        store.put("host-doc", "parent body", _label("restricted"))
+        assert EgressGate(store, local=False).permits(lookalike, {}) is False
 
     def test_a_store_that_raises_is_refused_not_propagated(self) -> None:
         broken = MagicMock()
@@ -158,6 +186,22 @@ class TestEgressGate:
         gate = EgressGate.for_route(registry, LLMConsumer.ENRICHMENT, store)
         assert gate.local is False
         assert gate.permits("a", _label("restricted")) is False
+
+    def test_a_clearance_that_raises_is_refused_not_propagated(
+        self, store: SQLiteDocumentStore
+    ) -> None:
+        class _Raises:
+            _cache = MagicMock()
+
+            def permits(self, *_args: Any, **_kwargs: Any) -> bool:
+                msg = "clearance is down"
+                raise RuntimeError(msg)
+
+        _Raises._cache.resolve.side_effect = RuntimeError("cache is down")
+        gate = EgressGate(store, local=False)
+        gate._clearance = _Raises()  # type: ignore[assignment]
+        assert gate.permits("plain-doc", {}) is False
+        assert gate.permits(chunk_doc_id("parent", 0), {}) is False
 
 
 class _PromptLog:
@@ -404,18 +448,112 @@ class TestReconcileEgress:
         assert ReconcileFallbackReason.EGRESS_WITHHELD not in JUDGE_FAILURE_REASONS
         assert ReconcileFallbackReason.EGRESS_WITHHELD.value == EGRESS_WITHHELD_REASON
 
+    @pytest.mark.parametrize("local", [False, True])
+    def test_the_gate_reads_the_reconcile_route_not_another_consumers(
+        self, store: SQLiteDocumentStore, monkeypatch: pytest.MonkeyPatch, local: bool
+    ) -> None:
+        """Every other consumer sits on the opposite tier, so a wrong read flips."""
+        registry, built = _reconcile_registry(store, monkeypatch, local=False)
+        registry.llm_route.side_effect = route_from(
+            per_consumer_config(LLMConsumer.RECONCILE, local=local)
+        )
+        outcome = self._outcome(
+            registry, store, candidate_label=_label("confidential"), new_label={}
+        )
+        assert (outcome.fallback_reason is None) is local
+        if not local:
+            assert outcome.fallback_reason is ReconcileFallbackReason.EGRESS_WITHHELD
+        assert built == ([LLMConsumer.RECONCILE] if local else [])
+
 
 class TestClientFallbackRespectsALocalDeclaration:
+    """``_build_llm_client`` takes the env key only for a route not declared local."""
+
+    @staticmethod
+    def _registry(config: dict[str, Any]) -> Any:
+        return SimpleNamespace(
+            llm_route=route_from(config), build_llm_client=lambda *, consumer: None
+        )
+
     def test_a_local_route_never_falls_back_to_a_hosted_key(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An unbuildable local client must not become ``OPENAI_API_KEY``."""
+        reached: list[str] = []
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
-        registry = SimpleNamespace(
-            llm_route=lambda consumer: resolve_llm_route({"local": True}, consumer),
-            build_llm_client=lambda *, consumer: None,
+        monkeypatch.setattr(
+            server_mod, "_build_llm_client_from_env", lambda: reached.append("env")
         )
-        assert (
-            server_mod._build_llm_client(registry, LLMConsumer.RECONCILE)  # type: ignore[arg-type]
-            is None
+        client = server_mod._build_llm_client(
+            self._registry({"local": True}),
+            LLMConsumer.RECONCILE,  # type: ignore[arg-type]
         )
+        assert client is None
+        assert reached == []
+
+    def test_an_undeclared_route_still_falls_back_to_the_env_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The contrast: the same unbuildable client, no declaration."""
+        sentinel = object()
+        reached: list[str] = []
+
+        def _from_env() -> object:
+            reached.append("env")
+            return sentinel
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
+        monkeypatch.setattr(server_mod, "_build_llm_client_from_env", _from_env)
+        client = server_mod._build_llm_client(
+            self._registry({}),
+            LLMConsumer.RECONCILE,  # type: ignore[arg-type]
+        )
+        assert client is sentinel
+        assert reached == ["env"]
+
+
+_OPERATIONS_GUIDE = (
+    Path(__file__).resolve().parents[3] / "docs" / "agent-guide" / "operations.md"
+)
+
+
+class TestOperationsGuideExample:
+    """The ``llm:`` example the guide shows an operator must load."""
+
+    @staticmethod
+    def _example() -> dict[str, Any]:
+        text = _OPERATIONS_GUIDE.read_text(encoding="utf-8")
+        section = text.split("## Keeping labelled content off a hosted model", 1)[1]
+        block = section.split("```yaml\n", 1)[1].split("\n```", 1)[0]
+        return yaml.safe_load(block)["llm"]
+
+    def test_the_example_passes_routing_validation(self) -> None:
+        validate_llm_routing(self._example())
+
+    def test_the_hosted_tier_is_buildable_and_not_local(self) -> None:
+        route = resolve_llm_route(self._example(), LLMConsumer.ENRICHMENT)
+        assert route.tier == "hosted"
+        assert route.local is False
+        assert route.block["api_key_env"]
+
+    def test_an_unrouted_consumer_keeps_the_parents_declaration(self) -> None:
+        route = resolve_llm_route(self._example(), LLMConsumer.MEMORY_EXTRACTION)
+        assert route.local is True
+
+
+class TestPerConsumerConfig:
+    """The helper the route-selection tests rely on must answer as designed.
+
+    A config that fails validation reads as not local for every consumer,
+    which would make every "hosted" arm of those tests pass for no reason.
+    """
+
+    @pytest.mark.parametrize("local", [False, True])
+    @pytest.mark.parametrize("target", list(LLMConsumer))
+    def test_each_consumer_gets_the_answer_its_tier_gives(
+        self, target: LLMConsumer, local: bool
+    ) -> None:
+        config = per_consumer_config(target, local=local)
+        for member in LLMConsumer:
+            route = resolve_llm_route(config, member)
+            assert route.local is ((member is target) == local)

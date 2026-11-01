@@ -540,6 +540,24 @@ class TestAdjudicateEgress:
         assert report.candidates_skipped_egress_withheld == 0
         assert candidate.supersedes_doc_id == seed_id
 
+    @pytest.mark.parametrize("local", [False, True])
+    def test_the_gate_reads_the_session_capture_route_not_another_consumers(
+        self, tmp_path: Path, local: bool
+    ) -> None:
+        from tests.llm_routes import per_consumer_config, route_from
+        from trellis.llm.routing import LLMConsumer
+
+        registry, seed_id = self._labelled_seed(tmp_path)
+        registry.llm_route.side_effect = route_from(
+            per_consumer_config(LLMConsumer.SESSION_CAPTURE, local=local)
+        )
+        client = FakeLLMClient([_SUPERSEDE])
+
+        report, _candidate, _survivors = self._adjudicate(registry, seed_id, client)
+
+        assert len(client.calls) == (1 if local else 0)
+        assert report.candidates_skipped_egress_withheld == (0 if local else 1)
+
     def test_an_unlabelled_match_is_judged_as_before(self, tmp_path: Path) -> None:
         registry = _registry(tmp_path)
         seed_id = _seed_one_memory(

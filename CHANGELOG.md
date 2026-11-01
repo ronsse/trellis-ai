@@ -6,20 +6,27 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
-- **Content labelled above `internal` no longer reaches an LLM route that is not
-  declared local.** One predicate, `trellis.llm.egress` (`may_reach_route` for a
+- **Content labelled above `internal` no longer reaches a chat or generate LLM
+  route that is not declared local.** One predicate, `trellis.llm.egress` (`may_reach_route` for a
   label, `EgressGate` for a stored document, a chunk judged by its parent's
-  label as retrieval judges it), answers "may this content reach this route?"
+  label as retrieval judges it, and a chunk whose parent row is absent
+  withheld), answers "may this content reach this route?"
   and every path that sends stored content to a model asks it: `trellis worker
   enrich`, `trellis classify shadow` (`shadow_classify_stale`), the MCP
   reconcile-on-write judge, the session-capture reconcile pass, and memory
   extraction in `save_memory`, `trellis ingest-corpus` and
-  `trellis ingest-conversations`. A route is cloud unless it says otherwise:
+  `trellis ingest-conversations`. **Embedding is not gated:** stored content,
+  labelled content included, still goes to the configured embedder, and an
+  operator with a hosted embedder must treat that as egress. A route is cloud unless it says otherwise:
   set `local: true` in the `llm:` block, or in a tier under `llm.tiers`
   (a tier that keeps the parent's endpoint inherits the parent's declaration; a
   tier that moves `provider` or `base_url` does not). `local` is on the route,
   not a write-behaviour knob, and `trellis admin llm-routes --format json`
-  reports it. A document whose label cannot be read is skipped, not sent.
+  reports it. `local: true` is the operator's statement about where the
+  endpoint sends content and is checked only as far as the URL: it is rejected
+  (`llm.local`, `EXIT_STORE`) on a route that names a hosted `provider` with no
+  `base_url`, and a local router that forwards to a hosted model is not local.
+  A document whose label cannot be read is skipped, not sent.
   Skips are counted under the named reason `egress_withheld`, never only
   logged: `skipped_egress_withheld` in the JSON report of `worker enrich` and
   `classify shadow`, `candidates_skipped_egress_withheld` in the session-capture
@@ -27,12 +34,26 @@ All notable changes to Trellis will be documented in this file.
   failure), and `extraction_skipped_labelled` in the corpus and conversation
   sync reports; each text report prints a matching line when the count is
   non-zero. Unlabelled and `internal` documents are sent exactly as before,
-  prompt included. `tests/unit/test_llm_egress_rule.py` derives every
-  `<client>.generate(messages=...)` site off `src/` and requires each to be
-  rostered behind the predicate or exempt with a reason. **One retrieval-adjacent
-  effect:** enrichment and shadow tags on a labelled document stop updating on a
-  route that is not declared local; whatever tags it already carries keep being
-  served unchanged, and nothing in `trellis.retrieve` changed.
+  prompt included. `tests/unit/test_llm_egress_rule.py` is a tripwire for the
+  common shapes of a new sender (it derives `.generate(...)` sites off `src/` and
+  requires each to be rostered behind the predicate or exempt with a reason);
+  the behaviour tests beside each sender are the guard, and the test's docstring
+  names the evasions it does not catch. **Effects on what is served, by path.**
+  Enrichment and shadow tags on a labelled document stop updating on a route that
+  is not declared local; whatever tags it already carries keep being served
+  unchanged. `ingest-corpus` sent a labelled document's text to the extractor
+  before and no longer does while the route is not local, so such a document
+  stops minting graph entities, which feeds the graph axis. With
+  `TRELLIS_ENABLE_RECONCILE_ON_WRITE` off nothing changes; with it on and a route
+  not declared local, a pair with a labelled side is not judged, the new memory
+  is stored as a plain ADD and both rows stay current, so a pack can serve the
+  old fact (a pair the judge would have called NOOP stores a second row too).
+  Nothing re-judges a withheld pair later. The label is read when a job scans, so
+  a relabel between scan and send is not re-read. A labelled document served to a
+  session can reach a transcript, be captured unlabelled and become an
+  enrichment candidate; that path is not gated. `trellis admin check-extractors`
+  no longer reports an env-key fallback for a route declared local. No file
+  under `trellis.retrieve` changed.
 - **`trellis classify label-candidates` points a person at documents they may
   want to label.** A read-only scan counts matches of four plain patterns (an email
   address, a US/Canada phone number with separators, a US SSN shape and a

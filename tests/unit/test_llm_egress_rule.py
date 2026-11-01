@@ -20,7 +20,8 @@ B. **Entry points call the predicate.** Each gated entry point calls
    directly or through one named helper that does.
 C. **Callers of the senders are rostered.** A call to a function that reaches
    an inner sender (``judge_reconcile``, ``run_memory_extraction``,
-   ``EnrichmentService`` and the classifier builder) must sit inside a roster
+   ``EnrichmentService``, ``LLMExtractor``, ``LLMFacetClassifier`` and the
+   classifier builder) must sit inside a roster
    entry point or a declared construct-only helper, so a new caller does not
    slip past A by reusing a sender it never reads.
 D. **The gate is opened only by a route's declaration.** ``EgressGate(...)``
@@ -30,10 +31,26 @@ D. **The gate is opened only by a route's declaration.** ``EgressGate(...)``
 
 The floors are hand-read off ``src/`` (see ``assert_hand_read_floor``), never
 taken from the scan they guard, and the rule's predicates are run against a
-deliberately defective subject below. Honest limit: a call spelled
-``getattr(client, "gen" + "erate")`` is invisible to a static scan; what
-bounds it is that every provider client is built through
-``StoreRegistry.build_llm_client``, which ``test_llm_consumer_rule.py`` polices.
+deliberately defective subject below.
+
+**This rule is a tripwire, not the guard.** It catches the common shapes of a
+new sender or caller: ``.generate(messages=...)`` or ``.generate(**kwargs)``, a
+literal ``getattr(client, "generate")``, a sink called under an import alias, a
+gate built under an alias. The guard is the behaviour test beside each sender:
+a labelled document, a route not declared local, a recording fake that must see
+nothing. An exempt function is one that needs a re-read when what it sends
+changes; the roster does not notice that it did.
+
+Known evasions, none of them caught, each pinned in
+``test_the_known_evasions_are_named_not_caught`` so this list stays true:
+``gen = client.generate`` and ``functools.partial`` hide the call; an
+attribute write such as ``gate.local = True`` opens a gate after construction;
+a sender or service passed in as an argument is built where this scan does not
+look; an entry that calls ``gate.permits(...)`` and ignores the result, or
+checks one path of several, still counts as passing. A call spelled
+``getattr(client, "gen" + "erate")`` is invisible too; what bounds it is that
+every provider client is built through ``StoreRegistry.build_llm_client``, which
+``test_llm_consumer_rule.py`` polices.
 """
 
 from __future__ import annotations
@@ -43,7 +60,14 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from tests.ast_rules import assert_hand_read_floor, iter_modules, name_of
+import pytest
+
+from tests.ast_rules import (
+    assert_hand_read_floor,
+    construction_names,
+    iter_modules,
+    name_of,
+)
 
 _SRC = Path(__file__).resolve().parents[2] / "src"
 
@@ -96,7 +120,9 @@ _GATED: dict[tuple[str, str], tuple[Entry, ...]] = {
 _EXEMPT: dict[tuple[str, str], str] = {
     ("trellis_workers/session_capture/distill.py", "distill_session"): (
         "sends the session transcript digest, which is not a stored document "
-        "and carries no label; its outputs are written under their own labels"
+        "and carries no label of its own; a labelled document served to a "
+        "session can reach a transcript, be captured unlabelled and become an "
+        "enrichment candidate, and nothing here follows that path"
     ),
     ("trellis_workers/learning/miner.py", "_ask_llm"): (
         "sends traces, which carry no sensitivity label in this slice"
@@ -110,6 +136,8 @@ _SINK_NAMES = frozenset(
         "run_memory_extraction",
         "EnrichmentService",
         "build_llm_facet_classifier",
+        "LLMExtractor",
+        "LLMFacetClassifier",
     }
 )
 
@@ -119,6 +147,16 @@ _CONSTRUCT_ONLY: dict[tuple[str, str], str] = {
         "builds the classifier; its only sender is shadow_classify_item, "
         "which is a roster entry point and passes the gate"
     ),
+    ("trellis/extract/save_memory.py", "build_save_memory_extractor"): (
+        "builds the extractor and sends nothing; its only sender is "
+        "LLMExtractor.extract, which the rostered entry points reach "
+        "only after the predicate"
+    ),
+    ("trellis/classify/classifiers/llm.py", "build_llm_facet_classifier"): (
+        "builds the classifier and sends nothing; its only sender is the "
+        "classifier's enrich call, reached from shadow_classify_item "
+        "after the predicate"
+    ),
 }
 
 #: Hand-read off ``src/``: extract, enrich, judge_reconcile, distill, _ask_llm.
@@ -126,8 +164,8 @@ _SENDER_FLOOR = 5
 #: Hand-read: two extraction sites, enrich batch, shadow item, two reconcile.
 _ENTRY_FLOOR = 6
 #: Hand-read: judge_reconcile x2, run_memory_extraction x2, EnrichmentService x2,
-#: build_llm_facet_classifier x1.
-_SINK_CALL_FLOOR = 7
+#: build_llm_facet_classifier x1, LLMExtractor x1, LLMFacetClassifier x1.
+_SINK_CALL_FLOOR = 9
 
 
 def _calls_with_scope(
@@ -146,11 +184,18 @@ def _calls_with_scope(
 
 
 def _is_sender_call(call: ast.Call) -> bool:
-    """``<anything>.generate(..., messages=...)``: the LLM client protocol call."""
+    """A call into the LLM client protocol.
+
+    ``<anything>.generate(..., messages=...)``, the same with ``**kwargs``
+    (which may carry ``messages``), or a literal ``getattr(x, "generate")``.
+    """
+    if isinstance(call.func, ast.Attribute) and call.func.attr == "generate":
+        return any(keyword.arg in {"messages", None} for keyword in call.keywords)
     return (
-        isinstance(call.func, ast.Attribute)
-        and call.func.attr == "generate"
-        and any(keyword.arg == "messages" for keyword in call.keywords)
+        name_of(call.func) == "getattr"
+        and len(call.args) >= 2
+        and isinstance(call.args[1], ast.Constant)
+        and call.args[1].value == "generate"
     )
 
 
@@ -239,13 +284,19 @@ def sink_caller_violations(
     problems: list[str] = []
     for path, tree in iter_modules(root):
         module = _relative(root, path)
+        spellings = {
+            spelling: sink
+            for sink in _SINK_NAMES
+            for spelling in construction_names(sink, tree)
+        }
         for call, scope in _calls_with_scope(tree):
-            if name_of(call.func) in _SINK_NAMES:
+            sink = spellings.get(name_of(call.func) or "")
+            if sink is not None:
                 seen += 1
                 if (module, scope) not in allowed:
                     problems.append(
                         f"{module}:{call.lineno}: {scope} calls "
-                        f"{name_of(call.func)} and is not a rostered entry point"
+                        f"{sink} and is not a rostered entry point"
                     )
     return seen, problems
 
@@ -257,8 +308,9 @@ def gate_opening_violations(root: Path) -> list[str]:
         module = _relative(root, path)
         if module == _EGRESS_MODULE:
             continue
+        gate_names = construction_names("EgressGate", tree)
         for call, _scope in _calls_with_scope(tree):
-            if name_of(call.func) != "EgressGate":
+            if name_of(call.func) not in gate_names:
                 continue
             local = [k.value for k in call.keywords if k.arg == "local"]
             closed = (
@@ -452,3 +504,92 @@ def test_the_defining_module_may_build_gates_freely(tmp_path: Path) -> None:
 def test_a_call_that_is_not_a_model_call_is_not_a_sender(tmp_path: Path) -> None:
     root = _corpus(tmp_path, decoy=_DECOY)
     assert inner_senders(root) == {}
+
+
+_ALIASED_SINKS = {
+    "judge_reconcile": (
+        "from trellis.mcp.reconcile import judge_reconcile as jr\n"
+        "def sneaky(registry, doc):\n    jr(registry, doc)\n"
+    ),
+    "EnrichmentService": (
+        "from trellis_workers.enrichment.service import EnrichmentService as ES\n"
+        "def sneaky(registry):\n    return ES(registry)\n"
+    ),
+    "LLMExtractor": "def sneaky(registry):\n    return LLMExtractor(registry)\n",
+    "LLMFacetClassifier": (
+        "def sneaky(registry):\n    return LLMFacetClassifier(registry)\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("sink", sorted(_ALIASED_SINKS))
+def test_a_sink_is_found_under_an_alias_and_for_the_new_sinks(
+    tmp_path: Path, sink: str
+) -> None:
+    root = _corpus(tmp_path, job=_ALIASED_SINKS[sink])
+    seen, problems = sink_caller_violations(root, set(), {})
+    assert seen == 1
+    assert len(problems) == 1
+    assert sink in problems[0]
+    assert "sneaky" in problems[0]
+
+
+def test_a_gate_built_under_an_alias_is_still_checked(tmp_path: Path) -> None:
+    source = (
+        "from trellis.llm.egress import EgressGate as G\n"
+        "def build(store):\n    return G(store, local=True)\n"
+    )
+    problems = gate_opening_violations(_corpus(tmp_path, job=source))
+    assert len(problems) == 1
+    assert "local=False" in problems[0]
+
+
+def test_a_keyword_expansion_on_generate_is_a_sender(tmp_path: Path) -> None:
+    source = "def job(client, kwargs):\n    return client.generate(**kwargs)\n"
+    assert inner_senders(_corpus(tmp_path, job=source)) == {("job.py", "job"): [2]}
+
+
+def test_a_literal_getattr_of_generate_is_a_sender(tmp_path: Path) -> None:
+    source = (
+        "def job(client, doc):\n"
+        '    send = getattr(client, "generate")\n'
+        "    return send(messages=[doc])\n"
+    )
+    assert inner_senders(_corpus(tmp_path, job=source)) == {("job.py", "job"): [2]}
+
+
+def test_the_known_evasions_are_named_not_caught(tmp_path: Path) -> None:
+    """Each shape the module docstring lists as uncaught still walks past the rule.
+
+    If one of these starts failing, the rule got stronger: update the docstring.
+    """
+    hidden_calls = (
+        "def job(client, doc):\n"
+        "    gen = client.generate\n"
+        "    return gen(messages=[doc])\n"
+        "def job2(client, doc):\n"
+        "    return functools.partial(client.generate, messages=[doc])()\n"
+    )
+    assert inner_senders(_corpus(tmp_path, a=hidden_calls)) == {}
+
+    opened_later = (
+        "def build(store):\n"
+        "    gate = EgressGate(store, local=False)\n"
+        "    gate.local = True\n"
+        "    return gate\n"
+    )
+    assert gate_opening_violations(_corpus(tmp_path, b=opened_later)) == []
+
+    discarded = (
+        "def gated_entry(client, gate, doc):\n"
+        '    gate.permits(doc["doc_id"], None)\n'
+        '    return client.generate(messages=[doc["content"]])\n'
+    )
+    root = _corpus(tmp_path, c=discarded)
+    assert entry_violations(root, {Entry("c.py", "gated_entry")}) == []
+
+    passed_in = "def job(service, doc):\n    return service.enrich(doc)\n"
+    assert sink_caller_violations(_corpus(tmp_path, d=passed_in), set(), {}) == (
+        0,
+        [],
+    )

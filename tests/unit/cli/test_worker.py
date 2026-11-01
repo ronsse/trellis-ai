@@ -4736,6 +4736,28 @@ class TestWorkerEnrichEgress:
         as_text = runner.invoke(app, ["worker", "enrich", "--dry-run"])
         assert as_json.exit_code == as_text.exit_code == 0
 
+    @pytest.mark.parametrize("local", [False, True])
+    def test_the_gate_reads_the_enrichment_route_not_another_consumers(
+        self, temp_stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch, local: bool
+    ) -> None:
+        from tests.llm_routes import TierRoutedRegistry, per_consumer_config
+        from trellis.llm.routing import LLMConsumer
+
+        self._seed(temp_stores.knowledge.document_store)
+        llm = self._stub(monkeypatch)
+        config = per_consumer_config(LLMConsumer.ENRICHMENT, local=local)
+        monkeypatch.setattr(
+            worker, "_get_registry", lambda: TierRoutedRegistry(temp_stores, config)
+        )
+
+        result = runner.invoke(app, ["worker", "enrich", "--format", "json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout.strip())
+        assert payload["skipped_egress_withheld"] == (0 if local else 2)
+        assert payload["enriched"] == (3 if local else 1)
+        assert len(llm.prompts) == payload["enriched"]
+
 
 class _LocalRouteRegistry:
     """The real registry, with the ``llm:`` route declared local."""

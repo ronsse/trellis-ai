@@ -207,6 +207,8 @@ def validate_llm_routing(llm_config: Mapping[str, Any] | None) -> None:
         msg = f"llm: must be a mapping, got {type(parent).__name__}."
         raise LLMRoutingError(msg, setting="llm")
     _validate_local("llm", parent)
+    if parent.get(LOCAL_KEY) is True:
+        _validate_local_endpoint("llm", parent.get("provider"), parent.get("base_url"))
     tiers = _tiers(parent)
     routes = _routes(parent)
     parent_endpoint = {key: parent.get(key) for key in ENDPOINT_KEYS}
@@ -237,6 +239,13 @@ def _validate_tier(name: str, body: Any, parent_endpoint: Mapping[str, Any]) -> 
         )
         raise LLMRoutingError(msg, setting=setting)
     _validate_local(setting, body)
+    if body.get(LOCAL_KEY) is True:
+        # The endpoint the tier resolves to: its own key, else the parent's.
+        _validate_local_endpoint(
+            setting,
+            body["provider"] if "provider" in body else parent_endpoint["provider"],
+            body["base_url"] if "base_url" in body else parent_endpoint["base_url"],
+        )
     for key, value in body.items():
         if key == LOCAL_KEY:
             continue
@@ -300,6 +309,32 @@ def _validate_local(setting: str, body: Mapping[str, Any]) -> None:
         msg = (
             f"{setting}.{LOCAL_KEY} must be true or false, got a {shape} value."
             " Omit the key to leave the route undeclared (treated as cloud)."
+        )
+        raise LLMRoutingError(msg, setting=f"{setting}.{LOCAL_KEY}")
+
+
+#: Providers whose default endpoint is a hosted service.
+_HOSTED_PROVIDERS = frozenset({"openai", "anthropic"})
+
+
+def _validate_local_endpoint(setting: str, provider: Any, base_url: Any) -> None:
+    """``local: true`` cannot sit on a hosted provider's default endpoint.
+
+    ``provider: openai`` (or ``anthropic``) with no ``base_url`` talks to the
+    provider's own hosted API, so declaring it local is a contradiction the
+    block itself shows. This reads only the block: a ``base_url`` that names a
+    local-looking router which forwards to a hosted model passes, because
+    ``local: true`` is the operator's statement about where the endpoint sends
+    data and nothing here can see past the URL.
+    """
+    named = str(provider).strip().lower() if isinstance(provider, str) else ""
+    if named in _HOSTED_PROVIDERS and not (
+        isinstance(base_url, str) and base_url.strip()
+    ):
+        msg = (
+            f"{setting}.{LOCAL_KEY} is true but the route names the hosted provider"
+            f" {named!r} with no base_url, which is that provider's hosted API."
+            f" Set base_url to the endpoint you run, or drop {LOCAL_KEY}."
         )
         raise LLMRoutingError(msg, setting=f"{setting}.{LOCAL_KEY}")
 

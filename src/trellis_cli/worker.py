@@ -2558,13 +2558,15 @@ def _render_capture_text(payload: dict[str, Any]) -> None:
             f"  reconcile: {payload['candidates_reconciled_noop']} noop  "
             f"{payload['candidates_reconciled_supersede']} supersede"
         )
-        if payload["candidates_skipped_egress_withheld"]:
-            console.print(
-                f"  [yellow]{EGRESS_WITHHELD_REASON}:[/yellow] "
-                f"{payload['candidates_skipped_egress_withheld']} candidate(s) not "
-                f"judged; their nearest stored capture is labelled above "
-                f"internal and the session_capture route is not declared local"
-            )
+    # Outside the block above: the count is only ever raised by the reconcile
+    # pass, but a non-zero count must never be hidden by a flag.
+    if payload["candidates_skipped_egress_withheld"]:
+        console.print(
+            f"  [yellow]{EGRESS_WITHHELD_REASON}:[/yellow] "
+            f"{payload['candidates_skipped_egress_withheld']} candidate(s) not "
+            f"judged; their nearest stored capture is labelled above "
+            f"internal and the session_capture route is not declared local"
+        )
     if payload["supersessions_failed"]:
         # Never folded into the reconcile line above: a supersession the
         # judge decided and the store could not apply is a defect, not a

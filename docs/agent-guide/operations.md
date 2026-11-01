@@ -943,7 +943,7 @@ trellis classify shadow [--limit <n>] [--max-age-days <n>] [--page-size <n>] [--
 
 Requires an `llm:` block in `config.yaml`; without one the command exits `1` naming what is missing rather than silently shadowing nothing. A **local** model is the intended configuration — the pass is ~1.6 s per document against a whole corpus, which is free and private on-host and expensive anywhere else.
 
-**Labelled documents are not sent to a route that is not declared local.** A document labelled above `internal` (`confidential` or `restricted`), or whose label cannot be read, is skipped and counted: `skipped_egress_withheld` in the JSON report, and an `egress_withheld:` line in the text report when the count is non-zero. It is never an error and does not change the exit code. Declare the `classify_shadow` route local with `local: true` in the `llm:` block (or its tier) to classify them; see [Keeping labelled content off a hosted model](#keeping-labelled-content-off-a-hosted-model).
+**Labelled documents are not sent to a route that is not declared local.** A document labelled above `internal` (`confidential` or `restricted`), or whose label cannot be read, is skipped and counted: `skipped_egress_withheld` in the JSON report, and an `egress_withheld:` line in the text report when the count is non-zero. It is never an error and does not change the exit code. Declare the `classify_shadow` route local with `local: true` in the `llm:` block (or its tier) to classify them. Unlike `worker enrich`, shadow counts a withheld document as scanned. See [Keeping labelled content off a hosted model](#keeping-labelled-content-off-a-hosted-model).
 
 **Why a separate key.** Verdicts are written to `metadata.content_tags_shadow`, never to `content_tags`. Two things follow, and both are the point:
 
@@ -5213,7 +5213,7 @@ A runnable end-to-end demo lives at `examples/hooks_generic_workflow.py`.
 
 ## Keeping labelled content off a hosted model
 
-Content labelled above `internal` (`DataClassification.sensitivity` of `confidential` or `restricted`) does not reach an LLM route unless the route is declared local. A route that says nothing is treated as cloud; a `localhost` `base_url` is not a declaration. Declare it in `config.yaml`:
+Content labelled above `internal` (`DataClassification.sensitivity` of `confidential` or `restricted`) does not reach a chat or generate LLM route unless the route is declared local. A route that says nothing is treated as cloud; a `localhost` `base_url` is not a declaration. Declare it in `config.yaml`:
 
 ```yaml
 llm:
@@ -5224,6 +5224,7 @@ llm:
   tiers:
     hosted:
       base_url: https://api.example.com/v1
+      api_key_env: HOSTED_API_KEY   # its own credential: the parent names none
       model: hosted-model    # moves base_url, so it does not inherit local: true
   routes:
     enrichment: hosted
@@ -5231,7 +5232,9 @@ llm:
 
 `local` must be a boolean (a malformed value is an `llm.local` routing error, `EXIT_STORE`). A tier that keeps the parent's `provider` and `base_url` inherits the parent's declaration; a tier that moves either inherits nothing and can set its own `local`. `trellis admin llm-routes --format json` reports the resolved value per consumer.
 
-Every path that sends stored content to a model asks the same predicate, `trellis.llm.egress`, and reports what it skipped under the reason `egress_withheld`:
+`local: true` is your statement about where the endpoint sends content, and Trellis cannot check it. A local router or proxy that forwards to a hosted model is not local. The one thing checked is the URL: `local: true` on a route that names a hosted `provider` (`openai`, `anthropic`) with no `base_url` is rejected as an `llm.local` routing error, because that route is the vendor's cloud. The check cannot see past a URL.
+
+Every path that sends stored content to a chat or generate route asks the same predicate, `trellis.llm.egress`, and reports what it skipped under the reason `egress_withheld`:
 
 | Path | Where the skip is counted |
 |---|---|
@@ -5242,3 +5245,12 @@ Every path that sends stored content to a model asks the same predicate, `trelli
 | Memory extraction (`save_memory`, `ingest-corpus`, `ingest-conversations`) | skipped whatever the route, because the entity names it mints land in an unlabelled graph: the `save_memory` note, and `extraction_skipped_labelled` in the sync reports |
 
 A skip never carries document text, a title or an id into a report beyond what the report already printed. Unlabelled and `internal` documents behave exactly as they did before.
+
+### What this does not cover
+
+- **Embedding.** Stored content, labelled content included, still goes to the configured embedder, and an operator with a hosted embedder must treat that as egress. The gate covers chat and generate routes only; gating the embedder would change which vectors exist, and so what a pack can serve.
+- **A labelled document that reaches a transcript.** A labelled document served to a session can appear in that session's transcript. The session-capture pass distills the transcript (`distill_session`), the memories it captures carry no label, and they can later become enrichment candidates. The predicate is not asked on that path.
+- **A relabel between scan and send.** `worker enrich` and `classify shadow` read the label when they scan for candidates. A document relabelled after the scan is not re-read before the send, and a chunk's parent label cached in that run stays permitted for the rest of it.
+- **Reconcile-on-write, flag on.** With `TRELLIS_ENABLE_RECONCILE_ON_WRITE` off nothing changes. With it on and a route not declared local, a pair with a labelled side is not judged: the new memory is stored as a plain ADD and both rows stay current, so a pack can serve the old fact. Nothing re-judges a withheld pair later.
+- **Corpus sync.** `ingest-corpus` used to send a labelled document's text to the extractor. It no longer does while the route is not local, so such a document mints no graph entities.
+- **Orphan chunks.** A chunk-shaped id whose parent row is absent is withheld, where retrieval judges it by its own label.

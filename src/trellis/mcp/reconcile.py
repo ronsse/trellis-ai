@@ -208,7 +208,9 @@ def marker_for_fallback(reason: ReconcileFallbackReason | None) -> str:
     ``RECONCILE_DEGRADED`` event cannot name different things: the MCP commit,
     and the session-capture sweep's withdrawal of an unapplied supersession.
     Every reason without a marker of its own is :data:`MARKER_SKIPPED` — the
-    judge did not produce a verdict, so the memory waits for a later sweep.
+    judge did not produce a verdict, so the memory is stored as a plain ADD
+    under that marker. The marker makes the row findable; it does not queue a
+    re-judgement, and nothing here promises one.
     """
     if reason is ReconcileFallbackReason.STALE_RECHECK:
         return MARKER_STALE

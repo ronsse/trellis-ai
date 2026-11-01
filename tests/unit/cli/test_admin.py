@@ -740,6 +740,25 @@ class TestCheckExtractorsRouting:
             consumer=LLMConsumer.MEMORY_EXTRACTION
         )
 
+    @pytest.mark.parametrize(("local", "applies"), [(True, False), (False, True)])
+    @patch("trellis_cli.admin._get_registry")
+    def test_an_unrouted_local_extractor_has_no_env_fallback(
+        self, mock_get_reg, monkeypatch, local, applies
+    ):
+        """A route declared local never takes a hosted env key, as in the server."""
+        config = {
+            "provider": "openai",
+            "base_url": "http://localhost:11434/v1",
+            "api_key_env": "OLLAMA_API_KEY",
+            "model": "local-model",
+            "local": local,
+        }
+        mock_get_reg.return_value = _make_registry(llm_config=config)
+        monkeypatch.setenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", "1")
+        exit_code, data = _check_extractors_json(monkeypatch)
+        assert exit_code == 0
+        assert data["llm_client"]["env_fallback_applies"] is applies
+
     @patch("trellis_cli.admin._get_registry")
     def test_unrouted_extractor_reports_no_tier(self, mock_get_reg, monkeypatch):
         mock_get_reg.return_value = _make_registry(

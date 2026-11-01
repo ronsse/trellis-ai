@@ -625,3 +625,30 @@ class TestShadowEgressReport:
 
         assert isinstance(seen["egress"], EgressGate)
         assert seen["egress"].local is False  # no declaration: treated as cloud
+
+    @pytest.mark.parametrize("local", [False, True])
+    def test_the_gate_reads_the_classify_shadow_route_not_another_consumers(
+        self, cli_env, monkeypatch, local
+    ) -> None:
+        from tests.llm_routes import TierRoutedRegistry, per_consumer_config
+        from trellis.classify.shadow import BatchShadowResult
+        from trellis.llm.routing import LLMConsumer
+        from trellis_cli import classify as classify_cli
+
+        seen: dict[str, Any] = {}
+
+        def _capture(**kwargs: Any) -> BatchShadowResult:
+            seen.update(kwargs)
+            return BatchShadowResult()
+
+        inner = classify_cli._get_registry()
+        config = per_consumer_config(LLMConsumer.CLASSIFY_SHADOW, local=local)
+        monkeypatch.setattr(
+            classify_cli, "_get_registry", lambda: TierRoutedRegistry(inner, config)
+        )
+        monkeypatch.setattr(classify_cli, "_require_llm_facet_classifier", object)
+        monkeypatch.setattr(classify_cli, "shadow_classify_stale", _capture)
+
+        _run_json("shadow")
+
+        assert seen["egress"].local is local

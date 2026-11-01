@@ -475,3 +475,53 @@ class TestLocalDeclaration:
         tier = _raises(_config(tiers={"t": {"local": value}}))
         assert tier.setting == "llm.tiers.t.local"
         assert "must be true or false" in tier.message
+
+
+class TestLocalNeedsAnEndpoint:
+    """``local`` on a hosted provider with no ``base_url`` declares nothing true."""
+
+    @pytest.mark.parametrize("provider", ["openai", "anthropic"])
+    @pytest.mark.parametrize("base_url", [None, ""])
+    def test_the_parent_is_rejected(self, provider, base_url):
+        config: dict[str, Any] = {"provider": provider, "model": "m", "local": True}
+        if base_url is not None:
+            config["base_url"] = base_url
+        error = _raises(config)
+        assert error.setting == "llm.local"
+        assert "base_url" in error.message
+
+    @pytest.mark.parametrize("provider", ["openai", "anthropic"])
+    def test_a_tier_that_resolves_to_no_endpoint_is_rejected(self, provider):
+        config = {
+            "provider": provider,
+            "model": "m",
+            "tiers": {"t": {"local": True}},
+        }
+        error = _raises(config)
+        assert error.setting == "llm.tiers.t.local"
+        assert "base_url" in error.message
+
+    def test_an_endpoint_makes_the_declaration_valid(self):
+        validate_llm_routing(
+            {
+                "provider": "openai",
+                "base_url": "http://localhost:11434/v1",
+                "local": True,
+            }
+        )
+        validate_llm_routing(
+            {
+                "provider": "openai",
+                "model": "m",
+                "tiers": {
+                    "t": {
+                        "base_url": "http://localhost:4000/v1",
+                        "api_key_env": "TIER_KEY",
+                        "local": True,
+                    }
+                },
+            }
+        )
+
+    def test_a_bare_declaration_still_passes(self):
+        validate_llm_routing({"local": True})
