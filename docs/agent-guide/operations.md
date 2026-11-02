@@ -1681,7 +1681,12 @@ trellis curate classify-sensitivity doc-1 --sensitivity restricted --format json
 ```
 
 Re-applying the stored label answers `Classification unchanged: ...` and writes
-nothing. A document that does not exist, a chunk id (a chunk reads its parent's
+nothing, but only a record that states the level counts. A record that cannot be
+parsed (a string, an unknown level, no level) reads `restricted` without saying so,
+so `restricted` over it replaces the record (`... restricted -> restricted
+(unreadable record replaced)`), with `updated_at` preserved. Fields of the old record
+that validate are kept; if one does not, the record is rebuilt from the level alone,
+and what is dropped is not kept anywhere. Asking again is then the no-op. A document that does not exist, a chunk id (a chunk reads its parent's
 label, so relabel the parent) and a value outside the vocabulary exit `2` with
 `"status": "rejected"`.
 
@@ -3473,7 +3478,7 @@ result = executor.execute(cmd)
 | Operation | Required Args | Description |
 |-----------|---------------|-------------|
 | `evidence.ingest` | `evidence` (dict) | Ingest evidence via the mutation pipeline. A caller-chosen `evidence.doc_id` may not start with `trace-summary:` (the trace embed worker's namespace: a row there makes the trace it names look already embedded, so its real summary is never written; code `reserved_trace_summary_id`), may not sit in the `precedent://learning/` namespace, and may not be a minted `<x>#chunk-<digits>` chunk id (both `reserved_document_id`). The prefix is exact and case-sensitive. `POST /api/v1/evidence`, `POST /api/v1/documents`, MCP `save_memory` and `trellis ingest evidence` refuse it the same way |
-| `classification.set` | `doc_id`, `sensitivity` | Relabel a document's `DataClassification.sensitivity` (metadata only; `updated_at` preserved, vector row re-mirrored). A document above the caller's clearance is `target_not_found`, as a missing one is; a requested label above the caller's clearance is refused (`policy_violation`, nothing written); a chunk id is `classification_set_chunk`; a malformed `doc_id`/`sensitivity` is `classification_set_shape`. Re-applying the stored label is a successful no-op, except to `public`: that writes the exact record an `external` key reads, so a record that only reads `public` is rewritten, and one carrying regulatory tags, a jurisdiction, another version or an unknown field is refused (`classification_public_discards`, nothing written). Also available via `trellis curate classify-sensitivity` and `POST /api/v1/documents/{doc_id}/sensitivity` |
+| `classification.set` | `doc_id`, `sensitivity` | Relabel a document's `DataClassification.sensitivity` (metadata only; `updated_at` preserved, vector row re-mirrored). A document above the caller's clearance is `target_not_found`, as a missing one is; a requested label above the caller's clearance is refused (`policy_violation`, nothing written); a chunk id is `classification_set_chunk`; a malformed `doc_id`/`sensitivity` is `classification_set_shape`. Re-applying the stored label is a successful no-op, with two exceptions. `restricted` over a record that cannot be parsed, which reads `restricted` without stating it, replaces the record: fields that validate are kept, and anything else is dropped and not kept anywhere. `public` writes the exact record an `external` key reads, so a record that only reads `public` is rewritten, and one carrying regulatory tags, a jurisdiction, another version or an unknown field is refused (`classification_public_discards`, nothing written). A row whose `metadata` is not an object fails with `Execution failed: <class>` and is not repaired. Also available via `trellis curate classify-sensitivity` and `POST /api/v1/documents/{doc_id}/sensitivity` |
 | `evidence.attach` | `evidence_id`, `target_id`, `target_type` | Attach evidence to a trace, entity, or precedent |
 
 ### Entity Operations

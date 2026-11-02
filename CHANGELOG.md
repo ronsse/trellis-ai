@@ -494,6 +494,27 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **The Memories tab's label control no longer refuses a repair, and its chunk wording
+  names only what is known.** (1) `classification.set` to `restricted` over a record that
+  cannot be parsed (a string, an unknown level, no level, `null`) answered `Classification
+  unchanged` and wrote nothing, because such a record already *reads* `restricted`; the
+  page told the operator it could not be done, and the label stayed `corrupt` for good. It
+  now writes a clean record through the same governed write as any relabel
+  (`put_document(..., preserve_updated_at=True)`, so recency does not move, with a
+  `... (unreadable record replaced)` message). Fields of the old record that validate are
+  kept; the rest are dropped and not kept anywhere. A row whose `metadata` is not an object
+  still fails, and the page now says so. A
+  record that states the level is still a no-op, and `public` over a record carrying tags
+  is still refused (`classification_public_discards`). A readable-as-`restricted` row
+  serves exactly as before: the effective label is `restricted` before and after. (2) A
+  chunk whose own record is corrupt is no longer told to "choose another label" (a chunk
+  cannot be relabelled, and relabelling its parent does not replace its record). (3) A
+  chunk that reads `restricted` is no longer said to read its parent's label: the server
+  reports a restricted parent, a parent whose record cannot be parsed and a parent it could
+  not read alike, so the badge names all three. (4) `GET /documents/{id}` on a chunk reads
+  its parent twice for a key below `restricted` instead of four times: the read gate and the
+  `label` block now share one `DocumentClearance`. No change to what any key may read.
+
 - **MCP `revoke_api_key` and `list_api_keys` no longer hand a store's error text to the
   caller.** An exception that escaped either tool (a store or event log that would not
   open, say) was answered with `Revoke failed: <its text>` or `Listing failed: <its text>`,

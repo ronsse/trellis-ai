@@ -364,7 +364,8 @@ def classify_sensitivity(
     ``restricted`` hides it from a ``read`` token. The CLI is trusted-local
     and clears every label. A missing document, a chunk id (it reads its
     parent's label) and a value outside the vocabulary are refused. Re-applying
-    the stored label is a no-op (exit 0, message says so).
+    the stored label is a no-op (exit 0, message says so), except
+    ``restricted`` over a record that cannot be parsed, which replaces it.
 
     ``public`` writes the exact record an ``external`` API key reads, so a
     document whose record merely reads ``public`` (a corpus file's frontmatter
