@@ -505,7 +505,6 @@ All notable changes to Trellis will be documented in this file.
   operations guide's API-key errors list also gains the 409 a stored admin key gets for
   revoking itself.
 
-
 - **A stored row whose metadata is JSON but not an object no longer fails every
   document read by a `read` or `confidential` key.** `metadata_json` of `[1]`,
   `5`, `"str"` or `true` parses, so the store returns it, and
