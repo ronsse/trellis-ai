@@ -37,6 +37,10 @@ UNLABELLED = {
 }
 BARE_PUBLIC = {**PUBLIC, "external_readable": False}
 RESTRICTED_CHUNK = {**UNLABELLED, "sensitivity": "restricted"}
+#: ``metadata`` that is not an object holds no label to read, so the row reads
+#: ``restricted``: a key below ``restricted`` is not served it, and the label
+#: says so rather than showing the ``internal`` the row is withheld from.
+UNREADABLE = {**UNLABELLED, "sensitivity": "restricted", "corrupt": True}
 
 
 @pytest.fixture
@@ -253,7 +257,11 @@ def test_a_corrupt_stored_record_is_flagged_and_a_chosen_restricted_is_not(
 def test_a_row_whose_metadata_is_not_an_object_still_answers_an_admin_key(
     client, raw
 ) -> None:
-    """These rows answered 200 before ``label`` existed; the label must not 500."""
+    """These rows answered 200 before ``label`` existed; the label must not 500.
+
+    An admin key is still served the row. The label reads it as the gate does:
+    ``restricted`` and ``corrupt``, because a ``read`` key is not served it.
+    """
     http, reg = client
     docs = reg.knowledge.document_store
     docs.put("bad", "plain text", {})
@@ -265,9 +273,9 @@ def test_a_row_whose_metadata_is_not_an_object_still_answers_an_admin_key(
     resp = _by_id(http, admin, "bad")
     assert resp.status_code == 200, resp.text
     document = resp.json()["document"]
-    assert document["label"] == UNLABELLED
+    assert document["label"] == UNREADABLE
     assert {k: v for k, v in document.items() if k != "label"} == stored
     listed = http.get("/api/v1/documents?limit=100", headers=admin)
     assert listed.status_code == 200, listed.text
     row = next(r for r in listed.json()["documents"] if r["doc_id"] == "bad")
-    assert row["label"] == UNLABELLED
+    assert row["label"] == UNREADABLE
