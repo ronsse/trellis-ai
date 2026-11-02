@@ -4749,7 +4749,9 @@ paths:
 
         its own reach. A chunk id (it reads its parent''s label) and a value outside
 
-        the vocabulary are refused. Re-applying the stored label is a no-op.
+        the vocabulary are refused. Re-applying the stored label is a no-op,
+
+        except ``restricted`` over a record that cannot be parsed, which replaces it.
 
 
         ``public`` writes the exact record an ``external`` key reads, so a record

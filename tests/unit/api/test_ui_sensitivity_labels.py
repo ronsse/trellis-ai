@@ -113,7 +113,18 @@ def test_relabelling_a_corrupt_record_restricted_is_sent_to_the_server() -> None
     assert "leaves it as it is" not in begin
     state = _function(_page(), "labelState")
     corrupt = state.split("if (label.corrupt) {", 1)[1].split("\n            }\n", 1)[0]
-    assert "restricted included, replaces it with a clean record" in corrupt
+    assert "restricted included, replaces it." in corrupt
+    assert "dropped and not kept" in corrupt
+    assert "Public is refused while the record carries other fields" in corrupt
+
+
+def test_a_row_whose_metadata_is_not_an_object_is_not_promised_a_repair() -> None:
+    """``stored: false`` beside ``corrupt`` is that row, and relabelling it fails."""
+    state = _function(_page(), "labelState")
+    corrupt = state.split("if (label.corrupt) {", 1)[1].split("\n            }\n", 1)[0]
+    branch = corrupt.split("label.stored === false", 1)[1].split("\n", 2)[1]
+    assert "Applying a label fails on such a row" in branch
+    assert "replaces it" not in branch
     assert "choose another label" not in _page()
 
 
@@ -123,7 +134,7 @@ def test_a_corrupt_chunk_is_not_told_to_do_what_a_chunk_cannot() -> None:
     corrupt = state.split("if (label.corrupt) {", 1)[1].split("\n            }\n", 1)[0]
     # The document wording says to apply a label; a chunk has no relabel.
     assert "title: chunk" in corrupt
-    chunk_title = corrupt.split("title: chunk", 1)[1].split(": '", 1)[0]
+    chunk_title = corrupt.split("title: chunk", 1)[1].split("label.stored", 1)[0]
     assert "has no relabel here" in chunk_title
     assert "does not replace this record" in chunk_title
     assert "Applying a label" not in chunk_title

@@ -381,7 +381,8 @@ def _relabelled_record(prior: object, sensitivity: str) -> dict[str, Any]:
     """A ``DataClassification`` record carrying ``sensitivity``, keeping what it can.
 
     The other fields of a readable prior record (regulatory tags, jurisdiction)
-    survive a relabel; an unreadable one is replaced whole. ``"caller"`` is
+    survive a relabel if they validate; if any does not, the record is rebuilt
+    from ``sensitivity`` alone. What is dropped is not kept. ``"caller"`` is
     recorded as a classifier because a person asked for this label.
     """
     kept = (

@@ -501,7 +501,9 @@ All notable changes to Trellis will be documented in this file.
   page told the operator it could not be done, and the label stayed `corrupt` for good. It
   now writes a clean record through the same governed write as any relabel
   (`put_document(..., preserve_updated_at=True)`, so recency does not move, with a
-  `... (unreadable record replaced)` message), keeping the old record's readable fields. A
+  `... (unreadable record replaced)` message). Fields of the old record that validate are
+  kept; the rest are dropped and not kept anywhere. A row whose `metadata` is not an object
+  still fails, and the page now says so. A
   record that states the level is still a no-op, and `public` over a record carrying tags
   is still refused (`classification_public_discards`). A readable-as-`restricted` row
   serves exactly as before: the effective label is `restricted` before and after. (2) A

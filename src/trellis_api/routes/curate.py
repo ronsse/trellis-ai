@@ -229,7 +229,8 @@ def set_document_sensitivity(
     cannot learn it exists by trying to relabel it; a requested label above the
     caller's clearance is refused too, so a key cannot push a document out of
     its own reach. A chunk id (it reads its parent's label) and a value outside
-    the vocabulary are refused. Re-applying the stored label is a no-op.
+    the vocabulary are refused. Re-applying the stored label is a no-op,
+    except ``restricted`` over a record that cannot be parsed, which replaces it.
 
     ``public`` writes the exact record an ``external`` key reads, so a record
     that only reads ``public`` (a corpus file's bare frontmatter) is rewritten,
