@@ -5790,7 +5790,17 @@
             if (label.corrupt) {
                 return { text: 'corrupt label (reads as restricted)', cls: 'badge-danger',
                     readers: SENSITIVITY_READERS.restricted,
-                    title: 'The label stored on this document cannot be parsed, so it reads as restricted until it is replaced. Relabelling it restricted leaves the stored record as it is; choose another label to replace it.' };
+                    title: chunk
+                        ? 'The label record stored on this chunk cannot be parsed, so it reads as restricted. A chunk has no relabel here, and relabelling its parent document does not replace this record.'
+                        : 'The label stored on this document cannot be parsed, so it reads as restricted until it is replaced. Applying a label, restricted included, replaces it with a clean record.' };
+            }
+            if (chunk && s === 'restricted') {
+                // A chunk reads restricted when its own label or its parent's is
+                // restricted, and also when its parent's label could not be read
+                // (a record that does not parse, or a store fault). The server
+                // reports all of these alike, so the page names none of them.
+                return { text: s, cls: SENSITIVITY_BADGE[s], readers: SENSITIVITY_READERS[s],
+                    title: `This chunk reads as restricted: its own label or its parent document's is restricted, or its parent's label could not be read, which also reads as restricted. The server does not say which; open the parent document to see its label. Readable by ${SENSITIVITY_READERS[s]}.` };
             }
             if (!label.stored && s === 'internal') {
                 return { text: 'unlabelled (internal)', cls: 'badge-warn',
@@ -5910,6 +5920,9 @@
 
         function relabelControlHtml(d) {
             if (CHUNK_DOC_ID.test(String(d.doc_id))) {
+                if (d.label && d.label.corrupt) {
+                    return '<p class="fs-3 text-dim mb-lg">This chunk\'s own label record cannot be parsed. It cannot be changed from here, and relabelling the parent document does not replace it.</p>';
+                }
                 return '<p class="fs-3 text-dim mb-lg">A chunk reads its parent document\'s label. Relabel the parent document.</p>';
             }
             // No label from the server: nothing to say a change would do, so the
@@ -5940,10 +5953,6 @@
             const label = memRelabelOpen.label;
             if (!labelState(label, docId)) return;
             const st = labelState(label, docId);
-            if (label.corrupt && target === 'restricted') {
-                memRelabelStatus('The stored label is corrupt and reads as restricted. Relabelling it restricted leaves it as it is; choose another label to replace it.');
-                return;
-            }
             const isNoop = label.stored && !label.corrupt && label.sensitivity === target
                 && (target !== 'public' || label.external_readable);
             if (isNoop) { memRelabelStatus(`Already labelled ${escHtml(target)}.`); return; }

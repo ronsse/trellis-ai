@@ -449,16 +449,16 @@ def get_document(
     registry = get_registry()
     store = registry.knowledge.document_store
     clearance = request_clearance(ctx)
+    # One gate for the read and the label: it memoizes a chunk's parent row, so a
+    # second gate would read that parent again and could judge it differently if
+    # the store faulted in between.
+    gate = DocumentClearance(store, clearance)
     doc = read_document_row(store, doc_id, clearance)
-    if doc is not None and not DocumentClearance(store, clearance).permits(
-        doc_id, doc.get("metadata")
-    ):
+    if doc is not None and not gate.permits(doc_id, doc.get("metadata")):
         doc = None
     if doc is None:
         raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}")
-    label = _document_label(
-        DocumentClearance(store, clearance), _external_gate(store), doc
-    )
+    label = _document_label(gate, _external_gate(store), doc)
     return {
         "status": "ok",
         "document": {

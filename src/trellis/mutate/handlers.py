@@ -445,7 +445,10 @@ class ClassificationSetHandler:
     The new label must be within ``clearance`` too
     (:func:`~trellis.mutate.sensitivity_floor.refuse_written_label`), so a caller
     cannot push a document out of its own reach. Re-applying the stored label is
-    a no-op.
+    a no-op, but only a record that states the level counts: a record that cannot
+    be parsed reads ``restricted`` without saying so, and a relabel to
+    ``restricted`` replaces it with a clean record (the same governed write as
+    any other relabel, ``updated_at`` preserved).
 
     **``public`` is the exact record, and the handler says when it is not.** An
     ``external`` key reads a document only when its stored record is exactly
@@ -507,6 +510,7 @@ class ClassificationSetHandler:
         metadata: dict[str, Any] = dict(existing.get("metadata") or {})
         previous = sensitivity_of(metadata)
         prior_record = metadata.get(DATA_CLASSIFICATION_KEY)
+        had_record = DATA_CLASSIFICATION_KEY in metadata
         if sensitivity == "public":
             if is_public_label(metadata):
                 return doc_id, f"Classification unchanged: {doc_id} is {sensitivity}"
@@ -523,7 +527,16 @@ class ClassificationSetHandler:
                 )
             metadata[DATA_CLASSIFICATION_KEY] = public_label_record()
         else:
-            if DATA_CLASSIFICATION_KEY in metadata and previous == sensitivity:
+            # A record that cannot be parsed reads ``restricted`` without anyone
+            # having chosen it, so ``previous == sensitivity`` is not enough to
+            # call a relabel to ``restricted`` a no-op: only a record that states
+            # the level is. An operator who asks for ``restricted`` on such a row
+            # means it, and gets a record that says so.
+            states_it = (
+                isinstance(prior_record, dict)
+                and prior_record.get("sensitivity") == sensitivity
+            )
+            if states_it:
                 return doc_id, f"Classification unchanged: {doc_id} is {sensitivity}"
             metadata[DATA_CLASSIFICATION_KEY] = _relabelled_record(
                 prior_record, sensitivity
@@ -538,11 +551,18 @@ class ClassificationSetHandler:
         )
         # Only a relabel to public rewrites into the exact record; any other
         # target keeps the prior fields, so the suffix would state something false.
-        rewritten = (
-            " (record rewritten to the exact public record)"
-            if (sensitivity == "public" and previous == sensitivity)
-            else ""
-        )
+        if sensitivity == "public":
+            rewritten = (
+                " (record rewritten to the exact public record)"
+                if previous == sensitivity
+                else ""
+            )
+        else:
+            rewritten = (
+                " (unreadable record replaced)"
+                if had_record and previous == sensitivity
+                else ""
+            )
         return (
             doc_id,
             f"Classification set: {doc_id} {previous} -> {sensitivity}{rewritten}",

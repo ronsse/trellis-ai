@@ -103,8 +103,55 @@ def test_a_corrupt_record_says_so_and_is_not_a_no_op_label() -> None:
     state = _function(page, "labelState")
     assert "'corrupt label (reads as restricted)'" in state
     begin = _function(page, "beginRelabelDocument")
-    assert "label.corrupt && target === 'restricted'" in begin
     assert "!label.corrupt && label.sensitivity === target" in begin
+
+
+def test_relabelling_a_corrupt_record_restricted_is_sent_to_the_server() -> None:
+    """The server writes a clean record, so the page must not refuse it first."""
+    begin = _function(_page(), "beginRelabelDocument")
+    assert "label.corrupt && target" not in begin
+    assert "leaves it as it is" not in begin
+    state = _function(_page(), "labelState")
+    corrupt = state.split("if (label.corrupt) {", 1)[1].split("\n            }\n", 1)[0]
+    assert "restricted included, replaces it with a clean record" in corrupt
+    assert "choose another label" not in _page()
+
+
+def test_a_corrupt_chunk_is_not_told_to_do_what_a_chunk_cannot() -> None:
+    page = _page()
+    state = _function(page, "labelState")
+    corrupt = state.split("if (label.corrupt) {", 1)[1].split("\n            }\n", 1)[0]
+    # The document wording says to apply a label; a chunk has no relabel.
+    assert "title: chunk" in corrupt
+    chunk_title = corrupt.split("title: chunk", 1)[1].split(": '", 1)[0]
+    assert "has no relabel here" in chunk_title
+    assert "does not replace this record" in chunk_title
+    assert "Applying a label" not in chunk_title
+    control = _function(page, "relabelControlHtml")
+    chunk_branch = control.split("if (CHUNK_DOC_ID.test", 1)[1].split(
+        "const usable", 1
+    )[0]
+    assert "d.label && d.label.corrupt" in chunk_branch
+    assert "does not replace it" in chunk_branch
+
+
+def test_a_chunk_reading_restricted_is_not_given_a_cause_the_server_did_not_name() -> (
+    None
+):
+    state = _function(_page(), "labelState")
+    hedge = state.split("if (chunk && s === 'restricted') {", 1)[1].split(
+        "\n            }\n", 1
+    )[0]
+    # A restricted parent, a parent whose label cannot be parsed and a parent that
+    # cannot be read all arrive as the same label, so the wording names all three.
+    assert "its own label or its parent document's is restricted" in hedge
+    assert "its parent's label could not be read" in hedge
+    assert "The server does not say which" in hedge
+    # It sits before the branches that say "its parent document's label" of a
+    # chunk that has no label of its own.
+    assert state.index("if (chunk && s === 'restricted')") < state.index(
+        "if (!label.stored) {"
+    )
 
 
 def test_the_control_is_off_when_the_server_reported_no_label() -> None:

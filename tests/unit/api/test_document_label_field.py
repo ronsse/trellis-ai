@@ -279,3 +279,92 @@ def test_a_row_whose_metadata_is_not_an_object_still_answers_an_admin_key(
     assert listed.status_code == 200, listed.text
     row = next(r for r in listed.json()["documents"] if r["doc_id"] == "bad")
     assert row["label"] == UNREADABLE
+
+
+def _count_gets(store) -> list[str]:
+    """Record every ``store.get`` id from here on, passing each through."""
+    seen: list[str] = []
+    real = store.get
+
+    def counting(doc_id):
+        seen.append(doc_id)
+        return real(doc_id)
+
+    store.get = counting
+    return seen
+
+
+@pytest.mark.parametrize(
+    "scopes",
+    [["admin"], ["read"], ["read", "confidential"]],
+    ids=["admin", "read", "read+confidential"],
+)
+def test_a_chunk_detail_reads_its_parent_no_more_than_one_gate_does(
+    client, scopes
+) -> None:
+    """Reading the row and labelling it share one gate, so one parent memo.
+
+    A gate reads a chunk's parent twice: once to fail closed on a label that
+    cannot be read, once for the verdict it memoizes. The detail route used to
+    build a second gate for the label and so read the parent twice more for a
+    key below ``restricted``; a ``restricted`` key never reached the first.
+    """
+    http, reg = client
+    _seed_chunks(reg)
+    reads = _count_gets(reg.knowledge.document_store)
+    headers = _headers(reg, scopes)
+    assert _by_id(http, headers, "p-open#chunk-0").status_code == 200
+    assert reads.count("p-open#chunk-0") == 1
+    assert reads.count("p-open") <= 2, reads
+
+
+@pytest.mark.parametrize("scopes", [["read"], ["admin"]], ids=["read", "admin"])
+def test_the_detail_label_of_a_chunk_matches_the_list_for_every_clearance(
+    client, scopes
+) -> None:
+    http, reg = client
+    _seed_chunks(reg)
+    headers = _headers(reg, scopes)
+    listed = http.get(
+        "/api/v1/documents?limit=100&include_chunks=true", headers=headers
+    ).json()["documents"]
+    labels = {row["doc_id"]: row["label"] for row in listed}
+    assert "p-open#chunk-0" in labels
+    for doc_id, label in labels.items():
+        detail = _by_id(http, headers, doc_id)
+        assert detail.status_code == 200, doc_id
+        assert detail.json()["document"]["label"] == label, doc_id
+
+
+def test_a_chunk_reads_restricted_alike_whatever_makes_its_parent_unservable(
+    client,
+) -> None:
+    """The route does not say why a chunk reads ``restricted``; the page must not.
+
+    A restricted parent, a parent whose own record cannot be parsed and a parent
+    that cannot be read at all give the chunk the same ``label``, and none of them
+    is ``corrupt``, which is about the chunk's own record. A page that worded the
+    badge with one cause would state it for the other two.
+    """
+    http, reg = client
+    docs = reg.knowledge.document_store
+    docs.put("r", "parent", {"data_classification": {"sensitivity": "restricted"}})
+    docs.put("r#chunk-0", "chunk", {"parent_doc_id": "r"})
+    docs.put("c", "parent", {"data_classification": "oops"})
+    docs.put("c#chunk-0", "chunk", {"parent_doc_id": "c"})
+    docs.put("o", "parent", {"title": "t"})
+    docs.put("o#chunk-0", "chunk", {"parent_doc_id": "o"})
+    real = docs.get
+
+    def outage(doc_id):
+        if doc_id == "o":
+            msg = "store fault"
+            raise RuntimeError(msg)
+        return real(doc_id)
+
+    docs.get = outage
+    admin = _headers(reg, ["admin"])
+    for chunk in ("r#chunk-0", "c#chunk-0", "o#chunk-0"):
+        resp = _by_id(http, admin, chunk)
+        assert resp.status_code == 200, chunk
+        assert resp.json()["document"]["label"] == RESTRICTED_CHUNK, chunk
