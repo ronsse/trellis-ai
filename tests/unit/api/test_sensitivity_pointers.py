@@ -380,9 +380,9 @@ class TestOneJudgementPerResponse:
         store = registry.knowledge.document_store
         real_get = store.get
 
-        def spy(document_store, ids, clearance):
+        def spy(document_store, ids, clearance, **kwargs):
             calls.append(list(ids))
-            return real(document_store, ids, clearance)
+            return real(document_store, ids, clearance, **kwargs)
 
         def counting_get(doc_id, *args, **kwargs):
             gets.append(doc_id)

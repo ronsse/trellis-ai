@@ -494,6 +494,31 @@ class TestFailsClosed:
 
         assert listing(registry, "internal") == []
 
+    @pytest.mark.parametrize("raw", ["5", "[1]", '"str"', "true"])
+    @pytest.mark.parametrize("clearance", ["internal", "confidential"])
+    def test_a_source_whose_metadata_is_not_an_object_withholds_only_its_row(
+        self, registry: StoreRegistry, source: str, raw: str, clearance: str
+    ) -> None:
+        """One unreadable source no longer blanks the rest of the listing.
+
+        The gate used to raise on such a row, the listing's judgement is one batch
+        per fetch window, and a raise withheld every id in the batch, so a readable
+        precedent beside it was left out too. The bad row reads ``restricted`` like
+        every row of that shape, and only its own precedent is withheld.
+        """
+        registry.knowledge.document_store.put("doc-bad", BODY, {"title": "Bad"})
+        good = promote(registry, "cand:good", source)
+        bad = promote(registry, "cand:bad", "doc-bad")
+        assert sorted(ids_of(listing(registry, clearance))) == sorted([good, bad])
+        conn = registry.knowledge.document_store._get_conn()
+        conn.execute(
+            "UPDATE documents SET metadata_json = ? WHERE doc_id = 'doc-bad'", (raw,)
+        )
+        conn.commit()
+
+        assert ids_of(listing(registry, clearance)) == [good]
+        assert sorted(ids_of(listing(registry, "restricted"))) == sorted([good, bad])
+
     def test_below_restricted_with_no_store_withholds_what_it_cannot_judge(
         self, registry: StoreRegistry, source: str
     ) -> None:
