@@ -459,6 +459,8 @@ class TestAdminRead:
         world.client.get(
             "/api/v1/search", params={"q": QUERY}, headers=world.headers["external"]
         )
+        # A read is logged off the request path, so a report can outrun it.
+        assert access_log.get_writer().wait_idle(5), "the writer did not drain"
         resp = world.client.get(
             "/api/v1/access-log/keys", headers=world.headers["admin"]
         )
