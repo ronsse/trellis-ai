@@ -83,6 +83,44 @@ class TestListApiKeys:
         assert record.secret_hash not in raw
         assert token.split(".", 1)[1] not in raw
 
+    @pytest.mark.parametrize(
+        "error",
+        [sqlite3.OperationalError, OSError, RuntimeError],
+    )
+    def test_an_escaped_exception_is_answered_with_a_fixed_text(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+        error: type[Exception],
+    ) -> None:
+        """The caller never reads a store's text; the operator's log has the class."""
+
+        def failing_list(*_args: object, **_kwargs: object) -> None:
+            raise error(DRIVER_TEXT)
+
+        monkeypatch.setattr(
+            type(temp_registry.operational.api_key_store), "list", failing_list
+        )
+        # The package conftest filters structlog below CRITICAL.
+        prior = structlog.get_config()
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
+        )
+        try:
+            with capture_logs() as logs:
+                raw = list_api_keys()
+        finally:
+            structlog.configure(**prior)
+        assert json.loads(raw) == {
+            "status": "error",
+            "message": server_mod._LIST_API_KEYS_FAULT,
+        }
+        assert "SECRET-DRIVER-TEXT" not in raw
+        assert DRIVER_TEXT not in raw
+        failed = [e for e in logs if e["event"] == "list_api_keys_failed"]
+        assert len(failed) == 1
+        assert failed[0]["error_type"] == error.__name__
+
 
 class TestRevokeApiKey:
     def test_revokes_and_emits_an_event(

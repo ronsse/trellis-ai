@@ -5365,6 +5365,10 @@ def _close_registry() -> None:
 # ---------------------------------------------------------------------------
 
 
+#: The one text ``list_api_keys`` answers an escaped exception with.
+_LIST_API_KEYS_FAULT = "The listing failed on the server. See the server log."
+
+
 @mcp.tool(auth=trellis_scope(SCOPE_ADMIN))
 def list_api_keys() -> str:
     """List every API key, live and revoked. Never returns a secret or its hash.
@@ -5381,9 +5385,9 @@ def list_api_keys() -> str:
         ]
     # GRACEFUL-DEGRADATION: MCP tool surface -- never raises to the client.
     except Exception as exc:
-        logger.exception("list_api_keys_failed")
-        detail = _exception_detail(exc)
-        return json.dumps({"status": "error", "message": f"Listing failed: {detail}"})
+        # A fixed text for the reason ``revoke_api_key`` gives below.
+        logger.exception("list_api_keys_failed", error_type=type(exc).__name__)
+        return json.dumps({"status": "error", "message": _LIST_API_KEYS_FAULT})
     return json.dumps({"status": "ok", "keys": rows, "count": len(rows)})
 
 

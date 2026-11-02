@@ -5234,8 +5234,9 @@ valid: `external` is accepted only as `read,external`, and
   answers 409 on REST and stays live (the rejection reason is `cannot_revoke_own_key`,
   which MCP returns as `reason` beside `status: rejected`); the CLI holds no key, so it
   never meets this. A server fault answers 500 with a
-  fixed message and no exception text; the MCP `revoke_api_key` tool answers an
-  escaped exception with `status: error` and a fixed message the same way. The CLI
+  fixed message and no exception text; the MCP `list_api_keys` and `revoke_api_key`
+  tools answer an escaped exception with `status: error` and a fixed message the same
+  way. The CLI
   exits 2 for the first three, as before, and 5 for a corrupt `policies.json`.
 - **Names** are 1 to 120 characters with no control character (NUL, newline,
   ESC and the rest of Unicode category `C`, plus line and paragraph

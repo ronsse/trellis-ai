@@ -494,11 +494,12 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
-- **MCP `revoke_api_key` no longer hands a store's error text to the caller.** An
-  exception that escaped the tool (a store or event log that would not open, say) was
-  answered with `Revoke failed: <its text>`, and the text sanitizer lets a host, a user
-  or a file path through. The tool now answers `status: error` with one fixed message,
-  like REST's server fault, and the exception class goes to the server log only. The
+- **MCP `revoke_api_key` and `list_api_keys` no longer hand a store's error text to the
+  caller.** An exception that escaped either tool (a store or event log that would not
+  open, say) was answered with `Revoke failed: <its text>` or `Listing failed: <its text>`,
+  and the text sanitizer lets a host, a user or a file path through. Each tool now answers
+  `status: error` with one fixed message, like REST's server fault, and the exception
+  class goes to the server log only. The
   operations guide's API-key errors list also gains the 409 a stored admin key gets for
   revoking itself.
 
