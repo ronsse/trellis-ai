@@ -295,15 +295,16 @@ def label_is_unreadable(metadata: Any) -> bool:
     """Whether a stored ``metadata`` holds no label the direct-read gate can read.
 
     ``dict()`` refuses it: JSON that is not an object and not a list of pairs (a
-    number, a string, ``true``, a list of scalars). Everything it converts,
-    ``None`` and every other empty value and a list of pairs, is judged as it
-    always was.
+    number, a string, ``true``, a list of scalars). So does a list of pairs whose
+    keys are not all strings (``[[1, 2]]``): ``dict()`` converts it and
+    :class:`PackItem` then refuses the result. Everything else, ``None`` and every
+    other empty value and a list of string-keyed pairs, is judged as it always was.
     """
     try:
-        dict(metadata or {})
+        bag = dict(metadata or {})
     except (TypeError, ValueError):
         return True
-    return False
+    return not all(isinstance(key, str) for key in bag)
 
 
 class DocumentClearance:
@@ -348,7 +349,8 @@ class DocumentClearance:
         :meth:`ParentVerdictCache.resolve` answers ``None`` for such a parent, the
         same answer as for an absent one, so a chunk would be judged on its own
         label and served to a caller its parent is withheld from. A store that
-        raises is left to the cache, which reads it as restricted.
+        raises reads as restricted, as it does in the cache: left to the cache's own
+        read, a fault that cleared by then would judge the chunk as if none occurred.
         """
         if not _is_chunk_id(item.item_id):
             return False
@@ -359,9 +361,9 @@ class DocumentClearance:
             try:
                 parent = self._document_store.get(parent_id)
             except Exception:
-                # GRACEFUL-DEGRADATION: the parent cache fetches the same row
-                # and fails closed on an outage; this check adds nothing to it.
-                parent = None
+                # GRACEFUL-DEGRADATION: fail closed, as the parent cache does.
+                self._refused_parents[parent_id] = True
+                return True
             self._refused_parents[parent_id] = parent is not None and (
                 label_is_unreadable(parent.get("metadata"))
             )
@@ -375,11 +377,13 @@ class DocumentClearance:
         A row whose stored ``metadata`` is JSON that is not an object (a number,
         a string, ``true``, a list that is not pairs) holds no label this gate
         can read, and reads ``restricted``: a caller below ``restricted`` is not
-        served it, and one at ``restricted`` is, as it is every row. So does a
+        served it, and one at ``restricted`` is, as it is every row. A list of pairs
+        with a key that is not a string (:func:`label_is_unreadable`) reads the same
+        way, because :class:`PackItem` refuses what ``dict()`` makes of it. So does a
         chunk of such a row. It used to raise, which failed the whole read it sat
-        in, and a chunk was judged on its own label. Only what ``dict()``
-        refuses reads this way: the shapes it converts (``None`` and every other
-        empty value, a list of pairs) are judged as they always were. With
+        in, and a chunk was judged on its own label. Every other shape ``dict()``
+        converts (``None`` and every other empty value, a list of string-keyed
+        pairs) is judged as it always was. With
         ``fail_closed_on_unreadable_label`` off, none of this applies.
         """
         if self._fail_closed and label_is_unreadable(metadata):

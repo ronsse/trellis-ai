@@ -133,7 +133,7 @@ def _document_label(
     doc_id = str(doc.get("doc_id"))
     stored = bag is not None and DATA_CLASSIFICATION_KEY in bag
     record = bag[DATA_CLASSIFICATION_KEY] if bag is not None and stored else None
-    # A shape ``dict()`` refuses is the one the read gate judges ``restricted``,
+    # A shape ``label_is_unreadable`` names is one the read gate judges ``restricted``,
     # so the gate is handed the stored value and the label says so. Every other
     # non-object value keeps the label it always had: judged as no bag at all.
     unreadable = label_is_unreadable(metadata)

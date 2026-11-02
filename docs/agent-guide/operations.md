@@ -4906,7 +4906,8 @@ guard:
   `content_hash`, `created_at` or `updated_at` is not valid UTF-8 still makes every
   external read answer 500 while it exists, because the page cannot be built. No `put` writes any of these; they are store
   faults. A key that reads more than `public` reads JSON that is not an object
-  differently from before: `[1]`, `"str"`, `5` and `true` hold no label the gate can read,
+  differently from before: `[1]`, `"str"`, `5`, `true` and a list of pairs with a key that
+  is not a string (`[[1, 2]]`) hold no label the gate can read,
   so the row reads `restricted`. A `read` or `confidential` key is served every other row
   and not this one (`GET /documents` and `GET /search` answer 200 without it, where they
   answered 500; by id it is a 404), and a `restricted` or `admin` key is served it, as it is

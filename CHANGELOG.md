@@ -504,9 +504,10 @@ All notable changes to Trellis will be documented in this file.
   fail-closed reading a present-but-malformed label record gets. A `read` or
   `confidential` key is served every other row and not this one (by id: 404, as a
   missing id answers); a `restricted` or `admin` key is served it, as it is every
-  row; an `external` key never was. Only what `dict()` refuses reads this way:
-  `null`, an empty value (`[]`, `""`, `0`, `false`) and a list of pairs are judged as
-  they always were, and the `label` of such a row is unchanged too. A chunk of such a
+  row; an `external` key never was. A list of pairs with a key that is not a string
+  (`[[1, 2]]`) failed the same way and reads the same way. Nothing else does:
+  `null`, an empty value (`[]`, `""`, `0`, `false`) and a list of string-keyed pairs are
+  judged as they always were, and the `label` of such a row is unchanged too. A chunk of such a
   row reads `restricted` as its parent does: before, it was judged on its own label,
   so a list with `include_chunks=true`, a search and a by-id read served it to a
   `read` key while the parent was withheld. That tightens by-id as well (it answered

@@ -8,7 +8,9 @@ read, so it reads ``restricted``: a ``read`` or ``confidential`` key is served
 every other row and not this one (a by-id read answers 404, as a missing id
 does), a ``restricted`` or ``admin`` key is served it like every row, and an
 ``external`` key never was. The shapes ``dict()`` converts (``null``, an empty
-value, a list of pairs) were never refused and are pinned as they were.
+value, a list of string-keyed pairs) were never refused and are pinned as they
+were. A list of pairs with a key that is no string converts too, and then
+``PackItem`` refuses it, so it reads ``restricted`` with the rest.
 
 The by-id read of a row the store cannot return (bytes that are not UTF-8, an
 integer past the parser's digit limit) is pinned in ``test_external_key_by_id_oracle``.
@@ -26,6 +28,7 @@ from fastapi.testclient import TestClient
 import trellis_api.app as app_module
 from tests.unit.retrieve.test_sensitivity import label
 from trellis.auth import generate_api_key
+from trellis.retrieve.sensitivity import DocumentClearance
 from trellis.stores.registry import StoreRegistry
 from trellis_api.app import create_app
 
@@ -41,6 +44,9 @@ ROWS: dict[str, str] = {
     "bad-number": "5",
     "bad-string": '"str"',
     "bad-true": "true",
+    # ``dict()`` converts these, and ``PackItem`` refuses a key that is no string.
+    "bad-int-key-pairs": "[[1, 2]]",
+    "bad-null-key-pairs": "[[null, 1]]",
     # ``dict()`` refuses none of these, so they read as they always did.
     "old-null": "null",
     "old-empty-list": "[]",
@@ -53,8 +59,8 @@ ROWS: dict[str, str] = {
     "old-pairs-restricted": json.dumps(list(RESTRICTED_RECORD.items())),
 }
 
-#: Every row ``dict()`` refuses.
-REFUSED = {"bad-list", "bad-number", "bad-string", "bad-true"}
+#: Every row whose label the gate cannot read.
+REFUSED = {r for r in ROWS if r.startswith("bad-")}
 
 SCOPES = {
     "internal": ["read"],
@@ -233,6 +239,32 @@ class TestARowWhoseMetadataIsNotAnObject:
         assert {d["doc_id"]: d["label"] for d in listed}[doc_id] == shown
 
 
+class _ParentGetFailsOnce:
+    """A store whose first ``get`` raises and whose later ones return ``parent``."""
+
+    def __init__(self, parent: dict[str, Any]) -> None:
+        self._parent = parent
+        self.gets = 0
+
+    def get(self, doc_id: str) -> dict[str, Any]:
+        self.gets += 1
+        if self.gets == 1:
+            msg = "the store went away"
+            raise RuntimeError(msg)
+        return self._parent
+
+
+class TestAParentReadThatFails:
+    """A fault that clears before a second read must not serve the chunk."""
+
+    @pytest.mark.parametrize("parent_metadata", [5, {}])
+    def test_the_chunk_is_withheld_on_one_read(self, parent_metadata: Any) -> None:
+        store = _ParentGetFailsOnce({"doc_id": "par", "metadata": parent_metadata})
+        gate = DocumentClearance(store, "internal")  # type: ignore[arg-type]
+        assert not gate.permits("par#chunk-0", {"parent_doc_id": "par"})
+        assert store.gets == 1
+
+
 class TestAChunkOfARowWhoseMetadataIsNotAnObject:
     """A chunk reads as its parent does, and the parent reads ``restricted``."""
 
@@ -241,7 +273,9 @@ class TestAChunkOfARowWhoseMetadataIsNotAnObject:
         _insert_raw(world.registry, "par", raw)
         _insert_raw(world.registry, "par#chunk-0", json.dumps({"parent_doc_id": "par"}))
 
-    @pytest.mark.parametrize("raw", sorted(["5", "[1]", '"str"', "true"]))
+    @pytest.mark.parametrize(
+        "raw", sorted(["5", "[1]", '"str"', "true", "[[1, 2]]", "[[null, 1]]"])
+    )
     @pytest.mark.parametrize("who", ["internal", "confidential"])
     def test_a_key_below_restricted_is_served_neither(
         self, world: World, raw: str, who: str
@@ -258,7 +292,9 @@ class TestAChunkOfARowWhoseMetadataIsNotAnObject:
         for doc_id in ("par", "par#chunk-0"):
             assert world.by_id(who, doc_id.replace("#", "%23")).status_code == 404
 
-    @pytest.mark.parametrize("raw", sorted(["5", "[1]", '"str"', "true"]))
+    @pytest.mark.parametrize(
+        "raw", sorted(["5", "[1]", '"str"', "true", "[[1, 2]]", "[[null, 1]]"])
+    )
     @pytest.mark.parametrize("who", ["restricted", "admin"])
     def test_a_restricted_key_is_served_both(
         self, world: World, raw: str, who: str
