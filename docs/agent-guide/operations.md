@@ -5233,11 +5233,13 @@ valid: `external` is accepted only as `read,external`, and
   `policies.json` and a duplicate answer 409. A stored admin key revoking itself
   answers 409 on REST and stays live (the rejection reason is `cannot_revoke_own_key`,
   which MCP returns as `reason` beside `status: rejected`); the CLI holds no key, so it
-  never meets this. A server fault answers 500 with a
-  fixed message and no exception text; the MCP `list_api_keys` and `revoke_api_key`
-  tools answer an escaped exception with `status: error` and a fixed message the same
-  way. The CLI
-  exits 2 for the first three, as before, and 5 for a corrupt `policies.json`.
+  never meets this. The CLI exits 2 for an unknown key id, an already-revoked one and
+  an invalid scope list or name, as before, and 5 for a corrupt `policies.json`. A
+  server fault answers 500 with a fixed message and no exception text; the MCP
+  `list_api_keys` and `revoke_api_key` tools answer an escaped exception with
+  `status: error` and a fixed message the same way. A corrupt `policies.json` on MCP
+  `revoke_api_key` is one such exception, so it gets that fixed text where REST
+  answers 409 with the message.
 - **Names** are 1 to 120 characters with no control character (NUL, newline,
   ESC and the rest of Unicode category `C`, plus line and paragraph
   separators), on every surface including the CLI. A name stored before the rule
