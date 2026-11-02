@@ -5230,9 +5230,13 @@ valid: `external` is accepted only as `read,external`, and
 - **Errors.** An unknown key id answers 404, an already-revoked one 409, an
   invalid scope list or name 400, and a policy that denies the operation 400 (as
   the other write routes do). A store that is degraded or stale, a corrupt
-  `policies.json` and a duplicate answer 409. A server fault answers 500 with a
-  fixed message and no exception text. The CLI exits 2 for the first three, as
-  before, and 5 for a corrupt `policies.json`.
+  `policies.json` and a duplicate answer 409. A stored admin key revoking itself
+  answers 409 on REST and stays live (the rejection reason is `cannot_revoke_own_key`,
+  which MCP returns as `reason` beside `status: rejected`); the CLI holds no key, so it
+  never meets this. A server fault answers 500 with a
+  fixed message and no exception text; the MCP `revoke_api_key` tool answers an
+  escaped exception with `status: error` and a fixed message the same way. The CLI
+  exits 2 for the first three, as before, and 5 for a corrupt `policies.json`.
 - **Names** are 1 to 120 characters with no control character (NUL, newline,
   ESC and the rest of Unicode category `C`, plus line and paragraph
   separators), on every surface including the CLI. A name stored before the rule

@@ -494,6 +494,14 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **MCP `revoke_api_key` no longer hands a store's error text to the caller.** An
+  exception that escaped the tool (a store or event log that would not open, say) was
+  answered with `Revoke failed: <its text>`, and the text sanitizer lets a host, a user
+  or a file path through. The tool now answers `status: error` with one fixed message,
+  like REST's server fault, and the exception class goes to the server log only. The
+  operations guide's API-key errors list also gains the 409 a stored admin key gets for
+  revoking itself.
+
 - **A row whose event type this build does not know no longer fails every read
   that reaches it.** A newer build can append an `event_type` an older one lacks,
   and both event logs turned the stored string into `EventType(...)` strictly, so

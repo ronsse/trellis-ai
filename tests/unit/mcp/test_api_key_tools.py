@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
+import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+import structlog
+from structlog.testing import capture_logs
 
 import trellis.mcp.server as server_mod
 from trellis.auth import SCOPE_ADMIN, SCOPE_READ, generate_api_key
@@ -14,7 +18,7 @@ from trellis.mcp.auth import set_auth_enforced
 from trellis.mcp.server import mcp
 from trellis.stores.base.event_log import EventType
 
-from ...flaky_registry import FlakyRegistry
+from ...flaky_registry import DRIVER_TEXT, FlakyRegistry
 from .conftest import unwrap_tool
 from .test_auth import _ctx, _token
 
@@ -187,3 +191,41 @@ class TestRevokeApiKeyOutcomeHonesty:
         record = temp_registry.operational.api_key_store.get(key_id)
         assert record is not None
         assert record.revoked_at is None
+
+    @pytest.mark.parametrize(
+        "error",
+        [sqlite3.OperationalError, OSError, RuntimeError],
+    )
+    def test_an_escaped_exception_is_answered_with_a_fixed_text(
+        self,
+        temp_registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+        error: type[Exception],
+    ) -> None:
+        """The caller never reads a store's text; the operator's log has the class."""
+        monkeypatch.setattr(server_mod, "current_principal_id", lambda: "aaaaaaaaaaaa")
+        key_id = _seed(temp_registry, [SCOPE_READ], "victim")
+        monkeypatch.setattr(
+            server_mod,
+            "_registry",
+            FlakyRegistry(temp_registry, fail_first=10**6, error=error),
+        )
+        # The package conftest filters structlog below CRITICAL.
+        prior = structlog.get_config()
+        structlog.configure(
+            wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING),
+        )
+        try:
+            with capture_logs() as logs:
+                raw = revoke_api_key(key_id=key_id)
+        finally:
+            structlog.configure(**prior)
+        assert json.loads(raw) == {
+            "status": "error",
+            "message": server_mod._REVOKE_API_KEY_FAULT,
+        }
+        assert "SECRET-DRIVER-TEXT" not in raw
+        assert DRIVER_TEXT not in raw
+        failed = [e for e in logs if e["event"] == "revoke_api_key_failed"]
+        assert len(failed) == 1
+        assert failed[0]["error_type"] == error.__name__
