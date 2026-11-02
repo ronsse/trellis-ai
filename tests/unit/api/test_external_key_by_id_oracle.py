@@ -45,7 +45,9 @@ RAW_SHAPES: dict[str, tuple[str, str]] = {
     "not-json": ("'{not json'", "'hidden'"),
     "empty": ("''", "'hidden'"),
     "control-char": ("char(123, 34, 97, 34, 58, 34, 10, 34, 125)", "'hidden'"),
-    "nested-too-deep": (f"'{'[' * 5000}{']' * 5000}'", "'hidden'"),
+    # Deep enough that every supported interpreter refuses it: 3.12 and later
+    # parse 5000 levels, which would make this a non-object row instead.
+    "nested-too-deep": (f"'{'[' * 200_000}{']' * 200_000}'", "'hidden'"),
     "metadata-not-utf8": ("CAST(x'7b22ff7d' AS TEXT)", "'hidden'"),
     "content-not-utf8": ("'{}'", "CAST(x'ff' AS TEXT)"),
     # A BLOB, so ``json.loads`` is handed bytes: a ``UnicodeDecodeError``.
