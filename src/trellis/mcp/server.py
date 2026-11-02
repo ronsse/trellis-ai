@@ -5365,6 +5365,10 @@ def _close_registry() -> None:
 # ---------------------------------------------------------------------------
 
 
+#: The one text ``list_api_keys`` answers an escaped exception with.
+_LIST_API_KEYS_FAULT = "The listing failed on the server. See the server log."
+
+
 @mcp.tool(auth=trellis_scope(SCOPE_ADMIN))
 def list_api_keys() -> str:
     """List every API key, live and revoked. Never returns a secret or its hash.
@@ -5381,10 +5385,18 @@ def list_api_keys() -> str:
         ]
     # GRACEFUL-DEGRADATION: MCP tool surface -- never raises to the client.
     except Exception as exc:
-        logger.exception("list_api_keys_failed")
-        detail = _exception_detail(exc)
-        return json.dumps({"status": "error", "message": f"Listing failed: {detail}"})
+        # A fixed text for the reason ``revoke_api_key`` gives below.
+        logger.exception("list_api_keys_failed", error_type=type(exc).__name__)
+        return json.dumps({"status": "error", "message": _LIST_API_KEYS_FAULT})
     return json.dumps({"status": "ok", "keys": rows, "count": len(rows)})
+
+
+#: The one text ``revoke_api_key`` answers an escaped exception with. Neutral
+#: about the key's state: the fault can land after the revoke committed.
+_REVOKE_API_KEY_FAULT = (
+    "The revoke failed on the server and its outcome is unknown. Check the key "
+    "with list_api_keys before retrying, and see the server log."
+)
 
 
 @mcp.tool(auth=trellis_scope(SCOPE_ADMIN))
@@ -5429,9 +5441,14 @@ def revoke_api_key(key_id: str) -> str:
         result = build_api_keys_executor(_get_registry()).execute(command)
     # GRACEFUL-DEGRADATION: MCP tool surface -- never raises to the client.
     except Exception as exc:
-        logger.exception("revoke_api_key_failed")
-        detail = _exception_detail(exc)
-        return json.dumps({"status": "error", "message": f"Revoke failed: {detail}"})
+        # The caller gets a fixed text, as REST's server fault does: what
+        # escapes here is a store's or driver's own error (a host, a user, a
+        # file path), which ``_exception_detail``'s deny-list lets through,
+        # and the tool is admin-scoped, so the caller is trusted with the
+        # outcome but not with the server's topology. The class name and the
+        # traceback go to the operator's log only.
+        logger.exception("revoke_api_key_failed", error_type=type(exc).__name__)
+        return json.dumps({"status": "error", "message": _REVOKE_API_KEY_FAULT})
 
     if result.status != CommandStatus.SUCCESS:
         return json.dumps(

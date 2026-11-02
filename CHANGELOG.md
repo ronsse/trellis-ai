@@ -494,6 +494,17 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **MCP `revoke_api_key` and `list_api_keys` no longer hand a store's error text to the
+  caller.** An exception that escaped either tool (a store or event log that would not
+  open, say) was answered with `Revoke failed: <its text>` or `Listing failed: <its text>`,
+  and the text sanitizer lets a host, a user or a file path through. Each tool now answers
+  `status: error` with one fixed message, like REST's server fault, and for an exception
+  that escapes the tool the class goes to the server log only. A driver error caught
+  inside the revoke handler still answers `status: failed` with
+  `Execution failed: <its class name>`, which names the class and no driver text. The
+  operations guide's API-key errors list also gains the 409 a stored admin key gets for
+  revoking itself.
+
 - **A stored row whose metadata is JSON but not an object no longer fails every
   document read by a `read` or `confidential` key.** `metadata_json` of `[1]`,
   `5`, `"str"` or `true` parses, so the store returns it, and
