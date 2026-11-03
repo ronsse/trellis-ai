@@ -78,15 +78,19 @@ on: **prod was not producing that stream at all.**
 - The acceptance is a production read, so it is the owner's to run. The tracker closing is
   not evidence that it holds.
 
-**N3 · The security floor** — PRD §6 "Now": #250 credential hygiene (closed 2026-09-30, owner
-confirmed the cleanup) and #194 classification enforcement (`keystone`, `ready`
-since 2026-10-29). #194 was blocked on #360, which closed 2026-09-21. Its read-side floor
-has merged, and the mutation-side deny followed as #1027 (merged 2026-10-29). #194 stays
-open, and its remaining work is tracked in #1029.
+**N3 · The security floor — closed in the tracker 2026-10-29; acceptance reproduced
+2026-11-01.** PRD §6 "Now": #250 credential hygiene (closed 2026-09-30, owner confirmed the
+cleanup) and #194 classification enforcement (closed 2026-10-29). #194 was blocked on #360,
+which closed 2026-09-21. Labels at write time merged as #1037, the read-side floor as #1021
+and #1026, and the mutation-side deny as #1027, all on 2026-10-29. The narrow gaps that
+remain are tracked in #1029, which is open and is not part of this gate's acceptance.
 
-- Acceptance: `pytest tests/unit/ -k "classification or sensitivity"` proves a restricted document is
-  withheld from packs and search for a caller without the clearance (roadmap §3.H.1 (a));
-  the mutation-side deny, (b), merged as #1027 on 2026-10-29.
+- Acceptance: `pytest tests/unit/ -k "classification or sensitivity"` passes. It proves a
+  restricted document is withheld from packs and search for a caller without the clearance
+  (roadmap §3.H.1 (a)) and that the mutation-side deny, (b), holds. #1083 widened the
+  selector to take in the read-side tests; before it, `-k classification` stayed green when
+  REST `GET /search` alone lost its clearance filter. Run 2026-11-01 on `main` at
+  `769ed34c`: 947 passed, 11 skipped, 19206 deselected.
 
 **N4 · Read the pack holdout.** The holdout withholds a share of packs so the effect of
 serving them can be measured, and an experiment nobody reads decides nothing. This gate is

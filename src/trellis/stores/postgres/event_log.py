@@ -11,7 +11,16 @@ import structlog
 
 from trellis.core.text_safety import scrub_jsonb_unsafe
 from trellis.errors import StoreError
-from trellis.stores.base.event_log import Event, EventLog, EventOrder, EventType
+from trellis.stores.base.event_log import (
+    KNOWN_EVENT_TYPE_VALUES,
+    Event,
+    EventLog,
+    EventOrder,
+    EventType,
+    partition_known_event_rows,
+    warn_skipped_event_types,
+)
+from trellis.stores.base.trace import as_utc
 from trellis.stores.postgres.base import PostgresStoreBase
 
 if TYPE_CHECKING:
@@ -71,6 +80,20 @@ _CREATE_INDEXES = [
 ]
 
 
+def _bound_instant(moment: datetime) -> datetime:
+    """Return *moment* in the form psycopg should bind it: naive means UTC.
+
+    psycopg binds a naive ``datetime`` as ``timestamp``, which the server
+    converts to ``timestamptz`` in the *session's* time zone, so the same naive
+    value named different instants under different sessions, while SQLite and
+    the trace store read it as UTC. An aware value is returned untouched, the
+    very object it was, so a caller passing aware datetimes sees no change;
+    :func:`~trellis.stores.base.trace.as_utc` is not applied to it, because it
+    clamps a stamp that sits at the edge of ``datetime``'s range.
+    """
+    return as_utc(moment) if moment.tzinfo is None else moment
+
+
 class PostgresEventLog(PostgresStoreBase, EventLog):
     """Postgres-backed append-only event log using psycopg v3 (sync)."""
 
@@ -126,8 +149,8 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
                     event.source,
                     event.entity_id,
                     event.entity_type,
-                    event.occurred_at,
-                    event.recorded_at,
+                    _bound_instant(event.occurred_at),
+                    _bound_instant(event.recorded_at),
                     json.dumps(event.payload, allow_nan=False),
                     json.dumps(event.metadata, allow_nan=False),
                     event.schema_version,
@@ -164,11 +187,21 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
     # ------------------------------------------------------------------
 
     def get_event(self, event_id: str) -> Event | None:
-        """Direct primary-key lookup -- reaches the whole log, not a window."""
+        """Direct primary-key lookup -- reaches the whole log, not a window.
+
+        A row whose type this build does not know reads as absent, as it does
+        from :meth:`get_events`, and is logged the same way.
+        """
         with self._mapped_conn("get_event") as conn, conn.cursor() as cur:
             cur.execute("SELECT * FROM events WHERE event_id = %s", (event_id,))
             row = cur.fetchone()
-        return self._row_to_event(row) if row is not None else None
+        if row is None:
+            return None
+        known, skipped = partition_known_event_rows([row], lambda r: r[1])
+        if skipped:
+            warn_skipped_event_types(skipped, operation="get_event")
+            return None
+        return self._row_to_event(known[0])
 
     def get_events(
         self,
@@ -188,6 +221,11 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
         scrubbed the same way ``append`` scrubs the corresponding stored
         field -- see the SQLite backend's twin method for the full
         rationale.
+
+        A row whose ``event_type`` this build does not know is left out and
+        logged (see :meth:`EventLog.get_events`). When such a row sat in a full
+        page, the page is read again restricted to the types this build knows,
+        so ``limit`` still returns up to ``limit`` readable rows.
         """
         clauses: list[str] = []
         params: list[Any] = []
@@ -203,10 +241,10 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
             params.append(scrub_jsonb_unsafe(source))
         if since is not None:
             clauses.append("occurred_at >= %s")
-            params.append(since)
+            params.append(_bound_instant(since))
         if until is not None:
             clauses.append("occurred_at <= %s")
-            params.append(until)
+            params.append(_bound_instant(until))
         if payload_filters:
             for key, value in payload_filters.items():
                 # ``payload->>'k' = 'v'`` returns TEXT; callers comparing
@@ -217,16 +255,30 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
 
         where = " AND ".join(clauses) if clauses else "1=1"
         direction = "DESC" if order == "desc" else "ASC"
-        sql = (
-            f"SELECT * FROM events WHERE {where} "
-            f"ORDER BY occurred_at {direction} LIMIT %s"
-        )
-        params.append(limit)
+
+        def select(where_sql: str) -> str:
+            return (
+                f"SELECT * FROM events WHERE {where_sql} "
+                f"ORDER BY occurred_at {direction} LIMIT %s"
+            )
 
         with self._mapped_conn("get_events") as conn, conn.cursor() as cur:
-            cur.execute(sql, params)
+            cur.execute(select(where), [*params, limit])
             rows = cur.fetchall()
-        return [self._row_to_event(row) for row in rows]
+            known, skipped = partition_known_event_rows(rows, lambda r: r[1])
+            if skipped and limit > 0 and len(rows) >= limit:
+                # The page was full, so the skipped rows used up some of it and
+                # a caller reading ``len(events) >= limit`` as "there is more"
+                # would read it as the end. Ask for readable rows only.
+                marks = ", ".join(["%s"] * len(KNOWN_EVENT_TYPE_VALUES))
+                cur.execute(
+                    select(f"{where} AND event_type IN ({marks})"),
+                    [*params, *KNOWN_EVENT_TYPE_VALUES, limit],
+                )
+                known = cur.fetchall()
+        if skipped:
+            warn_skipped_event_types(skipped, operation="get_events")
+        return [self._row_to_event(row) for row in known]
 
     # ------------------------------------------------------------------
     # Count
@@ -238,6 +290,11 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
         event_type: EventType | None = None,
         since: datetime | None = None,
     ) -> int:
+        """Count events with optional filters.
+
+        Counts every stored row, including rows of a type this build cannot
+        read, so it can exceed what :meth:`get_events` returns.
+        """
         clauses: list[str] = []
         params: list[Any] = []
 
@@ -246,7 +303,7 @@ class PostgresEventLog(PostgresStoreBase, EventLog):
             params.append(str(event_type))
         if since is not None:
             clauses.append("occurred_at >= %s")
-            params.append(since)
+            params.append(_bound_instant(since))
 
         where = " AND ".join(clauses) if clauses else "1=1"
         sql = f"SELECT COUNT(*) FROM events WHERE {where}"

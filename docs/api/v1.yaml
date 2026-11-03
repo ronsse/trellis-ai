@@ -315,6 +315,32 @@ components:
       - timeout_seconds
       title: AdminJobSummary
       type: object
+    ApiKeyMintRequest:
+      additionalProperties: false
+      description: 'Body for ``POST /api/v1/api-keys``.
+
+
+        ``scopes`` is a comma-separated string or a list, checked by the same
+
+        parser ``trellis admin api-keys create`` uses, so ``external`` is valid
+
+        only as ``read,external`` on both surfaces.'
+      properties:
+        name:
+          title: Name
+          type: string
+        scopes:
+          anyOf:
+          - type: string
+          - items:
+              type: string
+            type: array
+          title: Scopes
+      required:
+      - name
+      - scopes
+      title: ApiKeyMintRequest
+      type: object
     AxisReportResponse:
       additionalProperties: false
       description: 'Which retrieval axes this pack has, ran, and did not.
@@ -1813,6 +1839,90 @@ components:
           - type: 'null'
           title: Trace Id
       title: IngestResponse
+      type: object
+    KeyReadReport:
+      additionalProperties: false
+      description: Per-key last-used time and read counts over a window.
+      properties:
+        covered_since:
+          title: Covered Since
+          type: string
+        dropped_reads:
+          title: Dropped Reads
+          type: integer
+        failed_reads:
+          title: Failed Reads
+          type: integer
+        failure_signals:
+          title: Failure Signals
+          type: integer
+        keys:
+          items:
+            $ref: '#/components/schemas/KeyReadSummary'
+          title: Keys
+          type: array
+        note:
+          default: ''
+          title: Note
+          type: string
+        since:
+          title: Since
+          type: string
+        truncated:
+          title: Truncated
+          type: boolean
+        window_hours:
+          title: Window Hours
+          type: number
+      required:
+      - since
+      - window_hours
+      - keys
+      - failure_signals
+      - dropped_reads
+      - failed_reads
+      - truncated
+      - covered_since
+      title: KeyReadReport
+      type: object
+    KeyReadSummary:
+      additionalProperties: false
+      description: One key's reads within a window.
+      properties:
+        by_surface:
+          additionalProperties:
+            type: integer
+          title: By Surface
+          type: object
+        items_returned:
+          title: Items Returned
+          type: integer
+        key_id:
+          title: Key Id
+          type: string
+        last_read_at:
+          title: Last Read At
+          type: string
+        name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Name
+        reads:
+          title: Reads
+          type: integer
+        revoked:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Revoked
+      required:
+      - key_id
+      - reads
+      - items_returned
+      - last_read_at
+      - by_surface
+      title: KeyReadSummary
       type: object
     LearningCandidateListResponse:
       additionalProperties: false
@@ -3403,6 +3513,65 @@ info:
   version: 0.2.0
 openapi: 3.1.0
 paths:
+  /api/v1/access-log/keys:
+    get:
+      description: 'Per key: reads, items returned and last read inside the window.
+
+
+        A key last used before the window is absent. ``truncated`` says the scan
+
+        cap bit and older reads in the window are missing (``note`` says what that
+
+        means: in an all-keys answer a key absent from the list may still have been
+
+        used; ask for one key and its own rows are scanned). ``failure_signals``
+
+        counts ``access.log_failed`` rows, which are rate limited and so not a count
+
+        of reads; ``dropped_reads`` and ``failed_reads`` are lower bounds on reads
+
+        the log did not record (queue full, store error).'
+      operationId: key_reads_api_v1_access_log_keys_get
+      parameters:
+      - description: Window, hours
+        in: query
+        name: hours
+        required: false
+        schema:
+          default: 168.0
+          description: Window, hours
+          exclusiveMinimum: 0
+          maximum: 2160.0
+          title: Hours
+          type: number
+      - description: Only this key
+        in: query
+        name: key_id
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: Only this key
+          title: Key Id
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KeyReadReport'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Key Reads
+      tags:
+      - access-log
   /api/v1/admin/jobs:
     get:
       description: 'List every catalog job, joined with its schedule row and last-run status.
@@ -3753,6 +3922,84 @@ paths:
       summary: Get Analyze Report
       tags:
       - analyze
+  /api/v1/api-keys:
+    get:
+      description: Every key, live and revoked, plus the scope presets a UI can offer.
+      operationId: list_api_keys_api_v1_api_keys_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response List Api Keys Api V1 Api Keys Get
+                type: object
+          description: Successful Response
+      security:
+      - APIKeyHeader: []
+      summary: List Api Keys
+      tags:
+      - api-keys
+    post:
+      description: Mint a key. The full token is in this response and never again.
+      operationId: mint_api_key_api_v1_api_keys_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiKeyMintRequest'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response Mint Api Key Api V1 Api Keys Post
+                type: object
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Mint Api Key
+      tags:
+      - api-keys
+  /api/v1/api-keys/{key_id}:
+    delete:
+      description: Revoke a live key. Unknown, already-revoked and own-key are refused.
+      operationId: revoke_api_key_api_v1_api_keys__key_id__delete
+      parameters:
+      - in: path
+        name: key_id
+        required: true
+        schema:
+          title: Key Id
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response Revoke Api Key Api V1 Api Keys  Key Id  Delete
+                type: object
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Revoke Api Key
+      tags:
+      - api-keys
   /api/v1/classify/candidates:
     get:
       description: 'Recent tag/domain candidates, deduped to each one''s latest emission.
@@ -4213,6 +4460,15 @@ paths:
         that id.
 
 
+        Each row carries ``label`` (``sensitivity``, ``stored``, ``corrupt``,
+
+        ``external_readable``), computed from the stored row before a public-only
+
+        caller''s metadata is cut down, so the label is shown whoever asks and is
+
+        only ever about a row the caller may read.
+
+
         ``<parent>#chunk-N`` fragment rows are excluded by default; pass
 
         ``include_chunks=true`` for the unfiltered listing. ``total`` is
@@ -4244,7 +4500,30 @@ paths:
 
         readable ones it holds, a count that depends on how many hidden matches
 
-        ranked ahead of them, with ``total_exact: false``.'
+        ranked ahead of them, with ``total_exact: false``.
+
+
+        A key that reads only ``public`` documents (an ``external`` key) is served
+
+        by one read of the public documents: the newest 2000 the label predicate
+
+        selects (``trellis.retrieve.public_rank``), never a scan of the store and
+
+        never the store''s ``search``. With ``q`` set, those rows are matched (any
+
+        query word, ASCII alphanumerics) and ordered by BM25 computed over them
+
+        here; with no ``q`` they are the page, newest first. ``total``, the order and
+
+        every page are functions of the public documents alone. At most the newest
+
+        2000 public documents are read, so past that ``total`` is clipped and
+
+        ``total_exact`` is ``false``, and an older public document is out of reach
+
+        of this route. A busy server refuses the read at once (429 with
+
+        ``Retry-After``) rather than queueing it.'
       operationId: list_documents_api_v1_documents_get
       parameters:
       - description: Full-text search query
@@ -4311,6 +4590,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+        '429':
+          description: A key that reads only public documents (an `external` key) was refused because the server is already
+            running its limit of such reads. Nothing ran; retry after `Retry-After` seconds. Never returned to a key that
+            reads above `public`.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
       security:
       - APIKeyHeader: []
       summary: List Documents
@@ -4405,11 +4693,15 @@ paths:
 
         A document labelled above the caller''s clearance answers 404, exactly
 
-        as a missing one does. A document whose ``lifecycle.superseded_by``,
+        as a missing one does. ``document.label`` says how the row is labelled
 
-        ``supersedes_doc_id`` or ``updates_doc_id`` names a document the caller may
+        (``sensitivity``, ``stored``, ``corrupt``, ``external_readable``), for a public-only
 
-        not read is served without that id.'
+        caller too, whose ``metadata`` carries no label. A document whose
+
+        ``lifecycle.superseded_by``, ``supersedes_doc_id`` or ``updates_doc_id``
+
+        names a document the caller may not read is served without that id.'
       operationId: get_document_api_v1_documents__doc_id__get
       parameters:
       - in: path
@@ -4457,7 +4749,20 @@ paths:
 
         its own reach. A chunk id (it reads its parent''s label) and a value outside
 
-        the vocabulary are refused. Re-applying the stored label is a no-op.
+        the vocabulary are refused. Re-applying the stored label is a no-op,
+
+        except ``restricted`` over a record that cannot be parsed, which replaces it.
+
+
+        ``public`` writes the exact record an ``external`` key reads, so a record
+
+        that only reads ``public`` (a corpus file''s bare frontmatter) is rewritten,
+
+        and a record that carries regulatory tags, a jurisdiction or other fields
+
+        the exact record would discard is refused (400, naming them) rather than
+
+        cleared. Only a stored record that already is the exact one is a no-op.
 
 
         ``requested_by`` is derived from the authenticated principal when one is
@@ -5811,6 +6116,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+        '429':
+          description: A key that reads only public documents (an `external` key) was refused because the server is already
+            running its limit of such reads. Nothing ran; retry after `Retry-After` seconds. Never returned to a key that
+            reads above `public`.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
       security:
       - APIKeyHeader: []
       summary: Assemble Pack
@@ -5851,6 +6165,15 @@ paths:
           description: '``req`` itself fails pydantic validation (DefaultValidationError -- ``detail`` is a list of field
             errors), or ``sections`` is empty or one entry fails ``SectionRequest`` validation (StringDetailError -- ``detail``
             is a plain string).'
+        '429':
+          description: A key that reads only public documents (an `external` key) was refused because the server is already
+            running its limit of such reads. Nothing ran; retry after `Retry-After` seconds. Never returned to a key that
+            reads above `public`.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
       security:
       - APIKeyHeader: []
       summary: Assemble Sectioned Pack
@@ -6714,7 +7037,22 @@ paths:
 
         ``include_chunks=true`` for the unfiltered result set. The applied
 
-        setting is echoed back on the response.'
+        setting is echoed back on the response.
+
+
+        A key that reads only ``public`` documents (an ``external`` key) is served
+
+        a search that never ranks a hidden row: the store is asked for documents
+
+        labelled ``public`` alone and they are ordered by BM25 computed over those
+
+        rows, ties by ``doc_id``, so the order and ``limit`` membership are
+
+        functions of the public documents (at most 2000 matches are held). It is
+
+        never served a chunk (``include_chunks`` is ignored and echoed ``false``),
+
+        and its rows carry only the allowlisted metadata.'
       operationId: search_api_v1_search_get
       parameters:
       - description: Search query
@@ -6772,6 +7110,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
+        '429':
+          description: A key that reads only public documents (an `external` key) was refused because the server is already
+            running its limit of such reads. Nothing ran; retry after `Retry-After` seconds. Never returned to a key that
+            reads above `public`.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
       security:
       - APIKeyHeader: []
       summary: Search
@@ -7405,6 +7752,11 @@ paths:
         this route was written for.  They appear when the API is served from
 
         an editable install whose working tree has moved on.
+
+
+        A key that reads only ``public`` documents (an ``external`` key) is not an
+
+        operator, so it is answered as an anonymous caller is.
 
 
         ``write_behaviour_settings`` is gated the same way, for the same

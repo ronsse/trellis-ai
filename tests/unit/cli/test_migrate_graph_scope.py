@@ -26,7 +26,7 @@ from tests.cli_output import plain
 from trellis.stores.base.graph import GraphStore
 from trellis.stores.sqlite.graph import SQLiteGraphStore
 from trellis_cli.admin import admin_app
-from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE
+from trellis_cli.exit_codes import EXIT_STORE, EXIT_VALIDATION
 
 #: The timestamp columns each SQLite table holds, by the name this module gives
 #: the row (an edge row has no ``updated_at``).
@@ -697,15 +697,28 @@ class TestAFailedRunStillStatesTheLimitsAndKeepsItsExit:
 class TestARunThatAbortsStatesNoLimits:
     """Two paths leave before the scope is built; the docs say so, so they are pinned.
 
-    A store error under the default strategy prints one text line in both
-    formats, so a caller reading ``.copy_scope`` from ``--format json`` gets a
-    parse failure and must read the exit code first. The destination can hold a
-    partial copy. A source over ``--max-nodes`` exits 1 before anything is
-    written.
+    A store error under the default strategy, and a source over
+    ``--max-nodes``, answer with a ``{"status": "error", ...}`` object under
+    ``--format json`` and carry no ``copy_scope``, so a caller reads ``status``
+    (or the exit code) before ``.copy_scope``. The destination can hold a
+    partial copy after a store error; a source over ``--max-nodes`` is refused
+    (exit 2) before anything is written.
     """
 
+    @staticmethod
+    def _assert_the_answer_is_a_refusal_in(fmt: str, stdout: str) -> None:
+        if fmt == "json":
+            payload = json.loads(stdout)
+            assert payload["status"] == "error"
+            assert "copy_scope" not in payload
+        else:
+            with pytest.raises(json.JSONDecodeError):
+                json.loads(stdout)
+        assert "copy_scope" not in stdout
+        assert "Timestamps are not preserved" not in plain(stdout)
+
     @pytest.mark.parametrize("fmt", ["text", "json"])
-    def test_a_store_error_aborts_with_one_text_line_and_a_partial_copy(
+    def test_a_store_error_aborts_in_its_format_and_leaves_a_partial_copy(
         self,
         versioned: dict[str, Path],
         runner: CliRunner,
@@ -732,14 +745,11 @@ class TestARunThatAbortsStatesNoLimits:
 
         assert result.exit_code == EXIT_STORE
         assert "Migration aborted:" in plain(result.stdout)
-        with pytest.raises(json.JSONDecodeError):
-            json.loads(result.stdout)
-        assert "copy_scope" not in result.stdout
-        assert "Timestamps are not preserved" not in plain(result.stdout)
+        self._assert_the_answer_is_a_refusal_in(fmt, result.stdout)
         assert _current_rows(versioned["dst_db"])[0] == 1
 
     @pytest.mark.parametrize("fmt", ["text", "json"])
-    def test_a_source_over_max_nodes_exits_1_before_writing_anything(
+    def test_a_source_over_max_nodes_exits_2_before_writing_anything(
         self, versioned: dict[str, Path], runner: CliRunner, fmt: str
     ) -> None:
         result = runner.invoke(
@@ -754,9 +764,7 @@ class TestARunThatAbortsStatesNoLimits:
             ),
         )
 
-        assert result.exit_code == EXIT_INTERNAL
+        assert result.exit_code == EXIT_VALIDATION
         assert "max_nodes=1" in plain(result.stdout)
-        with pytest.raises(json.JSONDecodeError):
-            json.loads(result.stdout)
-        assert "copy_scope" not in result.stdout
+        self._assert_the_answer_is_a_refusal_in(fmt, result.stdout)
         assert _current_rows(versioned["dst_db"]) == [0, 0, 0]

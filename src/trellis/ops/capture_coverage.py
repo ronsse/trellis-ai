@@ -147,6 +147,14 @@ class CaptureFunnel(TrellisModel):
     #: Sessions that raised mid-sweep and were left un-watermarked for
     #: retry. Reads 0 for sweeps that predate the counter.
     sessions_errored: int = 0
+    #: Sessions kept off the distillation route because a pack they were served
+    #: named a document labelled above ``internal`` (``egress_withheld``) and the
+    #: route is not declared local, and the sessions kept off it because a store
+    #: could not answer (``egress_unreadable``, a fault). Neither is a sampling
+    #: decision nor a judge outage, and neither reaches ``sessions_triggered``.
+    #: Read 0 for sweeps that predate the counters.
+    sessions_skipped_egress_withheld: int = 0
+    sessions_skipped_egress_unreadable: int = 0
     sessions_with_memory: int = 0
     memories_written: int = 0
     candidates_distilled: int = 0
@@ -231,6 +239,27 @@ def _funnel_from_events(events: list[Any]) -> tuple[CaptureFunnel, int]:
     return funnel, dry_runs
 
 
+def _egress_reason(funnel: CaptureFunnel) -> str | None:
+    """The reason sessions were kept off the distillation route, if any were."""
+    if funnel.sessions_skipped_egress_unreadable > 0:
+        return (
+            f"{funnel.sessions_skipped_egress_unreadable} of "
+            f"{funnel.sessions_parsed} parsed session(s) were kept off the "
+            "distillation route because a store could not be asked whether "
+            "what they were served may leave the host; nothing was captured "
+            "from them, and this is a fault, not a label"
+        )
+    if funnel.sessions_skipped_egress_withheld > 0:
+        return (
+            f"{funnel.sessions_skipped_egress_withheld} of "
+            f"{funnel.sessions_parsed} parsed session(s) were not distilled "
+            "because they were served a document labelled above internal and "
+            "the session_capture route is not declared local (egress_withheld); "
+            "declare the route local or accept that these sessions are not captured"
+        )
+    return None
+
+
 def _degraded_reason(funnel: CaptureFunnel) -> str:
     """Name the stage that consumed every session, worst-first."""
     if funnel.sessions_judge_unavailable > 0:
@@ -239,6 +268,9 @@ def _degraded_reason(funnel: CaptureFunnel) -> str:
             "the distillation judge was unreachable, so nothing could be "
             "captured; check the llm: block and the local model endpoint"
         )
+    egress = _egress_reason(funnel)
+    if egress is not None:
+        return egress
     if funnel.sessions_skipped_empty > 0:
         return (
             f"{funnel.sessions_skipped_empty} session(s) parsed to zero "
@@ -366,6 +398,22 @@ def summarize_capture_coverage(
         report.notes.append(
             f"{funnel.sessions_errored} session(s) raised mid-sweep and were "
             "left un-watermarked for retry; inspect capture_session_failed "
+            "warnings in the capture run log"
+        )
+
+    if funnel.sessions_skipped_egress_withheld > 0:
+        report.notes.append(
+            f"{funnel.sessions_skipped_egress_withheld} session(s) were not "
+            "distilled because they were served a document labelled above "
+            "internal and the session_capture route is not declared local "
+            "(egress_withheld); they stay un-watermarked and are retried"
+        )
+    if funnel.sessions_skipped_egress_unreadable > 0:
+        report.notes.append(
+            f"{funnel.sessions_skipped_egress_unreadable} session(s) were kept "
+            "off the distillation route because a store could not be asked "
+            "whether what they were served may leave the host "
+            "(egress_unreadable); inspect capture_session_egress_unreadable "
             "warnings in the capture run log"
         )
 

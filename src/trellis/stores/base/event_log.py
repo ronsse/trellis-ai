@@ -8,10 +8,12 @@ should use instead of calling :meth:`EventLog.get_events` with a bare
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections import Counter
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 import structlog
 from pydantic import Field
@@ -92,6 +94,37 @@ class EventType(StrEnum):
     #: to ``PACK_ASSEMBLED`` / ``FEEDBACK_RECORDED`` the same way
     #: ``PACK_QUALITY_SCORED`` does.
     PACK_ITEMS_FETCHED = "pack.items_fetched"
+    #: A pack served to a public-only caller (an ``external`` API key). It is
+    #: deliberately not ``PACK_ASSEMBLED``: that event feeds the pack-effect
+    #: holdout, session dedup, attribution and promotion, and a caller that
+    #: reads only ``public`` documents (and is refused feedback) must move
+    #: none of them. The payload is ``{pack_id, served_item_ids, count,
+    #: key_id}`` -- what the key read, answerable after the fact -- and
+    #: ``entity_id`` carries the pack_id.
+    PUBLIC_PACK_SERVED = "pack.public_served"
+
+    #: One authenticated read by an API key, on REST or MCP: what the key was
+    #: served. Recorded at the transport boundary
+    #: (:mod:`trellis.core.access_log`), never by retrieval, and deliberately
+    #: not ``PACK_ASSEMBLED``: no holdout, dedup, attribution or promotion
+    #: reader may take it for a served pack. The payload is ``{key_id,
+    #: surface, route, item_count, item_ids, item_ids_truncated}``;
+    #: ``item_ids`` is capped at ``MAX_LOGGED_ITEM_IDS`` and ``item_count`` is
+    #: the count of ids the boundary could name (REST: the items in the
+    #: answer's body; MCP: the pack ids the answer printed), or ``None`` when
+    #: the route or tool names none, so a cut is visible. No document text, no query or
+    #: intent text, no secret. ``entity_id`` carries the key id. A call with
+    #: no key (local or anonymous) records nothing.
+    KEY_READ = "access.key_read"
+
+    #: The access-log step failed (``trellis.core.access_log``). The step is
+    #: advisory and wrapped whole, so a failure never fails the read; this row
+    #: is how an operator learns reads went unrecorded. At most one per
+    #: minute per process. Payload: ``{surface, error_type, dropped_reads,
+    #: failed_reads}``: the exception class name only (a message can carry a
+    #: DSN), and how many reads the writer's queue refused and how many emits
+    #: raised since the last signal that was written.
+    ACCESS_LOG_FAILED = "access.log_failed"
 
     # Graph
     LINK_CREATED = "link.created"
@@ -626,6 +659,20 @@ class EventType(StrEnum):
     #: operation (see the handler's own docstring for why).
     SETTINGS_UPDATED = "settings.updated"
 
+    #: Emitted by the governed API-key write path (``ApiKeyMintHandler`` /
+    #: ``Operation.API_KEY_MINT``) on every key minted, from the CLI, REST and
+    #: any other surface alike. Payload: ``{key_id, name, scopes, minted_by,
+    #: actor_key_id, actor_key_name}``. It never carries the token, the
+    #: secret half or its hash. ``actor_key_id`` / ``actor_key_name`` are
+    #: ``None`` where no authenticated key made the call (the CLI, auth mode
+    #: ``off``). ``entity_id`` is the new key id.
+    API_KEY_MINTED = "api_key.minted"
+    #: Emitted by the same path's revoke handler
+    #: (``ApiKeyRevokeHandler`` / ``Operation.API_KEY_REVOKE``) on every key
+    #: revoked. Payload: ``{key_id, name, scopes, revoked_by, actor_key_id,
+    #: actor_key_name}``. ``entity_id`` is the revoked key id.
+    API_KEY_REVOKED = "api_key.revoked"
+
     #: Emitted by ``trellis admin record-job-run`` at the start and end of
     #: one dispatcher-driven job execution (see
     #: ``trellis.stores.schedule_store.ScheduleStore`` and the schedule
@@ -815,13 +862,13 @@ class EventLog(ABC):
         stored with a ``-11:00`` or ``+14:00`` offset is found by the moment it
         happened, not by the wall-clock digits it was written with, and results
         are ordered by instant, events at one instant in insertion order (SQLite).
-        On SQLite a naive bound or a naive stored ``occurred_at`` is read as
-        UTC; Postgres reads a naive bound in the session's time zone, so pass an
-        aware datetime to get the same answer from both. The returned event
-        keeps the ``occurred_at`` it was appended with, so a caller that
-        compares or sorts them across events must normalise (see ``_as_utc``
-        below) first. ``count(since=...)``
-        reads its bound the same way.
+        A naive bound or a naive ``occurred_at`` is read as UTC on both
+        backends, whatever the server session's time zone; an aware datetime
+        names its own instant. SQLite hands back the ``occurred_at`` it was
+        appended with, naive or offset, and Postgres an aware one, so a caller
+        that compares or sorts them across events must normalise (see
+        ``_as_utc`` below) first. ``count(since=...)`` reads its bound the
+        same way.
 
         ``order`` controls truncation semantics when ``limit`` is hit:
         ``"asc"`` (default) preserves chronological consumption for
@@ -838,6 +885,15 @@ class EventLog(ABC):
         (``payload->>K`` on Postgres, ``json_extract(payload, '$.K')`` on
         SQLite), so callers comparing against ints / bools must coerce
         to ``str`` at the call site.
+
+        **A row whose type this build does not know is skipped, never fatal.**
+        A newer build can write an ``event_type`` an older one lacks. Rows of
+        such a type are left out of the result and the read logs
+        ``event_log.unknown_event_type_skipped`` (the type strings and how many
+        rows, never a payload). They are neither deleted nor rewritten. A read
+        that names an ``event_type`` is unaffected, and ``limit`` still returns
+        up to ``limit`` readable rows: skipped rows do not use up the page.
+        A field of a *readable* row that fails to parse still raises.
         """
 
     @abstractmethod
@@ -847,7 +903,12 @@ class EventLog(ABC):
         event_type: EventType | None = None,
         since: datetime | None = None,
     ) -> int:
-        """Count events with optional filters."""
+        """Count events with optional filters.
+
+        Counts every stored row, including rows of a type this build cannot
+        read, so an unfiltered ``count()`` can exceed the number of events
+        :meth:`get_events` returns (see its note on unknown types).
+        """
 
     @abstractmethod
     def close(self) -> None:
@@ -1045,6 +1106,11 @@ def scan_events(
 
     A non-positive ``limit`` is passed through untouched and never
     reported as truncated; backends treat it as their own no-op.
+
+    With no ``event_type``, ``matched`` comes from :meth:`EventLog.count`, which
+    also counts rows of a type this build cannot read, while ``scanned`` does
+    not; ``dropped`` is then too large by the number of such rows in the window.
+    Every shipped caller names an ``event_type``, which no such row can match.
     """
     events = event_log.get_events(
         event_type=event_type,
@@ -1154,4 +1220,64 @@ def merge_coverage(*coverages: ScanCoverage) -> ScanCoverage:
         truncated_event_types=types,
         covered_since=covered_since,
         note=note,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rows of a type this build does not know
+# ---------------------------------------------------------------------------
+
+_Row = TypeVar("_Row")
+
+#: Every ``event_type`` string this build can read, sorted. A backend binds
+#: these to re-read a full page of readable rows after a page that held some
+#: it cannot.
+KNOWN_EVENT_TYPE_VALUES: tuple[str, ...] = tuple(sorted(e.value for e in EventType))
+
+_KNOWN_EVENT_TYPE_SET = frozenset(KNOWN_EVENT_TYPE_VALUES)
+
+#: A warning names at most this many distinct unknown types, each cut to
+#: ``_MAX_TYPE_CHARS`` characters: the string came from a stored row, not from
+#: this build, so it is bounded before it reaches a log line.
+_MAX_NAMED_TYPES = 10
+_MAX_TYPE_CHARS = 64
+
+
+def partition_known_event_rows(
+    rows: Iterable[_Row], type_of: Callable[[_Row], object]
+) -> tuple[list[_Row], Counter[str]]:
+    """Split stored rows into those whose type this build knows and a tally
+    of the stored type strings of the rest.
+
+    Only the type is judged; no other field of a skipped row is parsed, and
+    a malformed field of a known row is left for ``_row_to_event`` to raise.
+    """
+    known: list[_Row] = []
+    skipped: Counter[str] = Counter()
+    for row in rows:
+        raw = type_of(row)
+        if raw in _KNOWN_EVENT_TYPE_SET:
+            known.append(row)
+        else:
+            skipped[str(raw)] += 1
+    return known, skipped
+
+
+def warn_skipped_event_types(skipped: Mapping[str, int], *, operation: str) -> None:
+    """Say that a read left rows out because their type is unknown here.
+
+    Names the stored type strings and how many rows of each, never a payload
+    or any other field. The count is of the rows this read met: a read that
+    refilled its page past them does not count the ones beyond it.
+    """
+    named: Counter[str] = Counter()
+    for event_type, rows in sorted(skipped.items(), key=lambda kv: (-kv[1], kv[0])):
+        if len(named) < _MAX_NAMED_TYPES or event_type[:_MAX_TYPE_CHARS] in named:
+            named[event_type[:_MAX_TYPE_CHARS]] += rows
+    logger.warning(
+        "event_log.unknown_event_type_skipped",
+        operation=operation,
+        rows_skipped=sum(skipped.values()),
+        distinct_types=len(skipped),
+        event_types=dict(named),
     )

@@ -63,7 +63,7 @@ from dataclasses import dataclass
 from typing import NoReturn
 
 import structlog
-from fastapi import Depends, HTTPException, Security, status
+from fastapi import Depends, HTTPException, Request, Security, status
 from fastapi.security import APIKeyHeader
 
 from trellis.auth import ALL_SCOPES, scopes_satisfy, verify_token
@@ -324,6 +324,7 @@ def require_scope(scope: str) -> Callable[..., AuthContext]:
         raise ValueError(msg)
 
     def _require(
+        request: Request,
         ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
     ) -> AuthContext:
         if not scopes_satisfy(ctx.scopes, scope):
@@ -337,6 +338,10 @@ def require_scope(scope: str) -> Callable[..., AuthContext]:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"credential lacks required scope '{scope}'",
             )
+        # Who the access log (``trellis_api.access_log``) attributes this
+        # request to. Only a real key has a ``key_id``; the shared secret, auth
+        # ``off`` and an anonymous call leave it ``None`` and are not logged.
+        request.state.access_key_id = ctx.key_id
         return ctx
 
     return _require

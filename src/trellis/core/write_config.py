@@ -175,6 +175,17 @@ MINHASH_SEED_MAX_DOCS_ENV = "TRELLIS_MINHASH_SEED_MAX_DOCS"
 #: never start withholding packs.
 PACK_HOLDOUT_RATE_ENV = "TRELLIS_PACK_HOLDOUT_RATE"
 
+#: Record one ``access.key_read`` event per authenticated read by an API key
+#: (REST and MCP; :mod:`trellis.core.access_log`).  **Default off**, like the
+#: other behaviour-adding flags above, and read with the shared ``TRUTHY``
+#: spellings (``1``/``true``/``yes``/``on``): an unset, blank or unrecognised
+#: value leaves it off, so a typo can never start writing rows.  It adds one
+#: event per keyed read and changes nothing a caller is served, but **those
+#: rows have no retention path** -- the event log has no prune or delete --
+#: which is why it is opt-in.  Off writes no row at all and the step reads
+#: nothing.
+ACCESS_LOG_ENV = "TRELLIS_ACCESS_LOG"
+
 # ---------------------------------------------------------------------------
 # Defaults.  Unchanged from the per-module values they were lifted from.
 # ---------------------------------------------------------------------------
@@ -417,6 +428,7 @@ class WriteBehaviourConfig:
     pack_holdout_rate: float = 0.0
     reconcile_model: str = DEFAULT_RECONCILE_MODEL
     reconcile_timeout_s: float = DEFAULT_RECONCILE_TIMEOUT_S
+    access_log: bool = False
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> WriteBehaviourConfig:
@@ -436,6 +448,7 @@ class WriteBehaviourConfig:
             reconcile_model=src.get(RECONCILE_MODEL_ENV, "").strip()
             or DEFAULT_RECONCILE_MODEL,
             reconcile_timeout_s=_reconcile_timeout(src),
+            access_log=_truthy(src, ACCESS_LOG_ENV),
         )
 
     @classmethod
@@ -630,10 +643,12 @@ ENV_VAR_BY_FIELD: dict[str, str] = {
     "pack_holdout_rate": PACK_HOLDOUT_RATE_ENV,
     "reconcile_model": RECONCILE_MODEL_ENV,
     "reconcile_timeout_s": RECONCILE_TIMEOUT_ENV,
+    "access_log": ACCESS_LOG_ENV,
 }
 
 
 __all__ = [
+    "ACCESS_LOG_ENV",
     "CLASSIFY_ON_INGEST_FLAG",
     "DEFAULT_RECONCILE_MODEL",
     "DEFAULT_RECONCILE_TIMEOUT_S",

@@ -57,6 +57,7 @@ from trellis.learning.candidate_auto_promote import AUTO_PROMOTE_REQUESTED_BY
 from trellis.learning.tag_evolution import MIN_TAG_KEYWORD_LENGTH
 from trellis.mutate.commands import Command, Operation
 from trellis.mutate.evidence_ingest import EvidenceEmbedMode
+from trellis.mutate.executor import guarded_audit_emit
 from trellis.mutate.retention import (
     ARCHIVED_STATE,
     CURRENT_STATE,
@@ -80,7 +81,9 @@ from trellis.schemas.classification import (
     SENSITIVITY_ORDER,
     DataClassification,
     Lifecycle,
+    is_public_label,
     lifecycle_state_of,
+    public_label_record,
     sensitivity_of,
 )
 from trellis.schemas.measurement import Measurement
@@ -378,7 +381,8 @@ def _relabelled_record(prior: object, sensitivity: str) -> dict[str, Any]:
     """A ``DataClassification`` record carrying ``sensitivity``, keeping what it can.
 
     The other fields of a readable prior record (regulatory tags, jurisdiction)
-    survive a relabel; an unreadable one is replaced whole. ``"caller"`` is
+    survive a relabel if they validate; if any does not, the record is rebuilt
+    from ``sensitivity`` alone. What is dropped is not kept. ``"caller"`` is
     recorded as a classifier because a person asked for this label.
     """
     kept = (
@@ -395,6 +399,34 @@ def _relabelled_record(prior: object, sensitivity: str) -> dict[str, Any]:
             update={"classified_by": [*record.classified_by, "caller"]}
         )
     return record.model_dump(mode="json")
+
+
+def _public_record_discards(prior: object) -> list[str]:
+    """What writing the exact public record would throw away from ``prior``.
+
+    The names of the substantive fields an exact public record
+    (:func:`~trellis.schemas.classification.public_label_record`) does not
+    carry: regulatory tags, a jurisdiction, a classification version other than
+    the current one, and any field the schema does not know. ``classified_by``
+    is not counted: it is who made the call, and a person making this one is
+    its new value. A prior that is not a record at all is replaced whole by
+    every relabel, so it discards nothing worth naming.
+    """
+    if not isinstance(prior, dict):
+        return []
+    defaults = DataClassification()
+    discarded = [
+        name
+        for name in ("regulatory_tags", "jurisdiction")
+        if prior.get(name) not in (None, getattr(defaults, name))
+    ]
+    version = prior.get("classification_version")
+    if version not in (None, defaults.classification_version):
+        discarded.append("classification_version")
+    discarded.extend(
+        sorted(str(k) for k in prior if k not in DataClassification.model_fields)
+    )
+    return discarded
 
 
 class ClassificationSetHandler:
@@ -414,7 +446,22 @@ class ClassificationSetHandler:
     The new label must be within ``clearance`` too
     (:func:`~trellis.mutate.sensitivity_floor.refuse_written_label`), so a caller
     cannot push a document out of its own reach. Re-applying the stored label is
-    a no-op.
+    a no-op, but only a record that states the level counts: a record that cannot
+    be parsed reads ``restricted`` without saying so, and a relabel to
+    ``restricted`` replaces it with a clean record (the same governed write as
+    any other relabel, ``updated_at`` preserved).
+
+    **``public`` is the exact record, and the handler says when it is not.** An
+    ``external`` key reads a document only when its stored record is exactly
+    :func:`~trellis.schemas.classification.public_label_record`, so a relabel
+    to ``public`` writes that record. A document whose record merely reads
+    ``public`` (a corpus file's bare frontmatter, a record another classifier
+    wrote) is *rewritten*, never reported as unchanged: it is unserved until it
+    is, and a success that changes nothing would leave it so. A record that
+    carries tags or other fields the exact record would discard is refused
+    (``classification_public_discards``) with the names of those fields rather
+    than cleared silently. Only the stored record being the exact one is a
+    no-op.
     """
 
     def __init__(
@@ -463,11 +510,38 @@ class ClassificationSetHandler:
 
         metadata: dict[str, Any] = dict(existing.get("metadata") or {})
         previous = sensitivity_of(metadata)
-        if DATA_CLASSIFICATION_KEY in metadata and previous == sensitivity:
-            return doc_id, f"Classification unchanged: {doc_id} is {sensitivity}"
-        metadata[DATA_CLASSIFICATION_KEY] = _relabelled_record(
-            metadata.get(DATA_CLASSIFICATION_KEY), sensitivity
-        )
+        prior_record = metadata.get(DATA_CLASSIFICATION_KEY)
+        had_record = DATA_CLASSIFICATION_KEY in metadata
+        if sensitivity == "public":
+            if is_public_label(metadata):
+                return doc_id, f"Classification unchanged: {doc_id} is {sensitivity}"
+            discarded = _public_record_discards(prior_record)
+            if discarded:
+                msg = (
+                    f"document {doc_id!r} carries {', '.join(discarded)} in its "
+                    "classification record, which the exact public record an "
+                    "external key reads does not hold; writing it would discard "
+                    "them. Nothing was written."
+                )
+                raise ValidationError(
+                    msg, errors=[msg], code="classification_public_discards"
+                )
+            metadata[DATA_CLASSIFICATION_KEY] = public_label_record()
+        else:
+            # A record that cannot be parsed reads ``restricted`` without anyone
+            # having chosen it, so ``previous == sensitivity`` is not enough to
+            # call a relabel to ``restricted`` a no-op: only a record that states
+            # the level is. An operator who asks for ``restricted`` on such a row
+            # means it, and gets a record that says so.
+            states_it = (
+                isinstance(prior_record, dict)
+                and prior_record.get("sensitivity") == sensitivity
+            )
+            if states_it:
+                return doc_id, f"Classification unchanged: {doc_id} is {sensitivity}"
+            metadata[DATA_CLASSIFICATION_KEY] = _relabelled_record(
+                prior_record, sensitivity
+            )
         put_document(
             document_store,
             resolve_vector_store(self._registry),
@@ -476,7 +550,24 @@ class ClassificationSetHandler:
             metadata,
             preserve_updated_at=True,
         )
-        return doc_id, f"Classification set: {doc_id} {previous} -> {sensitivity}"
+        # Only a relabel to public rewrites into the exact record; any other
+        # target keeps the prior fields, so the suffix would state something false.
+        if sensitivity == "public":
+            rewritten = (
+                " (record rewritten to the exact public record)"
+                if previous == sensitivity
+                else ""
+            )
+        else:
+            rewritten = (
+                " (unreadable record replaced)"
+                if had_record and previous == sensitivity
+                else ""
+            )
+        return (
+            doc_id,
+            f"Classification set: {doc_id} {previous} -> {sensitivity}{rewritten}",
+        )
 
 
 def _bind_entity_name_alias(
@@ -4863,6 +4954,157 @@ def create_curate_handlers(
         Operation.REDACTION_APPLY: RedactionApplyHandler(registry),
         Operation.RETENTION_PRUNE: RetentionPruneHandler(registry),
         Operation.RETENTION_RESTORE: RetentionRestoreHandler(registry),
+    }
+
+
+def _api_key_actor(command: Command) -> dict[str, Any]:
+    """The audit identity an API-key command carries: who asked, and which key.
+
+    ``requested_by`` is what the surface derived (``api:<key>`` on REST,
+    ``cli:...``, ``mcp:...``); ``actor_key_id`` / ``actor_key_name`` name the
+    authenticated key when there is one, and are ``None`` otherwise.
+    """
+    return {
+        "actor_key_id": command.metadata.get("actor_key_id"),
+        "actor_key_name": command.metadata.get("actor_key_name"),
+    }
+
+
+class ApiKeyMintHandler:
+    """Persist one freshly generated API key and emit ``api_key.minted``.
+
+    The caller generates the token (:func:`trellis.auth.generate_api_key`) and
+    hands the handler only the :class:`~trellis.stores.base.api_key.ApiKeyRecord`,
+    so the secret never enters the pipeline: the event, the result and the
+    audit trail carry the key id, name and scopes, never the token or its hash.
+    The scope vocabulary and the ``external``-only-as-``read,external`` rule are
+    re-checked here with the same functions a mint uses, so a command built by
+    hand cannot mint what the CLI would refuse.
+    """
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        from trellis.auth import (  # noqa: PLC0415
+            KEY_SCOPES,
+            api_key_name_refusal,
+            external_scope_refusal,
+        )
+        from trellis.stores.base.api_key import ApiKeyRecord  # noqa: PLC0415
+
+        record = command.args["record"]
+        if not isinstance(record, ApiKeyRecord):
+            msg = "api_key.mint requires args['record'] to be an ApiKeyRecord"
+            raise ValidationError(msg, errors=[msg], code="invalid_record")
+        name_refusal = api_key_name_refusal(record.name)
+        if name_refusal is not None:
+            raise ValidationError(
+                name_refusal, errors=[name_refusal], code="invalid_name"
+            )
+        if not record.scopes:
+            msg = "API key must carry at least one scope"
+            raise ValidationError(msg, errors=[msg], code="invalid_scopes")
+        unknown = [s for s in record.scopes if s not in KEY_SCOPES]
+        refusal = external_scope_refusal(record.scopes)
+        if unknown or refusal is not None:
+            msg = refusal or f"Unknown scope(s) {unknown!r}"
+            raise ValidationError(msg, errors=[msg], code="invalid_scopes")
+        self._registry.operational.api_key_store.create(record)
+        # The key is stored: from here the mint has happened, so a dead event
+        # log is a warning on the result and never a failure (the token the
+        # caller holds is for a key that exists).
+        guarded_audit_emit(
+            command,
+            EventType.API_KEY_MINTED,
+            lambda: self._registry.operational.event_log.emit(
+                EventType.API_KEY_MINTED,
+                source="mutation_executor",
+                entity_id=record.key_id,
+                entity_type="api_key",
+                payload={
+                    "key_id": record.key_id,
+                    "name": record.name,
+                    "scopes": list(record.scopes),
+                    "minted_by": command.requested_by,
+                    **_api_key_actor(command),
+                },
+            ),
+        )
+        return record.key_id, f"API key {record.key_id} minted"
+
+
+class ApiKeyRevokeHandler:
+    """Revoke one live API key and emit ``api_key.revoked``.
+
+    An unknown or already-revoked key id is a :class:`ValidationError` (the
+    operator error the store and the CLI have always called it), and a key
+    revoking itself is refused: a caller holding a single admin key would
+    otherwise lock itself out with one request. The refusal rests on
+    ``command.metadata["actor_key_id"]``, which each authenticated surface sets
+    from its own principal, so it holds on REST and MCP alike. The CLI has no
+    key to compare against and may revoke any key.
+    """
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        key_id = command.args["key_id"]
+        if not isinstance(key_id, str) or not key_id:
+            msg = "api_key.revoke requires a non-empty string 'key_id'"
+            raise ValidationError(msg, errors=[msg], code="invalid_key_id")
+        store = self._registry.operational.api_key_store
+        existing = store.get(key_id)
+        if existing is None:
+            msg = f"Cannot revoke {key_id!r}: unknown key id."
+            raise ValidationError(msg, errors=[msg], code="unknown_key_id")
+        if existing.revoked_at is not None:
+            msg = f"Cannot revoke {key_id!r}: already revoked."
+            raise ValidationError(msg, errors=[msg], code="already_revoked")
+        if command.metadata.get("actor_key_id") == key_id:
+            msg = (
+                f"Cannot revoke {key_id!r}: it is the key this request is "
+                "authenticated with. Revoke it with another admin key or "
+                "'trellis admin api-keys revoke'."
+            )
+            raise ValidationError(msg, errors=[msg], code="cannot_revoke_own_key")
+        if not store.revoke(key_id):
+            msg = f"Cannot revoke {key_id!r}: already revoked."
+            raise ValidationError(msg, errors=[msg], code="already_revoked")
+        guarded_audit_emit(
+            command,
+            EventType.API_KEY_REVOKED,
+            lambda: self._registry.operational.event_log.emit(
+                EventType.API_KEY_REVOKED,
+                source="mutation_executor",
+                entity_id=key_id,
+                entity_type="api_key",
+                payload={
+                    "key_id": key_id,
+                    "name": existing.name,
+                    "scopes": list(existing.scopes),
+                    "revoked_by": command.requested_by,
+                    **_api_key_actor(command),
+                },
+            ),
+        )
+        return key_id, f"API key {key_id} revoked"
+
+
+def create_api_key_handlers(registry: StoreRegistry) -> dict[str, Any]:
+    """Handlers for the admin-only API-key write path.
+
+    Deliberately **not** folded into :func:`create_curate_handlers`, for the
+    reason ``create_settings_handlers`` gives, and with more at stake: that
+    dict backs REST ``POST /commands/batch`` and MCP ``execute_mutation``, so
+    registering ``api_key.mint`` there would let a ``mutate``-scoped agent mint
+    a credential. Only :func:`trellis.mutate.build_api_keys_executor` builds an
+    executor from this dict.
+    """
+    return {
+        Operation.API_KEY_MINT: ApiKeyMintHandler(registry),
+        Operation.API_KEY_REVOKE: ApiKeyRevokeHandler(registry),
     }
 
 

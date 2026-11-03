@@ -59,6 +59,11 @@ class Operation(StrEnum):
     SETTINGS_UPDATE = "settings.update"
     CLASSIFY_RULE_APPLY = "classify_rule.apply"
     CLASSIFY_RULE_REVOKE = "classify_rule.revoke"
+    # Credentials: routed only through ``build_api_keys_executor`` (admin
+    # REST, ``trellis admin api-keys``, MCP revoke). Never in
+    # ``create_curate_handlers``, so ``execute_mutation`` cannot mint a key.
+    API_KEY_MINT = "api_key.mint"
+    API_KEY_REVOKE = "api_key.revoke"
 
 
 class CommandStatus(StrEnum):
@@ -372,6 +377,8 @@ class OperationRegistry:
         # docstring), so the presence check below must not reject a
         # literal null the way an `if not command.args.get("value")` would.
         self._schemas[Operation.SETTINGS_UPDATE] = {"name", "value"}
+        self._schemas[Operation.API_KEY_MINT] = {"record"}
+        self._schemas[Operation.API_KEY_REVOKE] = {"key_id"}
         self._schemas[Operation.CLASSIFY_RULE_APPLY] = {
             "kind",
             "key",

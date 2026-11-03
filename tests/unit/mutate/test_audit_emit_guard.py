@@ -27,6 +27,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from trellis.errors import (
     IdempotencyError,
@@ -45,6 +46,7 @@ from trellis.mutate.commands import (
 from trellis.mutate.executor import (
     AUDIT_EMIT_FAILED_MARKER,
     MutationExecutor,
+    guarded_audit_emit,
 )
 from trellis.stores.base.event_log import EventLog, EventType
 
@@ -517,3 +519,32 @@ class TestTheWarningNamesTheErrorAsTheLogLineDoes:
     def test_a_trellis_error_keeps_its_message(self, exc, error) -> None:
         """The warning keeps a Trellis error's type and message, byte for byte."""
         assert _committed_result(exc)["warnings"] == [_stage5_warning(error)]
+
+
+class TestTheHandlerGuardCatchesAnyException:
+    """``guarded_audit_emit`` is wrapped whole, not by a list of classes (#551)."""
+
+    @pytest.mark.parametrize(
+        "exc_type",
+        [ImportError, RuntimeError, KeyError, OSError, sqlite3.OperationalError],
+    )
+    def test_nothing_escapes_and_the_driver_text_stays_out_of_the_log(
+        self, exc_type: type[Exception]
+    ) -> None:
+        command = _cmd()
+        driver_text = "SECRET-DRIVER-TEXT"
+
+        def emit() -> None:
+            raise exc_type(driver_text)
+
+        with capture_logs() as logs:
+            guarded_audit_emit(command, EventType.API_KEY_MINTED, emit)
+
+        warnings = command.metadata["handler_warnings"]
+        assert len(warnings) == 1
+        assert AUDIT_EMIT_FAILED_MARKER in warnings[0]
+        assert "SECRET-DRIVER-TEXT" not in warnings[0]
+        failed = [e for e in logs if e["event"] == "audit_emit_failed"]
+        assert len(failed) == 1
+        assert failed[0]["error_type"] == exc_type.__name__
+        assert all("SECRET-DRIVER-TEXT" not in str(v) for e in logs for v in e.values())

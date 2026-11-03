@@ -260,8 +260,28 @@ to protect data that has no label. The posture that replaces it:
   store with no labels serves every caller exactly what it served before, so
   there is nothing to switch on and nothing retroactively hidden. A document is
   withheld only when someone labelled it `confidential` or `restricted` and the
-  caller lacks the scope. There is no `public` clearance tier: `public` is a
-  label a document may carry, not a ceiling a caller is held to.
+  caller lacks the scope. Keys minted with the scopes above reach `internal` at
+  the lowest. The one exception is the opt-in `external` scope, a clearance
+  below `internal`: a key minted `read,external` reads at `public` (the lowest
+  rung of the label vocabulary), so it is served only a stored document someone
+  labelled `public` with exactly the record the labelling path writes (one
+  predicate, shared by the store filter and the per-row gate, on every surface:
+  bare frontmatter is not served until a person relabels it), and nothing that
+  cannot carry a label (see the operations guide's
+  [Sensitivity clearance](../agent-guide/operations.md#sensitivity-clearance)).
+  Because a count of what a filter removed, and a score computed over the whole
+  corpus, are each an oracle over what it hides, that key runs a separate
+  pipeline that never ranks a hidden row: the label is a query predicate, only
+  the keyword and semantic axes run (by allow-list), and neither asks a store to
+  search or rank: both read the newest 2000 public documents and score them
+  locally over those rows alone. It receives no chunk, text and metadata only
+  from the stored row (an allowlist of `title` and `document_form`), no count
+  that sees past the filter, and `pack.public_served` in place of
+  `PACK_ASSEMBLED`. At most two public reads run at once in a process; the rest
+  are refused at once (HTTP 429 with `Retry-After`), because one read costs the
+  same however narrow the question. The tier holds only under auth mode
+  `required`, and it does not equalise timing; the operations guide lists that
+  and the other residuals.
 - **Clearance comes from existing key scopes.** `confidential` and `restricted`
   are two new scopes (`restricted` implies `confidential`; `admin` implies both),
   and `trellis.auth.clearance_of(scopes)` maps a scope set to its ceiling. No

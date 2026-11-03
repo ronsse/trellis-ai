@@ -61,7 +61,7 @@ from fastapi.responses import JSONResponse
 
 from trellis.core.error_sanitize import sanitize_error_message
 from trellis.core.ids import generate_ulid
-from trellis.errors import ConfigError, TrellisError
+from trellis.errors import ConfigError, PublicReadBusyError, TrellisError
 from trellis.mutate.handlers import _find_unsafe_jsonb_string
 from trellis_wire.feedback_hints import rating_out_of_range_hint
 
@@ -302,6 +302,11 @@ async def request_validation_error_handler(
 #: legibility lives in this handler and not in the catch-all.
 CONFIG_ERROR_STATUS = 409
 
+#: A public-only read (an ``external`` key) refused at the process's limit on
+#: concurrent public reads (:class:`~trellis.errors.PublicReadBusyError`). The
+#: refusal is immediate and carries ``Retry-After``.
+PUBLIC_READ_BUSY_STATUS = 429
+
 #: Fields the typed hierarchy carries that a caller can act on. Read off
 #: the exception, so a subclass that adds one is carried without an edit
 #: here. ``setting`` names the config key or file, ``path`` the file,
@@ -329,6 +334,8 @@ def _error_status(exc: TrellisError) -> int:
     """
     if isinstance(exc, ConfigError):
         return CONFIG_ERROR_STATUS
+    if isinstance(exc, PublicReadBusyError):
+        return PUBLIC_READ_BUSY_STATUS
     return 500
 
 
@@ -392,8 +399,7 @@ async def trellis_error_handler(
         content[attr] = (
             sanitize_error_message(value) if isinstance(value, str) else value
         )
-    return JSONResponse(
-        status_code=status_code,
-        content=content,
-        headers={REQUEST_ID_HEADER: request_id} if request_id else {},
-    )
+    headers = {REQUEST_ID_HEADER: request_id} if request_id else {}
+    if isinstance(trellis_exc, PublicReadBusyError):
+        headers["Retry-After"] = str(trellis_exc.retry_after)
+    return JSONResponse(status_code=status_code, content=content, headers=headers)

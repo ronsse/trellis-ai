@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
 from tests.chunk_corpus import seed_chunk_favouring, seed_chunked
-from trellis.stores.base.event_log import EventType
+from trellis.stores.base.event_log import Event, EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_api.routes import explore, retrieve
 
@@ -429,6 +429,29 @@ def test_event_get_by_id_404(client):
     resp = client.get("/api/v1/events/no-such-event-id")
     assert resp.status_code == 404
     assert "no-such-event-id" in resp.json()["detail"]
+
+
+def test_events_list_answers_past_a_row_of_a_type_this_build_lacks(client, registry):
+    """A newer build wrote a type this one does not know: the list still reads.
+
+    The row is left out (and logged), not turned into a 500 for the whole
+    list. ``total`` is the log's own count and so still includes it.
+    """
+    log = _seed_events(registry)
+    newer = Event.model_construct(event_type="future.kind", source="newer")
+    log.append(newer)
+
+    resp = client.get("/api/v1/events", params={"limit": 2})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] == 2
+    assert {e["event_type"] for e in data["events"]} == {
+        EventType.MEMORY_STORED.value,
+        EventType.FEEDBACK_RECORDED.value,
+    }
+    assert data["total"] == 3
+    # Still stored, but not readable here: a lookup by id says so as absent.
+    assert client.get(f"/api/v1/events/{newer.event_id}").status_code == 404
 
 
 # ---------------------------------------------------------------------------

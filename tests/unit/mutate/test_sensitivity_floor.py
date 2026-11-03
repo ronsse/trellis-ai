@@ -189,6 +189,111 @@ class TestClassificationSetHandler:
         assert "unchanged" in result.message
         assert registry.knowledge.document_store.get("doc") == before
 
+    def test_reapplying_a_chosen_restricted_label_writes_nothing(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put(registry, "doc", "restricted")
+        before = registry.knowledge.document_store.get("doc")
+        result = _handlers_only(registry, "restricted").execute(
+            _set("doc", "restricted")
+        )
+        assert result.status == CommandStatus.SUCCESS
+        assert "unchanged" in result.message
+        assert registry.knowledge.document_store.get("doc") == before
+
+    @pytest.mark.parametrize(
+        "prior",
+        [
+            "oops",
+            {"sensitivity": "secret"},
+            {"regulatory_tags": ["gdpr"]},
+            None,
+            ["restricted"],
+        ],
+        ids=["string", "unknown-level", "no-level", "null", "list"],
+    )
+    def test_restricted_replaces_a_record_that_only_reads_restricted(
+        self, registry: StoreRegistry, prior: object
+    ) -> None:
+        """A record that cannot be parsed reads ``restricted`` without saying so.
+
+        Relabelling it ``restricted`` is the operator choosing what it already
+        reads as, and the row stays unreadable-as-a-label until a clean record
+        is written, so it writes one: through ``put_document`` with the clock
+        preserved, content and the other metadata untouched.
+        """
+        store = registry.knowledge.document_store
+        store.put("doc", BODY, {"title": "t", DATA_CLASSIFICATION_KEY: prior})
+        before = store.get("doc")
+        assert before is not None
+        assert sensitivity_of(before["metadata"]) == "restricted"
+        result = _handlers_only(registry, "restricted").execute(
+            _set("doc", "restricted")
+        )
+        assert result.status == CommandStatus.SUCCESS, result.message
+        assert "unchanged" not in result.message
+        assert "unreadable record replaced" in result.message
+        after = store.get("doc")
+        assert after is not None
+        record = after["metadata"][DATA_CLASSIFICATION_KEY]
+        assert isinstance(record, dict)
+        assert record["sensitivity"] == "restricted"
+        assert record["classified_by"] == ["caller"]
+        assert after["content"] == before["content"]
+        assert after["updated_at"] == before["updated_at"]
+        assert after["metadata"]["title"] == "t"
+        # The row now says what it reads, so asking again is the true no-op.
+        again = _handlers_only(registry, "restricted").execute(
+            _set("doc", "restricted")
+        )
+        assert "unchanged" in again.message
+        assert store.get("doc") == after
+
+    def test_restricted_over_an_unreadable_record_keeps_its_readable_fields(
+        self, registry: StoreRegistry
+    ) -> None:
+        store = registry.knowledge.document_store
+        store.put(
+            "doc",
+            BODY,
+            {
+                DATA_CLASSIFICATION_KEY: {
+                    "sensitivity": "secret",
+                    "jurisdiction": ["eu"],
+                }
+            },
+        )
+        result = _handlers_only(registry, "restricted").execute(
+            _set("doc", "restricted")
+        )
+        assert result.status == CommandStatus.SUCCESS, result.message
+        stored = store.get("doc")
+        assert stored is not None
+        record = stored["metadata"][DATA_CLASSIFICATION_KEY]
+        assert record["sensitivity"] == "restricted"
+        assert record["jurisdiction"] == ["eu"]
+
+    def test_public_over_an_unreadable_record_still_refuses_to_discard(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The refusal is the existing one; repairing to restricted did not touch it."""
+        store = registry.knowledge.document_store
+        store.put(
+            "doc",
+            BODY,
+            {
+                DATA_CLASSIFICATION_KEY: {
+                    "sensitivity": "secret",
+                    "jurisdiction": ["eu"],
+                }
+            },
+        )
+        before = store.get("doc")
+        result = _handlers_only(registry, "restricted").execute(_set("doc", "public"))
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "classification_public_discards"
+        assert store.get("doc") == before
+
     @pytest.mark.parametrize(
         ("doc_id", "level", "code"),
         [
@@ -759,3 +864,156 @@ class TestRelabelWithholdsOnBothAxes:
         row = vectors.get("doc")
         assert row is not None
         assert sensitivity_of(row["metadata"]) == "restricted"
+
+
+#: The stored record an ``external`` key serves, written out by hand.
+_EXACT_PUBLIC = {
+    "sensitivity": "public",
+    "regulatory_tags": [],
+    "jurisdiction": [],
+    "classified_by": ["caller"],
+    "classification_version": "1",
+}
+
+
+def _stored_record(registry: StoreRegistry, doc_id: str) -> Any:
+    row = registry.knowledge.document_store.get(doc_id)
+    assert row is not None
+    return row["metadata"].get(DATA_CLASSIFICATION_KEY)
+
+
+class TestRelabellingToPublicWritesTheRecordAnExternalKeyReads:
+    """``public`` is the exact record, and a relabel never succeeds on a no-op.
+
+    An ``external`` key serves a document only when its stored record equals
+    ``_EXACT_PUBLIC``. A document whose record merely *reads* ``public`` (bare
+    frontmatter, ``classified_by: ["import"]``) is unserved, so relabelling it
+    must rewrite it. A record that carries tags the exact record would discard
+    is refused with the names of what would go, never cleared silently.
+    """
+
+    def _relabel(self, registry: StoreRegistry, doc_id: str) -> Any:
+        return _handlers_only(registry, "restricted").execute(_set(doc_id, "public"))
+
+    def test_an_unlabelled_document_gets_the_exact_record(
+        self, registry: StoreRegistry
+    ) -> None:
+        _put(registry, "doc", None)
+        result = self._relabel(registry, "doc")
+        assert result.status == CommandStatus.SUCCESS, result.message
+        assert _stored_record(registry, "doc") == _EXACT_PUBLIC
+
+    @pytest.mark.parametrize(
+        "prior",
+        [
+            {"sensitivity": "public"},
+            {**_EXACT_PUBLIC, "classified_by": ["import"]},
+            {**_EXACT_PUBLIC, "classified_by": ["caller", "import"]},
+            {**_EXACT_PUBLIC, "sensitivity": "internal"},
+        ],
+        ids=["bare", "imported", "two-classifiers", "internal"],
+    )
+    def test_a_record_that_only_reads_public_is_rewritten_not_reported_unchanged(
+        self, registry: StoreRegistry, prior: dict[str, Any]
+    ) -> None:
+        registry.knowledge.document_store.put(
+            "doc", BODY, {"title": "t", DATA_CLASSIFICATION_KEY: prior}
+        )
+        result = self._relabel(registry, "doc")
+        assert result.status == CommandStatus.SUCCESS, result.message
+        assert "unchanged" not in result.message
+        assert _stored_record(registry, "doc") == _EXACT_PUBLIC
+        row = registry.knowledge.document_store.get("doc")
+        assert row is not None
+        assert row["metadata"]["title"] == "t", "other metadata keys survive"
+        assert row["content"] == BODY
+
+    def test_the_exact_record_alone_is_a_no_op(self, registry: StoreRegistry) -> None:
+        registry.knowledge.document_store.put(
+            "doc", BODY, {DATA_CLASSIFICATION_KEY: dict(_EXACT_PUBLIC)}
+        )
+        before = registry.knowledge.document_store.get("doc")
+        result = self._relabel(registry, "doc")
+        assert result.status == CommandStatus.SUCCESS
+        assert "unchanged" in result.message
+        assert registry.knowledge.document_store.get("doc") == before
+
+    @pytest.mark.parametrize(
+        ("prior", "named"),
+        [
+            ({**_EXACT_PUBLIC, "regulatory_tags": ["gdpr"]}, "regulatory_tags"),
+            ({**_EXACT_PUBLIC, "jurisdiction": ["EU"]}, "jurisdiction"),
+            (
+                {**_EXACT_PUBLIC, "classification_version": "0"},
+                "classification_version",
+            ),
+            ({**_EXACT_PUBLIC, "note": "x"}, "note"),
+            (
+                {
+                    "sensitivity": "confidential",
+                    "regulatory_tags": ["hipaa"],
+                    "jurisdiction": ["US"],
+                    "classified_by": ["clinic"],
+                    "classification_version": "1",
+                },
+                "regulatory_tags, jurisdiction",
+            ),
+        ],
+        ids=["tags", "jurisdiction", "version", "unknown-field", "both"],
+    )
+    def test_a_record_with_fields_the_exact_record_would_discard_is_refused(
+        self, registry: StoreRegistry, prior: dict[str, Any], named: str
+    ) -> None:
+        registry.knowledge.document_store.put(
+            "doc", BODY, {DATA_CLASSIFICATION_KEY: prior}
+        )
+        before = registry.knowledge.document_store.get("doc")
+        result = self._relabel(registry, "doc")
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "classification_public_discards"
+        assert named in result.message
+        assert "Nothing was written" in result.message
+        assert registry.knowledge.document_store.get("doc") == before
+
+    def test_a_label_that_is_not_a_record_is_replaced(
+        self, registry: StoreRegistry
+    ) -> None:
+        registry.knowledge.document_store.put(
+            "doc", BODY, {DATA_CLASSIFICATION_KEY: "public"}
+        )
+        result = self._relabel(registry, "doc")
+        assert result.status == CommandStatus.SUCCESS, result.message
+        assert _stored_record(registry, "doc") == _EXACT_PUBLIC
+
+    def test_a_relabel_to_a_higher_label_keeps_the_prior_fields_as_before(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Only ``public`` writes the exact record; every other target is as it was."""
+        prior = {**_EXACT_PUBLIC, "regulatory_tags": ["gdpr"]}
+        registry.knowledge.document_store.put(
+            "doc", BODY, {DATA_CLASSIFICATION_KEY: prior}
+        )
+        result = _handlers_only(registry, "restricted").execute(
+            _set("doc", "confidential")
+        )
+        assert result.status == CommandStatus.SUCCESS, result.message
+        record = _stored_record(registry, "doc")
+        assert record["sensitivity"] == "confidential"
+        assert record["regulatory_tags"] == ["gdpr"]
+
+    def test_the_relabelled_document_is_selected_by_the_external_filter(
+        self, registry: StoreRegistry
+    ) -> None:
+        from trellis.retrieve.public_rank import read_public_documents
+
+        registry.knowledge.document_store.put(
+            "doc",
+            BODY,
+            {"title": "t", DATA_CLASSIFICATION_KEY: {"sensitivity": "public"}},
+        )
+        assert read_public_documents(registry.knowledge.document_store) == []
+        self._relabel(registry, "doc")
+        assert [
+            r["doc_id"]
+            for r in read_public_documents(registry.knowledge.document_store)
+        ] == ["doc"]

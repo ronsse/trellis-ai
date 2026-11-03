@@ -25,6 +25,11 @@ Exit codes follow :mod:`trellis_cli.exit_codes`:
   ``list-proposals``.
 * :data:`EXIT_INTERNAL` (1) — uncaught exception. Operators should
   file a bug.
+* :data:`EXIT_VALIDATION` (2) — a refused request: ``generate-proposals
+  --dry-run`` (the generator cannot honour it; the run is refused, not
+  ignored), ``list-proposals`` with a ``--limit`` below 1 and
+  ``show-proposal`` with a blank or whitespace-only id. An id that names no
+  proposal is a lookup that found nothing, and stays :data:`EXIT_INTERNAL`.
 * :data:`EXIT_STORE` (5) — backend / EventLog failure during read.
 
 This module is the first CLI surface to actually consume the
@@ -45,8 +50,13 @@ from rich.markup import escape
 
 from trellis.core.error_sanitize import render_exception_detail
 from trellis.stores.base.event_log import EventType
-from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE
-from trellis_cli.output import build_console
+from trellis_cli.exit_codes import (
+    EXIT_INTERNAL,
+    EXIT_OK,
+    EXIT_STORE,
+    EXIT_VALIDATION,
+)
+from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import _get_registry, get_event_log
 
 if TYPE_CHECKING:
@@ -247,17 +257,18 @@ def generate_proposals_command(
 ) -> None:
     """CLI body — wraps the generator with output + exit codes."""
     if dry_run:
-        # Phase 0 generator has no dry-run knob. Documented in the
-        # ``--help`` of the registered command; the flag remains
+        # Phase 0 generator has no dry-run knob. The flag remains
         # because the original Phase 1 brief asked for it. Refuse
-        # rather than silently ignoring so operators know.
-        console.print(
-            "[yellow]--dry-run is not supported in Phase 1: the Phase 0 "
+        # rather than silently ignoring: a caller that asked for a
+        # preview must not read exit 0 as "the request was honoured".
+        _refuse_invalid_argument(
+            "--dry-run is not supported in Phase 1: the Phase 0 "
             "ProposalGenerator does not expose a dry-run knob. Re-run "
             "without --dry-run, or pin --window-hours 0 to short-circuit "
-            "every cluster outside the window.[/yellow]"
+            "every cluster outside the window.",
+            output_format,
         )
-        raise typer.Exit(code=EXIT_OK)
+        raise typer.Exit(code=EXIT_VALIDATION)
 
     try:
         event_log = get_event_log()
@@ -312,6 +323,20 @@ def _parse_since(since: str | None) -> datetime | None:
     return parsed
 
 
+def _refuse_invalid_argument(message: str, output_format: str) -> None:
+    """Report a refused argument on the caller's format.
+
+    ``--format json`` gets the ``{"error": <code>, "message": ...}`` object this
+    module's other failures emit, plus the ``"status": "error"`` every other
+    command's carries. The exit stays at the call site, below this branch, so
+    both formats reach it (``tests/unit/test_format_exit_parity_rule.py``).
+    """
+    if output_format == "json":
+        emit_json({"status": "error", "error": "validation_error", "message": message})
+    else:
+        console.print(f"[red]{escape(message)}[/red]")
+
+
 def list_proposals_command(
     *,
     limit: int,
@@ -323,8 +348,8 @@ def list_proposals_command(
         # Typer's min= validation handles this on the registered
         # wrapper, but the programmatic entry-point may also be
         # exercised in tests; be loud either way.
-        console.print("[red]--limit must be a positive integer[/red]")
-        raise typer.Exit(code=EXIT_INTERNAL)
+        _refuse_invalid_argument("--limit must be a positive integer", output_format)
+        raise typer.Exit(code=EXIT_VALIDATION)
     capped_limit = min(limit, _LIST_LIMIT_CEILING)
 
     try:
@@ -385,9 +410,9 @@ def show_proposal_command(
     output_format: str,
 ) -> None:
     """CLI body for ``show-proposal``."""
-    if not proposal_id:
-        console.print("[red]proposal_id is required[/red]")
-        raise typer.Exit(code=EXIT_INTERNAL)
+    if not proposal_id.strip():
+        _refuse_invalid_argument("proposal_id is required", output_format)
+        raise typer.Exit(code=EXIT_VALIDATION)
 
     try:
         event_log = get_event_log()
@@ -511,7 +536,8 @@ def register(admin_app: typer.Typer) -> None:
             help=(
                 "Currently unsupported — the Phase 0 generator does not "
                 "expose a dry-run knob. Flag remains for forward "
-                "compatibility; passing it short-circuits with a warning."
+                "compatibility; passing it is refused (exit 2) without "
+                "running the generator."
             ),
         ),
     ) -> None:

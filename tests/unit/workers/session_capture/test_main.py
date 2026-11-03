@@ -201,6 +201,62 @@ class TestMain:
         assert json.loads(captured.out)["sessions_errored"] == 1
         assert "1 session(s) raised mid-sweep" in captured.err
 
+    def test_sessions_kept_off_the_model_by_an_unreadable_store_fail_strict(
+        self, monkeypatch, capsys
+    ) -> None:
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        monkeypatch.setattr(
+            capture_main,
+            "run_sweep",
+            MagicMock(
+                return_value=_report(
+                    sessions_seen=3, sessions_skipped_egress_unreadable=2
+                )
+            ),
+        )
+
+        exit_code = capture_main.main([])
+
+        assert exit_code == capture_main.EXIT_SESSIONS_ERRORED
+        captured = capsys.readouterr()
+        assert json.loads(captured.out)["sessions_skipped_egress_unreadable"] == 2
+        assert "2 session(s) kept off the model" in captured.err
+
+    def test_unreadable_egress_under_the_opt_out_reports_and_exits_zero(
+        self, monkeypatch, capsys
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_CAPTURE_STRICT", "0")
+        monkeypatch.setattr(
+            capture_main,
+            "run_sweep",
+            MagicMock(
+                return_value=_report(
+                    sessions_seen=3, sessions_skipped_egress_unreadable=2
+                )
+            ),
+        )
+
+        assert capture_main.main([]) == capture_main.EXIT_OK
+        assert "2 session(s) kept off the model" in capsys.readouterr().err
+
+    def test_sessions_withheld_on_a_label_do_not_fail_strict(
+        self, monkeypatch, capsys
+    ) -> None:
+        monkeypatch.delenv("TRELLIS_CAPTURE_STRICT", raising=False)
+        monkeypatch.setattr(
+            capture_main,
+            "run_sweep",
+            MagicMock(
+                return_value=_report(
+                    sessions_seen=3, sessions_skipped_egress_withheld=2
+                )
+            ),
+        )
+
+        assert capture_main.main([]) == capture_main.EXIT_OK
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["sessions_skipped_egress_withheld"] == 2
+
     def test_an_outage_and_an_errored_session_both_print(
         self, monkeypatch, capsys
     ) -> None:

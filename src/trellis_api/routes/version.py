@@ -31,8 +31,10 @@ from trellis.api_version import (
 from trellis.core.base import get_version
 from trellis.core.write_config import WriteBehaviourConfig, resolve_overridden_by
 from trellis.core.write_provenance import get_write_provenance
+from trellis.retrieve.sensitivity import is_public_only
 from trellis.stores.settings_store import load_settings_values
 from trellis_api.auth import AuthContext, authenticate_optional
+from trellis_api.routes._principal import request_clearance
 from trellis_api.routes.health import OPS_DETAIL_PUBLIC, resolve_ops_detail
 from trellis_wire.dtos import VersionResponse
 
@@ -85,6 +87,9 @@ def api_version(
     this route was written for.  They appear when the API is served from
     an editable install whose working tree has moved on.
 
+    A key that reads only ``public`` documents (an ``external`` key) is not an
+    operator, so it is answered as an anonymous caller is.
+
     ``write_behaviour_settings`` is gated the same way, for the same
     reason — a knob's ``overridden_by`` sits beside its env-sourced
     counterpart in ``write_provenance.env_flags``, so splitting the gate
@@ -97,7 +102,10 @@ def api_version(
     """
     provenance = None
     settings_rows = None
-    if ctx is not None or resolve_ops_detail() == OPS_DETAIL_PUBLIC:
+    # A public-only caller (an ``external`` key) is not an operator: it gets the
+    # answer an anonymous probe gets, as ``/readyz`` does.
+    anonymous = ctx is None or is_public_only(request_clearance(ctx))
+    if not anonymous or resolve_ops_detail() == OPS_DETAIL_PUBLIC:
         provenance = copy.deepcopy(get_write_provenance())
         settings_values = load_settings_values(_resolve_stores_dir())
         config = WriteBehaviourConfig.from_env_and_settings(settings=settings_values)

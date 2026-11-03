@@ -182,7 +182,7 @@ class TestStartupValidation:
 
 
 # Routes that back each nav tab, cross-referenced against app.py's router ->
-# scope map (admin.py, settings.py and analyze.py require "admin"; the
+# scope map (admin.py, settings.py, api_keys.py and analyze.py require "admin"; the
 # default retrieve.py and policies.py routes require "read"; explore.py is
 # split — documents and graph history stay "read", its pack-telemetry
 # routes (events, packs) carry their own route-level "admin" requirement).
@@ -205,6 +205,7 @@ _ADMIN_SCOPE_VIEWS = {
     "packs",
     "reports",
     "schedules",
+    "keys",
 }
 
 

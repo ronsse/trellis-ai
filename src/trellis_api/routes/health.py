@@ -30,9 +30,11 @@ from fastapi import APIRouter, Depends, Response, status
 
 from trellis.core.error_sanitize import sanitize_error_message
 from trellis.errors import ConfigError
+from trellis.retrieve.sensitivity import is_public_only
 from trellis.stores.registry import StoreRegistry
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate_optional
+from trellis_api.routes._principal import request_clearance
 
 logger = structlog.get_logger(__name__)
 
@@ -160,7 +162,8 @@ def readyz(
     A single backend failing flips the whole probe to 503. The public
     response carries only the status line (all an orchestrator probe
     needs); the per-backend breakdown — backend names, latencies,
-    raw error strings — goes to authenticated callers (any scope), or
+    raw error strings — goes to authenticated callers (any scope except
+    ``external``, which reads the public response), or
     to everyone when ``TRELLIS_OPS_DETAIL=public`` is set. A presented
     but invalid credential still gets 401 via
     :func:`~trellis_api.auth.authenticate_optional`.
@@ -175,6 +178,9 @@ def readyz(
     overall = overall_backend_status(backends)
     if overall != "ready":
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-    if ctx is None and resolve_ops_detail() != OPS_DETAIL_PUBLIC:
+    # A public-only caller (an ``external`` key) is not an operator: it gets the
+    # status line an anonymous probe gets, not backend names and raw errors.
+    anonymous = ctx is None or is_public_only(request_clearance(ctx))
+    if anonymous and resolve_ops_detail() != OPS_DETAIL_PUBLIC:
         return {"status": overall}
     return {"status": overall, "backends": backends}

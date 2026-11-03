@@ -184,8 +184,9 @@ class TestRecordedToolRoster:
     async def test_every_write_tool_is_recorded_or_named_as_left_out(self) -> None:
         """A write tool added later fails here until someone decides.
 
-        Classed by each tool's declared scope, not from memory. The two left
-        out are named with the reason in ``_RECORDED_ARGUMENT_TOOLS``.
+        Classed by each tool's declared scope, not from memory. The ones left
+        out are named with the reason in ``_RECORDED_ARGUMENT_TOOLS``; the
+        two API-key tools are admin-scoped and record no boundary rejection.
         """
         tools = await server_mod.mcp.list_tools()
         assert tools, "no tools registered"
@@ -199,7 +200,12 @@ class TestRecordedToolRoster:
         writers = {tool.name for tool in tools if _scope(tool) != "read"}
         recorded = server_mod._RECORDED_ARGUMENT_TOOLS
         assert recorded <= writers
-        assert writers - recorded == {"record_observation", "execute_mutation"}
+        assert writers - recorded == {
+            "record_observation",
+            "execute_mutation",
+            "list_api_keys",
+            "revoke_api_key",
+        }
 
     async def test_a_write_tool_left_out_gets_the_message_and_no_event(
         self, temp_registry: StoreRegistry

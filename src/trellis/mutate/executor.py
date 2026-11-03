@@ -142,6 +142,48 @@ def _audit_emit_failure_classes() -> tuple[type[BaseException], ...]:
     return (StoreError, TrellisError, *_handler_panic_classes())
 
 
+def guarded_audit_emit(command: Command, event_type: EventType, emit: Any) -> None:
+    """Run a handler's own semantic-event emit so it cannot change the outcome.
+
+    The executor holds this line for its audit events (#551): once a handler's
+    store write has committed, an event log that raises must not turn the
+    result into a failure. A handler that emits a second, semantic event after
+    its write calls this with the emit as a zero-argument callable; a failure is
+    logged at ``error`` (command id, operation, event type and target, never a
+    payload) and lands on ``command.metadata["handler_warnings"]``, which every
+    result built after the handler carries, under
+    :data:`AUDIT_EMIT_FAILED_MARKER`.
+    """
+    try:
+        emit()
+    # GRACEFUL-DEGRADATION: an advisory step on the write path is wrapped whole
+    # (#551), because one escaped exception of any class fails a write that has
+    # already landed. Not swallowed: logged at error and stated on the result.
+    # The log carries the class name only; a driver's text can hold values.
+    except Exception as exc:
+        logger.error(  # noqa: TRY400 -- no traceback on purpose; see _emit_event
+            "audit_emit_failed",
+            command_id=command.command_id,
+            operation=command.operation,
+            event_type=event_type,
+            target_id=command.target_id,
+            error_type=type(exc).__name__,
+        )
+        warning = _AUDIT_EMIT_FAILED_TEMPLATE.format(
+            event_type=event_type,
+            error=(
+                f"{type(exc).__name__}: {exc}"
+                if isinstance(exc, TrellisError)
+                else type(exc).__name__
+            ),
+        )
+        existing = command.metadata.get("handler_warnings")
+        if isinstance(existing, list):
+            existing.append(warning)
+        else:
+            command.metadata["handler_warnings"] = [warning]
+
+
 def _audit_warnings(audit_warning: str | None) -> list[str]:
     """The warning list contributed by one audit emit — empty when it landed."""
     return [] if audit_warning is None else [audit_warning]

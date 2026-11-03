@@ -47,6 +47,8 @@ def _sweep_payload(**overrides: Any) -> dict[str, Any]:
         "sessions_skipped_empty": 0,
         "sessions_judge_unavailable": 0,
         "sessions_judge_malformed": 0,
+        "sessions_skipped_egress_withheld": 0,
+        "sessions_skipped_egress_unreadable": 0,
         "sessions_with_memory": 10,
         "malformed_lines": 0,
         "candidates_distilled": 30,
@@ -558,3 +560,84 @@ class TestTheMetricIsNotAConstant:
         assert after.funnel.sessions_skipped_empty == 61
         assert any("#332" in note for note in after.notes)
         assert not any("#332" in note for note in before.notes)
+
+
+class TestEgressWithholdingIsVisible:
+    """Sessions kept off the route are neither sampled out nor a judge outage."""
+
+    def test_withheld_sessions_are_not_misread_as_sampling(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _emit_sweep(
+            event_log,
+            sessions_parsed=4,
+            sessions_sampled_out=1,
+            sessions_skipped_egress_withheld=3,
+            sessions_triggered=0,
+            sessions_with_memory=0,
+        )
+
+        report = summarize_capture_coverage(event_log, days=7)
+
+        assert report.state == "degraded"
+        assert "3 of 4 parsed" in report.degraded_reason
+        assert "egress_withheld" in report.degraded_reason
+        assert "all 1" not in report.degraded_reason
+        assert report.funnel.sessions_skipped_egress_withheld == 3
+        assert any("egress_withheld" in note for note in report.notes)
+
+    def test_unreadable_sessions_are_named_as_a_fault(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _emit_sweep(
+            event_log,
+            sessions_parsed=2,
+            sessions_skipped_egress_unreadable=2,
+            sessions_triggered=0,
+            sessions_with_memory=0,
+        )
+
+        report = summarize_capture_coverage(event_log, days=7)
+
+        assert "a fault, not a label" in report.degraded_reason
+        assert report.funnel.sessions_skipped_egress_unreadable == 2
+
+    def test_a_run_with_nothing_withheld_reads_exactly_as_before(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _emit_sweep(
+            event_log,
+            sessions_parsed=1,
+            sessions_sampled_out=1,
+            sessions_triggered=0,
+            sessions_with_memory=0,
+        )
+
+        report = summarize_capture_coverage(event_log, days=7)
+
+        assert report.degraded_reason == (
+            "all 1 parsed session(s) were sampled out — raise "
+            "TRELLIS_CAPTURE_SAMPLE_DENOMINATOR's selectivity or accept that "
+            "this window says nothing"
+        )
+        assert report.funnel.sessions_skipped_egress_withheld == 0
+        assert not any("egress" in note for note in report.notes)
+
+    def test_a_sweep_from_before_the_counters_reads_zero(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        payload = _sweep_payload()
+        del payload["sessions_skipped_egress_withheld"]
+        del payload["sessions_skipped_egress_unreadable"]
+        event_log.emit(
+            EventType.CAPTURE_SWEEP_COMPLETED,
+            "worker:session-capture",
+            entity_id="capture:claude-code",
+            entity_type="capture_sweep",
+            payload=payload,
+        )
+
+        report = summarize_capture_coverage(event_log, days=7)
+
+        assert report.funnel.sessions_skipped_egress_withheld == 0
+        assert report.funnel.sessions_skipped_egress_unreadable == 0

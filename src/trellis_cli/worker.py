@@ -2285,9 +2285,12 @@ def mine_precedents_cmd(
         False,
         "--strict",
         help=(
-            "Exit non-zero when the model call failed (outcome llm_error). "
-            "Off by default: a failed call is reported as status partial, "
-            "exits 0, and the next run asks again."
+            "On a live run, exit non-zero when the model call failed (outcome "
+            "llm_error) or a store could not be asked whether a trace may leave "
+            "the host (egress_unreadable). Off by default: either is reported "
+            "as status partial, exits 0, and the next run asks again. A "
+            "--dry-run never calls the model and exits 0 whether or not "
+            "--strict is given."
         ),
     ),
     output_format: str = typer.Option("text", "--format", help="Output format."),
@@ -2317,6 +2320,12 @@ def mine_precedents_cmd(
     A failed model call reports ``status: partial`` and ``outcome: llm_error``
     and exits 0 unless ``--strict``. ``no_candidates`` and ``llm_error`` write
     nothing, so a scheduled run asks the model again every time.
+
+    On a route not declared local, a failure trace citing a document labelled
+    above ``internal`` is not shown to the model (``skipped_egress_withheld``);
+    one a store could not be asked about is ``skipped_egress_unreadable`` and
+    makes the run ``partial``. A run where every trace found was kept back is
+    ``all_withheld``, not ``no_failures``.
 
     Requires an LLM extra. Without a configured client this command exits
     loudly (the miner would otherwise return an empty list silently).
@@ -2348,7 +2357,16 @@ def mine_precedents_cmd(
         PrecedentMiner,
     )
 
-    miner = PrecedentMiner(trace_store, event_log=event_log, llm=llm)
+    miner = PrecedentMiner(
+        trace_store,
+        event_log=event_log,
+        llm=llm,
+        # Lazy: a route declared local reads no label, so it must not need
+        # the document store the gate would otherwise open.
+        egress=EgressGate.for_route_lazy(
+            _get_registry(), LLMConsumer.PRECEDENT_MINING, get_document_store
+        ),
+    )
     cap = DEFAULT_TRACE_SCAN_CAP if scan_cap is None else scan_cap
 
     if dry_run:
@@ -2358,7 +2376,7 @@ def mine_precedents_cmd(
         if output_format == "json":
             emit_json(
                 {
-                    "status": "ok",
+                    "status": "partial" if plan.egress_unreadable else "ok",
                     "dry_run": True,
                     "domain": domain,
                     "failure_traces_in_scope": plan.failures_in_scope,
@@ -2382,7 +2400,7 @@ def mine_precedents_cmd(
     precedents = report.candidates
     # Same flag for the payload's status and the exit below, so the two
     # surfaces cannot disagree about whether the run failed.
-    failed = report.outcome == "llm_error"
+    failed = report.outcome == "llm_error" or report.egress_unreadable > 0
 
     if output_format == "json":
         emit_json(
@@ -2433,11 +2451,50 @@ def _mining_scan_fields(report: MiningReport) -> dict[str, Any]:
         "skipped_unchanged": report.outcome == "skipped_unchanged",
         "source_digest": report.source_digest,
         "already_mined_candidate_ids": list(report.already_mined),
+        "skipped_egress_withheld": report.egress_withheld,
+        "skipped_egress_unreadable": report.egress_unreadable,
+        "below_min_traces_due_to_egress": report.below_min_due_to_egress,
     }
+
+
+def _print_mining_egress_counts(report: MiningReport) -> None:
+    """Name the traces the gate kept from the model, withheld apart from unreadable."""
+    if report.egress_withheld:
+        console.print(
+            f"  [yellow]{EGRESS_WITHHELD_REASON}:[/yellow] {report.egress_withheld} "
+            f"failure trace(s) naming a document labelled above internal (or a "
+            f"chunk whose parent row is gone) were not shown to the model; the "
+            f"precedent_mining route is not declared local"
+        )
+    if report.egress_unreadable:
+        console.print(
+            f"  [red]egress_unreadable:[/red] {report.egress_unreadable} failure "
+            f"trace(s) were not shown to the model because a store could not be "
+            f"asked whether the documents they cite may leave the host; this is "
+            f"a fault, not a label. Run partial."
+        )
+
+
+def _below_min_text(report: MiningReport, min_traces: int) -> str:
+    """Why a ``below_min_traces`` run mined nothing, naming egress when it caused it."""
+    if report.below_min_due_to_egress:
+        return (
+            f"Below --min-traces ({min_traces}) because of egress: "
+            f"{report.failures_in_scope} were kept, and "
+            f"{report.egress_withheld + report.egress_unreadable} more were "
+            f"kept from the model, which would have met the minimum."
+        )
+    if report.read_to_end:
+        return f"Below --min-traces ({min_traces}): the store was read to its end."
+    return (
+        f"Below --min-traces ({min_traces}): only "
+        f"{report.failures_in_scope} were kept, so nothing was mined."
+    )
 
 
 def _print_mining_outcome(report: MiningReport, *, min_traces: int) -> None:
     """Say, for every outcome, why a mining run produced what it did."""
+    _print_mining_egress_counts(report)
     outcome = report.outcome
     analysed = len(report.analyzed)
     if outcome == "mined":
@@ -2463,16 +2520,15 @@ def _print_mining_outcome(report: MiningReport, *, min_traces: int) -> None:
             f"No failure/partial traces: read {report.traces_examined} trace(s) "
             f"and the store holds no more."
         )
+    elif outcome == "all_withheld":
+        console.print(
+            f"[yellow]all withheld:[/yellow] {report.traces_examined} trace(s) "
+            f"were read and every failure/partial trace found was kept from the "
+            f"model ({report.egress_withheld} withheld, {report.egress_unreadable} "
+            f"unreadable). This is not an empty store; nothing was mined."
+        )
     elif outcome == "below_min_traces":
-        if report.read_to_end:
-            console.print(
-                f"Below --min-traces ({min_traces}): the store was read to its end."
-            )
-        else:
-            console.print(
-                f"Below --min-traces ({min_traces}): only "
-                f"{report.failures_in_scope} were kept, so nothing was mined."
-            )
+        console.print(_below_min_text(report, min_traces))
     elif outcome == "no_candidates":
         console.print(
             "[yellow]no candidates:[/yellow] the model answered but returned "
@@ -2523,7 +2579,10 @@ def capture_sessions_cmd(
     ``TRELLIS_CAPTURE_STRICT=0`` downgrades that second case to a reported
     count with a zero exit. A session that raised mid-sweep
     (``sessions_errored``) is treated the same way: skipped, left
-    un-watermarked for retry, and a failed run unless strict mode is off.
+    un-watermarked for retry, and a failed run unless strict mode is off. So is
+    a session kept off the route because a store could not be asked whether it
+    may leave the host (``sessions_skipped_egress_unreadable``); one kept off
+    it by a label (``sessions_skipped_egress_withheld``) is not a failure.
     """
     # Imported here, not at module scope: trellis_workers is an optional
     # install alongside the CLI, and every other `trellis worker` command
@@ -2553,7 +2612,9 @@ def capture_sessions_cmd(
     payload = report.to_payload()
     unjudged = judge_unavailable_sessions(report)
     payload["sessions_judge_unavailable"] = unjudged
-    failed = bool(unjudged or report.sessions_errored)
+    failed = bool(
+        unjudged or report.sessions_errored or report.sessions_skipped_egress_unreadable
+    )
 
     if output_format == "json":
         # "partial", not "ok": the command itself treats an unjudged or an
@@ -2606,6 +2667,22 @@ def _render_capture_text(payload: dict[str, Any]) -> None:
             f"judged; their nearest stored capture was withheld (labelled above "
             f"internal, label unreadable, or an orphan chunk) and the "
             f"session_capture route is not declared local"
+        )
+    if payload["sessions_skipped_egress_withheld"]:
+        console.print(
+            f"  [yellow]{EGRESS_WITHHELD_REASON}:[/yellow] "
+            f"{payload['sessions_skipped_egress_withheld']} session(s) not "
+            f"distilled; they were served a document labelled above internal "
+            f"(or a chunk whose parent row is gone) and the session_capture "
+            f"route is not declared local; they stay un-watermarked"
+        )
+    if payload["sessions_skipped_egress_unreadable"]:
+        console.print(
+            f"[red]  egress_unreadable: "
+            f"{payload['sessions_skipped_egress_unreadable']} session(s) not "
+            f"distilled because a store could not be asked whether what they "
+            f"were served may leave the host (a fault, not a label); they stay "
+            f"un-watermarked and the run is partial[/red]"
         )
     if payload["supersessions_failed"]:
         # Never folded into the reconcile line above: a supersession the

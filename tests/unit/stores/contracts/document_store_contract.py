@@ -924,3 +924,106 @@ class DocumentStoreContractTests:
 
         escaped = store.search("filterable", filters={"a\\b": "x"})
         assert {d["doc_id"] for d in escaped} == {"escaped"}
+
+    # ------------------------------------------------------------------
+    # list_documents(filters=) -- the same predicate grammar as search
+    # ------------------------------------------------------------------
+
+    def test_list_documents_without_filters_is_unchanged(
+        self, store: DocumentStore
+    ) -> None:
+        store.put("a", "body", {"k": "hit"})
+        store.put("b", "body", {"k": "miss"})
+        everything = {d["doc_id"] for d in store.list_documents(limit=50)}
+        assert everything == {"a", "b"}
+        assert {d["doc_id"] for d in store.list_documents(limit=50, filters=None)} == (
+            everything
+        )
+        assert {d["doc_id"] for d in store.list_documents(limit=50, filters={})} == (
+            everything
+        )
+
+    def test_list_documents_filter_is_a_predicate_not_a_pass_over_the_page(
+        self, store: DocumentStore
+    ) -> None:
+        """A ``limit=N`` listing whose filter matches N rows returns N rows.
+
+        The ``hit`` rows are the oldest, so a filter applied to the rows
+        ``LIMIT`` had already returned would come back empty.
+        """
+        for i in range(4):
+            store.put(f"hit-{i}", "body", {"k": "hit"})
+        for i in range(12):
+            store.put(f"miss-{i}", "body", {"k": "miss"})
+        page = store.list_documents(limit=3, filters={"k": "hit"})
+        assert len(page) == 3
+        assert all(d["doc_id"].startswith("hit-") for d in page)
+        assert len(store.list_documents(limit=50, filters={"k": "hit"})) == 4
+
+    def test_list_documents_filter_offset_pages_the_filtered_rows(
+        self, store: DocumentStore
+    ) -> None:
+        for i in range(5):
+            store.put(f"hit-{i}", "body", {"k": "hit"})
+            store.put(f"miss-{i}", "body", {"k": "miss"})
+        first = store.list_documents(limit=2, offset=0, filters={"k": "hit"})
+        second = store.list_documents(limit=2, offset=2, filters={"k": "hit"})
+        third = store.list_documents(limit=2, offset=4, filters={"k": "hit"})
+        ids = [d["doc_id"] for d in (*first, *second, *third)]
+        assert len(ids) == 5
+        assert len(set(ids)) == 5
+        assert all(i.startswith("hit-") for i in ids)
+
+    def test_list_documents_filter_takes_an_object_valued_filter(
+        self, store: DocumentStore
+    ) -> None:
+        """Whole-object equality, order-insensitive, as ``search`` pins it."""
+        store.put("a", "body", {"rec": {"x": 1, "y": ["p"]}})
+        store.put("b", "body", {"rec": {"x": 1, "y": ["q"]}})
+        store.put("c", "body", {"rec": "x"})
+        got = store.list_documents(limit=50, filters={"rec": {"y": ["p"], "x": 1}})
+        assert {d["doc_id"] for d in got} == {"a"}
+
+    def test_list_documents_filter_takes_content_tags(
+        self, store: DocumentStore
+    ) -> None:
+        store.put("noisy", "body", {"content_tags": {"signal_quality": "noise"}})
+        store.put("plain", "body", {"content_tags": {"signal_quality": "standard"}})
+        store.put("untagged", "body", {})
+        got = store.list_documents(
+            limit=50,
+            filters={"content_tags": {"signal_quality": {"not_in": ["noise"]}}},
+        )
+        assert {d["doc_id"] for d in got} == {"plain", "untagged"}
+
+    def test_list_documents_filter_composes_with_chunk_exclusion(
+        self, store: DocumentStore
+    ) -> None:
+        parents = self._seed_chunked_corpus(store, parents=2, per_parent=2)
+        store.put("flagged", "body", {"k": "hit"})
+        store.put(f"{parents[0]}#chunk-9", "body", {"k": "hit"})
+        with_chunks = store.list_documents(limit=50, filters={"k": "hit"})
+        assert {d["doc_id"] for d in with_chunks} == {
+            "flagged",
+            f"{parents[0]}#chunk-9",
+        }
+        without = store.list_documents(
+            limit=50, include_chunks=False, filters={"k": "hit"}
+        )
+        assert {d["doc_id"] for d in without} == {"flagged"}
+
+    def test_list_documents_filter_none_matches_an_omitted_key(
+        self, store: DocumentStore
+    ) -> None:
+        store.put("absent", "body", {})
+        store.put("null", "body", {"k": None})
+        store.put("set", "body", {"k": "v"})
+        got = store.list_documents(limit=50, filters={"k": None})
+        assert {d["doc_id"] for d in got} == {"absent", "null"}
+
+    def test_list_documents_filter_that_is_not_json_raises(
+        self, store: DocumentStore
+    ) -> None:
+        store.put("a", "body", {})
+        with pytest.raises(TypeError):
+            store.list_documents(limit=50, filters={"k": {1, 2}})

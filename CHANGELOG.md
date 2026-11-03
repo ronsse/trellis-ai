@@ -6,6 +6,231 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **API keys can be listed, minted and revoked from the REST API, the UI and MCP.**
+  `GET`/`POST /api/v1/api-keys` and `DELETE /api/v1/api-keys/{key_id}` (admin scope), a
+  **Keys** tab in the web UI with scope presets, a one-time token display and a
+  typed-confirmation revoke, and the MCP tools `list_api_keys` and `revoke_api_key`. There is
+  deliberately no MCP tool that mints a key. Mint and revoke are governed operations
+  (`api_key.mint`, `api_key.revoke`), so a denying policy blocks every surface, and each emits
+  an `api_key.minted` / `api_key.revoked` event, the CLI's included; the payload names the key
+  id, name, scopes and actor and never the token, secret or hash. Scope validation is one shared
+  parser (`trellis.auth.parse_scope_list`), so `read,admin,external` is refused identically
+  everywhere. A caller cannot revoke the key it is authenticated with (the CLI still can). An
+  `external` key is refused on all of it. No change to the `trellis_api_keys` table.
+
+  **Behaviour to know before deploying.** (1) Mint and revoke over REST need an
+  identified admin credential: a stored key that holds `admin`, or the shared
+  `TRELLIS_API_KEY` secret. The anonymous caller of `optional` mode, which otherwise
+  holds every scope, gets 403 pointing at `trellis admin api-keys`; `off` mode ignores a
+  presented key, so there every REST caller is anonymous and the 403 points only at the
+  CLI. The MCP `revoke_api_key` needs a stored admin key and does not accept the shared
+  secret. A stored admin key cannot revoke itself; that is the whole last-admin guard,
+  so the shared secret and the CLI can remove the last admin, unsetting the secret
+  afterwards leaves no REST or MCP admin, and two admins revoking each other at once can
+  reach zero. (2) A store failure on the audit write does not change the outcome: the key
+  operation answers success with the warning `audit_event_not_recorded` (a mint still
+  returns its token), and warnings now reach the REST body, the CLI text and JSON, MCP
+  and the UI. A failure the executor's emit guard does not list, such as a broken import,
+  still answers an error after the write has committed, so a mint can leave a live key
+  with no token returned; list and revoke it. A true server fault answers 500 with no
+  exception text. (3) The CLI
+  succeeds and warns when `events.db` is corrupt, so a compromised key can still be
+  revoked. A corrupt `policies.json` is the exception: it fails closed (CLI exit 5, REST
+  409, the message names the file), and until that file is fixed no surface can mint or
+  revoke. (4) A key name is 1 to 120 characters with no control character, on every
+  surface. (5) Key operations are neither an accept nor a reject for capture health. (6)
+  **Deploy order:** once an `api_key.*` event exists, an older build's `GET /api/v1/events` answers 500 on the unknown event type; redeploy every server before
+  minting or revoking through the new build. A policy denial answers 400, like the other
+  write routes.
+
+- **Per-key access log: what did this key read, and when did it last run?** Off by
+  default; `TRELLIS_ACCESS_LOG=1` (settings key `access_log`; only `1`, `true`, `yes`, `on`
+  enable it) writes one `access.key_read` event per authenticated read by an API key, on REST
+  (every `GET /api/v1/...` plus `POST /packs` and `POST /packs/sectioned`, answered 200) and
+  on MCP (each tool registered at the `read` scope). A row holds the key id, the surface,
+  the route template or tool name, the count of items it could name and the first 25 ids,
+  with `item_ids_truncated` beside them: on REST the items in the answer's body, on MCP the
+  pack ids the answer printed (a formatter that runs out of token budget drops the rest, and
+  those are not counted). Ids come from an allowlist of item-serving REST
+  routes and from ids the MCP tools already hold, kept only if the answer prints them; any other route or tool records
+  `item_count: null`. It holds no document text, query or intent text, or secret. A call
+  with no key id (auth mode `off`, an anonymous call, the legacy shared secret, stdio)
+  records nothing. Rows are written after the response by one bounded background writer
+  (1024 entries, 16 MiB, drop-and-count when full), so a slow store delays rows and never
+  reads. `trellis admin access-log [--hours] [--key-id] [--format json]` and the admin-only
+  `GET /api/v1/access-log/keys` read it back as one row per key (an `external` key is
+  refused the route); unrecorded reads leave an `access.log_failed` event, shown as
+  `failure_signals`, `dropped_reads` and `failed_reads`. **Rows have no retention path**:
+  nothing deletes events, and a row is about 1.6 KB on SQLite, so 1,000 reads a day is about
+  590 MB a year. The new `access_log` field joins every event's `write_provenance.env_flags`,
+  so `env_flags_digest` changes once for every process after upgrade, whatever the flag's
+  value. Retrieval, `PACK_ASSEMBLED` and every pack are unchanged. See
+  `docs/agent-guide/operations.md`.
+
+- **The Memories tab shows a document's sensitivity label and relabels it.** The list has a
+  Label column and the detail view a badge and a "Relabel as" control that calls the existing
+  `POST /documents/{id}/sensitivity`, showing the server's refusal text (a key without the
+  `mutate` scope, a label above the key's clearance, a store fault). An unlabelled document is
+  badged "unlabelled (internal)" with a title saying an `external` key cannot read it, and a
+  bare `{"sensitivity": "public"}` that an `external` key does not read is badged as such.
+  Lowering a label, or making a document readable by `external` keys, asks first and names who
+  can read it before and after; raising applies at once. A chunk is badged with the label it
+  reads (its parent document's, raised to its own), and a stored record that cannot be parsed is
+  badged "corrupt label (reads as restricted)". To make that possible for every key,
+  `GET /documents` rows and `GET /documents/{id}` carry `label` (`sensitivity`, `stored`,
+  `corrupt`, `external_readable`), computed from the stored row before an `external` key's
+  metadata is cut down, for rows the caller may already read; `external_readable` is the same
+  test the read gate applies, so it is false for a chunk. The "readable by" wording holds when
+  auth is required; with auth off every caller holds every scope. No pack, search or write
+  route changes.
+
+- **An `external` key reads only what someone labelled `public`.** `trellis admin api-keys
+  create --scopes read,external` mints a key whose clearance is a new lowest rung, `public`.
+  A pack, search, `GET /documents` or `get_items` serves it only a stored document labelled
+  `public`; an unlabelled document reads `internal` and is withheld, so the default inverts
+  for this one key. A graph node, trace, precedent, observation, advisory or capture banner
+  cannot carry a label and is never shown to it: those REST routes answer 403 with the
+  reason, the matching MCP tools raise a policy-denied error saying the same, and `get_items`
+  answers a graph or trace id as it answers a missing one. `external` grants no write, is only
+  valid as `read,external` (the CLI refuses it beside any other scope and stores nothing),
+  and a stored key that holds it beside a higher clearance reads at `public`. The case of an
+  `external` scope is ignored, so a stored list `["read", "External"]` is the same key;
+  a single string `"read,external"` is neither scope (the key has no `read`, clearance
+  `internal`, and every route answers 403).
+  With `TRELLIS_METRICS_PUBLIC=false`, `/metrics` answers this key 403; the default leaves
+  `/metrics` open to every caller, this key included.
+
+  What the key receives does not depend on anything it may not read, and every rule below
+  applies to this key alone. **The public path never ranks a hidden row.** The label is a
+  query predicate, so a document the key may not read is not in any result set and is in no
+  score's statistics. `DocumentStore.list_documents` gains an optional `filters` keyword (the
+  semantics `search` already had: equality on a top-level metadata key, in the query; `None`
+  keeps every existing caller's SQL and result), on the SQLite and Postgres stores. The
+  keyword axis does not call the store's `search` (a full-text index covers every row, so a
+  query word would be looked up among rows the key may not read): it reads the newest 2000
+  public documents with `list_documents`, keeps a document that holds any query word (ASCII
+  whole words, case-insensitive, the first 20, which is how the stores' own full-text query
+  reads), and ranks them by BM25 computed over those rows alone (ties by `doc_id`). The
+  stores' tokenizer is not reproduced (no stemming, no unicode folding). `GET /search`,
+  `GET /documents?q=` and a pack all read through that one function, and a pack's two axes
+  share one read.
+  The semantic axis never calls `VectorStore.query` (two backends filter after an
+  over-fetch, so a hidden row still pushes a public one out): it reads the public document
+  ids, fetches each stored vector with `VectorStore.get`, computes cosine locally, and skips
+  a row whose vector is missing, unusable or the wrong width. Only those two axes run for this
+  key, by allow-list: a graph or plugin strategy is not asked, so a strategy added later fails
+  closed. One that did not run is listed in `axes.failed`, and `axes.graph` reads `"absent"`.
+  The gates (archived, noise, supersession, class prior) still run over the public candidates.
+
+  **One predicate decides "public", on every surface.** A document is public to this key
+  when its stored label is exactly the record `classification.set` writes for `public`
+  (`public_label_record()`; no tags, no jurisdiction, classifier `caller`, version `1`).
+  The store filter and the per-row gate (`DocumentClearance.permits`, for a public-only
+  clearance) both call it, so `/search`, `GET /documents` with and without `q`, a lookup by
+  id and a pack fail closed the same way; every clearance above `public` keeps its result
+  unchanged. Relabelling a document `public` (`POST /documents/{id}/sensitivity`,
+  `trellis curate classify-sensitivity`) now writes that exact record, or refuses with
+  `classification_public_discards` and writes nothing when the earlier record holds
+  regulatory tags, a jurisdiction, another classification version or a field the schema does
+  not know (it replaces `classified_by` and does not refuse over it); it never reports
+  success on a document that is still not served. A corpus file's `sensitivity: public`
+  frontmatter is stored bare and is not enough: it is served to no external key until a
+  person runs `trellis curate classify-sensitivity <doc_id> --sensitivity public`. A test
+  pins a record written out by hand against both the filter and the gate, so bumping
+  `classification_version` or adding a `DataClassification` field fails a test, with
+  instructions, instead of turning every stored row into an empty 200.
+
+  **Public reads are bounded.** A public read lists and tokenises up to 2000 whole documents
+  however narrow the question, so a process runs at most 2 at once
+  (`MAX_CONCURRENT_PUBLIC_READS`) and refuses the rest at once, never queued:
+  `PublicReadBusyError`, HTTP 429 with `Retry-After: 1` (in the OpenAPI spec), and on MCP an
+  error result reading `public_read_busy: ... (retry_after_seconds=1)`. Only public reads take
+  a slot, so a key above `public` is never counted and a refusal says nothing about hidden rows.
+  The limit caps the amplification, not the cost of one read: on a synthetic SQLite store of
+  2000 documents of about 20 KB, one external `/search` takes about 1.2 s and an internal
+  `GET /documents/{id}` that takes 3 ms idle completes about 4 to 5 a second, not 40, while four
+  external loops run, at a limit of 2 or of 1 alike (`operations.md` has the figures).
+
+  An item's text and metadata are read from the stored document row, never from the vector
+  row, and cut as a pack cuts them; an item with no stored row is withheld. Metadata is an
+  allowlist, `title` and `document_form`, so a key a writer adds later is not served until
+  someone lists it. A chunk is never served (a pack, `/search`, `GET /documents`,
+  `get_items`), and a chunk id answers as a missing id. No count sees past the filter:
+  `withholding` keeps its keys and reads zero, `rejected_items` is empty, `candidates_found`
+  counts only what passed, and no MCP surface prints a `**Withheld:**` line. A document row
+  carries no `rank`. `/api/version` gives the key the anonymous answer. Its pack draws no
+  holdout, reads and writes no session dedup, and emits `pack.public_served` (pack id, served
+  item ids, count, key id) instead of `PACK_ASSEMBLED`; the key cannot write a feedback row, so
+  no reader waits for one.
+
+  Limits of the read, all in `operations.md`. A document labelled `public` whose record
+  carries anything beyond the exact record is not served (it fails closed). A caller's filters
+  (`domain`, tag filters) are matched against a public document's own stored `domain` and tags,
+  which the response drops, so a filter can test those fields of a document labelled `public`.
+  A public document whose embedding is older than its text lets the old words move its semantic
+  rank. Documents the corpus ingest split into chunks have chunk vectors and no parent vector,
+  so the semantic axis cannot read them (`axes.semantic` reads `ran`); the keyword axis still
+  finds them. The ceiling is the newest 2000 public documents, a function of public rows alone;
+  above it older public documents are out of reach of both axes and `total_exact` is `false`.
+  A stored row whose `metadata_json` is not JSON, or is JSON that is not an object, is withheld
+  from a public read and every other row is served; the SQLite store records it as a
+  `public_read_unparseable_row` warning, the event a by-id read of the same row uses. One
+  `VectorStore.get` per public document on a networked backend is reasoned, not measured.
+  A by-id read (`GET /documents/{id}`, `get_items`) of a row whose metadata cannot be parsed
+  answers a public-only key exactly as a missing id (a hidden corrupt row cannot confirm a
+  guessed id); a store fault still answers 500 and a key above `public` is unchanged. Status
+  and body do not depend on hidden rows apart from a store fault; response time does (SQLite,
+  `/documents?limit=5` over 200 public rows: 6.2 ms with none hidden, 432 ms with 100,000).
+
+  A differential test builds stores that hold the same public documents, one also holding
+  documents the key may not read, and asserts every REST and MCP surface the key can reach
+  answers alike (the whole payload, apart from ids drawn per call and clocks). Its worlds
+  include a hidden document holding a public word, 1, 5 and 40 hidden documents that match
+  nothing, hidden rows with a malformed `auto_importance`, a hidden document whose vector is
+  the query's own, 3000 hidden rows beside 2200 public ones (more than one read holds; three
+  worlds, none and one repeating each word), and a hidden row whose stored metadata is not
+  JSON, `[1]`, `null`, `"str"` or `5`, with and without the queried words in its text; the walk
+  covers `POST` bodies for the pack and sectioned routes. A `read` key is run through the worlds
+  that must differ, so no pair passes for free. A runtime walk of the real app's routes and the
+  server's registered tools, resources and prompts requires each to be rostered by its full
+  module path and for the number of routes it was read for, which the two source rules cannot
+  do for a route added with `add_api_route`, `@app.get` or `mcp.tool(fn, ...)`. A test names
+  `record_feedback` and `save_knowledge` and checks `["read","external"]` is refused both.
+
+  No other caller changes. The test in `test_public_clearance.py` that compares a non-public
+  caller with and without the new branch is a weak check: it patches the dispatch predicate
+  to the value it already has for those callers, so it shows that those callers take no public
+  branch and that a build agrees with itself, and it would not notice a change made inside the
+  non-public path. The comparison that would is a base-versus-head run of the packs and
+  `PACK_ASSEMBLED` payloads, made outside the suite.
+
+  It does not protect anything an existing key reads, nothing labels a document `public`
+  for you, and a `public` label is still a human decision. It is enforced only under auth mode
+  `required`; with auth `off`, or `optional` and no key sent, nothing is enforced, and
+  trusted-local and stdio MCP callers read at `restricted`. A scoped token set as
+  `TRELLIS_API_KEY` is granted every scope over REST (the shared-secret check comes first)
+  while MCP keeps the token's scopes. It does not equalise timing. A title is served as
+  stored and uncapped (`metadata.title`), markup included; the MCP index lines flatten its
+  whitespace and cut it to 80 characters, nothing else.
+  `tests/unit/test_sensitivity_rest_roster_rule.py` and
+  `tests/unit/test_sensitivity_surface_rule.py` fail a new read route or tool that is
+  neither refused nor listed as answering to this key. The ADR sentence saying there is no
+  `public` clearance tier is corrected.
+
+- **`live-infra` runs the Postgres event log contract under a non-UTC session.**
+  `tests/unit/stores/contracts/test_postgres_event_log_session_zone_contract.py`
+  runs `EventLogContractTests` against `PostgresEventLog` on a connection opened
+  with `options=-c timezone=America/Los_Angeles`, and adds one case that reads
+  `SHOW TimeZone` so a connection that dropped the option cannot pass the suite
+  as a UTC run. The existing Postgres event log contract runs under the server's
+  default session, UTC, where a naive and an aware UTC value are the same
+  instant whether or not the store converts, so a regression in
+  `_bound_instant` passed it. The new file needs no workflow edit, because
+  `live-infra` already selects `tests/unit/stores/contracts/` and the file
+  carries the `postgres` marker the job sets. It has a row in
+  `scripts/check_live_floor.py`'s `FLOORS`, so a run that skips it fails the
+  job rather than leaving it green. Test-only: nothing under `src/` changes.
+
 - **`trellis analyze holdout` reads as the one-shot readout.** With
   `--by-commit`, each build's row carries the served-minus-withheld mean
   difference (null when an arm is empty), builds serving fewer than 5 withheld
@@ -50,6 +275,58 @@ All notable changes to Trellis will be documented in this file.
   50/50 split (`analytic_mde` takes a `share`, default 0.5, so existing calls
   are unchanged). The primary estimator, strata, exclusions, assignment and
   serving are untouched; `--operational` prints none of the new figures.
+
+- **Precedent mining and session distillation ask the egress predicate.** Two senders that
+  `trellis.llm.egress` rostered as exempt now go through it. `trellis worker mine-precedents`
+  leaves a failure trace out of what the model sees when any document in its `evidence_used`
+  is labelled above `internal` and the `precedent_mining` route is not declared local; the
+  skip is counted as `skipped_egress_withheld` in the JSON report (dry run and live) with an
+  `egress_withheld:` text line. Such traces take no seat among the 20 shown to the model, but
+  they do count against `--limit`, because the filter runs after the scan stops, so a store
+  whose newest failures are labelled can report fewer traces than it holds. A run where every
+  failure trace found was kept back is outcome `all_withheld`, not `no_failures`, and
+  `below_min_traces` says (`below_min_traces_due_to_egress` in JSON) when withheld traces are
+  what put it under the minimum. Session capture does not distil a session whose served packs
+  (the transcript's pack ids, read through their `PACK_ASSEMBLED` events) named such a
+  document while the `session_capture` route is not declared local:
+  `sessions_skipped_egress_withheld`, an `egress_withheld:` line, the session left
+  un-watermarked so a sweep over a local route distils it, and not counted as a judge outage.
+  **A store that could not answer is not a label.** A document row, a chunk's parent, or a
+  pack event that a store raised on, or a gate handed no document store, is counted apart as
+  `sessions_skipped_egress_unreadable` / `skipped_egress_unreadable`, logs a warning, makes the
+  run `partial`, and fails a strict run (the capture sweep's `TRELLIS_CAPTURE_STRICT`,
+  `mine-precedents --strict`); a mine run where every trace was unreadable is `all_withheld`.
+  A pack event is read from `injected_item_ids`, `injected_items[]` and `sections[].item_ids`
+  together (a sectioned pack written before `injected_items[]` existed carries only the
+  section ids); an event that records none of them, or whose lists are malformed, is a
+  permanent fact of an immutable event, so the session is withheld (counted as withheld, never
+  failing a strict run) and not reported as an outage. A pack that truly served nothing
+  (`injected_item_ids: []`) is permitted. A row whose stored bytes do not parse (a pack
+  event's payload that is not a JSON object, a document's metadata that is not JSON) is
+  withheld too, as is a chunk whose parent row does not parse, because none of them parses on
+  a retry. `CaptureFunnel`
+  gains the two counts, so `analyze health` reports sessions kept off the route instead of
+  calling them sampled out (two zero-valued keys appear in the funnel payload even when
+  nothing is withheld; no existing value or text changes). A trace or transcript carries no
+  label, so the label is propagated from the documents it cites or was served; gating on the
+  route alone would have withheld unlabelled content too. `EgressGate.stored_verdict(doc_id)`
+  reads a document's row by id and answers `permitted`, `withheld` or `unreadable`.
+  **Unchanged when nothing is labelled, or the route is declared local:** the prompts sent, the
+  digest, the candidates and the mined events are byte-identical (tests compare both against
+  an ungated run), and a local gate reads nothing. Three cases keep content off a route that
+  is not local with nothing labelled: a chunk-shaped id whose parent row is gone (as since
+  #1129, where retrieval would judge it by the chunk's own label) and a pack event with no
+  readable item list, both counted as withheld because neither passes on a retry, and a store
+  that could not answer, or a gate handed no document store, counted as unreadable; so a
+  session that was served such a chunk is withheld
+  on every sweep, and one withheld session is re-read and re-counted by each sweep with no age
+  bound. `PrecedentMiner` now requires its `egress=` gate, and the rule test rosters
+  `PrecedentMiner(` and the `_ask_llm` sender (its exempt roster is empty). **Not covered:** a
+  pack id the transcript parser could not read, a pack whose event the log no longer holds, a
+  trace that summarises a labelled document without citing it, and the MCP `get_items` /
+  `get_file_context` calls (their results carry no pack header, so a transcript cannot name
+  the documents they returned) are sent as before. No file under `src/trellis/retrieve/`
+  changed.
 
 - **Content labelled above `internal` no longer reaches a chat or generate LLM
   route that is not declared local, on the paths listed here.** One predicate, `trellis.llm.egress` (`may_reach_route` for a
@@ -286,6 +563,203 @@ All notable changes to Trellis will be documented in this file.
   an append to rise by a third or more on a loaded host. The graph store is
   unaffected by any of this.
 
+- **The Memories tab's label control no longer refuses a repair, and its chunk wording
+  names only what is known.** (1) `classification.set` to `restricted` over a record that
+  cannot be parsed (a string, an unknown level, no level, `null`) answered `Classification
+  unchanged` and wrote nothing, because such a record already *reads* `restricted`; the
+  page told the operator it could not be done, and the label stayed `corrupt` for good. It
+  now writes a clean record through the same governed write as any relabel
+  (`put_document(..., preserve_updated_at=True)`, so recency does not move, with a
+  `... (unreadable record replaced)` message). Fields of the old record that validate are
+  kept; the rest are dropped and not kept anywhere. A row whose `metadata` is not an object
+  still fails, and the page now says so. A
+  record that states the level is still a no-op, and `public` over a record carrying tags
+  is still refused (`classification_public_discards`). A readable-as-`restricted` row
+  serves exactly as before: the effective label is `restricted` before and after. (2) A
+  chunk whose own record is corrupt is no longer told to "choose another label" (a chunk
+  cannot be relabelled, and relabelling its parent does not replace its record). (3) A
+  chunk that reads `restricted` is no longer said to read its parent's label: the server
+  reports a restricted parent, a parent whose record cannot be parsed and a parent it could
+  not read alike, so the badge names all three. (4) `GET /documents/{id}` on a chunk reads
+  its parent twice for a key below `restricted` instead of four times: the read gate and the
+  `label` block now share one `DocumentClearance`. No change to what any key may read.
+
+- **MCP `revoke_api_key` and `list_api_keys` no longer hand a store's error text to the
+  caller.** An exception that escaped either tool (a store or event log that would not
+  open, say) was answered with `Revoke failed: <its text>` or `Listing failed: <its text>`,
+  and the text sanitizer lets a host, a user or a file path through. Each tool now answers
+  `status: error` with one fixed message, like REST's server fault, and for an exception
+  that escapes the tool the class goes to the server log only. A driver error caught
+  inside the revoke handler still answers `status: failed` with
+  `Execution failed: <its class name>`, which names the class and no driver text. The
+  operations guide's API-key errors list also gains the 409 a stored admin key gets for
+  revoking itself.
+
+- **A stored row whose metadata is JSON but not an object no longer fails every
+  document read by a `read` or `confidential` key.** `metadata_json` of `[1]`,
+  `5`, `"str"` or `true` parses, so the store returns it, and
+  `DocumentClearance.sensitivity` raised on it (`dict(5)`): `GET /documents`
+  (with or without `q`), `GET /search` and `GET /documents/{id}` answered 500 for
+  those keys while one such row existed, whoever it belonged to. The row holds no
+  label the gate can read, so on a direct read it now reads `restricted`, the same
+  fail-closed reading a present-but-malformed label record gets. A `read` or
+  `confidential` key is served every other row and not this one (by id: 404, as a
+  missing id answers); a `restricted` or `admin` key is served it, as it is every
+  row; an `external` key never was. A list of pairs with a key that is not a string
+  (`[[1, 2]]`) failed the same way and reads the same way. Nothing else does:
+  `null`, an empty value (`[]`, `""`, `0`, `false`) and a list of string-keyed pairs are
+  judged as they always were, and the `label` of such a row is unchanged too. A chunk of such a
+  row reads `restricted` as its parent does: before, it was judged on its own label,
+  so a list with `include_chunks=true`, a search and a by-id read served it to a
+  `read` key while the parent was withheld. That tightens by-id as well (it answered
+  200 for such a chunk). The `label` that `GET /documents` and `GET /documents/{id}`
+  attach for a `restricted` or `admin` key reports such a row as `sensitivity:
+  restricted`, `corrupt: true` (it said `internal`, a clearance that cannot read it).
+  The same change stops the MCP `get_items` call and the overwrite refusal raising
+  on one such row (each now judges that id as `restricted`), and the graph and REST
+  pointer concealment (a node, a version list, an observation) now drops a pointer
+  that names one for a key below `restricted` instead of raising. A precedent
+  listing no longer blanks every row it judged in the same batch when one source
+  is such a row: only that source's precedent is withheld, where a readable one
+  beside it was withheld too.
+  A pack is unchanged, and so is the one place it reaches this gate: a served item
+  whose `supersedes_doc_id`, `updates_doc_id`, `evidence_ref` or `source_item_id`
+  names such a row still raises at `internal` and `confidential` and keeps the
+  pointer at `restricted`, as it did. That is deliberate, for the measurement
+  freeze, and it is the one failure kept; the pack path passes
+  `fail_closed_on_unreadable_label=False`. The egress gate passes it too, so its
+  verdicts do not move. Pinned by a test that builds packs through `builder_factory`
+  for an unscoped caller over each shape, with and without a pointer to it.
+- **A by-id read by an `external` key answers 404 for a row whose `metadata_json`
+  is bytes that are not UTF-8 or an integer past `json.loads`'s digit limit.**
+  `GET /documents/{id}` and `get_items` answered 500 for such a row where the list
+  already withheld it, so a key could tell a row from a missing id.
+  The by-id read now treats `UnicodeDecodeError` and a `ValueError` whose text is the
+  digit-limit message as the row's own; any other `ValueError` is still a store fault
+  and still answers 500. The egress verdict does not use this test, so it is unchanged.
+  Not covered: `get_file_context` raises `AttributeError` on a row whose metadata is
+  `5`, before and after this change. Also not covered: a key above `public` still answers 500 for such a row, because the store cannot return it; a public row whose own text
+  column is not UTF-8 still fails every external list, search and pack.
+- **A row whose event type this build does not know no longer fails every read
+  that reaches it.** A newer build can append an `event_type` an older one lacks,
+  and both event logs turned the stored string into `EventType(...)` strictly, so
+  `GET /api/v1/events` (and any read with no `event_type` filter) answered 500 until
+  the older server was redeployed. `SQLiteEventLog` and `PostgresEventLog` now leave
+  such a row out of `get_events` and log `event_log.unknown_event_type_skipped` at
+  warning level: the operation, the number of rows skipped, and the stored type
+  strings with a count each (at most 10 types, each cut to 64 characters). It never
+  carries a payload, entity id or any other field. `get_event` reads such a row as
+  absent (`GET /api/v1/events/{id}` answers 404) and logs the same way. Nothing
+  deletes or rewrites a row. A page that held a skipped row is read again restricted
+  to the types this build knows, so `limit` still returns up to `limit` readable rows
+  and `scan_events` still reads a full page as possibly truncated; a page with no
+  such row sends the one statement it always did. A read that names an `event_type`
+  is unchanged. A field of a readable row that fails to parse still raises, as it
+  did. **`count()` is unchanged and counts every stored row**, so an unfiltered
+  `count()` (and `total` in `GET /api/v1/events`) can exceed the rows `get_events`
+  returns, and `scan_events` with no `event_type` over-reports `matched` and `dropped`
+  by the skipped rows; every shipped caller names a type. The response says nothing
+  else about a skipped row, so the Events tab can show "2 of 3" with Older enabled, or
+  its empty message beside "0 of N" when every row is unknown. This helps only builds that
+  carry it: an older build still raises on a type it does not know. The
+  Postgres statements are covered by a no-database test of what is sent and returned
+  and by new cases in the live contract suite, which run against a real server only in
+  the live-infra job.
+- **A flaky test: a session-dedup test compared two pack id lists in order.**
+  `TestSessionDedup` in `tests/unit/mcp/test_external_key_events.py` asserted that two
+  ordinary-key packs for the same query held identical id lists. The documents that rank
+  below the public ones tie on every axis, and what orders them is each row's own clock
+  reading in `_apply_recency_decay`, so a stall between two rows reorders them (and can
+  change which of the tied bulk documents is served). Two CI runs failed this way, on
+  Python 3.11 and 3.12, with the same three documents in a different order. The tests now
+  compare which documents were served, and the test about what an external pack records
+  compares the public documents only. Test-only: no change under `src/`, and no pack
+  changes.
+- **A document row whose metadata cannot be read no longer fails every read by
+  an `external` key on SQLite.** The label predicate the public path runs
+  through `DocumentStore.list_documents` raised on a row whose `metadata_json`
+  is not JSON, is JSON that is not an object (`[1]`, `null`, `"str"`, `5`), is
+  not UTF-8, has bytes after a NUL, is JSON5 rather than JSON, or is nested past
+  the parser's limit, so a pack, `GET /search` and `GET /documents` answered 500
+  for every external key while one such row existed, whoever it belonged to. It
+  also read a JSON string whose text is the public label record as that record,
+  so such a row matched the filter (the later per-row gate withheld it). The
+  public filter is now a `trellis.stores.base.document.ReadableMatch`, a dict
+  that only a readable row can match: the SQLite store parses the column as the
+  read that follows does (`json.loads`), withholds a row that does not parse as an
+  object, serves every other row (a row holding `NaN` is readable), and records
+  each withheld row as a `public_read_unparseable_row` warning (the event a
+  by-id read of the same row already uses). **Not covered:** a row labelled
+  public whose `doc_id`, `content`, `content_hash`, `created_at` or
+  `updated_at` is not valid UTF-8 still makes every external read answer 500
+  while it exists, on SQLite as before.
+  Postgres needed no change for unreadable metadata: its predicate is
+  `metadata -> key = value`, which is NULL, not an error, on a row that is not
+  an object. Every other read is unchanged, row by row: a plain dict filter, a
+  scalar filter, no filter and every call by a key above `public` answer as
+  before, including the malformed row. `ReadableMatch` is a `dict`, so a store
+  that does not know it behaves as it did.
+
+
+- **`trellis admin draft-promotion-adr` no longer reads a broken `--output` as
+  free.** The overwrite check used `Path.exists()`, which answers absent for a
+  symlink loop, a dangling link and a path under a regular file, so the command
+  went on to write and died with a Python traceback in both formats. A path with
+  anything at it is now present: without `--force` the run is refused ("Refusing
+  to overwrite existing ADR", exit 1, as for a regular file). That now includes a
+  dangling link, which used to be written through when its target directory
+  existed and to crash when it did not. With `--force`, a write that
+  fails answers `Could not write the ADR at <path>: <reason>` (text), or
+  `{"status": "error", "message": ...}` under `--format json`, and exits 2
+  (`EXIT_VALIDATION`); both formats exit alike. A forced write through a dangling
+  link whose target directory exists still creates the target.
+
+- **The Postgres event log reads a naive timestamp as UTC, whatever the
+  session's time zone.** `PostgresEventLog` bound a naive `datetime` as it
+  came, which psycopg sends as `timestamp` and the server reads in the
+  session's time zone. Under any session but UTC a naive `occurred_at` was
+  stored hours away from the instant its digits name, and a naive `since` or
+  `until` named another instant, so the same naive value meant different
+  things to SQLite, to the trace store and to this log. Against a scratch
+  Postgres 16 in `America/Los_Angeles`, a naive event stamped
+  `2026-03-04T05:06:07` was stored as 13:06:07 UTC, an `until` at 05:06:07Z
+  missed it, `count(since=...)` read one of two events, and two event log
+  contract cases failed (the naive `occurred_at` and the naive-and-aware
+  ordering ones); all 53 contract cases passed under `UTC`, and under
+  `America/Los_Angeles`, `Pacific/Kiritimati` and `Pacific/Pago_Pago` once the
+  binds below were in. `append` now binds a naive `occurred_at` and
+  `recorded_at` as UTC, `get_events` a naive `since` and `until`, and `count` a
+  naive `since`, on the trace store's rule (`as_utc`). An aware value reaches
+  the driver as the very object it was, so a deployment whose callers pass
+  aware datetimes sees no change; it is not passed through `as_utc`, which
+  clamps a stamp at the edge of `datetime`'s range where the server today
+  stores the instant it was given. Rows already stored under a non-UTC
+  session are not rewritten. `EventLog.get_events` now says both backends read
+  a naive bound or `occurred_at` as UTC; that replaces the last sentence of the
+  SQLite entry below, which called the Postgres case unchanged. Reads still
+  have no tie-break: `ORDER BY occurred_at` on Postgres orders events at one
+  instant as the plan happens to, where SQLite uses insertion order. That
+  stays out of this change on purpose, because the session dedup read keeps
+  the newest `limit` `PACK_ASSEMBLED` rows of a session by that order, so a
+  tie-break could change which tied rows survive the cut, which ids are
+  deduplicated out of the next pack, and so what a pack serves. The new
+  mocked-pool test (`tests/unit/stores/test_postgres_event_log_binding.py`)
+  runs wherever psycopg is installed; `live-infra` runs the contract suite
+  under the server's default session, which is UTC, and under
+  `America/Los_Angeles` too (see the session-zone contract entry under Added).
+
+- **Docs no longer say the eval harness is in this repo, or that roadmap gate N3
+  is open.** `docs/design/eval.md` described `eval/runner.py`, `eval/scenarios/`
+  and a CI smoke test under `tests/unit/eval/` as living here; the harness moved
+  to the `trellis-evals` repo on 2026-07-12 and this repo keeps only
+  `eval/reports/`. The page now says so and marks each command as run from that
+  repo. `plan-evaluation-strategy.md` and `plan-real-corpus-eval.md` carry the
+  same path note the other stamped plans do, and
+  `docs/agent-guide/program-convergence-eval.md` and one path in
+  `operations.md` name the repo. ROADMAP gate N3 said #194 stays open; it closed
+  2026-10-29, and the gate now states its acceptance command and a dated run.
+  Docs only; no code, test or served pack changes.
+
 - **SQLite event log time bounds compare `occurred_at` by instant, not as
   text.** `get_events(since=..., until=...)`, `count(since=...)` and the
   `ORDER BY` behind `order=` and `limit=` compared the writer's `isoformat()`
@@ -341,8 +815,27 @@ All notable changes to Trellis will be documented in this file.
   byte-identical. The three LLM-client and config helpers keep their signatures:
   they read the running command's `--format` through
   `trellis_cli.output.active_output_format`, which answers `text` outside a
-  command. Still prose under `--format json`, left as is because tests pin it:
-  `trellis admin migrate-graph`'s config-file, step and capacity refusals.
+  command. `trellis admin migrate-graph`'s config-file, step and capacity
+  refusals were left as prose; the next entry covers them.
+- **The remaining refusals under `--format json` answer with one JSON object
+  too.** `trellis admin migrate-graph` (its five `--from-config` / `--to-config`
+  refusals, a source over `--max-nodes`, and a run a store error aborted),
+  `trellis admin show-proposal` and `trellis admin list-proposals` on a blank id
+  or a non-positive `--limit`, `trellis admin draft-promotion-adr` on an unknown
+  candidate or an existing output file without `--force`, and the learning
+  parameter file guard shared by `trellis analyze learning-candidates` and
+  `trellis worker curate` each printed prose on stdout and exited non-zero. They
+  now emit `{"status": "error", "message": ...}`. An aborted `migrate-graph`
+  run also carries the next step under `hint`, where text prints it as a second
+  line, and still carries no `copy_scope`. The proposal commands add
+  `"error": "validation_error"` so their existing `error` key stays populated.
+  Exit codes are unchanged by this entry (`migrate-graph` config file `2`, step
+  abort `5`, the others `1`); a source over `--max-nodes` changes in the entry
+  under Changed. The human-format text is byte-identical. One success path
+  changes: `draft-promotion-adr --force` under
+  `--format json` no longer prints its "Overwriting existing file" line ahead of
+  the JSON object, which made stdout unparseable at exit `0`; the warning is
+  still logged and text still prints it.
 - **`trellis admin quickstart` stops on a config path it cannot read instead of
   initializing over it.** `config.yaml` as a dangling or looping symlink read as
   absent (`Path.exists()` answers `False` on `ENOENT`/`ELOOP`/`ENOTDIR`), so the
@@ -658,6 +1151,41 @@ All notable changes to Trellis will be documented in this file.
   archives.
 
 ### Changed
+
+- **BREAKING: `trellis admin list-proposals` (a `--limit` below 1, reached by a
+  direct call of the command body) and `trellis admin show-proposal` (a blank or
+  whitespace-only id) exit 2, not 1.** Both are a refused request, as
+  `generate-proposals --dry-run` is, so they now answer with `EXIT_VALIDATION`
+  in both formats (the JSON payload is unchanged: `{"status": "error", "error":
+  "validation_error", ...}`). `list-proposals --limit 0` on the command line
+  already exited 2 (Typer's `min=1` refuses it before the command runs), so for
+  a shell caller only `show-proposal ""` and a whitespace-only id move. An id
+  that names no proposal still exits 1: the lookup ran and found nothing. A
+  script that treated exit 1 from either call as "the request was refused" must
+  read 2; none in this repository does.
+
+
+- **BREAKING: `trellis admin generate-proposals --dry-run` exits 2 and answers
+  as an error.** The generator has no dry-run mode, so the flag was refused with
+  a yellow warning and exit 0, which a caller that asked for a preview read as
+  success. It now exits 2 (`EXIT_VALIDATION`; was 0) without running the
+  generator, prints the same sentence as a plain error line in text, and under
+  `--format json` prints one `{"status": "error", "error": "validation_error",
+  "message": ...}` object (was a prose line on stdout, so the stream did not
+  parse). The `--dry-run` help says so. A script that passed the flag and
+  treated exit 0 as success must drop it.
+
+- **`trellis admin migrate-graph` exits `2`, not `1`, for a source with more
+  current nodes than `--max-nodes`.** Breaking for a script that branches on the
+  code. Old `1`, new `2` (`EXIT_VALIDATION`), in both formats. `1` is the
+  "unexpected error, file it with a traceback" code
+  (`docs/design/adr-cli-exit-codes.md`), and this is a deliberate refusal of the
+  arguments given: re-run with a larger `--max-nodes`, as for the command's other
+  input refusals, which already exit `2`. It is not `5`:
+  `MigrationCapacityExceededError` is a `RuntimeError`, not a `TrellisError`, and
+  no store or backend failed. Every other `migrate-graph` exit code is
+  unchanged (`0`, `2` for a config file, `5` for a step failure or a bad
+  backend); nothing was written before the refusal, as before.
 
 - **The repeated-rejection health signal is rated against each tool's attempts and
   no longer asserts a cause.** `trellis analyze health` warned once any `(kind, loc)`

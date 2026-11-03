@@ -409,8 +409,8 @@ to lower a label as part of normal work.
 
 **Verified before acting** — both panelists warned eval fixtures might stub promotion and
 become their own always-passing constant. Checked:
-`eval/scenarios/parameter_registry_passthrough.py:160` calls the *real*
-`analyze_learning_observations`, already with `min_support=1`. Not a stub, so the decision
+`eval/scenarios/parameter_registry_passthrough.py:160` in the `trellis-evals` repo calls the
+*real* `analyze_learning_observations`, already with `min_support=1`. Not a stub, so the decision
 holds; but that scenario asserts the analyzer's return shape, not the
 promote→review→serve chain. **The test refined the scope rather than flipping the answer.**
 

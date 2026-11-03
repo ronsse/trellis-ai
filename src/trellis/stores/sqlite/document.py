@@ -15,6 +15,7 @@ from trellis.core.ids import generate_ulid
 from trellis.schemas.classification import LIST_FACETS
 from trellis.stores.base.document import (
     DocumentStore,
+    ReadableMatch,
     chunk_exclusion_clause,
     chunk_id_like_pattern,
     encode_filter_value,
@@ -158,8 +159,77 @@ def _metadata_matches(metadata_json: str, key: str, expected_json: str) -> bool:
     opaque ``sqlite3.OperationalError: user-defined function raised
     exception``, with the original message discarded. Parsing in SQL keeps
     the one failure this can realistically hit legible.
+
+    The SQL this filter shape produces is pinned literally, with that of the
+    other plain shapes, by ``TestThePlainFilterSqlIsUnchanged`` in
+    ``tests/unit/stores/test_sqlite_readable_match.py``.
     """
     return bool(json.loads(metadata_json).get(key) == json.loads(expected_json))
+
+
+#: Name of the SQL function :func:`_metadata_matches_closed` is registered under.
+_METADATA_MATCH_CLOSED_FN = "trellis_metadata_matches_closed"
+
+
+def _parse_as_the_read_does(text: str) -> Any:
+    """``json.loads(text)``, one Python frame below the caller, as the read does.
+
+    The one frame is the point: do not inline it. Where the parser's depth limit
+    is the interpreter's remaining recursion depth (CPython 3.11), a row nested to
+    the limit parses or fails by how many frames are on the stack, and the read
+    that follows (``list_documents`` -> ``<listcomp>`` -> ``_row_to_dict`` ->
+    ``json.loads``) sits one frame below where the callback would call
+    ``json.loads`` itself. Measured on 3.11.15, a direct call passes a row at one
+    nesting depth that the read then fails with ``RecursionError``; with this frame
+    the predicate withholds from the same depth the plain read raises from, and a
+    deeper margin withholds rows the read serves (16 frames withheld 16 levels
+    early). From 3.12 the limit is a C recursion count that Python frames do not
+    touch, and entering the callback from C costs about two levels (measured on
+    3.12.3: the predicate withholds two levels before the read would raise), which
+    no Python code can give back.
+    ``tests/unit/stores/test_sqlite_readable_match.py`` finds both boundaries on
+    the running interpreter and pins how far apart they may be.
+    """
+    return json.loads(text)
+
+
+def _metadata_matches_closed(
+    raw: bytes | None, doc_id: bytes | None, key: str, expected_json: str
+) -> bool:
+    """SQL callback for a :class:`ReadableMatch` filter: unreadable never matches.
+
+    ``raw`` and ``doc_id`` are the row's columns as bytes (the caller casts
+    them): CPython raises while converting a text value that is not UTF-8,
+    before any callback runs, so a text argument would fail every read that
+    scans such a row. SQLite's own ``json_valid`` and ``json_extract`` are not
+    used either, because they judge JSON by a stricter grammar than the
+    ``json.loads`` that reads the row afterwards (``NaN``, a NUL tail), and a
+    row that one accepts and the other refuses fails the read or is withheld
+    wrongly.
+
+    The row is parsed here exactly as :meth:`SQLiteDocumentStore._row_to_dict`
+    parses it. A row that does not decode, does not parse or is not an object
+    is a row whose label cannot be read: it is withheld and recorded under the
+    event :func:`~trellis.retrieve.sensitivity.read_document_row` uses for a
+    by-id read of the same row, so a corrupt row is one signal on every
+    surface. A readable row is judged as :func:`_metadata_matches` judges it.
+    Never an exception: one raised here reaches the caller as an opaque
+    ``OperationalError`` and fails every read that scans the row.
+    """
+    # The filter value is ours, not the row's: a bad one is a bug and must raise.
+    expected = json.loads(expected_json)
+    error = "unreadable_metadata"
+    try:
+        parsed = None if raw is None else _parse_as_the_read_does(raw.decode("utf-8"))
+    except (ValueError, RecursionError) as exc:
+        # ``UnicodeDecodeError`` and ``json.JSONDecodeError`` are both ValueErrors.
+        error = type(exc).__name__
+    else:
+        if isinstance(parsed, dict):
+            return bool(parsed.get(key) == expected)
+    shown = None if doc_id is None else doc_id.decode("utf-8", errors="replace")
+    logger.warning("public_read_unparseable_row", doc_id=shown, error=error)
+    return False
 
 
 def _bindable_json_path(key: str) -> str | None:
@@ -224,6 +294,12 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         if conn is not existing:
             conn.create_function(
                 _METADATA_MATCH_FN, 3, _metadata_matches, deterministic=True
+            )
+            conn.create_function(
+                _METADATA_MATCH_CLOSED_FN,
+                4,
+                _metadata_matches_closed,
+                deterministic=True,
             )
         return conn
 
@@ -339,14 +415,72 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         if not sanitized:
             return []
 
+        filter_conditions, filter_params = self._filter_conditions(
+            filters, "d.metadata_json"
+        )
+
+        where_parts = ["documents_fts MATCH ?"]
+        sql_params: list[Any] = [sanitized]
+
+        if not include_chunks:
+            where_parts.append("d.doc_id NOT LIKE ?")
+            sql_params.append(chunk_id_like_pattern())
+
+        if filter_conditions:
+            where_parts.extend(filter_conditions)
+            sql_params.extend(filter_params)
+
+        sql_params.append(limit)
+        where_clause = " AND ".join(where_parts)
+
+        sql = (
+            "SELECT d.*, bm25(documents_fts) as rank"
+            " FROM documents d"
+            " JOIN documents_fts fts ON d.doc_id = fts.doc_id"
+            f" WHERE {where_clause}"
+            " ORDER BY rank"
+            " LIMIT ?"
+        )
+        cursor = self._conn.execute(sql, sql_params)
+
+        return [self._row_to_dict(row, include_rank=True) for row in cursor.fetchall()]
+
+    @staticmethod
+    def _filter_conditions(
+        filters: dict[str, Any] | None, column: str
+    ) -> tuple[list[str], list[Any]]:
+        """The ``WHERE`` predicates and bound parameters of a metadata filter.
+
+        ``column`` is the ``metadata_json`` column as the calling query spells it
+        (``d.metadata_json`` under a join, ``metadata_json`` on the bare table).
+        :meth:`search` and :meth:`list_documents` both take their filters from
+        here, so a filter means the same thing in each.
+        """
         # Every filter shape becomes a WHERE predicate. Nothing is applied
         # to the returned page — see :func:`_metadata_matches` (#409).
         filter_conditions: list[str] = []
         filter_params: list[Any] = []
 
         if filters:
-            for key, value in filters.items():
-                if key == "content_tags" and isinstance(value, dict):
+            # A ``ReadableMatch`` goes first. Its predicate calls no ``json_*``
+            # function, so it cannot raise on a row that is not JSON, but a
+            # ``json_extract`` term beside it can. SQLite is not documented to
+            # evaluate ``WHERE`` terms in the order written; this relies on the
+            # order it is seen to use, and the tests that put a scalar or a
+            # ``content_tags`` filter beside the marker (and a copy without this
+            # sort) are what pin it. The sort is stable, so every other filter
+            # keeps its order.
+            for key, value in sorted(
+                filters.items(), key=lambda kv: not isinstance(kv[1], ReadableMatch)
+            ):
+                if isinstance(value, ReadableMatch):
+                    doc_id = column.removesuffix("metadata_json") + "doc_id"
+                    filter_conditions.append(
+                        f"{_METADATA_MATCH_CLOSED_FN}("
+                        f"CAST({column} AS BLOB), CAST({doc_id} AS BLOB), ?, ?)"
+                    )
+                    filter_params.extend([key, encode_filter_value(key, value)])
+                elif key == "content_tags" and isinstance(value, dict):
                     tag_conds, tag_params = _build_tag_conditions(value)
                     filter_conditions.extend(tag_conds)
                     filter_params.extend(tag_params)
@@ -378,8 +512,8 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
                     # ``NULL NOT IN (...)`` is NULL, so an absent key stays
                     # excluded exactly as the equality already left it.
                     filter_conditions.append(
-                        "(json_extract(d.metadata_json, ?) = ?"
-                        " AND json_type(d.metadata_json, ?)"
+                        f"(json_extract({column}, ?) = ?"
+                        f" AND json_type({column}, ?)"
                         " NOT IN ('object', 'array'))"
                     )
                     filter_params.extend([path, value, path])
@@ -394,36 +528,10 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
                     # than an approximation of it, and it takes the whole
                     # object (path ``'$'``), so no key needs escaping.
                     filter_conditions.append(
-                        f"{_METADATA_MATCH_FN}"
-                        "(json_extract(d.metadata_json, '$'), ?, ?)"
+                        f"{_METADATA_MATCH_FN}(json_extract({column}, '$'), ?, ?)"
                     )
                     filter_params.extend([key, encode_filter_value(key, value)])
-
-        where_parts = ["documents_fts MATCH ?"]
-        sql_params: list[Any] = [sanitized]
-
-        if not include_chunks:
-            where_parts.append("d.doc_id NOT LIKE ?")
-            sql_params.append(chunk_id_like_pattern())
-
-        if filter_conditions:
-            where_parts.extend(filter_conditions)
-            sql_params.extend(filter_params)
-
-        sql_params.append(limit)
-        where_clause = " AND ".join(where_parts)
-
-        sql = (
-            "SELECT d.*, bm25(documents_fts) as rank"
-            " FROM documents d"
-            " JOIN documents_fts fts ON d.doc_id = fts.doc_id"
-            f" WHERE {where_clause}"
-            " ORDER BY rank"
-            " LIMIT ?"
-        )
-        cursor = self._conn.execute(sql, sql_params)
-
-        return [self._row_to_dict(row, include_rank=True) for row in cursor.fetchall()]
+        return filter_conditions, filter_params
 
     @staticmethod
     def _sanitize_fts_query(query: str) -> str:
@@ -448,12 +556,27 @@ class SQLiteDocumentStore(SQLiteStoreBase, DocumentStore):
         limit: int = 50,
         offset: int = 0,
         include_chunks: bool = True,
+        filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         where, params = chunk_exclusion_clause("?", include_chunks=include_chunks)
+        table = "documents"
+        if filters:
+            # The same predicates ``search`` builds, in the same grammar, so a
+            # filter is a ``WHERE`` term and never a pass over the page. The
+            # table is aliased only here: ``filters=None`` runs the SQL it
+            # always has.
+            conditions, filter_params = self._filter_conditions(
+                filters, "d.metadata_json"
+            )
+            if conditions:
+                clause = " AND ".join(conditions)
+                where = f"{where} AND {clause}" if where else f" WHERE {clause}"
+                params = [*params, *filter_params]
+                table = "documents d"
         # ``doc_id`` breaks a ``created_at`` tie, so an OFFSET-paged scan neither
         # repeats nor skips rows that share a timestamp.
         cursor = self._conn.execute(
-            f"SELECT * FROM documents{where}"
+            f"SELECT * FROM {table}{where}"
             " ORDER BY created_at DESC, doc_id DESC LIMIT ? OFFSET ?",
             (*params, limit, offset),
         )

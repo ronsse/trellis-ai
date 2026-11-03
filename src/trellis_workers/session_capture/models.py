@@ -516,6 +516,20 @@ class CaptureReport:
     #: ``candidates_reconciled_noop`` and the judge-failure counts: no model
     #: was asked, and nothing failed.
     candidates_skipped_egress_withheld: int = 0
+    #: Sessions not distilled because a pack they were served named a document
+    #: labelled above ``internal`` (or a chunk whose parent row is gone) and the
+    #: ``session_capture`` route is not declared local
+    #: (:mod:`trellis.llm.egress`). Left un-watermarked, so a sweep over a local
+    #: route distils them; they are re-read on every sweep until then. Not a
+    #: judge outage: nothing was asked and nothing failed, so
+    #: ``sessions_judge_unavailable`` does not move.
+    sessions_skipped_egress_withheld: int = 0
+    #: Sessions kept off the route because a store could not answer: the event
+    #: log or a served document's
+    #: row. A fault and not a label, so it warns, fails a strict run like
+    #: ``sessions_errored`` and is kept apart from the count above. Also left
+    #: un-watermarked.
+    sessions_skipped_egress_unreadable: int = 0
     #: SUPERSEDE *verdicts* — what the judge decided, counted whether or not
     #: the sweep went on to apply them (a ``--dry-run`` reports these and
     #: applies none). Paired with ``supersessions_failed`` deliberately: a
@@ -574,6 +588,10 @@ class CaptureReport:
             "candidates_reconciled_noop": self.candidates_reconciled_noop,
             "candidates_skipped_egress_withheld": (
                 self.candidates_skipped_egress_withheld
+            ),
+            "sessions_skipped_egress_withheld": self.sessions_skipped_egress_withheld,
+            "sessions_skipped_egress_unreadable": (
+                self.sessions_skipped_egress_unreadable
             ),
             "candidates_reconciled_supersede": self.candidates_reconciled_supersede,
             "supersessions_failed": self.supersessions_failed,

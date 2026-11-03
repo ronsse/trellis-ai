@@ -100,7 +100,11 @@ class TestOperation:
         # directly — see EntityUpdateHandler)
         # + CLASSIFICATION_SET (governed document sensitivity relabel, #194;
         # the write half of the label retrieval already reads)
-        assert len(Operation) == 28
+        # + API_KEY_MINT + API_KEY_REVOKE (credential writes; handled only
+        # by trellis.mutate.build_api_keys_executor, never
+        # create_curate_handlers, so execute_mutation and POST
+        # /commands/batch cannot mint or revoke a key)
+        assert len(Operation) == 30
 
 
 class TestCommand:

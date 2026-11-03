@@ -52,7 +52,14 @@ if TYPE_CHECKING:
     from fastmcp.tools.base import ToolResult
 from pydantic import ValidationError
 
-from trellis.auth import SCOPE_ADMIN, SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ
+from trellis.auth import (
+    SCOPE_ADMIN,
+    SCOPE_INGEST,
+    SCOPE_MUTATE,
+    SCOPE_READ,
+    public_listing_row,
+)
+from trellis.core.access_log import note_printed_items, note_served_items
 from trellis.core.document_write import put_document
 from trellis.core.error_sanitize import (
     describe_validation_error,
@@ -66,7 +73,7 @@ from trellis.core.write_config import (
     resolve_write_behaviour,
 )
 from trellis.core.write_provenance import get_write_provenance
-from trellis.errors import TrellisError
+from trellis.errors import PublicReadBusyError, TrellisError
 from trellis.extract.entity_resolution import build_name_alias_resolver
 from trellis.extract.memory_ingest_hook import run_memory_extraction
 from trellis.extract.trace_ingest_hook import (
@@ -86,6 +93,7 @@ from trellis.llm.egress import EgressGate, may_reach_route
 from trellis.llm.routing import LLMConsumer, LLMRoutingError
 from trellis.logging import configure_stderr_logging
 from trellis.mcp import supersession as _supersession
+from trellis.mcp.access_log import AccessLogMiddleware
 from trellis.mcp.auth import (
     TRANSPORT_HTTP,
     HttpSettings,
@@ -122,6 +130,7 @@ from trellis.mutate import (
     CommandStatus,
     MutationExecutor,
     Operation,
+    build_api_keys_executor,
     build_curate_executor,
     build_evidence_ingest_command,
     build_evidence_ingest_command_from_args,
@@ -129,6 +138,7 @@ from trellis.mutate import (
     redirect_unreachable_settings_update,
     requires_admin_scope,
 )
+from trellis.mutate.api_key_commands import build_revoke_command
 from trellis.mutate.evidence_pointer_keys import (
     evidence_ingest_pointer_refusal,
     pointer_key_refusal,
@@ -173,6 +183,8 @@ from trellis.retrieve.sensitivity import (
     OverwriteRefusedError,
     SensitivityLabelError,
     conceal_node_pointers,
+    is_public_only,
+    read_document_row,
     readable_ids,
     refuse_overwrite,
     stamp_sensitivity,
@@ -208,6 +220,12 @@ POLICY_DENIED = -32002
 
 #: A governed mutation executed but came back non-success.
 MUTATION_FAILED = -32003
+
+#: A read for a key that reads only public documents was refused because the
+#: process is at its limit on concurrent public reads
+#: (:class:`~trellis.errors.PublicReadBusyError`). The error text
+#: carries ``retry_after_seconds=N`` (the wire has the text only); nothing ran.
+PUBLIC_READ_BUSY = -32004
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +307,26 @@ def _raise_policy_denied(
     :func:`_raise_mutation_failed`.
     """
     raise McpError(ErrorData(code=POLICY_DENIED, message=message, data=data))
+
+
+def _refuse_public_caller(tool: str) -> None:
+    """Refuse ``tool`` to a public-only caller (an ``external`` key), or return.
+
+    For a tool that reads something with no sensitivity label (the graph, a
+    trace, a precedent, an observation, file context). A ``public`` caller is
+    only ever shown a stored document someone labelled ``public``, so these are
+    refused with a stated reason rather than filtered to nothing silently. The
+    reason is the same on every refused tool and names no content.
+    """
+    if is_public_only(current_clearance()):
+        _raise_policy_denied(
+            f"{tool} is not available to an external key: it reads content that "
+            "cannot carry a public label. An external key can use get_context, "
+            "search, get_sectioned_context, get_objective_context, "
+            "get_task_context and get_items, and sees only documents labelled "
+            "public.",
+            data={"tool": tool, "reason": "external_key"},
+        )
 
 
 def _exception_detail(exc: BaseException) -> str:
@@ -501,6 +539,23 @@ class _SanitizeUncaughtToolErrors(Middleware):
             cause = exc.__cause__
             name = context.message.name
             prefix = f"Error calling tool {name!r}:"
+            if isinstance(cause, PublicReadBusyError):
+                raise McpError(
+                    ErrorData(
+                        code=PUBLIC_READ_BUSY,
+                        # The wire carries ``isError`` and this text only (the
+                        # SDK renders any handler exception as ``str(exc)``), so
+                        # the reason and the retry hint are in the text too.
+                        message=(
+                            f"public_read_busy: {cause.message} "
+                            f"(retry_after_seconds={cause.retry_after})"
+                        ),
+                        data={
+                            "reason": "public_read_busy",
+                            "retry_after_seconds": cause.retry_after,
+                        },
+                    )
+                ) from cause
             if (
                 cause is None
                 or isinstance(cause, McpError)
@@ -522,8 +577,9 @@ mcp.add_middleware(_SanitizeUncaughtToolErrors())
 #: ``execute_mutation`` are deliberately absent: neither records a boundary
 #: rejection today, and ``execute_mutation`` stamps accepted writes with the
 #: authenticated principal rather than ``mcp:execute_mutation``, so a banner
-#: raised under that label could not clear. A read tool gets the message and
-#: no event.
+#: raised under that label could not clear. ``list_api_keys`` and
+#: ``revoke_api_key`` are absent for the same reason: admin-scoped, no
+#: boundary rejection recorded. A read tool gets the message and no event.
 _RECORDED_ARGUMENT_TOOLS = frozenset(
     {"save_experience", "save_knowledge", "save_memory", "record_feedback"}
 )
@@ -606,6 +662,8 @@ class _ExplainArgumentRejections(Middleware):
 
 
 mcp.add_middleware(_ExplainArgumentRejections(mcp))
+# The lambda is late binding: ``_get_registry`` is defined below this line.
+mcp.add_middleware(AccessLogMiddleware(lambda: _get_registry()))  # noqa: PLW0108
 
 
 _registry: StoreRegistry | None = None
@@ -1398,6 +1456,18 @@ def _axis_note(axes: AxisReport) -> str:
     return "\n\n".join(note for note in notes if note)
 
 
+def _context_banner(registry: StoreRegistry) -> str:
+    """The capture-health banner for a pack reply; empty for a public-only caller.
+
+    The banner is operational health text about the store's capture surfaces,
+    not a document, so a public-only caller (an ``external`` key) is not shown
+    it. Every other caller gets :func:`_capture_warning_banner` unchanged.
+    """
+    if is_public_only(current_clearance()):
+        return ""
+    return _capture_warning_banner(registry)
+
+
 def _flat_context(
     registry: StoreRegistry,
     intent: str,
@@ -1476,8 +1546,13 @@ def _flat_context(
             refresh=refresh,
             index_mode=index,
             retrieval_phase=retrieval_phase,
+            principal_id=current_principal_id(),
         )
     except McpError:
+        raise
+    except PublicReadBusyError:
+        # A refused public read is not an assembly failure: it travels as
+        # itself so ``_SanitizeUncaughtToolErrors`` can give it its own code.
         raise
     except Exception as exc:
         logger.exception("flat_context_failed", operation=operation)
@@ -1489,7 +1564,7 @@ def _flat_context(
             data={"tool": operation, "intent": intent},
         )
 
-    banner = _capture_warning_banner(registry)
+    banner = _context_banner(registry)
     # #404: read the summary the builder stamped, do not re-derive one.
     withholding = withholding_from_payload(pack.metadata.get("withholding"))
     # A missing axis is reported in the pack's axes block on the REST
@@ -1507,6 +1582,7 @@ def _flat_context(
         embedder_configured=builder.embedder_configured,
         embedder_resolve_failure=builder.embedder_resolve_failure,
         graph_axis=pack.retrieval_report.graph_axis,
+        public_only=is_public_only(current_clearance()),
     )
     axis_note = _axis_note(axes)
 
@@ -1537,6 +1613,8 @@ def _flat_context(
         # One shape for all empty packs also keeps the look-alike rule
         # above true by construction: a withheld pack and a genuinely empty
         # one take this same path, so neither can differ by its header.
+        # Nothing is served here, so the count is a real zero.
+        note_served_items([])
         formatter = format_pack_as_index_markdown if index else format_pack_as_markdown
         result = formatter(
             [],
@@ -1576,6 +1654,9 @@ def _flat_context(
         # footer stays the last thing read (see ``_advisories_block``).
         advisories=pack.advisories,
     )
+    # The pack's own ids, kept only if the formatter printed them: it stops
+    # listing items when the token budget runs out.
+    note_printed_items(result, (item.item_id for item in pack.items))
     if banner:
         result = f"{banner}\n\n{result}"
     _track_tokens(
@@ -1628,6 +1709,7 @@ def _sectioned_context(
             run_id=run_id or None,
             refresh=refresh,
             retrieval_phase=retrieval_phase,
+            principal_id=current_principal_id(),
         )
         section_dicts = [
             {
@@ -1657,6 +1739,7 @@ def _sectioned_context(
                 embedder_configured=builder.embedder_configured,
                 embedder_resolve_failure=builder.embedder_resolve_failure,
                 graph_axis=sectioned_pack.sections[0].retrieval_report.graph_axis,
+                public_only=is_public_only(current_clearance()),
             )
             axis_note = _axis_note(axes)
         result = format_sectioned_pack_as_markdown(
@@ -1670,7 +1753,15 @@ def _sectioned_context(
             axis_note=axis_note,
             advisories=sectioned_pack.advisories,
         )
-        banner = _capture_warning_banner(registry)
+        note_printed_items(
+            result,
+            (
+                item.item_id
+                for section in sectioned_pack.sections
+                for item in section.items
+            ),
+        )
+        banner = _context_banner(registry)
         if banner:
             result = f"{banner}\n\n{result}"
         _track_tokens(
@@ -1682,6 +1773,9 @@ def _sectioned_context(
         )
     except McpError:
         # Already structured by a deeper helper — let it propagate.
+        raise
+    except PublicReadBusyError:
+        # See the flat path: a refused public read keeps its own type.
         raise
     except Exception as exc:
         logger.exception("sectioned_context_failed", tool=tool)
@@ -3425,6 +3519,7 @@ def get_lessons(
     """
     from trellis.retrieve.precedents import list_precedents as _list_prec  # noqa: PLC0415
 
+    _refuse_public_caller("get_lessons")
     registry = _get_registry()
     lessons = _list_prec(
         registry.operational.event_log,
@@ -3468,6 +3563,7 @@ def get_graph(
         depth: How many relationship hops to traverse (default 1).
         max_tokens: Maximum response size in tokens (default 2000).
     """
+    _refuse_public_caller("get_graph")
     if not entity_id or not entity_id.strip():
         _raise_invalid_params(
             "entity_id must not be empty",
@@ -3532,7 +3628,9 @@ def _render_fetched_item(
     ``get_graph`` renders, so a fetched entity carries the ``document_ids``
     evidence pointers that make it a hop rather than a dead end.
     """
-    doc = registry.knowledge.document_store.get(item_id)
+    doc = read_document_row(
+        registry.knowledge.document_store, item_id, current_clearance()
+    )
     if doc is not None:
         # Above the caller's clearance answers exactly as not-found: no other
         # kind is tried, so the reply cannot say the document exists (#194).
@@ -3541,6 +3639,12 @@ def _render_fetched_item(
         ).permits(item_id, doc.get("metadata")):
             return None
         return "document", doc.get("content", "")
+
+    if is_public_only(current_clearance()):
+        # A graph node or a trace has no label to compare, so a public-only
+        # caller is never shown one, and the reply is the not-found a missing
+        # id gets: no other kind is tried, so it cannot say the id exists.
+        return None
 
     node = registry.knowledge.graph_store.get_node(item_id)
     if node is not None:
@@ -3629,6 +3733,8 @@ def get_items(
             pack_id=pack_id.strip() or None,
         )
 
+        note_served_items(served_ids)
+
         # The serve record is the point of the tool (#305): a fetch that
         # cannot be recorded is invisible to attribution, so this emit is
         # loud — same posture as PackBuilder's PACK_ASSEMBLED emit on the
@@ -3690,6 +3796,7 @@ def get_file_context(
             (excluded by default — extraction attests mention, not fact).
         max_tokens: Maximum response size in tokens (default 2000).
     """
+    _refuse_public_caller("get_file_context")
     cleaned = [p.strip() for p in paths if p and p.strip()] if paths else []
     if not cleaned:
         _raise_invalid_params(
@@ -4749,6 +4856,7 @@ def query_observations(
         property dicts. Each dict carries ``node_id`` plus the
         schema's payload fields.
     """
+    _refuse_public_caller("query_observations")
     from trellis.schemas.well_known import OBSERVATION  # noqa: PLC0415
 
     registry = _get_registry()
@@ -5246,6 +5354,117 @@ def _close_registry() -> None:
         logger.exception("mcp_server_registry_close_failed")
     finally:
         _registry = None
+
+
+# ---------------------------------------------------------------------------
+# API-key administration. Admin scope only, so an ``external`` key (which
+# satisfies ``read`` and nothing else) is refused by the scope check. There is
+# deliberately NO mint tool: a token is a credential, and minting one over a
+# channel an agent drives would hand the agent a way to widen its own access.
+# Minting stays on ``trellis admin api-keys create`` and the admin REST route.
+# ---------------------------------------------------------------------------
+
+
+#: The one text ``list_api_keys`` answers an escaped exception with.
+_LIST_API_KEYS_FAULT = "The listing failed on the server. See the server log."
+
+
+@mcp.tool(auth=trellis_scope(SCOPE_ADMIN))
+def list_api_keys() -> str:
+    """List every API key, live and revoked. Never returns a secret or its hash.
+
+    Returns:
+        A JSON object with ``status``, ``keys`` (each ``key_id``, ``name``,
+        ``scopes``, ``created_at``, ``revoked``, ``revoked_at``) and ``count``,
+        or ``message`` on failure. This tool never raises to MCP.
+    """
+    try:
+        rows = [
+            public_listing_row(r)
+            for r in _get_registry().operational.api_key_store.list()
+        ]
+    # GRACEFUL-DEGRADATION: MCP tool surface -- never raises to the client.
+    except Exception as exc:
+        # A fixed text for the reason ``revoke_api_key`` gives below.
+        logger.exception("list_api_keys_failed", error_type=type(exc).__name__)
+        return json.dumps({"status": "error", "message": _LIST_API_KEYS_FAULT})
+    return json.dumps({"status": "ok", "keys": rows, "count": len(rows)})
+
+
+#: The one text ``revoke_api_key`` answers an escaped exception with. Neutral
+#: about the key's state: the fault can land after the revoke committed.
+_REVOKE_API_KEY_FAULT = (
+    "The revoke failed on the server and its outcome is unknown. Check the key "
+    "with list_api_keys before retrying, and see the server log."
+)
+
+
+@mcp.tool(auth=trellis_scope(SCOPE_ADMIN))
+def revoke_api_key(key_id: str) -> str:
+    """Revoke a live API key, through the governed mutation pipeline.
+
+    An unknown or already-revoked key id is refused, and so is revoking the
+    key this session is authenticated with. A caller the server cannot
+    identify (a stdio session, or HTTP with enforcement off) is refused too,
+    and pointed at ``trellis admin api-keys revoke``: revoking a credential
+    needs a named actor on the audit event.
+
+    Args:
+        key_id: The 12-hex-char key id (see ``list_api_keys``).
+
+    Returns:
+        A JSON object with ``status`` (``ok`` on success), ``key_id``, and
+        ``message`` plus ``reason`` when refused, and ``warnings`` when the
+        revoke took effect but its audit event was not recorded. This tool
+        never raises to MCP.
+    """
+    principal = current_principal_id()
+    if principal is None:
+        logger.warning("api_key_write_refused_unidentified", action="revoke")
+        return json.dumps(
+            {
+                "status": "rejected",
+                "reason": "unidentified_caller",
+                "message": (
+                    "Revoking an API key needs an identified admin credential, "
+                    "and this session has none. Use "
+                    "'trellis admin api-keys revoke <key_id>' on the server host."
+                ),
+            }
+        )
+    try:
+        command = build_revoke_command(
+            key_id,
+            requested_by="mcp:revoke_api_key",
+            actor_key_id=principal,
+        )
+        result = build_api_keys_executor(_get_registry()).execute(command)
+    # GRACEFUL-DEGRADATION: MCP tool surface -- never raises to the client.
+    except Exception as exc:
+        # The caller gets a fixed text, as REST's server fault does: what
+        # escapes here is a store's or driver's own error (a host, a user, a
+        # file path), which ``_exception_detail``'s deny-list lets through,
+        # and the tool is admin-scoped, so the caller is trusted with the
+        # outcome but not with the server's topology. The class name and the
+        # traceback go to the operator's log only.
+        logger.exception("revoke_api_key_failed", error_type=type(exc).__name__)
+        return json.dumps({"status": "error", "message": _REVOKE_API_KEY_FAULT})
+
+    if result.status != CommandStatus.SUCCESS:
+        return json.dumps(
+            {
+                "status": result.status.value,
+                "message": _result_message(result),
+                "reason": result.metadata.get("rejection_reason"),
+            }
+        )
+    return json.dumps(
+        {
+            "status": "ok",
+            "key_id": key_id,
+            **({"warnings": list(result.warnings)} if result.warnings else {}),
+        }
+    )
 
 
 #: ``trellis_cli.exit_codes.EXIT_STORE``, the code the CLI gives a typed

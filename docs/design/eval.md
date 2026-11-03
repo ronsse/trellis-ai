@@ -8,20 +8,30 @@ reports, how to add new ones.
 
 ## Where it lives
 
-The harness is in the repo root at [`eval/`](../../eval/). It is **not**
-shipped in the `trellis-ai` PyPI package — the wheel/sdist whitelists in
-`pyproject.toml` only list `src/`. To use it, work from a checkout of
-this repo with the `dev` extra installed:
+The harness is **not in this repo**. The evaluation program (runner,
+scenarios, generators, corpora) moved to the private `trellis-evals`
+repo on 2026-07-12, with its history. Every command and path below
+(`python -m eval.runner`, `eval/scenarios/`, `eval/reports/`) refers to a
+checkout of that repo; see its `README.md` for setup.
 
-```bash
-uv pip install -e ".[dev]"
-```
+What stays here:
 
+* The unit and contract tests. This repo's CI runs no eval scenario, and
+  `tests/unit/eval/` went with the harness.
+* [`eval/reports/`](../../eval/reports/), which holds eight run reports from
+  2026-06-17 to 2026-07-10 as committed records. Nothing in this repo
+  writes to it.
+* `tests/integration/_live_wipe.py`, vendored from the harness.
+
+The harness is not shipped in the `trellis-ai` wheel: the wheel lists
+only the `src/` packages, and the sdist whitelist does not list `eval/`.
 If a scenario targets a particular backend (Postgres, Neo4j, pgvector)
 install the matching extra too — see the deployment docs under
 [`docs/deployment/`](../deployment/) for backend-specific setup.
 
 ## Quickstart
+
+Run these from a `trellis-evals` checkout.
 
 ```bash
 # What scenarios exist
@@ -54,12 +64,15 @@ The `decision` field on every scenario is the point of the run — it
 states which Phase 3 deferred item the result informs and what the
 recommendation is. Metrics without a decision are noise.
 
-`eval/reports/` is gitignored (`.gitkeep` keeps the directory). Reports
-are local artifacts; share them in PR descriptions or copy notable
-numbers back into [`plan-evaluation-strategy.md`](./plan-evaluation-strategy.md)
-§5 when they unblock a Phase 3 item.
+In `trellis-evals`, `eval/reports/` is gitignored (`.gitkeep` keeps the
+directory). Reports are local artifacts; share them in PR descriptions or
+copy notable numbers back into
+[`plan-evaluation-strategy.md`](./plan-evaluation-strategy.md) §5 when
+they unblock a Phase 3 item.
 
 ## Adding a scenario
+
+In a `trellis-evals` checkout:
 
 1. Create `eval/scenarios/<name>/scenario.py`.
 2. Expose a single `run(registry: StoreRegistry) -> ScenarioReport`.
@@ -89,9 +102,10 @@ The minimal template is `_example/scenario.py`.
 
 ## CI posture
 
-The repo's CI runs the smoke test in
-`tests/unit/eval/test_runner_smoke.py`,
-which exercises discovery + execution against the `_example` scenario
-only. Heavyweight scenarios run on `workflow_dispatch` or a scheduled
-workflow — never per-push. Plan §6 has the per-scenario wall-time
-expectations.
+Nothing runs the eval suite automatically. This repo's CI runs no
+scenario (no workflow mentions `eval`, and `tests/unit/eval/` was removed
+with the harness), and `trellis-evals` had no `.github/workflows/`
+directory when [`decision-ledger.md`](./decision-ledger.md) F-2 measured
+it on 2026-08-27. The runner's own smoke test, `tests/test_runner_smoke.py`,
+is in `trellis-evals`; run it and any heavyweight scenario by hand. Plan §6
+has the per-scenario wall-time expectations.

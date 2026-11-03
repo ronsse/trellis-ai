@@ -15,12 +15,9 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+import pytest
 from typer.testing import CliRunner
-
-if TYPE_CHECKING:
-    import pytest
 
 from tests.cli_output import plain
 from trellis.core.error_sanitize import SUPPRESSED_MARKER
@@ -29,7 +26,12 @@ from trellis_cli.admin import admin_app
 from trellis_cli.admin_proposals import (
     _parse_source_file_from_preview,
 )
-from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK, EXIT_STORE
+from trellis_cli.exit_codes import (
+    EXIT_INTERNAL,
+    EXIT_OK,
+    EXIT_STORE,
+    EXIT_VALIDATION,
+)
 from trellis_cli.main import app as root_app
 from trellis_cli.stores import get_event_log
 
@@ -193,16 +195,30 @@ class TestGenerateProposals:
         assert second_data["proposals_returned"] == 1
         assert second_data["proposals"] == []
 
-    def test_dry_run_warns_and_exits_zero(
+    def test_dry_run_is_refused_without_running_the_generator(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``--dry-run`` short-circuits with a warning (Phase 0 limitation)."""
+        """``--dry-run`` is unsupported (Phase 0 limitation): refused, exit 2."""
         _init_stores(tmp_path, monkeypatch)
         _emit_extraction_failures(count=2)
 
         result = _invoke(["generate-proposals", "--dry-run"])
-        assert result.exit_code == EXIT_OK, result.output
-        assert "not supported" in result.output
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        assert "not supported" in plain(result.output)
+        assert not get_event_log().get_events(
+            event_type=EventType.PROPOSAL_DRAFTED, limit=10
+        )
+
+    def test_dry_run_json_is_one_error_object(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _init_stores(tmp_path, monkeypatch)
+
+        result = _invoke(["generate-proposals", "--dry-run", "--format", "json"])
+        assert result.exit_code == EXIT_VALIDATION, result.output
+        data = json.loads(result.stdout)
+        assert data["status"] == "error"
+        assert "--dry-run is not supported" in data["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +285,41 @@ class TestListProposals:
 # ---------------------------------------------------------------------------
 # show-proposal
 # ---------------------------------------------------------------------------
+
+
+class TestRefusedRequestsExitTwo:
+    """A request that is refused as malformed exits 2 in both formats."""
+
+    @pytest.mark.parametrize("fmt", ["text", "json"])
+    def test_list_proposals_limit_below_one_exits_two(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fmt: str
+    ) -> None:
+        """Typer's ``min=1`` refuses it before the command body runs."""
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(["list-proposals", "--limit", "0", "--format", fmt])
+        assert result.exit_code == EXIT_VALIDATION, result.output
+
+    @pytest.mark.parametrize("fmt", ["text", "json"])
+    @pytest.mark.parametrize("proposal_id", ["", "   ", "\t"])
+    def test_show_proposal_blank_id_exits_two(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        fmt: str,
+        proposal_id: str,
+    ) -> None:
+        """A whitespace-only id names nothing either, so it is refused like ``""``."""
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(["show-proposal", proposal_id, "--format", fmt])
+        assert result.exit_code == EXIT_VALIDATION, result.output
+
+    def test_an_id_that_names_no_proposal_stays_exit_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Not a malformed request: the lookup ran and found nothing."""
+        _init_stores(tmp_path, monkeypatch)
+        result = _invoke(["show-proposal", "deadbeef"])
+        assert result.exit_code == EXIT_INTERNAL, result.output
 
 
 class TestShowProposal:

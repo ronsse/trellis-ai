@@ -44,11 +44,17 @@ SRC = Path(__file__).parents[2] / "src" / "trellis_cli"
 #: summary, which exits ``EXIT_OK`` (73), plus 8 sites this widening makes
 #: visible: admin.py:1533 and :1884, analyze.py:3130, curate.py:78 and
 #: extract_refresh.py:565 (an exit under a later ``if``);
-#: extract_refresh.py:539, ingest.py:448 and :524 (an ``IfExp`` red arm).
+#: extract_refresh.py:539, ingest.py:448 and :524 (an ``IfExp`` red arm),
+#: less the 9 admin.py sites that now print through two helpers: five
+#: ``_load_graph_store_from_yaml`` refusals, the ``migrate-graph`` capacity and
+#: step-abort lines, ``_lookup_candidate_payload``'s not-found line and
+#: ``draft_promotion_adr``'s overwrite refusal (72). The helpers
+#: (``_report_refusal``, ``_report_migration_abort``) raise nothing, so each is
+#: a cross-function entry in the roster below.
 #: Lines whose exit is raised in a different function than the print stay
 #: out of this count; see the module docstring. Counted outside this scan,
 #: never computed by it.
-HAND_READ_FAILURE_LINE_COUNT = 81
+HAND_READ_FAILURE_LINE_COUNT = 72
 
 #: Spellings this repo raises to end the process.
 _EXIT_NAMES = frozenset({"typer.Exit", "SystemExit", "Exit", "click.exceptions.Exit"})
@@ -192,7 +198,7 @@ def test_every_cli_failure_line_passes_soft_wrap() -> None:
 #: ``HAND_READ_FAILURE_LINE_COUNT`` above, so a roster entry quietly
 #: dropped (or renamed past what it matches) shrinks the *measured*
 #: population below this floor instead of moving the floor with it.
-HAND_READ_CROSS_FUNCTION_COUNT = 19
+HAND_READ_CROSS_FUNCTION_COUNT = 21
 
 #: (file, function, message fragment) for each cross-function failure line:
 #: a helper prints it in red or yellow, and a caller in the same file
@@ -222,6 +228,8 @@ CROSS_FUNCTION_FAILURE_LINES = (
     ("admin.py", "_print_check_extractors_report", "not configurable from"),
     ("admin.py", "_render_smoke_text", "check['error']"),
     ("admin.py", "_render_smoke_text", "info['error']"),
+    ("admin.py", "_report_migration_abort", "Migration aborted"),
+    ("admin.py", "_report_refusal", "escape(message)"),
     ("admin_api_keys.py", "_store_error", "store error"),
     ("admin_migrate_provenance.py", "_print_text_report", "escape(err)"),
     ("curate.py", "_execute_command", "Message:"),

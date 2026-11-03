@@ -23,6 +23,11 @@ from trellis.errors import ConfigError
 from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
 from trellis.retrieve.excerpts import EXCERPT_MAX_CHARS, truncate_excerpt
 from trellis.retrieve.lifecycle import is_archived, is_demoted
+from trellis.retrieve.public_rank import (
+    PublicRead,
+    cosine,
+    public_keyword_rows,
+)
 from trellis.schemas.enums import EdgeKind
 from trellis.schemas.extraction import (
     EXTRACTION_STATUS_PROPERTY,
@@ -1496,6 +1501,82 @@ def _apply_recency_decay(
     return base_score * (floor + (1.0 - floor) * decay)
 
 
+def _public_items(
+    *,
+    strategy: str,
+    item_type: str,
+    scored: list[tuple[dict[str, Any], float]],
+    component: str,
+    domain: Any,
+    registry: ParameterRegistry | None,
+    half_life_default: float,
+    excerpt_max_chars: int,
+) -> StrategyResult:
+    """Items for ``scored`` stored document rows: importance, recency, a stamp.
+
+    Only the public-only methods call this (``KeywordSearch.public_result``,
+    ``SemanticSearch.public_result``). It mirrors the ordinary loops' per-row
+    scoring so a document's importance and recency read the same on both
+    paths; the base score is the caller's local one (see
+    :mod:`trellis.retrieve.public_rank`), never a store's.
+    """
+    half_life = _resolve_param(
+        registry, component, domain, "recency_half_life_days", half_life_default
+    )
+    floor = _resolve_param(registry, component, domain, "recency_floor", RECENCY_FLOOR)
+    importance_params = _resolve_importance_params(registry, component, domain)
+    _require_numeric_importance_params(importance_params)
+    items: list[PackItem] = []
+    skipped: list[PackItem] = []
+    for row, base_score in scored:
+        doc_id = row["doc_id"]
+        metadata = row.get("metadata") or {}
+        try:
+            score = _apply_importance(base_score, metadata, **importance_params)
+        except (ValueError, TypeError) as exc:
+            _skip_malformed_row(strategy, doc_id, "auto_importance", exc)
+            skipped.append(
+                _malformed_placeholder(doc_id, item_type, metadata, strategy)
+            )
+            continue
+        recency = resolve_recency_stamp(
+            metadata, row.get("updated_at"), row.get("created_at")
+        )
+        score = _apply_recency_decay(
+            score, recency.stamp, half_life_days=half_life, floor=floor
+        )
+        items.append(
+            PackItem(
+                item_id=doc_id,
+                item_type=item_type,
+                excerpt=truncate_excerpt(
+                    row.get("content", ""), limit=excerpt_max_chars
+                ),
+                relevance_score=score,
+                metadata={
+                    **metadata,
+                    "source_strategy": strategy,
+                    RECENCY_CLOCK_METADATA_KEY: recency.clock,
+                },
+            )
+        )
+    return StrategyResult(
+        items=sorted(items, key=lambda x: x.relevance_score, reverse=True),
+        skipped=skipped,
+    )
+
+
+def public_store_filters(filters: dict[str, Any] | None) -> dict[str, Any] | None:
+    """``filters`` as a public-only read hands them to the document store.
+
+    ``domain`` is a scoping hint already carried on the ``content_tags`` facet
+    (default-pass), and the graph-axis control keys are not metadata; both go,
+    as on the ordinary keyword path.
+    """
+    kept = {k: v for k, v in filters.items() if k != "domain"} if filters else None
+    return strip_graph_controls(kept)
+
+
 class KeywordSearch(SearchStrategy):
     """Full-text keyword search via DocumentStore."""
 
@@ -1638,6 +1719,41 @@ class KeywordSearch(SearchStrategy):
         return StrategyResult(
             items=sorted(items, key=lambda x: x.relevance_score, reverse=True),
             skipped=skipped,
+        )
+
+    def public_result(
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+        filters: dict[str, Any] | None = None,
+        read: PublicRead | None = None,
+    ) -> StrategyResult:
+        """The public-only keyword read: public documents, matched and scored here.
+
+        Reached only from the public-only path. The public documents are read
+        by predicate (``read``, or the caller's own so the keyword and semantic
+        axes of one pack share a read) and matched and scored locally
+        (:func:`~trellis.retrieve.public_rank.public_keyword_rows`): the
+        store's ``search`` is not called, so no hidden document can outrank, or
+        move the score of, a public one, and a query word is never looked up
+        among hidden rows. :meth:`search_result` is unchanged.
+        """
+        scored = public_keyword_rows(
+            self._store,
+            query,
+            filters=public_store_filters(filters),
+            read=read,
+        )[:limit]
+        return _public_items(
+            strategy=self.name,
+            item_type="document",
+            scored=scored,
+            component=_KEYWORD_COMPONENT,
+            domain=(filters or {}).get("domain"),
+            registry=self._registry,
+            half_life_default=self._recency_half_life_days,
+            excerpt_max_chars=self._excerpt_max_chars,
         )
 
 
@@ -1813,6 +1929,59 @@ class SemanticSearch(SearchStrategy):
         return StrategyResult(
             items=sorted(items, key=lambda x: x.relevance_score, reverse=True),
             skipped=skipped,
+        )
+
+    def public_result(
+        self,
+        query: str,
+        document_store: Any,
+        *,
+        limit: int = 20,
+        filters: dict[str, Any] | None = None,
+        read: PublicRead | None = None,
+    ) -> StrategyResult:
+        """The public-only semantic read: public documents, cosine computed here.
+
+        Reached only from the public-only path. ``VectorStore.query`` is not
+        called: two backends filter after an approximate-neighbour over-fetch,
+        so hidden rows would still push public ones out of it. The public
+        documents are listed from ``document_store`` (the label is a query
+        predicate; ``read`` is the caller's own read, shared with the keyword
+        axis), each one's own vector is read with ``VectorStore.get``, and
+        cosine against the query vector is computed over those and no others.
+        A document with no vector, an unreadable one, or one of another width
+        is skipped. A document that corpus ingest chunked has a vector per
+        chunk and none of its own, so this axis cannot read it (the keyword
+        axis can). :meth:`search_result` is unchanged.
+        """
+        if self._embedding_fn is None:
+            logger.warning("semantic_search_no_embedding_fn")
+            return StrategyResult(items=[], skipped=[])
+        query_vector = self._embedding_fn(query)
+        scored: list[tuple[dict[str, Any], float]] = []
+        shared = read or PublicRead(
+            document_store, filters=public_store_filters(filters)
+        )
+        for row in shared.rows:
+            try:
+                stored = self._store.get(row["doc_id"])
+            except (ValueError, TypeError):
+                continue
+            if not stored:
+                continue
+            similarity = cosine(query_vector, stored.get("vector"))
+            if similarity is not None:
+                scored.append((row, similarity))
+        scored.sort(key=lambda pair: (-pair[1], str(pair[0]["doc_id"])))
+        return _public_items(
+            strategy=self.name,
+            item_type="vector",
+            scored=scored[:limit],
+            component=_SEMANTIC_COMPONENT,
+            domain=(filters or {}).get("domain"),
+            registry=self._registry,
+            half_life_default=self._recency_half_life_days,
+            excerpt_max_chars=self._excerpt_max_chars,
         )
 
     @staticmethod

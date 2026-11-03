@@ -89,6 +89,28 @@ class BackendNotInstalledError(ConfigError):
         self.code = "BACKEND_NOT_INSTALLED"
 
 
+class PublicReadBusyError(TrellisError):
+    """A public-only read was refused because the process is at its limit.
+
+    A caller that reads only ``public`` documents (an ``external`` key) is
+    served by reading and ranking every public document it may see, which costs
+    the same on every call and is not shaped by what the key asks for. The
+    process therefore admits at most
+    :data:`trellis.retrieve.public_rank.MAX_CONCURRENT_PUBLIC_READS` of them at
+    once and refuses the rest immediately (no queue: a queue would hold a worker
+    thread, which is what the limit protects). Only public reads are counted,
+    so the refusal says nothing about hidden documents or other traffic.
+
+    ``retry_after`` is the seconds a caller should wait: ``Retry-After`` on
+    REST (HTTP 429); on MCP the seconds are in the error text only, because the
+    wire carries the text and no ``data`` field.
+    """
+
+    def __init__(self, message: str, *, retry_after: int = 1) -> None:
+        self.retry_after = retry_after
+        super().__init__(message, code="PUBLIC_READ_BUSY")
+
+
 class StoreError(TrellisError):
     """Raised when a storage operation fails."""
 
