@@ -6,16 +6,26 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
-- **A document's regulatory tags can be set without changing what it serves.**
+- **A document's regulatory tags can be set without changing which documents a key can read.**
   `trellis curate tag-regulatory <doc_id> --tag pii [--tag phi ...] [--clear]` and
   `POST /api/v1/documents/{doc_id}/regulatory-tags` run the governed
   `classification.tag_regulatory` operation, which writes only the `regulatory_tags` field of
-  the stored classification record (lower-cased, de-duplicated, sorted; open vocabulary) and
-  leaves `sensitivity`, `jurisdiction` and `classification_version` as they were. It refuses,
-  with nothing written, a `public` document (an `external` key reads one only while its record
-  is exactly the public record, so a tag would withhold it), a record that cannot be read, and
-  a chunk id. On every other label the document is served to the same keys before and after.
-  `classification.set` is unchanged and still replaces a record's tags. No MCP tool.
+  the stored classification record (lower-cased, de-duplicated, sorted; open vocabulary; at
+  most 32 distinct tags, counted after normalisation on every surface) and leaves
+  `sensitivity`, `jurisdiction`, `classification_version` and `classified_by` as they were.
+  A document with no record gets one at `internal`, the level it already read, with
+  `classified_by: ["regulatory-tag"]`, which `trellis classify label-candidates` still scans:
+  tagging a document is not labelling it. It refuses, with nothing written, a `public`
+  document (an `external` key reads one only while its record is exactly the public record,
+  so a tag would withhold it), a record that cannot be read, and a chunk id. Which documents a
+  key can read is the same before and after on every other label. Like every metadata-only
+  write (a relabel included), re-writing the row can reorder documents whose ranks tie
+  exactly, so a pack at a per-strategy fetch boundary can serve the other tied item.
+  `classification.set` keeps a record's tags on a relabel to a level other than `public` and
+  refuses a relabel to `public` while tags are present, so a tagged document cannot be
+  relabelled `public` until `tag-regulatory --clear` runs. The operation is also reachable
+  through MCP `execute_mutation` and `POST /commands/batch` with the caller's clearance; there
+  is no dedicated MCP tool.
 
 - **API keys can be listed, minted and revoked from the REST API, the UI and MCP.**
   `GET`/`POST /api/v1/api-keys` and `DELETE /api/v1/api-keys/{key_id}` (admin scope), a

@@ -29,6 +29,8 @@ finding may hold exactly what an owner would want to label.
 The rules live in :data:`LABEL_RULES`, the one place to read or change them.
 Documents that already carry a ``data_classification`` record are skipped and
 counted: a person has decided about them, and a proposal would second-guess it.
+The one exception is a record that only ``classification.tag_regulatory`` wrote
+(``classified_by == ["regulatory-tag"]``): tagging a document is not labelling it.
 Chunk rows are not read; a chunk takes its parent's label, and the parent holds
 the same text.
 """
@@ -43,7 +45,10 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trellis.classify.refresh import DEFAULT_PAGE_SIZE
-from trellis.schemas.classification import DATA_CLASSIFICATION_KEY
+from trellis.schemas.classification import (
+    DATA_CLASSIFICATION_KEY,
+    REGULATORY_TAG_CLASSIFIER,
+)
 
 if TYPE_CHECKING:
     from trellis.stores.base.document import DocumentStore
@@ -220,8 +225,20 @@ def _is_labelled(metadata: object) -> bool:
     Presence, not value. A record that is malformed reads as ``restricted``
     everywhere else (:func:`trellis.schemas.classification.sensitivity_of`), so
     it is not an unlabelled document either.
+
+    One record is not a decision: the one ``classification.tag_regulatory``
+    creates on a document that had none, whose ``classified_by`` is exactly
+    ``[REGULATORY_TAG_CLASSIFIER]``. It holds the level the document already
+    read, so no person chose its sensitivity and the scan still reads it. Any
+    other record, whatever its ``classified_by``, is a label.
     """
-    return isinstance(metadata, Mapping) and DATA_CLASSIFICATION_KEY in metadata
+    if not (isinstance(metadata, Mapping) and DATA_CLASSIFICATION_KEY in metadata):
+        return False
+    record = metadata[DATA_CLASSIFICATION_KEY]
+    tag_only = isinstance(record, Mapping) and record.get("classified_by") == [
+        REGULATORY_TAG_CLASSIFIER
+    ]
+    return not tag_only
 
 
 def scan_for_label_candidates(

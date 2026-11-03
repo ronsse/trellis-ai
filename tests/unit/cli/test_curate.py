@@ -2897,6 +2897,51 @@ class TestCurateTagRegulatory:
         assert codes[0] == codes[1] != 0
         assert self._record() == public_label_record()
 
+    def test_the_cap_counts_distinct_tags_after_normalisation(self) -> None:
+        """33 entries holding a duplicate are 32 tags; 33 distinct are refused."""
+        self._seed(self._internal())
+        self._seed(self._internal(), doc_id="doc-2")
+        names = [f"t{i:02d}" for i in range(32)]
+
+        def args(doc_id: str, tags: list[str]) -> list[str]:
+            flags = [flag for tag in tags for flag in ("--tag", tag)]
+            return ["curate", "tag-regulatory", doc_id, *flags, "--format", "json"]
+
+        accepted = runner.invoke(app, args("doc-1", [*names, "T00"]))
+        assert accepted.exit_code == 0, accepted.output
+        assert self._record()["regulatory_tags"] == names
+
+        refused = runner.invoke(app, args("doc-2", [*names, "t32"]))
+        assert refused.exit_code != 0
+        assert json.loads(refused.stdout.strip())["status"] == "rejected"
+        assert self._record("doc-2")["regulatory_tags"] == []
+
+    def test_tagging_an_unlabelled_pii_document_leaves_label_candidates_unchanged(
+        self,
+    ) -> None:
+        """Tagging is not labelling: the scan reports the same before and after."""
+        from trellis_cli.stores import _get_registry
+
+        _get_registry().knowledge.document_store.put(
+            "doc-1", "mail alice@example.com about the keys", {"title": "t"}
+        )
+
+        def scan() -> dict[str, object]:
+            result = runner.invoke(
+                app, ["classify", "label-candidates", "--format", "json"]
+            )
+            assert result.exit_code == 0, result.output
+            return json.loads(result.stdout.strip())
+
+        before = scan()
+        assert before["documents_flagged"] == 1
+        tagged = runner.invoke(
+            app, ["curate", "tag-regulatory", "doc-1", "--tag", "pii"]
+        )
+        assert tagged.exit_code == 0, tagged.output
+        assert self._record()["classified_by"] == ["regulatory-tag"]
+        assert scan() == before
+
     def test_neither_a_tag_nor_clear_is_refused(self) -> None:
         self._seed(self._internal())
         result = runner.invoke(

@@ -82,6 +82,7 @@ from trellis.retrieve.sensitivity import (
 from trellis.schemas.classification import (
     DATA_CLASSIFICATION_KEY,
     LIFECYCLE_KEY,
+    REGULATORY_TAG_CLASSIFIER,
     SENSITIVITY_ORDER,
     DataClassification,
     Lifecycle,
@@ -639,16 +640,19 @@ def _stored_tags(record: dict[str, Any]) -> list[str] | None:
 
 
 class ClassificationTagRegulatoryHandler:
-    """Set one document's ``regulatory_tags`` without changing what it serves.
+    """Set one document's ``regulatory_tags`` without changing who may read it.
 
     The tags are a label *about* the content (``pii``, ``phi``), not a limit on
     who reads it, so this write must never move a document in or out of any
     caller's reach. It writes one field of the stored
     :class:`~trellis.schemas.classification.DataClassification` record and
     carries every other key of that record forward untouched (``sensitivity``,
-    ``jurisdiction``, ``classification_version``, an unknown key); the one
-    exception is ``classified_by``, which gains ``"caller"`` when absent, as a
-    relabel records a person's call (``_relabelled_record``).
+    ``jurisdiction``, ``classification_version``, ``classified_by``, an unknown
+    key). It never claims a person made a sensitivity call: on a document with a
+    record it leaves ``classified_by`` alone, and on one with none it writes
+    ``classified_by=[REGULATORY_TAG_CLASSIFIER]``, which the label proposer reads
+    as "no one has labelled this" (``classification.set`` still records
+    ``"caller"`` when a person relabels).
 
     ``tags`` replaces the document's set (the other tags are not merged in), and
     ``clear`` with an empty ``tags`` removes it. Re-applying the stored set is a
@@ -672,6 +676,13 @@ class ClassificationTagRegulatoryHandler:
     content and the row's clock are untouched, and ``put_document`` re-mirrors
     ``data_classification`` onto the document's vector row. A document above
     ``clearance`` answers as a missing one, as it does for ``classification.set``.
+
+    **What it does not promise.** Which documents a key can read does not move.
+    Like every metadata-only write (a relabel included), re-writing the row can
+    reorder documents whose ranks tie exactly (SQLite FTS deletes and inserts the
+    row, the vector store replaces it, and the ranking queries have no tiebreak),
+    so a pack sitting at a per-strategy fetch boundary can serve the other tied
+    item.
     """
 
     def __init__(
@@ -737,7 +748,7 @@ class ClassificationTagRegulatoryHandler:
             record: dict[str, Any] = DataClassification(
                 sensitivity="internal",
                 regulatory_tags=tags,
-                classified_by=["caller"],
+                classified_by=[REGULATORY_TAG_CLASSIFIER],
             ).model_dump(mode="json")
         else:
             prior = metadata[DATA_CLASSIFICATION_KEY]
@@ -768,9 +779,6 @@ class ClassificationTagRegulatoryHandler:
                 )
             previous = stored or []
             record = {**prior, "regulatory_tags": tags}
-            classified_by = prior.get("classified_by")
-            if isinstance(classified_by, list) and "caller" not in classified_by:
-                record["classified_by"] = [*classified_by, "caller"]
 
         metadata[DATA_CLASSIFICATION_KEY] = record
         put_document(

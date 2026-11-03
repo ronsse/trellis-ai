@@ -1697,11 +1697,13 @@ record merely reads `public` (a corpus file's frontmatter is stored bare as
 `external` key does not read it until it is. A record that carries regulatory tags,
 a jurisdiction, another classification version or a field the schema does not know
 is refused (exit `2`, reason `classification_public_discards`, naming those
-fields, `Nothing was written.`) rather than cleared silently. Neither the CLI nor
-REST can clear a record's tags, so such a document stays unserved to `external` keys
-until a command that clears them exists (a known gap; `tag-regulatory --clear` is not
-that command, because it refuses a `public` record). Only a stored record that
-already is the exact one answers `unchanged`. A relabel to `public` replaces
+fields, `Nothing was written.`) rather than cleared silently. A document that is
+not yet `public` and carries tags is therefore refused a `public` relabel until
+`trellis curate tag-regulatory <doc_id> --clear` removes them. One that already
+reads `public` with tags cannot be cleared that way (`tag-regulatory` refuses a
+`public` record, because clearing it would change what an `external` key reads), so it
+stays unserved to `external` keys until a command that clears it exists (a known
+gap). Only a stored record that already is the exact one answers `unchanged`. A relabel to `public` replaces
 `classified_by` with the exact record's value (the refusal does not name it); a
 target other than `public` keeps the prior fields and its message says nothing about
 a rewrite, as it always did. The exit code is the same under `--format text` and
@@ -1718,8 +1720,12 @@ the answer is `400` and nothing is written.
 Set the regulatory tags (`pii`, `phi`, any open-vocabulary word) of a stored
 document's classification record. A metadata-only write through the governed
 `classification.tag_regulatory` operation, built for one property: **it never
-changes what any pack, search or read serves.** The tags say what the content
-is; they are not a limit on who reads it.
+changes which documents a key can read.** The tags say what the content is; they
+are not a limit on who reads it. It does not promise that every ranking is
+byte-identical: like every metadata-only write (a relabel included), re-writing the
+row can reorder documents whose ranks tie exactly (SQLite FTS deletes and inserts the
+row, the vector store replaces it, and the ranking queries have no tiebreak), so a
+pack sitting at a per-strategy fetch boundary can serve the other tied item.
 
 ```bash
 trellis curate tag-regulatory <doc_id> --tag <tag> [--tag <tag> ...] [--by <who>] [--format text|json]
@@ -1740,14 +1746,17 @@ stored set is a successful no-op that writes nothing (`Regulatory tags unchanged
 (`regulatory_tags_shape`).
 
 The write touches the `regulatory_tags` field and nothing else of the record:
-`sensitivity`, `jurisdiction`, `classification_version` and any other key are carried
-forward byte for byte, the content and the row's `updated_at` are untouched, and the
-vector row is re-mirrored by the same `put_document` call every metadata write uses.
-`classified_by` gains `"caller"` when it lacks it, as a relabel does, because the
-record now carries a person's call. A document with no record at all gets a new one
-at `sensitivity: internal` (the label it already read as) holding the tags; that
-stops the label proposer listing it as unlabelled and flips `stored` on the Memories
-tab, and changes nothing a reader is served.
+`sensitivity`, `jurisdiction`, `classification_version`, `classified_by` and any other
+key are carried forward byte for byte, the content and the row's `updated_at` are
+untouched, and the vector row is re-mirrored by the same `put_document` call every
+metadata write uses. A tag write never claims a person chose a sensitivity, so it
+never adds `"caller"` to `classified_by`. A document with no record at all gets a new
+one at `sensitivity: internal` (the label it already read as) holding the tags, with
+`classified_by: ["regulatory-tag"]`. `trellis classify label-candidates` reads a record
+whose `classified_by` is exactly that as unlabelled and still scans the document; any
+other record is a label and is skipped, as before. The Memories tab `stored` flag
+reads the new record as stored (it tests that a record exists, not who wrote it), and
+that is left as it is. `--clear` leaves the record in place with an empty tag set.
 
 **What it refuses, because it would change serving** (exit `2`, `"status":
 "rejected"`, nothing written):
@@ -1773,8 +1782,20 @@ the same under `--format text` and `--format json`.
 `POST /api/v1/documents/{doc_id}/regulatory-tags` with body `{"tags": ["pii", "phi"]}`
 (or `{"clear": true}`) is the credentialed equivalent and returns a
 `CommandResponse`. It needs the `mutate` scope; a refusal is `400` and nothing is
-written. There is no MCP tool for it. `classification.set` is unchanged: a relabel
-still replaces the tags of the record it rewrites.
+written. The 32-tag cap counts distinct tags after normalisation on every surface, so
+33 entries holding one duplicate are accepted and 33 distinct tags are refused.
+
+**Other ways to reach it.** The operation is also available through MCP
+`execute_mutation` and REST `POST /commands/batch`, run with the caller's clearance
+exactly as `classification.set` is. There is still no dedicated MCP tool.
+
+**Relabelling a tagged document.** `classification.set` does not discard tags on a
+relabel to a level other than `public`: `_relabelled_record` keeps the record's
+`regulatory_tags` and `jurisdiction` when they validate, and adds `"caller"` to
+`classified_by`, because a person asked for that label. A relabel to `public` is
+refused while the record carries tags (`classification_public_discards`, nothing
+written). A tagged document therefore cannot be relabelled `public` until
+`tag-regulatory --clear` has run.
 
 ### `trellis curate redact`
 
@@ -3543,7 +3564,7 @@ result = executor.execute(cmd)
 |-----------|---------------|-------------|
 | `evidence.ingest` | `evidence` (dict) | Ingest evidence via the mutation pipeline. A caller-chosen `evidence.doc_id` may not start with `trace-summary:` (the trace embed worker's namespace: a row there makes the trace it names look already embedded, so its real summary is never written; code `reserved_trace_summary_id`), may not sit in the `precedent://learning/` namespace, and may not be a minted `<x>#chunk-<digits>` chunk id (both `reserved_document_id`). The prefix is exact and case-sensitive. `POST /api/v1/evidence`, `POST /api/v1/documents`, MCP `save_memory` and `trellis ingest evidence` refuse it the same way |
 | `classification.set` | `doc_id`, `sensitivity` | Relabel a document's `DataClassification.sensitivity` (metadata only; `updated_at` preserved, vector row re-mirrored). A document above the caller's clearance is `target_not_found`, as a missing one is; a requested label above the caller's clearance is refused (`policy_violation`, nothing written); a chunk id is `classification_set_chunk`; a malformed `doc_id`/`sensitivity` is `classification_set_shape`. Re-applying the stored label is a successful no-op, with two exceptions. `restricted` over a record that cannot be parsed, which reads `restricted` without stating it, replaces the record: fields that validate are kept, and anything else is dropped and not kept anywhere. `public` writes the exact record an `external` key reads, so a record that only reads `public` is rewritten, and one carrying regulatory tags, a jurisdiction, another version or an unknown field is refused (`classification_public_discards`, nothing written). A row whose `metadata` is not an object fails with `Execution failed: <class>` and is not repaired. Also available via `trellis curate classify-sensitivity` and `POST /api/v1/documents/{doc_id}/sensitivity` |
-| `classification.tag_regulatory` | `doc_id`, `tags` (list of strings) or `clear` (bool) | Set a document's `DataClassification.regulatory_tags` without changing what it serves (metadata only; `updated_at` preserved, vector row re-mirrored). `tags` replaces the set (lower-cased, de-duplicated, sorted; at most 32 of at most 64 characters); `clear: true` with no `tags` removes it. Writes only that field, plus `"caller"` in `classified_by`. A `public` document, a record that cannot be read and a chunk id are refused with nothing written (`regulatory_tags_public`, `regulatory_tags_corrupt_record`, `regulatory_tags_chunk`); a document above the caller's clearance is `target_not_found`; both or neither of `tags`/`clear` is `regulatory_tags_shape`. Also available via `trellis curate tag-regulatory` and `POST /api/v1/documents/{doc_id}/regulatory-tags` |
+| `classification.tag_regulatory` | `doc_id`, `tags` (list of strings) or `clear` (bool) | Set a document's `DataClassification.regulatory_tags` without changing which documents a key can read (metadata only; `updated_at` preserved, vector row re-mirrored). `tags` replaces the set (lower-cased, de-duplicated, sorted; at most 32 distinct tags of at most 64 characters, counted after normalisation); `clear: true` with no `tags` removes it. Writes only that field and leaves `classified_by` alone; a document with no record gets one at `internal` with `classified_by: ["regulatory-tag"]`, which `classify label-candidates` still scans. A `public` document, a record that cannot be read and a chunk id are refused with nothing written (`regulatory_tags_public`, `regulatory_tags_corrupt_record`, `regulatory_tags_chunk`); a document above the caller's clearance is `target_not_found`; both or neither of `tags`/`clear` is `regulatory_tags_shape`. Also available via `trellis curate tag-regulatory` and `POST /api/v1/documents/{doc_id}/regulatory-tags`, and through MCP `execute_mutation` and REST `POST /commands/batch` with the caller's clearance (no dedicated MCP tool) |
 | `evidence.attach` | `evidence_id`, `target_id`, `target_type` | Attach evidence to a trace, entity, or precedent |
 
 ### Entity Operations

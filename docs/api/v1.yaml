@@ -2825,13 +2825,15 @@ components:
 
         ``tags`` is an open vocabulary (``pii``, ``phi``, ...), lower-cased, de-duplicated
 
-        and sorted by the server, and it replaces the document''s set. Send ``clear``
+        and sorted by the server, and it replaces the document''s set. The server bounds
 
-        with no tags to remove the set. Tagging never changes who may read the
+        the set after that normalisation (at most 32 distinct tags), as the CLI does, so
 
-        document, so a ``public`` document, whose exact record an ``external`` key
+        this model puts no cap on the raw list. Send ``clear`` with no tags to remove
 
-        needs, is refused.'
+        the set. Tagging never changes who may read the document, so a ``public``
+
+        document, whose exact record an ``external`` key needs, is refused.'
       properties:
         clear:
           default: false
@@ -2844,7 +2846,6 @@ components:
         tags:
           items:
             type: string
-          maxItems: 32
           title: Tags
           type: array
       title: RegulatoryTagsRequest

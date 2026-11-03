@@ -1,10 +1,12 @@
-"""``classification.tag_regulatory``: tag a document without changing what it serves.
+"""``classification.tag_regulatory``: tag a document without changing who may read it.
 
 The handler writes one field, ``DataClassification.regulatory_tags``. The hard
 requirement is that no caller's access to the document moves because of it, so
 the serving tests here compare every clearance's verdict before and after, and
 the refusals (a ``public`` document, a corrupt record) are the guard that keeps
-that true for the one label where it would not be.
+that true for the one label where it would not be. It also never claims a person
+labelled the document: ``classified_by`` is left alone on a record that exists and
+is ``["regulatory-tag"]`` on one it creates, which the label proposer still scans.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from tests.unit.retrieve.test_sensitivity import label
+from trellis.classify.label_proposer import scan_for_label_candidates
 from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Command, CommandResult, CommandStatus, Operation
@@ -31,6 +34,7 @@ from trellis.retrieve.public_rank import read_public_documents
 from trellis.retrieve.sensitivity import DocumentClearance
 from trellis.schemas.classification import (
     DATA_CLASSIFICATION_KEY,
+    REGULATORY_TAG_CLASSIFIER,
     SENSITIVITY_ORDER,
     Sensitivity,
     is_public_label,
@@ -216,7 +220,7 @@ class TestSetsAndClears:
     def test_an_unlabelled_document_gets_a_record_saying_internal(
         self, registry: StoreRegistry
     ) -> None:
-        """The level it already read; ``classified_by`` records the person."""
+        """The level it already read, and ``classified_by`` names the tag write."""
         _put(registry, "doc", None)
         assert sensitivity_of(_row(registry, "doc")["metadata"]) == "internal"
         result = _tag(registry, "doc", "pii")
@@ -225,9 +229,10 @@ class TestSetsAndClears:
             "sensitivity": "internal",
             "regulatory_tags": ["pii"],
             "jurisdiction": [],
-            "classified_by": ["caller"],
+            "classified_by": [REGULATORY_TAG_CLASSIFIER],
             "classification_version": "1",
         }
+        assert REGULATORY_TAG_CLASSIFIER == "regulatory-tag"
         assert _row(registry, "doc")["metadata"]["title"] == "t"
 
     def test_a_metadata_only_write_keeps_content_and_the_clock(
@@ -293,33 +298,153 @@ class TestWritesOnlyTheTagField:
 
         new = _record(registry, "doc")
         assert new["regulatory_tags"] == ["phi", "pii"]
-        expected = {**prior, "regulatory_tags": ["phi", "pii"]}
-        if isinstance(prior.get("classified_by"), list):
-            expected["classified_by"] = [
-                *prior["classified_by"],
-                *([] if "caller" in prior["classified_by"] else ["caller"]),
-            ]
-        assert new == expected
+        assert new == {**prior, "regulatory_tags": ["phi", "pii"]}
         for field in ("sensitivity", "jurisdiction", "classification_version"):
             assert json.dumps(new.get(field)) == json.dumps(prior.get(field)), field
         assert _row(registry, "doc")["metadata"]["title"] == "t"
 
-    def test_classified_by_gains_caller_once_as_a_relabel_records_it(
-        self, registry: StoreRegistry
+    @pytest.mark.parametrize(
+        "classified_by",
+        [
+            ["import"],
+            ["import", "caller"],
+            [],
+            [REGULATORY_TAG_CLASSIFIER],
+            ["llm_facet", "regulatory-tag"],
+        ],
+        ids=["import", "import-caller", "empty", "tag-only", "tag-among-others"],
+    )
+    def test_classified_by_is_left_byte_identical_on_an_existing_record(
+        self, registry: StoreRegistry, classified_by: list[str]
     ) -> None:
+        """A tag write makes no sensitivity call, so it never says a person did."""
         registry.knowledge.document_store.put(
             "doc",
             BODY,
             {
                 DATA_CLASSIFICATION_KEY: {
                     "sensitivity": "internal",
-                    "classified_by": ["import"],
+                    "classified_by": list(classified_by),
                 }
             },
         )
         _tag(registry, "doc", "pii")
         _tag(registry, "doc", "phi")
-        assert _record(registry, "doc")["classified_by"] == ["import", "caller"]
+        _tag(registry, "doc", clear=True)
+        assert json.dumps(_record(registry, "doc")["classified_by"]) == json.dumps(
+            classified_by
+        )
+
+    def test_a_record_with_no_classified_by_key_gains_none(
+        self, registry: StoreRegistry
+    ) -> None:
+        registry.knowledge.document_store.put(
+            "doc", BODY, {DATA_CLASSIFICATION_KEY: {"sensitivity": "confidential"}}
+        )
+        _tag(registry, "doc", "pii")
+        assert "classified_by" not in _record(registry, "doc")
+
+
+def _relabel(registry: StoreRegistry, doc_id: str, sensitivity: str) -> CommandResult:
+    return _executor(registry).execute(
+        Command(
+            operation=Operation.CLASSIFICATION_SET,
+            args={"doc_id": doc_id, "sensitivity": sensitivity},
+            requested_by="tester",
+        )
+    )
+
+
+PII_BODY = "contact alice@example.com about the vault seal rotation"
+
+
+class TestTaggingIsNotLabelling:
+    """A tag write must not hide a document from ``label-candidates``."""
+
+    @staticmethod
+    def _scan(registry: StoreRegistry) -> dict[str, object]:
+        report = scan_for_label_candidates(registry.knowledge.document_store)
+        return {
+            "documents_flagged": report.documents_flagged,
+            "skipped_labelled": report.skipped_labelled,
+            "flagged": sorted({f.doc_id for f in report.findings}),
+        }
+
+    def test_tagging_an_unlabelled_pii_document_leaves_it_flagged(
+        self, registry: StoreRegistry
+    ) -> None:
+        store = registry.knowledge.document_store
+        store.put("doc-open", PII_BODY, {"title": "t"})
+        store.put("doc-labelled", PII_BODY, label("internal"))
+        before = self._scan(registry)
+        assert before == {
+            "documents_flagged": 1,
+            "skipped_labelled": 1,
+            "flagged": ["doc-open"],
+        }
+
+        result = _tag(registry, "doc-open", "pii")
+        assert result.status == CommandStatus.SUCCESS, result.message
+        assert DATA_CLASSIFICATION_KEY in _row(registry, "doc-open")["metadata"]
+
+        assert self._scan(registry) == before
+
+    def test_tagging_a_labelled_document_leaves_it_skipped(
+        self, registry: StoreRegistry
+    ) -> None:
+        registry.knowledge.document_store.put("doc", PII_BODY, label("internal"))
+        before = self._scan(registry)
+        _tag(registry, "doc", "pii")
+        assert self._scan(registry) == before
+        assert before["skipped_labelled"] == 1
+
+    def test_clearing_the_tags_still_leaves_it_flagged(
+        self, registry: StoreRegistry
+    ) -> None:
+        registry.knowledge.document_store.put("doc", PII_BODY, {"title": "t"})
+        before = self._scan(registry)
+        _tag(registry, "doc", "pii")
+        _tag(registry, "doc", clear=True)
+        assert self._scan(registry) == before
+
+    @pytest.mark.parametrize("target", ["confidential", "restricted"])
+    def test_a_relabel_afterwards_is_a_persons_call(
+        self, registry: StoreRegistry, target: str
+    ) -> None:
+        """``_relabelled_record`` appends ``caller``; the scan then skips it."""
+        registry.knowledge.document_store.put("doc", PII_BODY, {"title": "t"})
+        _tag(registry, "doc", "pii", "phi")
+        assert _record(registry, "doc")["classified_by"] == [REGULATORY_TAG_CLASSIFIER]
+        assert self._scan(registry)["documents_flagged"] == 1
+
+        result = _relabel(registry, "doc", target)
+
+        assert result.status == CommandStatus.SUCCESS, result.message
+        record = _record(registry, "doc")
+        assert record["sensitivity"] == target
+        assert record["regulatory_tags"] == ["phi", "pii"]
+        assert record["classified_by"] == [REGULATORY_TAG_CLASSIFIER, "caller"]
+        assert self._scan(registry) == {
+            "documents_flagged": 0,
+            "skipped_labelled": 1,
+            "flagged": [],
+        }
+
+    def test_a_tagged_document_cannot_be_relabelled_public_until_cleared(
+        self, registry: StoreRegistry
+    ) -> None:
+        registry.knowledge.document_store.put("doc", PII_BODY, {"title": "t"})
+        _tag(registry, "doc", "pii")
+        before = _row(registry, "doc")
+
+        refused = _relabel(registry, "doc", "public")
+        assert refused.status == CommandStatus.REJECTED
+        assert "regulatory_tags" in refused.message
+        assert _row(registry, "doc") == before
+
+        assert _tag(registry, "doc", clear=True).status == CommandStatus.SUCCESS
+        assert _relabel(registry, "doc", "public").status == CommandStatus.SUCCESS
+        assert is_public_label(_row(registry, "doc")["metadata"])
 
 
 class TestServingIsUnchanged:

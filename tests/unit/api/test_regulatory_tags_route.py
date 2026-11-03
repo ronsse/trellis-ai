@@ -1,4 +1,4 @@
-"""``POST /api/v1/documents/{id}/regulatory-tags``, and tagging never moves serving.
+"""``POST /api/v1/documents/{id}/regulatory-tags``; tagging never moves who reads what.
 
 Two things are held here. The route answers as its sibling
 ``.../sensitivity`` does (200 on success, 400 on a refusal, 403 below the
@@ -188,6 +188,26 @@ class TestRoute:
             sensitivity="public",
         )
         assert resp.status_code == 422, resp.text
+
+    def test_the_cap_counts_distinct_tags_after_normalisation(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """33 entries holding a duplicate are 32 tags; 33 distinct are refused."""
+        _seed(registry)
+        headers = _headers(registry, MUTATE_RESTRICTED)
+        names = [f"t{i:02d}" for i in range(32)]
+
+        accepted = _tag(client, headers, "doc-internal", tags=[*names, "T00"])
+        assert accepted.status_code == 200, accepted.text
+        stored = registry.knowledge.document_store.get("doc-internal")
+        assert stored is not None
+        assert stored["metadata"][DATA_CLASSIFICATION_KEY]["regulatory_tags"] == names
+
+        before = registry.knowledge.document_store.get("doc-confidential")
+        refused = _tag(client, headers, "doc-confidential", tags=[*names, "t32"])
+        assert refused.status_code == 400, refused.text
+        assert "32" in refused.json()["detail"]
+        assert registry.knowledge.document_store.get("doc-confidential") == before
 
     def test_a_missing_document_is_400(
         self, client: TestClient, registry: StoreRegistry

@@ -348,6 +348,15 @@ Sensitivity = Literal["public", "internal", "confidential", "restricted"]
 #: Metadata key a document's :class:`DataClassification` record lives under.
 DATA_CLASSIFICATION_KEY = "data_classification"
 
+#: The ``classified_by`` of a record that ``classification.tag_regulatory`` created
+#: on a document that had none. A tag write records what wrote it and never claims
+#: a person chose a sensitivity: a record whose ``classified_by`` is exactly
+#: ``[REGULATORY_TAG_CLASSIFIER]`` holds the level the document already read
+#: (``internal``) and is not a label anyone decided (the label proposer still
+#: scans it). Defined here, not beside the handler, because
+#: :mod:`trellis.classify` reads it and does not import :mod:`trellis.mutate`.
+REGULATORY_TAG_CLASSIFIER = "regulatory-tag"
+
 #: ``Sensitivity`` values, lowest to highest. The position is the rank.
 SENSITIVITY_ORDER: tuple[Sensitivity, ...] = get_args(Sensitivity)
 
