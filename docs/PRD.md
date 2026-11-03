@@ -31,8 +31,9 @@ Adopter profiles beyond the author (it's public, on PyPI — who else deploys th
 1. **MCP-agent power users** — hire Trellis for persistent cross-session memory for Claude Code/Cursor with one `pip install`, SQLite, no cloud. The proven path (skynet dogfood is this profile).
 2. **Agent-platform teams (LangGraph, custom Python)** who want *self-hosted* memory instead of Zep/Mem0/Letta SaaS — hire it for Postgres+pgvector on infra they already run, REST/SDK, governed writes + audit log. The wedge vs those systems: feedback attributes to the **specific items served**, not to a session or user, plus SCD-2 time-travel.
 3. **Data-platform teams** pointing agents at warehouse/dbt/BI metadata — hire it as a governed usage-evidence graph with an explicit promotion ladder and privacy rules (`docs/design/adr-query-history-promotion.md`). This profile sourced issues #200–#203 via the paused consumer-kg pilot; they were closed as deferred 2026-10-29 and reopen with it (roadmap §3.H.2).
+4. **Households running one memory for several AI clients** — local agents on a home server plus hosted assistants reached through a remote MCP endpoint, all reading one store that holds personal and family records next to work notes. They hire Trellis for one memory every client shares, with per-document sensitivity labels (`trellis curate classify-sensitivity`, candidates from `trellis classify label-candidates`), one key per device or client whose scopes set a read ceiling (`internal` by default, `read,external` for `public`-labelled documents only), and a per-key access log (`TRELLIS_ACCESS_LOG`) that shows what each key read. Labelling is manual on purpose: nothing sets a label for you, so a key's ceiling protects only what someone has labelled.
 
-Honesty note: verified deployments today = the author's dogfood + that paused pilot. Profiles 2–3 are targets, not evidence.
+Honesty note: verified deployments today = the author's dogfood + that paused pilot. Profiles 2–4 are targets, not evidence; profile 4 overlaps the author's dogfood, so it has one data point.
 
 ## 3. Current state (verified)
 
