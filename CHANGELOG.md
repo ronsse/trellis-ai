@@ -21,7 +21,7 @@ All notable changes to Trellis will be documented in this file.
   key can read is the same before and after on every other label. Like every metadata-only
   write (a relabel included), re-writing the row can reorder documents whose ranks tie
   exactly, so a pack at a per-strategy fetch boundary can serve the other tied item.
-  `classification.set` keeps a record's tags on a relabel to a level other than `public` and
+  `classification.set` keeps a record's tags (when they validate) on a relabel to a level other than `public` and
   refuses a relabel to `public` while tags are present, so a tagged document cannot be
   relabelled `public` until `tag-regulatory --clear` runs. The operation is also reachable
   through MCP `execute_mutation` and `POST /commands/batch` with the caller's clearance; there

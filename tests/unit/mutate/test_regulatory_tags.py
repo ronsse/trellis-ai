@@ -441,7 +441,10 @@ class TestTaggingIsNotLabelling:
         result = _relabel(registry, "doc", "internal")
 
         assert result.status == CommandStatus.SUCCESS, result.message
-        assert "unchanged" not in result.message
+        assert result.message == (
+            "Classification set: doc internal -> internal "
+            "(tag-only record confirmed as a label)"
+        )
         record = _record(registry, "doc")
         assert record["sensitivity"] == "internal"
         assert record["regulatory_tags"] == ["pii"]
@@ -451,6 +454,22 @@ class TestTaggingIsNotLabelling:
         again = _relabel(registry, "doc", "internal")
         assert again.status == CommandStatus.SUCCESS
         assert "unchanged" in again.message
+
+    def test_a_public_record_with_tags_can_be_made_servable_again(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Relabel ``internal`` (tags kept), clear the tags, relabel ``public``."""
+        record = {**public_label_record(), "regulatory_tags": ["pii"]}
+        registry.knowledge.document_store.put(
+            "doc", "body", {DATA_CLASSIFICATION_KEY: record}
+        )
+        assert not is_public_label(_row(registry, "doc")["metadata"])
+
+        assert _relabel(registry, "doc", "internal").status == CommandStatus.SUCCESS
+        assert _record(registry, "doc")["regulatory_tags"] == ["pii"]
+        assert _tag(registry, "doc", clear=True).status == CommandStatus.SUCCESS
+        assert _relabel(registry, "doc", "public").status == CommandStatus.SUCCESS
+        assert is_public_label(_row(registry, "doc")["metadata"])
 
     def test_a_tagged_document_cannot_be_relabelled_public_until_cleared(
         self, registry: StoreRegistry

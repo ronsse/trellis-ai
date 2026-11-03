@@ -47,7 +47,7 @@ import structlog
 from trellis.classify.refresh import DEFAULT_PAGE_SIZE
 from trellis.schemas.classification import (
     DATA_CLASSIFICATION_KEY,
-    REGULATORY_TAG_CLASSIFIER,
+    is_tag_only_record,
 )
 
 if TYPE_CHECKING:
@@ -228,17 +228,14 @@ def _is_labelled(metadata: object) -> bool:
 
     One record is not a decision: the one ``classification.tag_regulatory``
     creates on a document that had none, whose ``classified_by`` is exactly
-    ``[REGULATORY_TAG_CLASSIFIER]``. It holds the level the document already
+    ``[REGULATORY_TAG_CLASSIFIER]`` at ``internal`` (:func:`is_tag_only_record`).
+    It holds the level the document already
     read, so no person chose its sensitivity and the scan still reads it. Any
     other record, whatever its ``classified_by``, is a label.
     """
     if not (isinstance(metadata, Mapping) and DATA_CLASSIFICATION_KEY in metadata):
         return False
-    record = metadata[DATA_CLASSIFICATION_KEY]
-    tag_only = isinstance(record, Mapping) and record.get("classified_by") == [
-        REGULATORY_TAG_CLASSIFIER
-    ]
-    return not tag_only
+    return not is_tag_only_record(metadata[DATA_CLASSIFICATION_KEY])
 
 
 def scan_for_label_candidates(

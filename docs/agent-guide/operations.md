@@ -1704,9 +1704,9 @@ fields, `Nothing was written.`) rather than cleared silently. A document that is
 not yet `public` and carries tags is therefore refused a `public` relabel until
 `trellis curate tag-regulatory <doc_id> --clear` removes them. One that already
 reads `public` with tags cannot be cleared that way (`tag-regulatory` refuses a
-`public` record, because clearing it would change what an `external` key reads), so it
-stays unserved to `external` keys until a command that clears it exists (a known
-gap). Only a stored record that already is the exact one answers `unchanged`. A relabel to `public` replaces
+`public` record, because clearing it would change what an `external` key reads). To
+serve it again, relabel it `internal` (the tags are kept), clear them with
+`tag-regulatory --clear`, then relabel it `public`. Only a stored record that already is the exact one answers `unchanged`. A relabel to `public` replaces
 `classified_by` with the exact record's value (the refusal does not name it); a
 target other than `public` keeps the prior fields and its message says nothing about
 a rewrite, as it always did. The exit code is the same under `--format text` and

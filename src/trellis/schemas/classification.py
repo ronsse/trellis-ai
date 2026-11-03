@@ -448,6 +448,23 @@ def sensitivity_rank(sensitivity: Sensitivity) -> int:
     return SENSITIVITY_ORDER.index(sensitivity)
 
 
+def is_tag_only_record(record: object) -> bool:
+    """Whether ``record`` is one a regulatory-tag write created and no person labelled.
+
+    Exactly ``classified_by == [REGULATORY_TAG_CLASSIFIER]`` at the level an
+    unlabelled document already reads (``internal``). Such a record states a level
+    nobody chose, so the label proposer still scans it, the Memories tab reports it
+    as not stored, and confirming ``internal`` on it is a relabel rather than a
+    no-op. A record without that level is not one: it reads as a malformed or
+    chosen label, as any other record does.
+    """
+    return (
+        isinstance(record, Mapping)
+        and record.get("classified_by") == [REGULATORY_TAG_CLASSIFIER]
+        and record.get("sensitivity") == "internal"
+    )
+
+
 def sensitivity_of(bag: Mapping[str, Any] | None) -> Sensitivity:
     """The ``DataClassification.sensitivity`` stamped in a metadata bag.
 

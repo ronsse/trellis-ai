@@ -87,6 +87,7 @@ from trellis.schemas.classification import (
     DataClassification,
     Lifecycle,
     is_public_label,
+    is_tag_only_record,
     lifecycle_state_of,
     public_label_record,
     sensitivity_of,
@@ -543,7 +544,7 @@ class ClassificationSetHandler:
             states_it = (
                 isinstance(prior_record, dict)
                 and prior_record.get("sensitivity") == sensitivity
-                and prior_record.get("classified_by") != [REGULATORY_TAG_CLASSIFIER]
+                and not is_tag_only_record(prior_record)
             )
             if states_it:
                 return doc_id, f"Classification unchanged: {doc_id} is {sensitivity}"
@@ -558,24 +559,34 @@ class ClassificationSetHandler:
             metadata,
             preserve_updated_at=True,
         )
-        # Only a relabel to public rewrites into the exact record; any other
-        # target keeps the prior fields, so the suffix would state something false.
-        if sensitivity == "public":
-            rewritten = (
-                " (record rewritten to the exact public record)"
-                if previous == sensitivity
-                else ""
-            )
-        else:
-            rewritten = (
-                " (unreadable record replaced)"
-                if had_record and previous == sensitivity
-                else ""
-            )
+        rewritten = _same_level_suffix(
+            sensitivity, previous, prior_record, had_record=had_record
+        )
         return (
             doc_id,
             f"Classification set: {doc_id} {previous} -> {sensitivity}{rewritten}",
         )
+
+
+def _same_level_suffix(
+    sensitivity: str, previous: str, prior_record: object, *, had_record: bool
+) -> str:
+    """What a relabel to the level a document already read actually rewrote.
+
+    Only a relabel to public rewrites into the exact record; any other target
+    keeps the prior fields, so that suffix would state something false there.
+    Below public, a same-level write replaced either an unreadable record or a
+    tag-only one (:func:`~trellis.schemas.classification.is_tag_only_record`).
+    """
+    if previous != sensitivity:
+        return ""
+    if sensitivity == "public":
+        return " (record rewritten to the exact public record)"
+    if not had_record:
+        return ""
+    if is_tag_only_record(prior_record):
+        return " (tag-only record confirmed as a label)"
+    return " (unreadable record replaced)"
 
 
 #: Bounds on a regulatory tag set. The vocabulary is open (``pii``, ``phi``,

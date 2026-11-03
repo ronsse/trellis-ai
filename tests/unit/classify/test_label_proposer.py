@@ -211,7 +211,9 @@ class TestScan:
         [
             # Only the record a tag write created is not a decision.
             ({"sensitivity": "internal", "classified_by": ["regulatory-tag"]}, False),
-            ({"classified_by": [REGULATORY_TAG_CLASSIFIER]}, False),
+            # Without the level a tag write states, it is malformed or chosen.
+            ({"classified_by": [REGULATORY_TAG_CLASSIFIER]}, True),
+            ({"sensitivity": "restricted", "classified_by": ["regulatory-tag"]}, True),
             # Every other record keeps today's reading.
             (
                 {
@@ -239,7 +241,8 @@ class TestScan:
         ],
         ids=[
             "tag-only-internal",
-            "tag-only-bare",
+            "tag-only-no-level",
+            "tag-only-restricted",
             "tag-then-caller",
             "caller-then-tag",
             "import",
