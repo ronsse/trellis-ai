@@ -537,10 +537,13 @@ class ClassificationSetHandler:
             # having chosen it, so ``previous == sensitivity`` is not enough to
             # call a relabel to ``restricted`` a no-op: only a record that states
             # the level is. An operator who asks for ``restricted`` on such a row
-            # means it, and gets a record that says so.
+            # means it, and gets a record that says so. A record a regulatory-tag
+            # write created states ``internal`` without anyone having chosen it
+            # either, so confirming ``internal`` on it records the person's call.
             states_it = (
                 isinstance(prior_record, dict)
                 and prior_record.get("sensitivity") == sensitivity
+                and prior_record.get("classified_by") != [REGULATORY_TAG_CLASSIFIER]
             )
             if states_it:
                 return doc_id, f"Classification unchanged: {doc_id} is {sensitivity}"

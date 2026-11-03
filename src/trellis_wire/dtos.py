@@ -300,12 +300,13 @@ class RegulatoryTagsRequest(WireRequestModel):
     ``tags`` is an open vocabulary (``pii``, ``phi``, ...), lower-cased, de-duplicated
     and sorted by the server, and it replaces the document's set. The server bounds
     the set after that normalisation (at most 32 distinct tags), as the CLI does, so
-    this model puts no cap on the raw list. Send ``clear`` with no tags to remove
+    duplicates do not count against it; this model only bounds the raw list, at
+    256 entries, so a request body stays small. Send ``clear`` with no tags to remove
     the set. Tagging never changes who may read the document, so a ``public``
     document, whose exact record an ``external`` key needs, is refused.
     """
 
-    tags: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list, max_length=256)
     clear: bool = False
     requested_by: str = "api:tag-regulatory"
 

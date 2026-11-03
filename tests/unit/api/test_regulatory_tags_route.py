@@ -209,6 +209,20 @@ class TestRoute:
         assert "32" in refused.json()["detail"]
         assert registry.knowledge.document_store.get("doc-confidential") == before
 
+    def test_the_raw_list_is_bounded(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        """Duplicates are free up to 256 entries; a longer body is refused."""
+        _seed(registry)
+        headers = _headers(registry, MUTATE_RESTRICTED)
+        before = registry.knowledge.document_store.get("doc-confidential")
+
+        accepted = _tag(client, headers, "doc-internal", tags=["pii"] * 256)
+        assert accepted.status_code == 200, accepted.text
+        refused = _tag(client, headers, "doc-confidential", tags=["pii"] * 257)
+        assert refused.status_code == 422, refused.text
+        assert registry.knowledge.document_store.get("doc-confidential") == before
+
     def test_a_missing_document_is_400(
         self, client: TestClient, registry: StoreRegistry
     ) -> None:

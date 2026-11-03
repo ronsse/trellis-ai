@@ -430,6 +430,28 @@ class TestTaggingIsNotLabelling:
             "flagged": [],
         }
 
+    def test_confirming_internal_on_a_tag_only_record_is_a_persons_call(
+        self, registry: StoreRegistry
+    ) -> None:
+        """The record states ``internal``, but nobody chose it, so this writes."""
+        registry.knowledge.document_store.put("doc", PII_BODY, {"title": "t"})
+        _tag(registry, "doc", "pii")
+        assert self._scan(registry)["documents_flagged"] == 1
+
+        result = _relabel(registry, "doc", "internal")
+
+        assert result.status == CommandStatus.SUCCESS, result.message
+        assert "unchanged" not in result.message
+        record = _record(registry, "doc")
+        assert record["sensitivity"] == "internal"
+        assert record["regulatory_tags"] == ["pii"]
+        assert record["classified_by"] == [REGULATORY_TAG_CLASSIFIER, "caller"]
+        assert self._scan(registry)["documents_flagged"] == 0
+
+        again = _relabel(registry, "doc", "internal")
+        assert again.status == CommandStatus.SUCCESS
+        assert "unchanged" in again.message
+
     def test_a_tagged_document_cannot_be_relabelled_public_until_cleared(
         self, registry: StoreRegistry
     ) -> None:

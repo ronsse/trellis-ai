@@ -1202,8 +1202,11 @@ measured. Both the text and the JSON output carry this notice.
 **What it reads and skips.** Chunk rows are not read: a chunk takes its parent's
 label and the parent holds the same text. A document that already carries a
 `data_classification` record, of any value and including a malformed one, is
-skipped and counted in `skipped_labelled`, since a person has decided about it. A
-document with no text is counted in `skipped_unscannable`. `documents_read`
+skipped and counted in `skipped_labelled`, since a person has decided about it.
+The exception is a record whose `classified_by` is exactly `["regulatory-tag"]`:
+`curate tag-regulatory` created it on an unlabelled document, nobody chose its
+level, so the document is still scanned. Any relabel, `internal` included, adds
+`caller` and makes it a label. A document with no text is counted in `skipped_unscannable`. `documents_read`
 counts every row fetched, which is what `--limit` caps.
 
 **A scan that stopped at `--limit`** reports `stopped_at_limit: true` and
