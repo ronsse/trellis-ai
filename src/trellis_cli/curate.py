@@ -384,6 +384,50 @@ def classify_sensitivity(
     _execute_command(cmd, output_format)
 
 
+@curate_app.command("tag-regulatory")
+def tag_regulatory(
+    doc_id: str = typer.Argument(..., help="Document ID to tag"),
+    tag: list[str] = typer.Option(  # noqa: B008 - typer option factory
+        [],
+        "--tag",
+        help="Regulatory tag such as pii or phi (repeatable). Replaces the "
+        "document's set; lower-cased, de-duplicated and sorted.",
+    ),
+    clear: bool = typer.Option(
+        False, "--clear", help="Remove the document's regulatory tags."
+    ),
+    requested_by: str = typer.Option(
+        "cli:tag-regulatory",
+        "--by",
+        help="Audit-trail identifier for the caller.",
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+) -> None:
+    """Set a document's ``DataClassification.regulatory_tags`` (``pii``, ``phi``, ...).
+
+    A metadata-only write (``classification.tag_regulatory``): the content and
+    the row's ``updated_at`` are untouched, the document's vector row is
+    re-synced, and nothing about who may read the document changes. The
+    vocabulary is open. ``--tag`` replaces the stored set; ``--clear`` removes
+    it; re-applying the stored set is a no-op (exit 0, message says so).
+
+    A ``public`` document is refused (exit non-zero): an ``external`` key reads
+    it only while its record is exactly the public one, which a tag would
+    break. So is a record that is not an object or names no sensitivity level,
+    a chunk id (it reads its parent's label) and a missing document. Nothing is
+    written on a refusal. A document with no label gets a record saying
+    ``internal``, the level it already read.
+    """
+    cmd = Command(
+        operation=Operation.CLASSIFICATION_TAG_REGULATORY,
+        args={"doc_id": doc_id, "tags": list(tag), "clear": clear},
+        target_id=doc_id,
+        target_type="document",
+        requested_by=requested_by,
+    )
+    _execute_command(cmd, output_format)
+
+
 @curate_app.command()
 def prune(
     reason: str = typer.Option(

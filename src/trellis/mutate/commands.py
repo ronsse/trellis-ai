@@ -40,6 +40,7 @@ class Operation(StrEnum):
     OBSERVATION_RECORD = "observation.record"
     MEASUREMENT_RECORD = "measurement.record"
     CLASSIFICATION_SET = "classification.set"
+    CLASSIFICATION_TAG_REGULATORY = "classification.tag_regulatory"
 
     # Maintain
     REDACTION_APPLY = "redaction.apply"
@@ -231,6 +232,7 @@ ID_BEARING_ARG_KEYS: dict[Operation, frozenset[str]] = {
     Operation.PRECEDENT_DEMOTE: frozenset({"target_id"}),
     Operation.PRECEDENT_REINSTATE: frozenset({"target_id"}),
     Operation.CLASSIFICATION_SET: frozenset({"doc_id"}),
+    Operation.CLASSIFICATION_TAG_REGULATORY: frozenset({"doc_id"}),
     Operation.LABEL_ADD: frozenset({"target_id", "label"}),
     Operation.LABEL_REMOVE: frozenset({"target_id", "label"}),
     Operation.FEEDBACK_RECORD: frozenset({"target_id", "pack_id"}),
@@ -308,6 +310,9 @@ class OperationRegistry:
         # ``sensitivity`` is validated against the closed vocabulary by the
         # handler, not here: this registry checks presence, not values.
         self._schemas[Operation.CLASSIFICATION_SET] = {"doc_id", "sensitivity"}
+        # ``tags`` is an open vocabulary, normalised and bounded by the handler;
+        # ``clear`` (optional) says an empty ``tags`` is meant.
+        self._schemas[Operation.CLASSIFICATION_TAG_REGULATORY] = {"doc_id", "tags"}
         self._schemas[Operation.EVIDENCE_ATTACH] = {
             "evidence_id",
             "target_id",

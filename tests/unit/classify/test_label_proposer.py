@@ -18,7 +18,10 @@ from trellis.classify.label_proposer import (
     LabelScanReport,
     scan_for_label_candidates,
 )
-from trellis.schemas.classification import DATA_CLASSIFICATION_KEY
+from trellis.schemas.classification import (
+    DATA_CLASSIFICATION_KEY,
+    REGULATORY_TAG_CLASSIFIER,
+)
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 
 RULES = {rule.name: rule for rule in LABEL_RULES}
@@ -202,6 +205,66 @@ class TestScan:
         assert report.documents_read == 4
         assert report.skipped_labelled == 3
         assert report.documents_scanned == 1
+
+    @pytest.mark.parametrize(
+        ("record", "labelled"),
+        [
+            # Only the record a tag write created is not a decision.
+            ({"sensitivity": "internal", "classified_by": ["regulatory-tag"]}, False),
+            # Without the level a tag write states, it is malformed or chosen.
+            ({"classified_by": [REGULATORY_TAG_CLASSIFIER]}, True),
+            ({"sensitivity": "restricted", "classified_by": ["regulatory-tag"]}, True),
+            # Every other record keeps today's reading.
+            (
+                {
+                    "sensitivity": "internal",
+                    "classified_by": ["regulatory-tag", "caller"],
+                },
+                True,
+            ),
+            (
+                {
+                    "sensitivity": "internal",
+                    "classified_by": ["caller", "regulatory-tag"],
+                },
+                True,
+            ),
+            ({"sensitivity": "internal", "classified_by": ["import"]}, True),
+            ({"sensitivity": "internal", "classified_by": ["caller"]}, True),
+            ({"sensitivity": "internal", "classified_by": []}, True),
+            ({"sensitivity": "internal"}, True),
+            ({"sensitivity": "internal", "classified_by": "regulatory-tag"}, True),
+            ({"sensitivity": "public", "classified_by": ["caller"]}, True),
+            (7, True),
+            ("regulatory-tag", True),
+            ([REGULATORY_TAG_CLASSIFIER], True),
+        ],
+        ids=[
+            "tag-only-internal",
+            "tag-only-no-level",
+            "tag-only-restricted",
+            "tag-then-caller",
+            "caller-then-tag",
+            "import",
+            "caller",
+            "empty-list",
+            "no-classified-by",
+            "string-not-list",
+            "public",
+            "malformed-int",
+            "malformed-str",
+            "malformed-list",
+        ],
+    )
+    def test_only_a_tag_write_record_is_not_a_label(
+        self, store: SQLiteDocumentStore, record: object, labelled: bool
+    ) -> None:
+        store.put("doc", "alice@example.com", {DATA_CLASSIFICATION_KEY: record})
+
+        report = scan_for_label_candidates(store)
+
+        assert report.skipped_labelled == (1 if labelled else 0)
+        assert report.documents_flagged == (0 if labelled else 1)
 
     def test_a_document_with_no_text_is_counted_not_scanned(
         self, store: SQLiteDocumentStore

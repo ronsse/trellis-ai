@@ -253,6 +253,27 @@ def test_a_corrupt_stored_record_is_flagged_and_a_chosen_restricted_is_not(
     assert labels["doc-unlabelled"]["corrupt"] is False
 
 
+def test_a_tag_only_record_reports_as_unlabelled(client) -> None:
+    """A record only a regulatory-tag write made is not a label anyone chose."""
+    http, reg = client
+    docs = reg.knowledge.document_store
+    tag_only = {"sensitivity": "internal", "classified_by": ["regulatory-tag"]}
+    docs.put("t-only", "x", {"data_classification": {**tag_only}})
+    docs.put(
+        "t-confirmed",
+        "x",
+        {
+            "data_classification": {
+                **tag_only,
+                "classified_by": ["regulatory-tag", "caller"],
+            }
+        },
+    )
+    labels = _labels(http, _headers(reg, ["admin"]))
+    assert labels["t-only"] == UNLABELLED
+    assert labels["t-confirmed"] == {**UNLABELLED, "stored": True}
+
+
 @pytest.mark.parametrize("raw", ["[1,2]", '"str"', "5", "true"])
 def test_a_row_whose_metadata_is_not_an_object_still_answers_an_admin_key(
     client, raw

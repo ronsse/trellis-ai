@@ -1436,7 +1436,8 @@ def label_candidates(
 
     Four plain rules run: email address, phone number, US SSN shape, and a
     card number that passes a Luhn check. Documents that already carry a label
-    are skipped and counted. A miss proves nothing, and this is not a PII
+    are skipped and counted; a record only a regulatory-tag write created is
+    not a label and is still scanned. A miss proves nothing, and this is not a PII
     guarantee: the rules do not read medical content, and they over-report.
     """
     registry = _get_registry()

@@ -31,7 +31,11 @@ from trellis.retrieve.sensitivity import (
     label_is_unreadable,
     read_document_row,
 )
-from trellis.schemas.classification import DATA_CLASSIFICATION_KEY, sensitivity_of
+from trellis.schemas.classification import (
+    DATA_CLASSIFICATION_KEY,
+    is_tag_only_record,
+    sensitivity_of,
+)
 from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, Event, EventType
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate, require_scope
@@ -131,15 +135,19 @@ def _document_label(
     metadata = doc.get("metadata")
     bag = metadata if isinstance(metadata, Mapping) else None
     doc_id = str(doc.get("doc_id"))
-    stored = bag is not None and DATA_CLASSIFICATION_KEY in bag
-    record = bag[DATA_CLASSIFICATION_KEY] if bag is not None and stored else None
+    present = bag is not None and DATA_CLASSIFICATION_KEY in bag
+    record = bag[DATA_CLASSIFICATION_KEY] if bag is not None and present else None
+    # A record only a regulatory-tag write created states ``internal`` but is not
+    # a label anyone chose, so it reports as not stored: the page shows it as
+    # unlabelled and offers ``internal`` as a relabel rather than a no-op.
+    stored = present and not is_tag_only_record(record)
     # A shape ``label_is_unreadable`` names is one the read gate judges ``restricted``,
     # so the gate is handed the stored value and the label says so. Every other
     # non-object value keeps the label it always had: judged as no bag at all.
     unreadable = label_is_unreadable(metadata)
     effective = gate.sensitivity(doc_id, metadata if unreadable else bag)
     corrupt = (
-        stored
+        present
         and sensitivity_of(bag) == "restricted"
         and not (
             isinstance(record, Mapping) and record.get("sensitivity") == "restricted"

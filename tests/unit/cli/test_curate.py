@@ -2802,3 +2802,159 @@ class TestCurateClassifySensitivity:
         )
         assert result.exit_code != 0
         assert json.loads(result.stdout.strip())["status"] == "rejected"
+
+
+class TestCurateTagRegulatory:
+    """``trellis curate tag-regulatory`` writes only a document's regulatory tags."""
+
+    @staticmethod
+    def _seed(metadata: dict[str, object], doc_id: str = "doc-1") -> None:
+        from trellis_cli.stores import _get_registry
+
+        _get_registry().knowledge.document_store.put(
+            doc_id, "deploy checklist", metadata
+        )
+
+    @staticmethod
+    def _record(doc_id: str = "doc-1") -> dict[str, object]:
+        from trellis.schemas.classification import DATA_CLASSIFICATION_KEY
+        from trellis_cli.stores import _get_registry
+
+        row = _get_registry().knowledge.document_store.get(doc_id)
+        assert row is not None
+        return row["metadata"][DATA_CLASSIFICATION_KEY]
+
+    @staticmethod
+    def _internal() -> dict[str, object]:
+        from trellis.schemas.classification import DATA_CLASSIFICATION_KEY
+
+        return {
+            DATA_CLASSIFICATION_KEY: {
+                "sensitivity": "internal",
+                "regulatory_tags": [],
+                "jurisdiction": ["us"],
+                "classified_by": ["caller"],
+                "classification_version": "1",
+            }
+        }
+
+    def test_tags_are_normalised_and_reported_as_json(self) -> None:
+        self._seed(self._internal())
+        result = runner.invoke(
+            app,
+            [
+                "curate",
+                "tag-regulatory",
+                "doc-1",
+                "--tag",
+                "PHI",
+                "--tag",
+                "pii",
+                "--tag",
+                " Pii ",
+                "--format",
+                "json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["status"] == "success"
+        assert data["operation"] == "classification.tag_regulatory"
+        record = self._record()
+        assert record["regulatory_tags"] == ["phi", "pii"]
+        assert record["sensitivity"] == "internal"
+        assert record["jurisdiction"] == ["us"]
+        assert record["classification_version"] == "1"
+
+    def test_clear_removes_the_tags(self) -> None:
+        self._seed(self._internal())
+        tagged = runner.invoke(
+            app, ["curate", "tag-regulatory", "doc-1", "--tag", "pii"]
+        )
+        assert tagged.exit_code == 0, tagged.output
+        result = runner.invoke(app, ["curate", "tag-regulatory", "doc-1", "--clear"])
+        assert result.exit_code == 0, result.output
+        assert self._record()["regulatory_tags"] == []
+
+    def test_a_public_document_is_refused_in_both_formats_and_not_written(self) -> None:
+        from trellis.schemas.classification import (
+            DATA_CLASSIFICATION_KEY,
+            public_label_record,
+        )
+
+        self._seed({DATA_CLASSIFICATION_KEY: public_label_record()})
+        codes = []
+        for fmt in ("json", "text"):
+            result = runner.invoke(
+                app,
+                ["curate", "tag-regulatory", "doc-1", "--tag", "pii", "--format", fmt],
+            )
+            codes.append(result.exit_code)
+            if fmt == "json":
+                data = json.loads(result.stdout.strip())
+                assert data["status"] == "rejected"
+                assert "public" in json.dumps(data)
+        assert codes[0] == codes[1] != 0
+        assert self._record() == public_label_record()
+
+    def test_the_cap_counts_distinct_tags_after_normalisation(self) -> None:
+        """33 entries holding a duplicate are 32 tags; 33 distinct are refused."""
+        self._seed(self._internal())
+        self._seed(self._internal(), doc_id="doc-2")
+        names = [f"t{i:02d}" for i in range(32)]
+
+        def args(doc_id: str, tags: list[str]) -> list[str]:
+            flags = [flag for tag in tags for flag in ("--tag", tag)]
+            return ["curate", "tag-regulatory", doc_id, *flags, "--format", "json"]
+
+        accepted = runner.invoke(app, args("doc-1", [*names, "T00"]))
+        assert accepted.exit_code == 0, accepted.output
+        assert self._record()["regulatory_tags"] == names
+
+        refused = runner.invoke(app, args("doc-2", [*names, "t32"]))
+        assert refused.exit_code != 0
+        assert json.loads(refused.stdout.strip())["status"] == "rejected"
+        assert self._record("doc-2")["regulatory_tags"] == []
+
+    def test_tagging_an_unlabelled_pii_document_leaves_label_candidates_unchanged(
+        self,
+    ) -> None:
+        """Tagging is not labelling: the scan reports the same before and after."""
+        from trellis_cli.stores import _get_registry
+
+        _get_registry().knowledge.document_store.put(
+            "doc-1", "mail alice@example.com about the keys", {"title": "t"}
+        )
+
+        def scan() -> dict[str, object]:
+            result = runner.invoke(
+                app, ["classify", "label-candidates", "--format", "json"]
+            )
+            assert result.exit_code == 0, result.output
+            return json.loads(result.stdout.strip())
+
+        before = scan()
+        assert before["documents_flagged"] == 1
+        tagged = runner.invoke(
+            app, ["curate", "tag-regulatory", "doc-1", "--tag", "pii"]
+        )
+        assert tagged.exit_code == 0, tagged.output
+        assert self._record()["classified_by"] == ["regulatory-tag"]
+        assert scan() == before
+
+    def test_neither_a_tag_nor_clear_is_refused(self) -> None:
+        self._seed(self._internal())
+        result = runner.invoke(
+            app, ["curate", "tag-regulatory", "doc-1", "--format", "json"]
+        )
+        assert result.exit_code != 0
+        assert json.loads(result.stdout.strip())["status"] == "rejected"
+        assert self._record()["regulatory_tags"] == []
+
+    def test_a_missing_document_is_refused(self) -> None:
+        result = runner.invoke(
+            app,
+            ["curate", "tag-regulatory", "ghost", "--tag", "pii", "--format", "json"],
+        )
+        assert result.exit_code != 0
+        assert json.loads(result.stdout.strip())["status"] == "rejected"

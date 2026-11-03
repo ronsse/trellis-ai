@@ -131,6 +131,7 @@ ROSTER: dict[str, str] = {
     "curate:create_entity": MUTATION,  # POST /entities
     "curate:create_document": GATED,  # POST /documents
     "curate:set_document_sensitivity": GATED,  # POST /documents/.../sensitivity
+    "curate:set_document_regulatory_tags": GATED,  # POST /documents/.../regulatory-tags
     "curate:record_feedback": MUTATION,  # POST /feedback
     "curate:pack_feedback": FREE,  # POST /packs/{pack_id}/feedback
     "explore:list_documents": GATED,  # GET /documents

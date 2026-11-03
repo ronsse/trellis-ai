@@ -40,6 +40,7 @@ from trellis_wire.dtos import (
     PrecedentDemoteResponse,
     PrecedentReinstateRequest,
     PromoteRequest,
+    RegulatoryTagsRequest,
 )
 
 if TYPE_CHECKING:
@@ -248,6 +249,48 @@ def set_document_sensitivity(
     cmd = Command(
         operation=Operation.CLASSIFICATION_SET,
         args={"doc_id": doc_id, "sensitivity": req.sensitivity},
+        target_id=doc_id,
+        target_type="document",
+        metadata=(
+            {"requested_by_claim": requested_by_claim}
+            if requested_by_claim is not None
+            else {}
+        ),
+        requested_by=requested_by,
+    )
+    return _execute_command(cmd, clearance=request_clearance(ctx))
+
+
+@router.post("/documents/{doc_id:path}/regulatory-tags", response_model=CommandResponse)
+def set_document_regulatory_tags(
+    doc_id: str,
+    req: RegulatoryTagsRequest,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> CommandResponse:
+    """Set a document's ``DataClassification.regulatory_tags`` (``pii``, ``phi``, ...).
+
+    A metadata-only write through ``classification.tag_regulatory``: the content
+    and the row's ``updated_at`` are untouched, and nothing about who may read the
+    document changes. ``tags`` replaces the set (lower-cased, de-duplicated,
+    sorted; the vocabulary is open), and ``clear`` with no tags removes it.
+    Re-applying the stored set is a no-op.
+
+    A ``public`` document is refused (400): an ``external`` key reads it only
+    while its record is exactly the public one, which a tag would break. So is a
+    record that is not an object or names no sensitivity level, and a chunk id.
+    A document above the caller's clearance answers 400 exactly as a missing one
+    does.
+
+    ``requested_by`` is derived from the authenticated principal when one is
+    present (see :func:`trellis_api.routes._principal.resolve_requested_by`);
+    the body's own claim rides along as ``metadata["requested_by_claim"]``.
+    """
+    requested_by, requested_by_claim = resolve_requested_by(
+        ctx, req.requested_by, claim_was_set="requested_by" in req.model_fields_set
+    )
+    cmd = Command(
+        operation=Operation.CLASSIFICATION_TAG_REGULATORY,
+        args={"doc_id": doc_id, "tags": list(req.tags), "clear": req.clear},
         target_id=doc_id,
         target_type="document",
         metadata=(

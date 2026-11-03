@@ -348,6 +348,15 @@ Sensitivity = Literal["public", "internal", "confidential", "restricted"]
 #: Metadata key a document's :class:`DataClassification` record lives under.
 DATA_CLASSIFICATION_KEY = "data_classification"
 
+#: The ``classified_by`` of a record that ``classification.tag_regulatory`` created
+#: on a document that had none. A tag write records what wrote it and never claims
+#: a person chose a sensitivity: a record whose ``classified_by`` is exactly
+#: ``[REGULATORY_TAG_CLASSIFIER]`` holds the level the document already read
+#: (``internal``) and is not a label anyone decided (the label proposer still
+#: scans it). Defined here, not beside the handler, because
+#: :mod:`trellis.classify` reads it and does not import :mod:`trellis.mutate`.
+REGULATORY_TAG_CLASSIFIER = "regulatory-tag"
+
 #: ``Sensitivity`` values, lowest to highest. The position is the rank.
 SENSITIVITY_ORDER: tuple[Sensitivity, ...] = get_args(Sensitivity)
 
@@ -437,6 +446,23 @@ def lifecycle_state_of(bag: Mapping[str, Any] | None) -> LifecycleState:
 def sensitivity_rank(sensitivity: Sensitivity) -> int:
     """Position in :data:`SENSITIVITY_ORDER`; a higher rank is more sensitive."""
     return SENSITIVITY_ORDER.index(sensitivity)
+
+
+def is_tag_only_record(record: object) -> bool:
+    """Whether ``record`` is one a regulatory-tag write created and no person labelled.
+
+    Exactly ``classified_by == [REGULATORY_TAG_CLASSIFIER]`` at the level an
+    unlabelled document already reads (``internal``). Such a record states a level
+    nobody chose, so the label proposer still scans it, the Memories tab reports it
+    as not stored, and confirming ``internal`` on it is a relabel rather than a
+    no-op. A record without that level is not one: it reads as a malformed or
+    chosen label, as any other record does.
+    """
+    return (
+        isinstance(record, Mapping)
+        and record.get("classified_by") == [REGULATORY_TAG_CLASSIFIER]
+        and record.get("sensitivity") == "internal"
+    )
 
 
 def sensitivity_of(bag: Mapping[str, Any] | None) -> Sensitivity:

@@ -74,14 +74,20 @@ from trellis.mutate.sensitivity_floor import (
     visible_document,
 )
 from trellis.retrieve.precedents import is_miner_candidate_event
-from trellis.retrieve.sensitivity import OverwriteRefusedError, refuse_overwrite
+from trellis.retrieve.sensitivity import (
+    OverwriteRefusedError,
+    label_is_unreadable,
+    refuse_overwrite,
+)
 from trellis.schemas.classification import (
     DATA_CLASSIFICATION_KEY,
     LIFECYCLE_KEY,
+    REGULATORY_TAG_CLASSIFIER,
     SENSITIVITY_ORDER,
     DataClassification,
     Lifecycle,
     is_public_label,
+    is_tag_only_record,
     lifecycle_state_of,
     public_label_record,
     sensitivity_of,
@@ -532,10 +538,13 @@ class ClassificationSetHandler:
             # having chosen it, so ``previous == sensitivity`` is not enough to
             # call a relabel to ``restricted`` a no-op: only a record that states
             # the level is. An operator who asks for ``restricted`` on such a row
-            # means it, and gets a record that says so.
+            # means it, and gets a record that says so. A record a regulatory-tag
+            # write created states ``internal`` without anyone having chosen it
+            # either, so confirming ``internal`` on it records the person's call.
             states_it = (
                 isinstance(prior_record, dict)
                 and prior_record.get("sensitivity") == sensitivity
+                and not is_tag_only_record(prior_record)
             )
             if states_it:
                 return doc_id, f"Classification unchanged: {doc_id} is {sensitivity}"
@@ -550,24 +559,258 @@ class ClassificationSetHandler:
             metadata,
             preserve_updated_at=True,
         )
-        # Only a relabel to public rewrites into the exact record; any other
-        # target keeps the prior fields, so the suffix would state something false.
-        if sensitivity == "public":
-            rewritten = (
-                " (record rewritten to the exact public record)"
-                if previous == sensitivity
-                else ""
-            )
-        else:
-            rewritten = (
-                " (unreadable record replaced)"
-                if had_record and previous == sensitivity
-                else ""
-            )
+        rewritten = _same_level_suffix(
+            sensitivity, previous, prior_record, had_record=had_record
+        )
         return (
             doc_id,
             f"Classification set: {doc_id} {previous} -> {sensitivity}{rewritten}",
         )
+
+
+def _same_level_suffix(
+    sensitivity: str, previous: str, prior_record: object, *, had_record: bool
+) -> str:
+    """What a relabel to the level a document already read actually rewrote.
+
+    Only a relabel to public rewrites into the exact record; any other target
+    keeps the prior fields, so that suffix would state something false there.
+    Below public, a same-level write replaced either an unreadable record or a
+    tag-only one (:func:`~trellis.schemas.classification.is_tag_only_record`).
+    """
+    if previous != sensitivity:
+        return ""
+    if sensitivity == "public":
+        return " (record rewritten to the exact public record)"
+    if not had_record:
+        return ""
+    if is_tag_only_record(prior_record):
+        return " (tag-only record confirmed as a label)"
+    return " (unreadable record replaced)"
+
+
+#: Bounds on a regulatory tag set. The vocabulary is open (``pii``, ``phi``,
+#: ``gdpr``, ``pci-dss``, whatever an owner uses), so these cap size and shape,
+#: never the words.
+MAX_REGULATORY_TAGS = 32
+MAX_REGULATORY_TAG_LENGTH = 64
+
+
+def _check_one_regulatory_tag(item: object) -> tuple[str, str | None]:
+    """One tag stripped and lower-cased, or why it is not a tag."""
+    if not isinstance(item, str):
+        return "", "every tag must be a string"
+    tag = item.strip().lower()
+    problem: str | None = None
+    if not tag:
+        problem = "a tag may not be empty"
+    elif len(tag) > MAX_REGULATORY_TAG_LENGTH:
+        problem = f"a tag may not exceed {MAX_REGULATORY_TAG_LENGTH} characters"
+    elif not tag.isprintable():
+        problem = "a tag may not contain a non-printable character"
+    return tag, problem
+
+
+def _check_regulatory_tags(raw: object) -> tuple[list[str], str | None]:
+    """``raw`` as sorted, de-duplicated lower-case tags, or why it is not a tag set.
+
+    Each tag is stripped and lower-cased, so ``"PII"``, ``" pii "`` and ``"pii"``
+    are one tag. The problem is a fixed sentence (it never quotes the caller's
+    value), for a value that is not a list, a tag that is not a string, one that
+    is empty, over :data:`MAX_REGULATORY_TAG_LENGTH`, or holding a non-printable
+    character, and for more than :data:`MAX_REGULATORY_TAGS` distinct tags.
+    """
+    if not isinstance(raw, (list, tuple)):
+        return [], "tags must be a list of strings"
+    tags: set[str] = set()
+    for item in raw:
+        tag, problem = _check_one_regulatory_tag(item)
+        if problem is not None:
+            return [], problem
+        tags.add(tag)
+    if len(tags) > MAX_REGULATORY_TAGS:
+        return [], f"a document may carry at most {MAX_REGULATORY_TAGS} regulatory tags"
+    return sorted(tags), None
+
+
+def normalize_regulatory_tags(raw: object) -> list[str]:
+    """``raw`` as a sorted, de-duplicated list of lower-case tags.
+
+    Raises ``ValueError`` (with a message safe to show a caller) for anything
+    :func:`_check_regulatory_tags` reports as a problem.
+    """
+    tags, problem = _check_regulatory_tags(raw)
+    if problem is not None:
+        raise ValueError(problem)
+    return tags
+
+
+def _stored_tags(record: dict[str, Any]) -> list[str] | None:
+    """The record's ``regulatory_tags`` when it is a list of strings, else ``None``."""
+    stored = record.get("regulatory_tags")
+    if isinstance(stored, list) and all(isinstance(t, str) for t in stored):
+        return stored
+    return None
+
+
+class ClassificationTagRegulatoryHandler:
+    """Set one document's ``regulatory_tags`` without changing who may read it.
+
+    The tags are a label *about* the content (``pii``, ``phi``), not a limit on
+    who reads it, so this write must never move a document in or out of any
+    caller's reach. It writes one field of the stored
+    :class:`~trellis.schemas.classification.DataClassification` record and
+    carries every other key of that record forward untouched (``sensitivity``,
+    ``jurisdiction``, ``classification_version``, ``classified_by``, an unknown
+    key). It never claims a person made a sensitivity call: on a document with a
+    record it leaves ``classified_by`` alone, and on one with none it writes
+    ``classified_by=[REGULATORY_TAG_CLASSIFIER]``, which the label proposer reads
+    as "no one has labelled this" (``classification.set`` still records
+    ``"caller"`` when a person relabels).
+
+    ``tags`` replaces the document's set (the other tags are not merged in), and
+    ``clear`` with an empty ``tags`` removes it. Re-applying the stored set is a
+    no-op that writes nothing.
+
+    **What is refused, and why.** An ``external`` key is served a document only
+    when its record is *exactly* the one
+    :func:`~trellis.schemas.classification.public_label_record` returns, so a tag
+    on a ``public`` document would withhold it from that key. Such a document is
+    refused (``regulatory_tags_public``), whether or not its record is the exact
+    one. A record that is not an object, or whose ``sensitivity``
+    names no level, reads ``restricted`` without anyone having chosen it, and
+    this write will not paper over it (``regulatory_tags_corrupt_record``);
+    repair it with ``classification.set``. Every other label (``internal``,
+    ``confidential``, ``restricted``, and an unlabelled document, which reads
+    ``internal``) keeps the level it had, so its clearance is the same before
+    and after. A document with no record gets one saying ``internal``, the level
+    it already read. A chunk reads its parent's label, so it is refused too.
+
+    A metadata-only write (``put_document(..., preserve_updated_at=True)``): the
+    content and the row's clock are untouched, and ``put_document`` re-mirrors
+    ``data_classification`` onto the document's vector row. A document above
+    ``clearance`` answers as a missing one, as it does for ``classification.set``.
+
+    **What it does not promise.** Which documents a key can read does not move.
+    Like every metadata-only write (a relabel included), re-writing the row can
+    reorder documents whose ranks tie exactly (SQLite FTS deletes and inserts the
+    row, the vector store replaces it, and the ranking queries have no tiebreak),
+    so a pack sitting at a per-strategy fetch boundary can serve the other tied
+    item.
+    """
+
+    def __init__(
+        self, registry: StoreRegistry, *, clearance: Sensitivity = "restricted"
+    ) -> None:
+        self._registry = registry
+        self._clearance = clearance
+
+    def _parse(self, command: Command) -> tuple[str, list[str], bool]:
+        doc_id = command.args.get("doc_id")
+        clear = command.args.get("clear", False)
+        if not isinstance(doc_id, str) or not doc_id:
+            msg = "classification.tag_regulatory doc_id must be a non-empty string"
+            raise ValidationError(msg, errors=[msg], code="regulatory_tags_shape")
+        if not isinstance(clear, bool):
+            msg = "classification.tag_regulatory clear must be a boolean"
+            raise ValidationError(msg, errors=[msg], code="regulatory_tags_shape")
+        tags, problem = _check_regulatory_tags(command.args.get("tags"))
+        if problem is not None:
+            msg = f"classification.tag_regulatory {problem}"
+            raise ValidationError(msg, errors=[msg], code="regulatory_tags_shape")
+        if clear and tags:
+            msg = "classification.tag_regulatory takes tags or clear, not both"
+            raise ValidationError(msg, errors=[msg], code="regulatory_tags_shape")
+        if not clear and not tags:
+            msg = "classification.tag_regulatory needs at least one tag, or clear"
+            raise ValidationError(msg, errors=[msg], code="regulatory_tags_shape")
+        return doc_id, tags, clear
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        doc_id, tags, _clear = self._parse(command)
+
+        document_store = self._registry.knowledge.document_store
+        existing = visible_document(document_store, doc_id, clearance=self._clearance)
+        if existing is None:
+            msg = f"document {doc_id!r} not found"
+            raise ValidationError(msg, errors=[msg], code="target_not_found")
+        # Deferred: ``trellis.ingest_corpus`` pulls the sync stack.
+        from trellis.ingest_corpus.models import is_chunk_doc_id  # noqa: PLC0415
+
+        if is_chunk_doc_id(doc_id):
+            msg = (
+                f"document {doc_id!r} is a chunk and reads its parent's label; "
+                "tag the parent document instead"
+            )
+            raise ValidationError(msg, errors=[msg], code="regulatory_tags_chunk")
+
+        stored_metadata = existing.get("metadata")
+        if label_is_unreadable(stored_metadata):
+            msg = (
+                f"document {doc_id!r} has metadata that is not an object, so its "
+                "label cannot be read. Nothing was written."
+            )
+            raise ValidationError(
+                msg, errors=[msg], code="regulatory_tags_corrupt_record"
+            )
+        metadata: dict[str, Any] = dict(stored_metadata or {})
+
+        if DATA_CLASSIFICATION_KEY not in metadata:
+            if not tags:
+                return doc_id, f"Regulatory tags unchanged: {doc_id} has none"
+            previous: list[str] = []
+            record: dict[str, Any] = DataClassification(
+                sensitivity="internal",
+                regulatory_tags=tags,
+                classified_by=[REGULATORY_TAG_CLASSIFIER],
+            ).model_dump(mode="json")
+        else:
+            prior = metadata[DATA_CLASSIFICATION_KEY]
+            level = prior.get("sensitivity") if isinstance(prior, dict) else None
+            if not isinstance(prior, dict) or level not in SENSITIVITY_ORDER:
+                msg = (
+                    f"document {doc_id!r} has a classification record that names "
+                    "no sensitivity level, so it reads as restricted without "
+                    "anyone having chosen that. Nothing was written; repair it "
+                    "with classification.set first."
+                )
+                raise ValidationError(
+                    msg, errors=[msg], code="regulatory_tags_corrupt_record"
+                )
+            if level == "public":
+                msg = (
+                    f"document {doc_id!r} is labelled public. An external key "
+                    "reads a public document only while its classification "
+                    "record is exactly the one a public label writes, so a "
+                    "regulatory tag would withhold it from that key. Nothing "
+                    "was written."
+                )
+                raise ValidationError(msg, errors=[msg], code="regulatory_tags_public")
+            stored = _stored_tags(prior)
+            if stored == tags:
+                return doc_id, (
+                    f"Regulatory tags unchanged: {doc_id} is {_tag_list(tags)}"
+                )
+            previous = stored or []
+            record = {**prior, "regulatory_tags": tags}
+
+        metadata[DATA_CLASSIFICATION_KEY] = record
+        put_document(
+            document_store,
+            resolve_vector_store(self._registry),
+            doc_id,
+            str(existing.get("content") or ""),
+            metadata,
+            preserve_updated_at=True,
+        )
+        return doc_id, (
+            f"Regulatory tags set: {doc_id} {_tag_list(previous)} -> {_tag_list(tags)}"
+        )
+
+
+def _tag_list(tags: list[str]) -> str:
+    """``tags`` for a message: the names, or ``none`` for an empty set."""
+    return ", ".join(tags) if tags else "none"
 
 
 def _bind_entity_name_alias(
@@ -4936,6 +5179,9 @@ def create_curate_handlers(
             clearance=clearance,
         ),
         Operation.CLASSIFICATION_SET: ClassificationSetHandler(
+            registry, clearance=clearance
+        ),
+        Operation.CLASSIFICATION_TAG_REGULATORY: ClassificationTagRegulatoryHandler(
             registry, clearance=clearance
         ),
         Operation.TRACE_INGEST: TraceIngestHandler(registry),

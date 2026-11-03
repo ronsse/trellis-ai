@@ -2818,6 +2818,41 @@ components:
           type: string
       title: ProposalRejectRequest
       type: object
+    RegulatoryTagsRequest:
+      additionalProperties: false
+      description: 'Request to set one document''s regulatory tags. ``doc_id`` rides the URL path.
+
+
+        ``tags`` is an open vocabulary (``pii``, ``phi``, ...), lower-cased, de-duplicated
+
+        and sorted by the server, and it replaces the document''s set. The server bounds
+
+        the set after that normalisation (at most 32 distinct tags), as the CLI does, so
+
+        duplicates do not count against it; this model only bounds the raw list, at
+
+        256 entries, so a request body stays small. Send ``clear`` with no tags to remove
+
+        the set. Tagging never changes who may read the document, so a ``public``
+
+        document, whose exact record an ``external`` key needs, is refused.'
+      properties:
+        clear:
+          default: false
+          title: Clear
+          type: boolean
+        requested_by:
+          default: api:tag-regulatory
+          title: Requested By
+          type: string
+        tags:
+          items:
+            type: string
+          maxItems: 256
+          title: Tags
+          type: array
+      title: RegulatoryTagsRequest
+      type: object
     RuntimeResponse:
       additionalProperties: false
       description: 'Response body for ``GET /api/v1/runtime`` — the admin Runtime panel.
@@ -4730,6 +4765,70 @@ paths:
       summary: Get Document
       tags:
       - explore
+  /api/v1/documents/{doc_id}/regulatory-tags:
+    post:
+      description: 'Set a document''s ``DataClassification.regulatory_tags`` (``pii``, ``phi``, ...).
+
+
+        A metadata-only write through ``classification.tag_regulatory``: the content
+
+        and the row''s ``updated_at`` are untouched, and nothing about who may read the
+
+        document changes. ``tags`` replaces the set (lower-cased, de-duplicated,
+
+        sorted; the vocabulary is open), and ``clear`` with no tags removes it.
+
+        Re-applying the stored set is a no-op.
+
+
+        A ``public`` document is refused (400): an ``external`` key reads it only
+
+        while its record is exactly the public one, which a tag would break. So is a
+
+        record that is not an object or names no sensitivity level, and a chunk id.
+
+        A document above the caller''s clearance answers 400 exactly as a missing one
+
+        does.
+
+
+        ``requested_by`` is derived from the authenticated principal when one is
+
+        present (see :func:`trellis_api.routes._principal.resolve_requested_by`);
+
+        the body''s own claim rides along as ``metadata["requested_by_claim"]``.'
+      operationId: set_document_regulatory_tags_api_v1_documents__doc_id__regulatory_tags_post
+      parameters:
+      - in: path
+        name: doc_id
+        required: true
+        schema:
+          title: Doc Id
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegulatoryTagsRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Set Document Regulatory Tags
+      tags:
+      - curate
   /api/v1/documents/{doc_id}/sensitivity:
     post:
       description: 'Relabel a document''s ``DataClassification.sensitivity`` (#194).
