@@ -20,11 +20,11 @@ Two layers, one predicate (:class:`~trellis.retrieve.sensitivity.DocumentClearan
   also runs :func:`~trellis.retrieve.sensitivity.refuse_overwrite` (a cleared
   caller may not silently downgrade, #1023).
 
-``classification.set`` is the one verb Stage 2 does not guard: its handler reads
-the target through :func:`visible_document`, so a document above the caller's
-clearance answers exactly as a missing one (``target_not_found``), the way every
-read surface does. A Stage-2 refusal would tell a key that cannot read a
-document that it exists.
+``classification.set`` and ``classification.tag_regulatory`` are the verbs Stage 2
+does not guard: their handlers read the target through :func:`visible_document`,
+so a document above the caller's clearance answers exactly as a missing one
+(``target_not_found``), the way every read surface does. A Stage-2 refusal would
+tell a key that cannot read a document that it exists.
 
 **Transparent by default.** A ``"restricted"`` clearance (trusted-local: the
 CLI, stdio MCP, auth off, an admin key) reads nothing and refuses nothing. A
@@ -149,9 +149,10 @@ def targeted_document_ids(command: Command) -> list[str]:
         evidence = args.get("evidence")
         doc_id = evidence.get("doc_id") if isinstance(evidence, dict) else None
         return [doc_id] if isinstance(doc_id, str) and doc_id else []
-    # ``classification.set`` is deliberately absent: its handler reads the target
-    # through :func:`visible_document` and answers an above-clearance document as
-    # not found, which a Stage-2 refusal would contradict.
+    # ``classification.set`` and ``classification.tag_regulatory`` are
+    # deliberately absent: their handlers read the target through
+    # :func:`visible_document` and answer an above-clearance document as not
+    # found, which a Stage-2 refusal would contradict.
     if op == Operation.RETENTION_RESTORE:
         item_ids = args.get("item_ids")
         if not isinstance(item_ids, list):

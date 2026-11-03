@@ -100,11 +100,14 @@ class TestOperation:
         # directly — see EntityUpdateHandler)
         # + CLASSIFICATION_SET (governed document sensitivity relabel, #194;
         # the write half of the label retrieval already reads)
+        # + CLASSIFICATION_TAG_REGULATORY (governed write of
+        # DataClassification.regulatory_tags; refuses any document whose
+        # serving it could change)
         # + API_KEY_MINT + API_KEY_REVOKE (credential writes; handled only
         # by trellis.mutate.build_api_keys_executor, never
         # create_curate_handlers, so execute_mutation and POST
         # /commands/batch cannot mint or revoke a key)
-        assert len(Operation) == 30
+        assert len(Operation) == 31
 
 
 class TestCommand:
@@ -412,8 +415,8 @@ class TestIdBearingArgNulSafety:
         out). Deleting an entry drops one of these counts and fails here —
         a silent shrink is the one failure mode this test exists to catch.
         """
-        assert len(ID_BEARING_ARG_KEYS) == 11
-        assert len(_ID_BEARING_PAIRS) == 18
+        assert len(ID_BEARING_ARG_KEYS) == 12
+        assert len(_ID_BEARING_PAIRS) == 19
 
     def test_mapping_is_pinned_by_full_content(self) -> None:
         """Content equality, not just size — a count floor cannot tell
@@ -428,6 +431,7 @@ class TestIdBearingArgNulSafety:
             Operation.PRECEDENT_DEMOTE: frozenset({"target_id"}),
             Operation.PRECEDENT_REINSTATE: frozenset({"target_id"}),
             Operation.CLASSIFICATION_SET: frozenset({"doc_id"}),
+            Operation.CLASSIFICATION_TAG_REGULATORY: frozenset({"doc_id"}),
             Operation.LABEL_ADD: frozenset({"target_id", "label"}),
             Operation.LABEL_REMOVE: frozenset({"target_id", "label"}),
             Operation.FEEDBACK_RECORD: frozenset({"target_id", "pack_id"}),

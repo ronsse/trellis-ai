@@ -251,6 +251,12 @@ NON_DESTRUCTIVE_OPERATIONS: frozenset[Operation] = frozenset(
         # ``mutate`` key holding ``restricted`` can relabel what it can read
         # and no other key can touch what it cannot.
         Operation.CLASSIFICATION_SET,
+        # classification.tag_regulatory rewrites one field of that same record
+        # (``regulatory_tags``) under the same clearance authority, and refuses
+        # any document whose label it could not leave serving-neutral (a
+        # ``public`` one, a corrupt record). The tags it replaces are named in
+        # its result message, which the audit event carries.
+        Operation.CLASSIFICATION_TAG_REGULATORY,
     }
 )
 

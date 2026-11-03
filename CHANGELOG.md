@@ -6,6 +6,17 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **A document's regulatory tags can be set without changing what it serves.**
+  `trellis curate tag-regulatory <doc_id> --tag pii [--tag phi ...] [--clear]` and
+  `POST /api/v1/documents/{doc_id}/regulatory-tags` run the governed
+  `classification.tag_regulatory` operation, which writes only the `regulatory_tags` field of
+  the stored classification record (lower-cased, de-duplicated, sorted; open vocabulary) and
+  leaves `sensitivity`, `jurisdiction` and `classification_version` as they were. It refuses,
+  with nothing written, a `public` document (an `external` key reads one only while its record
+  is exactly the public record, so a tag would withhold it), a record that cannot be read, and
+  a chunk id. On every other label the document is served to the same keys before and after.
+  `classification.set` is unchanged and still replaces a record's tags. No MCP tool.
+
 - **API keys can be listed, minted and revoked from the REST API, the UI and MCP.**
   `GET`/`POST /api/v1/api-keys` and `DELETE /api/v1/api-keys/{key_id}` (admin scope), a
   **Keys** tab in the web UI with scope presets, a one-time token display and a

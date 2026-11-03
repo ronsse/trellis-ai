@@ -1699,7 +1699,8 @@ a jurisdiction, another classification version or a field the schema does not kn
 is refused (exit `2`, reason `classification_public_discards`, naming those
 fields, `Nothing was written.`) rather than cleared silently. Neither the CLI nor
 REST can clear a record's tags, so such a document stays unserved to `external` keys
-until a command that clears them exists (a known gap). Only a stored record that
+until a command that clears them exists (a known gap; `tag-regulatory --clear` is not
+that command, because it refuses a `public` record). Only a stored record that
 already is the exact one answers `unchanged`. A relabel to `public` replaces
 `classified_by` with the exact record's value (the refusal does not name it); a
 target other than `public` keeps the prior fields and its message says nothing about
@@ -1711,6 +1712,69 @@ clearance; the REST route is the credentialed equivalent:
 returns a `CommandResponse`. It needs the `mutate` scope, and the key's clearance
 must cover both the document's current label and the requested one, otherwise
 the answer is `400` and nothing is written.
+
+### `trellis curate tag-regulatory`
+
+Set the regulatory tags (`pii`, `phi`, any open-vocabulary word) of a stored
+document's classification record. A metadata-only write through the governed
+`classification.tag_regulatory` operation, built for one property: **it never
+changes what any pack, search or read serves.** The tags say what the content
+is; they are not a limit on who reads it.
+
+```bash
+trellis curate tag-regulatory <doc_id> --tag <tag> [--tag <tag> ...] [--by <who>] [--format text|json]
+trellis curate tag-regulatory <doc_id> --clear
+```
+
+| Argument / option | Required | Description |
+|-------------------|----------|-------------|
+| `doc_id` | **Yes** | Document ID to tag |
+| `--tag` | One of `--tag` / `--clear` | A tag; repeat for several. Lower-cased, stripped, de-duplicated and sorted. At most 32 tags of at most 64 printable characters |
+| `--clear` | One of `--tag` / `--clear` | Remove the document's tags |
+| `--by` | No | Caller recorded on the command (default `cli:tag-regulatory`) |
+
+`--tag` replaces the stored set; it does not merge into it, and the message names
+the tags it replaced (`Regulatory tags set: doc-1 pii -> phi, pii`). Re-applying the
+stored set is a successful no-op that writes nothing (`Regulatory tags unchanged:
+...`). Giving both `--tag` and `--clear`, or neither, is refused
+(`regulatory_tags_shape`).
+
+The write touches the `regulatory_tags` field and nothing else of the record:
+`sensitivity`, `jurisdiction`, `classification_version` and any other key are carried
+forward byte for byte, the content and the row's `updated_at` are untouched, and the
+vector row is re-mirrored by the same `put_document` call every metadata write uses.
+`classified_by` gains `"caller"` when it lacks it, as a relabel does, because the
+record now carries a person's call. A document with no record at all gets a new one
+at `sensitivity: internal` (the label it already read as) holding the tags; that
+stops the label proposer listing it as unlabelled and flips `stored` on the Memories
+tab, and changes nothing a reader is served.
+
+**What it refuses, because it would change serving** (exit `2`, `"status":
+"rejected"`, nothing written):
+
+- **A `public` document** (`regulatory_tags_public`), `--clear` included. An
+  `external` key reads a public document only while its record is *exactly* the one
+  a public label writes, so a tag would withhold it from that key, and clearing the
+  tags off an already-tagged public record would start serving it. Neither is a
+  tagging decision; relabel with `classify-sensitivity` instead.
+- **A record that cannot be read** (`regulatory_tags_corrupt_record`): metadata that
+  is not an object, a classification record that is not an object, or one that names
+  no valid level. Such a record reads `restricted` without anyone having chosen it;
+  repair it with `classify-sensitivity` first.
+- **A chunk id** (`regulatory_tags_chunk`): a chunk reads its parent's label, so tag
+  the parent.
+- **A document above the caller's clearance, or a missing one**, both as
+  `target_not_found`, in the same words.
+
+On every other label (`internal`, `confidential`, `restricted`, unlabelled) the
+clearance computed for the document is identical before and after. The exit code is
+the same under `--format text` and `--format json`.
+
+`POST /api/v1/documents/{doc_id}/regulatory-tags` with body `{"tags": ["pii", "phi"]}`
+(or `{"clear": true}`) is the credentialed equivalent and returns a
+`CommandResponse`. It needs the `mutate` scope; a refusal is `400` and nothing is
+written. There is no MCP tool for it. `classification.set` is unchanged: a relabel
+still replaces the tags of the record it rewrites.
 
 ### `trellis curate redact`
 
@@ -3479,6 +3543,7 @@ result = executor.execute(cmd)
 |-----------|---------------|-------------|
 | `evidence.ingest` | `evidence` (dict) | Ingest evidence via the mutation pipeline. A caller-chosen `evidence.doc_id` may not start with `trace-summary:` (the trace embed worker's namespace: a row there makes the trace it names look already embedded, so its real summary is never written; code `reserved_trace_summary_id`), may not sit in the `precedent://learning/` namespace, and may not be a minted `<x>#chunk-<digits>` chunk id (both `reserved_document_id`). The prefix is exact and case-sensitive. `POST /api/v1/evidence`, `POST /api/v1/documents`, MCP `save_memory` and `trellis ingest evidence` refuse it the same way |
 | `classification.set` | `doc_id`, `sensitivity` | Relabel a document's `DataClassification.sensitivity` (metadata only; `updated_at` preserved, vector row re-mirrored). A document above the caller's clearance is `target_not_found`, as a missing one is; a requested label above the caller's clearance is refused (`policy_violation`, nothing written); a chunk id is `classification_set_chunk`; a malformed `doc_id`/`sensitivity` is `classification_set_shape`. Re-applying the stored label is a successful no-op, with two exceptions. `restricted` over a record that cannot be parsed, which reads `restricted` without stating it, replaces the record: fields that validate are kept, and anything else is dropped and not kept anywhere. `public` writes the exact record an `external` key reads, so a record that only reads `public` is rewritten, and one carrying regulatory tags, a jurisdiction, another version or an unknown field is refused (`classification_public_discards`, nothing written). A row whose `metadata` is not an object fails with `Execution failed: <class>` and is not repaired. Also available via `trellis curate classify-sensitivity` and `POST /api/v1/documents/{doc_id}/sensitivity` |
+| `classification.tag_regulatory` | `doc_id`, `tags` (list of strings) or `clear` (bool) | Set a document's `DataClassification.regulatory_tags` without changing what it serves (metadata only; `updated_at` preserved, vector row re-mirrored). `tags` replaces the set (lower-cased, de-duplicated, sorted; at most 32 of at most 64 characters); `clear: true` with no `tags` removes it. Writes only that field, plus `"caller"` in `classified_by`. A `public` document, a record that cannot be read and a chunk id are refused with nothing written (`regulatory_tags_public`, `regulatory_tags_corrupt_record`, `regulatory_tags_chunk`); a document above the caller's clearance is `target_not_found`; both or neither of `tags`/`clear` is `regulatory_tags_shape`. Also available via `trellis curate tag-regulatory` and `POST /api/v1/documents/{doc_id}/regulatory-tags` |
 | `evidence.attach` | `evidence_id`, `target_id`, `target_type` | Attach evidence to a trace, entity, or precedent |
 
 ### Entity Operations
@@ -5022,6 +5087,11 @@ above its own clearance, and cannot touch a document it may not read.**
   new label must be within the caller's clearance too (`policy_violation`,
   nothing written). Any cleared key with the `mutate` scope may lower a label it
   can read; the scope is not `admin`.
+- `classification.tag_regulatory` (CLI `trellis curate tag-regulatory`, REST `POST
+  /api/v1/documents/{doc_id}/regulatory-tags`) follows the same two rules for the
+  document, and takes no label, so it has no ceiling of its own to exceed. It refuses
+  whatever would move a document in or out of a caller's reach: a `public` document
+  and a record that cannot be read.
 - `evidence.ingest` refuses a label above the caller's clearance, on a new id
   and an existing one, in the words `classification.set` uses. At an id that
   already names a document it also refuses to overwrite one above the caller's

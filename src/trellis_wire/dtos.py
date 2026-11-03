@@ -294,6 +294,21 @@ class ClassificationSetRequest(WireRequestModel):
     requested_by: str = "api:classify-sensitivity"
 
 
+class RegulatoryTagsRequest(WireRequestModel):
+    """Request to set one document's regulatory tags. ``doc_id`` rides the URL path.
+
+    ``tags`` is an open vocabulary (``pii``, ``phi``, ...), lower-cased, de-duplicated
+    and sorted by the server, and it replaces the document's set. Send ``clear``
+    with no tags to remove the set. Tagging never changes who may read the
+    document, so a ``public`` document, whose exact record an ``external`` key
+    needs, is refused.
+    """
+
+    tags: list[str] = Field(default_factory=list, max_length=32)
+    clear: bool = False
+    requested_by: str = "api:tag-regulatory"
+
+
 class LinkRequest(WireRequestModel):
     """Request to create a graph edge.
 
