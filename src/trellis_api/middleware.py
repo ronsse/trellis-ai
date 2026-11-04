@@ -61,7 +61,12 @@ from fastapi.responses import JSONResponse
 
 from trellis.core.error_sanitize import sanitize_error_message
 from trellis.core.ids import generate_ulid
-from trellis.errors import ConfigError, PublicReadBusyError, TrellisError
+from trellis.errors import (
+    ConfigError,
+    HoldoutReadoutSealedError,
+    PublicReadBusyError,
+    TrellisError,
+)
 from trellis.mutate.handlers import _find_unsafe_jsonb_string
 from trellis_wire.feedback_hints import rating_out_of_range_hint
 
@@ -302,6 +307,12 @@ async def request_validation_error_handler(
 #: legibility lives in this handler and not in the catch-all.
 CONFIG_ERROR_STATUS = 409
 
+#: The pack-holdout outcome readout asked for before its pre-registered horizon
+#: (:class:`~trellis.errors.HoldoutReadoutSealedError`). 409, not 403: the
+#: refusal turns on the clock and the deployment's horizon, not on the caller's
+#: credential, and the Reports tab reads a 403 as an under-scoped key.
+HOLDOUT_SEALED_STATUS = 409
+
 #: A public-only read (an ``external`` key) refused at the process's limit on
 #: concurrent public reads (:class:`~trellis.errors.PublicReadBusyError`). The
 #: refusal is immediate and carries ``Retry-After``.
@@ -324,8 +335,9 @@ _CONTEXT_ATTRS = ("setting", "path", "recovery", "store")
 def _error_status(exc: TrellisError) -> int:
     """HTTP status for a typed Trellis error reaching the boundary.
 
-    Deliberately narrow. Only :class:`~trellis.errors.ConfigError` is
-    remapped; everything else keeps the 500 it returns today, because
+    Deliberately narrow. Only :class:`~trellis.errors.ConfigError` and the
+    two refusals below it are remapped; everything else keeps the 500 it
+    returns today, because
     widening the *status* map is a separate decision from making the
     *body* legible and this change is only licensed to make the second.
     A ``StoreError`` from a driver that fell over is a server fault and
@@ -336,6 +348,8 @@ def _error_status(exc: TrellisError) -> int:
         return CONFIG_ERROR_STATUS
     if isinstance(exc, PublicReadBusyError):
         return PUBLIC_READ_BUSY_STATUS
+    if isinstance(exc, HoldoutReadoutSealedError):
+        return HOLDOUT_SEALED_STATUS
     return 500
 
 
