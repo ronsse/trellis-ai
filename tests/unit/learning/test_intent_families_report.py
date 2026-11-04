@@ -65,10 +65,10 @@ class TestAgainstHandComputedCounts:
         assert report.rule_set.source == "default"
         assert report.interval_method == "pack_bootstrap_95"
         assert report.bootstrap_resamples == 2000
-        assert report.sectioned_packs_without_rows == 0
+        assert report.sectioned_packs_excluded == 0
         assert report.cited_not_served == 0
         assert report.rule_set.fallback == "general"
-        assert report.rule_set.rules == 17
+        assert report.rule_set.rules == 18
 
     def test_packs_per_new_family(self, log: EventLog) -> None:
         seed_mod.seed(log)
@@ -429,5 +429,5 @@ class TestFeedbackAndSectionedCounting:
         assert report.packs_served == 2
         assert report.packs_analyzed == 1
         assert report.packs_without_item_rows == 1
-        assert report.sectioned_packs_without_rows == 1
+        assert report.sectioned_packs_excluded == 1
         assert any("sectioned pack(s)" in note for note in report.notes)

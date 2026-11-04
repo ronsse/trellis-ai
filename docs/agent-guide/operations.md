@@ -4180,7 +4180,11 @@ performance); `docs` precedes `design` ("write the design doc" is a document, an
 are "release notes" and a "pre-release checklist", while "cut the release" is `ops`);
 `implement` precedes `design` ("implement the RFC" is the work, not the plan); and a
 building verb (`add`, `write`) comes last. Nouns that are common in this codebase and
-say nothing about the work ("mutation", "audit", "new") are not keywords. Every match
+say nothing about the work ("mutation", "audit", "new") are not keywords, and neither are
+the bare words "dependency", "upgrade", "plan", "error" and "failure", which are as often
+the object of a feature or a test as a bug or an upkeep task ("add dependency injection",
+"add error handling", "retry on failure"): only phrases that name the work count
+("update dependencies", "plan the", "errors in", "test failure"). Every match
 records the rule id, so the report can show why an intent landed where it did.
 
 A deployment replaces the shipped set in `config.yaml`:
@@ -4217,8 +4221,8 @@ with replacement, a fixed seed, the 2.5th and 97.5th percentiles), because the c
 of one pack are not independent; a Wilson interval over them would be several times too
 narrow. Report-wide: packs
 served, packs analysed (those carrying item rows, as in `analyze value`), sectioned
-packs without rows (`sectioned_packs_without_rows`, not analysed), the share
-that fell to the fallback family, a legacy-by-new cross-tab of pack counts, and how
+sectioned packs (`sectioned_packs_excluded`: they carry no per-item rows and are not
+analysed), the share that fell to the fallback family, a legacy-by-new cross-tab of pack counts, and how
 many packs' stored `intent_family` stamp differs from the legacy family recomputed
 here. **A family's rates are withheld below 20 graded packs**, with the reason stated
 beside it (`withheld_reason`); an uncited item is not an unhelpful one. A good report has

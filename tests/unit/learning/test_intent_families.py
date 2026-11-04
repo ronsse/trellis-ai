@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import math
+import random
 from typing import Any
 
 import pytest
@@ -71,8 +72,13 @@ TABLE: list[tuple[str | None, str, str, str | None]] = [
     ("debug the build", "investigate", "investigate.inquiry", "debug"),
     ("reproduce the crash", "bugfix", "bugfix.defect", "crash"),
     # Defect vocabulary is a bug, not a miss.
-    ("error in ingest", "bugfix", "bugfix.defect", "error"),
-    ("errors from the exporter", "bugfix", "bugfix.defect", "errors"),
+    ("error in ingest", "bugfix", "bugfix.error_phrase", "error in"),
+    ("errors from the exporter", "bugfix", "bugfix.error_phrase", "errors from"),
+    ("errors in the log", "bugfix", "bugfix.error_phrase", "errors in"),
+    ("test failure", "bugfix", "bugfix.error_phrase", "test failure"),
+    ("failure in the nightly job", "bugfix", "bugfix.error_phrase", "failure in"),
+    ("failure to connect", "bugfix", "bugfix.error_phrase", "failure to"),
+    ("failed deploy", "bugfix", "bugfix.defect", "failed"),
     ("traceback in the worker", "bugfix", "bugfix.defect", "traceback"),
     ("exception on startup", "bugfix", "bugfix.defect", "exception"),
     ("parser fails on unicode", "bugfix", "bugfix.defect", "fails"),
@@ -120,17 +126,41 @@ TABLE: list[tuple[str | None, str, str, str | None]] = [
         "investigate",
     ),
     ("the sql warehouse schema", "data", "data.platform", "sql"),
-    # Maintenance.
-    ("update dependencies", "maintenance", "maintenance.deps", "dependencies"),
+    # Maintenance. ``dependency`` and ``upgrade`` stand alone as nouns of other
+    # work, so only the phrases that name the upkeep count.
+    (
+        "update dependencies",
+        "maintenance",
+        "maintenance.deps",
+        "update dependencies",
+    ),
+    (
+        "upgrade dependencies",
+        "maintenance",
+        "maintenance.deps",
+        "upgrade dependencies",
+    ),
+    (
+        "upgrading the dependencies",
+        "maintenance",
+        "maintenance.deps",
+        "upgrading the dependencies",
+    ),
+    ("upgrade deps", "maintenance", "maintenance.deps", "deps"),
     ("bump ruff to 0.17", "maintenance", "maintenance.deps", "bump"),
-    ("upgrade pydantic", "maintenance", "maintenance.deps", "upgrade"),
+    # A bare ``upgrade <package>`` cannot be told from "upgrade the auth flow",
+    # so it is general rather than a guess; the cost is one intent in the probe
+    # list that used to land in maintenance.
+    ("upgrade pydantic", "general", FALLBACK_RULE_ID, None),
     ("refresh the lockfile", "maintenance", "maintenance.deps", "lockfile"),
     ("renovate config", "maintenance", "maintenance.deps", "renovate"),
     ("dependabot alerts", "maintenance", "maintenance.deps", "dependabot"),
     # Design, with a design document staying a document and an implementation
     # of a spec staying an implementation.
     ("design the schema for X", "design", "design.core", "design"),
-    ("plan the migration", "design", "design.core", "plan"),
+    ("plan the migration", "design", "design.core", "plan the"),
+    ("planning the schema work", "design", "design.core", "planning"),
+    ("design plan for the store", "design", "design.core", "design"),
     ("architecture proposal", "design", "design.core", "architecture"),
     ("write an ADR for the store", "design", "design.core", "adr"),
     ("write the design doc", "docs", "docs.core", "doc"),
@@ -157,6 +187,30 @@ TABLE: list[tuple[str | None, str, str, str | None]] = [
     ("ratings of the newest items", "general", FALLBACK_RULE_ID, None),
     ("prerelease checks", "general", FALLBACK_RULE_ID, None),
     ("follow-up on the PR", "general", FALLBACK_RULE_ID, None),
+    # A noun of one family inside another family's work stays with that work:
+    # ``dependency``, ``upgrade``, ``plan``, ``error`` and ``failure`` alone claim
+    # nothing, so the verb of the intent decides.
+    ("add dependency injection", "feature", "feature.build", "add"),
+    ("add a dependency on httpx", "feature", "feature.build", "add"),
+    ("the dependency graph", "general", FALLBACK_RULE_ID, None),
+    ("add a plan command to the CLI", "feature", "feature.build", "add"),
+    ("add error handling to the loader", "feature", "feature.build", "add"),
+    ("add retries on failure", "feature", "feature.build", "add"),
+    ("retry on failure", "general", FALLBACK_RULE_ID, None),
+    ("add a failure mode to the fake", "feature", "feature.build", "add"),
+    ("add a test for the dependency resolver", "test", "test.core", "test"),
+    ("deploying the new upgrade", "ops", "ops.deploy", "deploying"),
+    ("fix failing upgrade test", "bugfix", "bugfix.fix", "fix"),
+    ("fix the error in the loader", "bugfix", "bugfix.fix", "fix"),
+    ("plan the bugfix", "bugfix", "bugfix.fix", "bugfix"),
+    # Neither a feature nor a defect is certain, so these are general.
+    ("upgrade the auth flow to OAuth2", "general", FALLBACK_RULE_ID, None),
+    ("upgrade path for v3 users", "general", FALLBACK_RULE_ID, None),
+    ("error budget dashboard", "general", FALLBACK_RULE_ID, None),
+    ("improve error messages", "general", FALLBACK_RULE_ID, None),
+    # Memory and tidying.
+    ("profile memory usage", "performance", "performance.core", "profile memory"),
+    ("tidy up imports", "refactor", "refactor.core", "tidy up"),
     # No intent at all.
     ("hello", "general", FALLBACK_RULE_ID, None),
     ("", "general", FALLBACK_RULE_ID, None),
@@ -473,6 +527,26 @@ def test_the_same_packs_give_the_same_interval() -> None:
     # The point estimate sits inside its own interval.
     point = sum(h for h, _ in packs) / sum(j for _, j in packs)
     assert low <= point <= high
+
+
+def test_the_interval_is_the_2_5th_and_97_5th_percentile_of_a_seeded_resample() -> None:
+    # The interval replicated by hand: Random(1179), 2,000 draws of the packs
+    # with replacement, each draw's total helpful over total judged, sorted;
+    # the 2.5th and 97.5th percentiles are the elements at indices 50 and 1949.
+    packs = [(1, 2), (3, 3), (0, 4), (2, 2), (1, 5), (4, 4), (0, 1), (2, 3)] * 3
+    rng = random.Random(1179)  # noqa: S311 - a reproducible resample, not security
+    rates: list[float] = []
+    for _ in range(2000):
+        drawn = rng.choices(range(len(packs)), k=len(packs))
+        judged = sum(packs[i][1] for i in drawn)
+        assert judged > 0  # every pack judges something, so no draw is skipped
+        rates.append(sum(packs[i][0] for i in drawn) / judged)
+    rates.sort()
+    assert len(rates) == 2000
+    # Not degenerate: a different percentile pair would give a different interval.
+    assert rates[50] < rates[200] <= rates[1799] < rates[1949]
+
+    assert pack_bootstrap_interval(packs) == (rates[50], rates[1949])
 
 
 def test_clustered_citations_widen_the_interval_past_wilson() -> None:

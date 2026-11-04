@@ -12,6 +12,9 @@ key as a string, which is how a dynamic import or a read of
 ``registry.retrieval_config`` would reach it. The relabel itself may import
 whatever it needs from them. Only the module's own CLI command and REST route
 may import the module; tests are outside ``src``.
+
+A static pin has a limit: a module name built at run time, such as a string joined
+with ``+``, is beyond any static pin and no test here would see it.
 """
 
 from __future__ import annotations

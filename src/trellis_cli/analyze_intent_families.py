@@ -57,11 +57,11 @@ def _render_text(report: IntentFamilyReport) -> None:
         f"intent; {report.legacy_stamp_differs} stamped differently from the legacy "
         "family recomputed here"
     )
-    if report.cited_not_served or report.sectioned_packs_without_rows:
+    if report.cited_not_served or report.sectioned_packs_excluded:
         console.print(
             f"  {report.cited_not_served} cited ids were not served by the pack "
             f"they were cited against (counted in no rate); "
-            f"{report.sectioned_packs_without_rows} sectioned packs carry no item "
+            f"{report.sectioned_packs_excluded} sectioned packs carry no item "
             "rows",
             soft_wrap=True,
         )
