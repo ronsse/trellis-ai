@@ -1,7 +1,10 @@
 """``trellis curate evaluate-precedent-gate``: the two-stage gate, report only.
 
 Stage 1 is the mint (dedup only): the distiller run dry over the window's
-traces, reusing :func:`~trellis_cli.worker_distill_precedents.distill_window`.
+traces, reusing :func:`~trellis_cli.worker_distill_precedents.distill_window`,
+and, beside it under ``stage1.advisory_source``, the advisory source run dry over
+the stored advisories
+(:func:`~trellis_cli.worker_distill_advisory_precedents.distill_advisory_window`).
 Stage 2 is activation: the pure test in
 :mod:`trellis.learning.precedent_activation`, run beside the gate
 ``auto-promote-candidates`` applies today, over the same candidates.
@@ -39,6 +42,10 @@ from trellis.stores.base.event_log import (
 from trellis_cli.exit_codes import EXIT_OK, EXIT_VALIDATION
 from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import _get_registry, get_event_log
+from trellis_cli.worker_distill_advisory_precedents import (
+    distill_advisory_window,
+    stage1_block,
+)
 from trellis_cli.worker_distill_precedents import distill_window
 
 console = build_console()
@@ -77,6 +84,9 @@ def _stage1(
         "by_rule": dict(sorted(tally.by_rule.items())),
         "skipped": dict(sorted(tally.skips_by_reason.items())),
         "dropped": dict(sorted(tally.dropped.items())),
+        # Beside the trace source's counts, which are unchanged: the same stage
+        # run over the stored ANTI_PATTERN advisories.
+        "advisory_source": stage1_block(distill_advisory_window(_get_registry())),
     }
 
 
@@ -217,6 +227,27 @@ def _render(payload: dict[str, Any]) -> None:
         console.print(f"    skipped {escape(reason)}: {count}")
     for reason, count in stage1["dropped"].items():
         console.print(f"    dropped {escape(reason)}: {count}")
+    advisory = stage1["advisory_source"]
+    console.print(
+        f"  stage 1 (mint, advisory source): read {advisory['advisories_read']} "
+        f"advisory(ies), would mint {advisory['would_mint']}, "
+        f"{advisory['duplicates']} duplicate(s), "
+        f"{advisory['finding_recorded']} finding(s) already recorded"
+    )
+    console.print(
+        "    every stored advisory is read: --days does not bound this source",
+        soft_wrap=True,
+    )
+    if advisory["store_degraded"]:
+        console.print(
+            "  [yellow]the advisory file loaded only in part; "
+            "the rows that parsed were read.[/yellow]",
+            soft_wrap=True,
+        )
+    for rule, count in advisory["by_rule"].items():
+        console.print(f"    rule {escape(rule)}: {count}")
+    for reason, count in advisory["skipped"].items():
+        console.print(f"    skipped {escape(reason)}: {count}")
     console.print(
         f"  stage 2 (activate): evaluated {stage2['evaluated']}, "
         f"promotable {stage2['promotable']}, "

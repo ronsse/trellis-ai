@@ -5182,6 +5182,44 @@ provenance tier is recorded; a record naming `local_model` or `human` is refused
 as a policy violation. See
 [`adr-precedent-record.md`](../design/adr-precedent-record.md).
 
+### `trellis worker distill-advisory-precedents`
+
+Distill **candidate precedents** from the stored `ANTI_PATTERN`
+advisories, the sibling of `distill-precedents` whose source is the advisory store
+instead of traces. Dry run by default: it reads the advisories and reports counts,
+and writes nothing. It changes no advisory, and what the advisory generator
+produces, stores, suppresses or serves is untouched.
+
+```bash
+trellis worker distill-advisory-precedents [--apply] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--apply` | off | Record the new candidates through the governed `precedent.candidate` operation. |
+
+The one rule (see `trellis.learning.advisory_candidates`) states a measured
+association, never a cause. `advisory_anti_pattern`: an item whose packs succeeded
+less often than the packs without it gives an `avoid` on that item. `APPROACH`
+advisories are not mapped: they are a retrieval-axis association, not an agent
+lesson. Skipped with a counted reason: `suppressed`, `retired`,
+`category_not_lesson_shaped` (every other category, `APPROACH` included),
+`missing_subject`, `missing_evidence`, `not_a_failure_association`,
+`entity_id_overlong`, `invalid_record`.
+
+A candidate is new only if neither its id nor its finding (rule, distiller
+version, advisory id, action kind) is recorded. The generator keys an advisory on
+its subject and not on its numbers, so the same finding returns nightly with moved
+counts and a new record id; the counts of the night it was first recorded stand,
+and `finding_recorded` counts the later ones.
+
+The JSON report carries `mode`, `status`, `advisories_read`, `candidates`,
+`by_rule`, `skipped`, `duplicates`, `finding_recorded`, `would_record` (dry run) or
+`recorded` (`--apply`), `rejected`, `failed`, `store_degraded` and `candidate_ids`.
+It carries no advisory text. The exit code does not depend on `--format`. As
+`distill-precedents`, candidates are event-only and never served, and the command
+is not wired into any nightly script.
+
 ### `trellis curate evaluate-precedent-gate`
 
 Count, night by night, what the two-stage precedent gate would mint and activate.
@@ -5206,7 +5244,14 @@ trellis curate evaluate-precedent-gate [--candidates PATH] [--days N] \
 **Stage 1 (mint)** runs `trellis worker distill-precedents` in dry-run over the
 window's traces (the same function, not a subprocess) and reports `traces_read`,
 `would_mint`, `duplicates` of already-recorded candidates, `by_rule`, `skipped` and
-`dropped` counters.
+`dropped` counters. Beside it, `stage1.advisory_source` reports the same stage run
+over the stored advisories (`trellis worker distill-advisory-precedents` in
+dry-run): `advisories_read`, `candidates`, `would_mint`, `duplicates`,
+`finding_recorded`, `by_rule`, `skipped` and `store_degraded`. The trace source's
+keys are unchanged. The advisory source reads every stored advisory: `--days` bounds
+the traces, packs and feedback, not this source, and the text report says so. The
+text report also warns when `store_degraded` is true (the advisory file loaded only
+in part).
 
 **Stage 2 (activate)** tests each promotable learning candidate, the same
 population `auto-promote-candidates` evaluates, against h >= 3 helpful citations,
