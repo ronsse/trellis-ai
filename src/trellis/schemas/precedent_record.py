@@ -85,6 +85,12 @@ class PrecedentEvidence(TrellisModel):
     advisory_ids: list[BoundedId] = Field(
         default_factory=list, max_length=MAX_LIST_ITEMS
     )
+    #: Candidate ids a merge combined (``precedent.merge``). Empty for every
+    #: other record, and then left out of the id (see
+    #: :data:`OMIT_WHEN_EMPTY_EVIDENCE`).
+    merged_from: list[BoundedId] = Field(
+        default_factory=list, max_length=MAX_LIST_ITEMS
+    )
 
 
 class PrecedentRecord(TrellisModel):
@@ -128,7 +134,7 @@ ID_EXCLUDED_FIELDS: Final = frozenset({"candidate_id", "lifecycle"})
 #: evidence after records were already recorded goes here, so that the ids of
 #: those records, which cannot name it, do not change. A non-empty list is hashed
 #: like any other, so a record that does cite one is told apart by it.
-OMIT_WHEN_EMPTY_EVIDENCE: Final = frozenset({"advisory_ids"})
+OMIT_WHEN_EMPTY_EVIDENCE: Final = frozenset({"advisory_ids", "merged_from"})
 
 _PENDING_ID: Final = "pcand_pending"
 

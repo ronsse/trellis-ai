@@ -673,7 +673,8 @@ llm:
 ```
 
 The consumers are `memory_extraction`, `session_capture`, `classify_shadow`,
-`enrichment`, `precedent_mining`, `reconcile` and `pack_judge` — `LLMConsumer` in
+`enrichment`, `precedent_mining`, `reconcile`, `pack_judge`, `precedent_distill` and
+`precedent_merge` (the last two refuse any route not declared `local: true`) — `LLMConsumer` in
 [`llm/routing.py`](../../src/trellis/llm/routing.py). A consumer with no route
 builds from the parent block exactly as it did before tiers existed, so adding
 `tiers:`/`routes:` to a working config changes nothing until a route names a
@@ -715,7 +716,7 @@ a note.
 
 ### Verification via `trellis admin llm-routes`
 
-`trellis admin llm-routes` resolves all seven consumers **without building a
+`trellis admin llm-routes` resolves every consumer **without building a
 client** — no key is read, no network call is made — and says where each one's
 credential would come from:
 

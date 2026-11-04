@@ -17,6 +17,7 @@ from trellis.core.precedent_document import (
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.errors import IdempotencyError, PolicyViolationError, ValidationError
 from trellis.learning.candidate_auto_promote import AUTO_PROMOTE_REQUESTED_BY
+from trellis.learning.precedent_judged import judged_op_backs
 from trellis.mutate.commands import Command, Operation
 from trellis.mutate.handlers._common import (
     _current_lifecycle_state,
@@ -810,7 +811,21 @@ CANDIDATE_RECORDED_ACTION = "precedent_candidate_recorded"
 #: get its own caller check; until then a record naming one is refused rather
 #: than recorded under a claim nothing here can back.
 PERMITTED_PROVENANCE_TIERS = frozenset({"deterministic"})
+#: ``local_model`` is recorded only when both hold. The caller is the local-model
+#: distillation command (``requested_by`` is the caller's own claim, as for every
+#: command, so on its own it keeps only an honest caller from stamping a tier it
+#: did not earn); and the event log holds the ``MEMORY_OP_JUDGED`` that produced
+#: the record (:func:`~trellis.learning.precedent_judged.judged_op_backs`), which
+#: no MCP, REST or governed caller can emit.
+LOCAL_MODEL_CANDIDATE_REQUESTERS = frozenset({"cli:distill-precedents-local"})
 CANDIDATE_TIER_POLICY_ID = "precedent_candidate_provenance_tier"
+CANDIDATE_JUDGED_POLICY_ID = "precedent_candidate_judged_op"
+#: The refusal for a ``local_model`` record no logged judged operation backs. Fixed
+#: text: it never quotes the record, which the caller wrote.
+JUDGED_OP_MISSING_MESSAGE = (
+    "precedent.candidate records a local_model record only when the event log "
+    "holds the judged operation that produced it; none was found"
+)
 
 
 def precedent_candidate_recorded(event_log: EventLog, candidate_id: str) -> bool:
@@ -835,9 +850,12 @@ class PrecedentCandidateHandler:
     :class:`~trellis.schemas.precedent_record.PrecedentRecord` whose
     ``candidate_id`` is the id its own content derives (evidence and text both),
     so a forged record cannot take the id the distiller derives for a real
-    trace; the event carries the whole record. Only the ``deterministic``
-    provenance tier is recorded: ``local_model`` and ``human`` are refused as a
-    policy violation until those tiers get their own caller checks. A candidate
+    trace; the event carries the whole record. The ``deterministic`` provenance
+    tier is recorded. ``local_model`` is recorded from the local distillation
+    command only, and only when the ``MEMORY_OP_JUDGED`` event that produced the
+    record is in the event log (a distillation ``lesson`` for its trace, a
+    reconciliation ``same`` for the pair it merged); ``human`` and any other
+    ``local_model`` record are refused as a policy violation. A candidate
     already recorded is a duplicate, whether or not the caller named an
     idempotency key.
     """
@@ -856,10 +874,15 @@ class PrecedentCandidateHandler:
             raise ValidationError(
                 msg, errors=[msg], code="precedent_record_invalid"
             ) from exc
-        if record.provenance_tier not in PERMITTED_PROVENANCE_TIERS:
+        local_ok = (
+            record.provenance_tier == "local_model"
+            and command.requested_by in LOCAL_MODEL_CANDIDATE_REQUESTERS
+        )
+        if record.provenance_tier not in PERMITTED_PROVENANCE_TIERS and not local_ok:
             msg = (
-                "precedent.candidate records only the deterministic provenance "
-                f"tier for now; {record.provenance_tier!r} records are refused"
+                "precedent.candidate records the deterministic provenance tier, "
+                "and the local_model tier from the local distillation command; "
+                f"{record.provenance_tier!r} records from this caller are refused"
             )
             raise PolicyViolationError(msg, policy_id=CANDIDATE_TIER_POLICY_ID)
         if record.candidate_id != record.expected_candidate_id():
@@ -867,6 +890,12 @@ class PrecedentCandidateHandler:
             raise ValidationError(msg, errors=[msg], code="candidate_id_mismatch")
 
         event_log = self._registry.operational.event_log
+        if record.provenance_tier == "local_model" and not judged_op_backs(
+            event_log, record
+        ):
+            raise PolicyViolationError(
+                JUDGED_OP_MISSING_MESSAGE, policy_id=CANDIDATE_JUDGED_POLICY_ID
+            )
         if precedent_candidate_recorded(event_log, record.candidate_id):
             raise IdempotencyError(idempotency_key=record.candidate_id)
 
