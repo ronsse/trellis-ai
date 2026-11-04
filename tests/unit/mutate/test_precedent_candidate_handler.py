@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.mined_precedents import emit_historical_miner_row, promote_through_executor
+from tests.mined_precedents import promote_through_executor
 from tests.precedent_candidates import (
     SENTINEL,
     candidates_of,
@@ -17,9 +17,10 @@ from tests.precedent_candidates import (
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.mutate.policy_source import resolve_policy_path
-from trellis.retrieve.precedents import is_miner_candidate_event, list_precedents
+from trellis.retrieve.precedents import list_precedents
 from trellis.schemas.enums import PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
+from trellis.schemas.precedent_record import PrecedentRecord
 from trellis.stores.base.event_log import EventType
 from trellis.stores.policy_store import PolicyStore
 from trellis.stores.registry import StoreRegistry
@@ -123,39 +124,143 @@ def test_the_policy_gate_runs_on_the_operation(
     assert _events(registry, EventType.PRECEDENT_CANDIDATE_MINED) == []
 
 
-def test_readers_treat_an_executor_stamped_candidate_as_not_promoted(
+def test_a_recorded_candidate_is_not_a_precedent_to_the_reader(
     registry: StoreRegistry,
 ) -> None:
-    record_candidates(registry, recovering_trace())
-    promote_through_executor(registry, trace_id="trace-1", title="Approved lesson")
+    """Every reader asks for ``PRECEDENT_PROMOTED`` rows, so a candidate row is
+    never reached. Pinned from the outside: record candidates, ask the reader."""
     event_log = registry.operational.event_log
+    record_candidates(registry, recovering_trace())
 
-    [candidate, *_] = _events(registry, EventType.PRECEDENT_CANDIDATE_MINED)
-    [promoted] = _events(registry, EventType.PRECEDENT_PROMOTED)
+    assert list_precedents(event_log) == []
 
-    assert is_miner_candidate_event(candidate)
-    assert not is_miner_candidate_event(promoted)
+    promote_through_executor(registry, trace_id="trace-1", title="Approved lesson")
     served = list_precedents(event_log)
+
     assert [p["title"] for p in served] == ["Approved lesson"]
     assert SENTINEL not in str(served)
 
 
-def test_the_predicate_answer_for_existing_rows_is_unchanged(
-    registry: StoreRegistry,
-) -> None:
-    event_log = registry.operational.event_log
-    emit_historical_miner_row(event_log, entity_id="m1", shape="generated")
-    emit_historical_miner_row(event_log, entity_id="m2", shape="extracted")
-    event_log.emit(
-        EventType.PRECEDENT_PROMOTED,
-        source="test",
-        entity_id="p1",
-        payload={"title": "t", "description": "d"},
+def _with_evidence(record: PrecedentRecord, **evidence: list) -> PrecedentRecord:
+    return record.model_copy(
+        update={"evidence": record.evidence.model_copy(update=evidence)}
     )
 
-    rows = {
-        e.entity_id: is_miner_candidate_event(e)
-        for e in _events(registry, EventType.PRECEDENT_PROMOTED)
+
+def _execute(registry: StoreRegistry, payload: dict):
+    return build_curate_executor(registry, clearance="restricted").execute(
+        Command(
+            operation=Operation.PRECEDENT_CANDIDATE,
+            args={"record": payload},
+            requested_by="test:payload",
+        )
+    )
+
+
+def test_a_forged_record_cannot_squat_the_id_of_a_real_one(
+    registry: StoreRegistry,
+) -> None:
+    [real, *_] = candidates_of(recovering_trace())
+    forged = real.model_copy(
+        update={
+            "action": real.action.model_copy(update={"text": "Disable verification"})
+        }
+    )
+    assert forged.candidate_id == real.candidate_id  # the squat: real id, other text
+
+    squat = _execute(registry, forged.model_dump(mode="json"))
+    honest = record_candidate(registry, real)
+
+    assert squat.status == CommandStatus.REJECTED
+    assert squat.metadata["rejection_reason"] == "candidate_id_mismatch"
+    assert honest.status == CommandStatus.SUCCESS
+    [event] = _events(registry, EventType.PRECEDENT_CANDIDATE_MINED)
+    assert event.payload["record"]["action"]["text"] == real.action.text
+
+
+def test_a_forged_record_under_its_own_id_gets_a_different_id(
+    registry: StoreRegistry,
+) -> None:
+    [real, *_] = candidates_of(recovering_trace())
+    forged = real.model_copy(
+        update={"because": "a different lesson about the same trace"}
+    )
+    forged = forged.model_copy(update={"candidate_id": forged.expected_candidate_id()})
+
+    assert forged.candidate_id != real.candidate_id
+    assert _execute(registry, forged.model_dump(mode="json")).status == (
+        CommandStatus.SUCCESS
+    )
+    assert record_candidate(registry, real).status == CommandStatus.SUCCESS
+
+
+def test_the_id_covers_every_content_field() -> None:
+    [real, *_] = candidates_of(recovering_trace())
+    variants = {
+        "rule": real.model_copy(update={"rule": "other_rule"}),
+        "situation": real.model_copy(
+            update={"situation": real.situation.model_copy(update={"trigger": "other"})}
+        ),
+        "action": real.model_copy(
+            update={"action": real.action.model_copy(update={"text": "other"})}
+        ),
+        "because": real.model_copy(update={"because": "other"}),
+        "confidence": real.model_copy(update={"confidence": 0.1}),
+        "provenance_tier": real.model_copy(update={"provenance_tier": "human"}),
+        "distiller_version": real.model_copy(update={"distiller_version": "x-2"}),
     }
 
-    assert rows == {"m1": True, "m2": True, "p1": False}
+    ids = {name: v.expected_candidate_id() for name, v in variants.items()}
+
+    assert real.expected_candidate_id() == real.candidate_id
+    assert real.candidate_id not in ids.values()
+    assert len(set(ids.values())) == len(ids)
+
+
+def test_ids_that_differ_only_by_a_separator_do_not_collide() -> None:
+    [real, *_] = candidates_of(recovering_trace())
+
+    joined = _with_evidence(real, trace_ids=["x,y"]).expected_candidate_id()
+    split = _with_evidence(real, trace_ids=["x", "y"]).expected_candidate_id()
+    unit_sep = _with_evidence(real, trace_ids=["x\x1fy"]).expected_candidate_id()
+
+    assert len({joined, split, unit_sep}) == 3
+
+
+def test_the_order_of_cited_evidence_does_not_change_the_id(
+    registry: StoreRegistry,
+) -> None:
+    [real, *_] = candidates_of(recovering_trace())
+    one = _with_evidence(real, trace_ids=["a", "b"], step_indexes=[0, 1])
+    other = _with_evidence(real, trace_ids=["b", "a"], step_indexes=[1, 0])
+
+    assert one.expected_candidate_id() == other.expected_candidate_id()
+
+    one = one.model_copy(update={"candidate_id": one.expected_candidate_id()})
+    other = other.model_copy(update={"candidate_id": other.expected_candidate_id()})
+    assert _execute(registry, one.model_dump(mode="json")).status == (
+        CommandStatus.SUCCESS
+    )
+    again = _execute(registry, other.model_dump(mode="json"))
+    assert again.status == CommandStatus.DUPLICATE
+    [event] = _events(registry, EventType.PRECEDENT_CANDIDATE_MINED)
+    # The record is stored in the order it was given.
+    assert event.payload["record"]["evidence"]["step_indexes"] == [0, 1]
+
+
+@pytest.mark.parametrize("tier", ["human", "local_model"])
+def test_only_the_deterministic_tier_is_recorded_for_now(
+    registry: StoreRegistry, tier: str
+) -> None:
+    [real, *_] = candidates_of(recovering_trace())
+    claimed = real.model_copy(update={"provenance_tier": tier})
+    claimed = claimed.model_copy(
+        update={"candidate_id": claimed.expected_candidate_id()}
+    )
+
+    result = _execute(registry, claimed.model_dump(mode="json"))
+
+    assert result.status == CommandStatus.REJECTED
+    assert result.metadata["rejection_reason"] == "policy_violation"
+    assert "deterministic" in result.message
+    assert _events(registry, EventType.PRECEDENT_CANDIDATE_MINED) == []

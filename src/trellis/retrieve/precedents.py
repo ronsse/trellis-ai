@@ -60,15 +60,9 @@ def is_miner_candidate_event(event: Event) -> bool:
     surfaces. Matches the miner's source or its candidate action, never a
     source *other than* the promote handler's: a ``PRECEDENT_PROMOTED``
     row from any other emitter is still a promotion.
-
-    A ``PRECEDENT_CANDIDATE_MINED`` row also matches, whoever stamped it. The
-    governed ``precedent.candidate`` operation writes those under the
-    executor's source, which neither clause above knows, so a reader that
-    skips by this predicate alone must still read one as not-promoted.
     """
     return (
-        event.event_type == EventType.PRECEDENT_CANDIDATE_MINED
-        or event.source == MINER_EVENT_SOURCE
+        event.source == MINER_EVENT_SOURCE
         or event.payload.get("action") == MINED_CANDIDATE_ACTION
     )
 

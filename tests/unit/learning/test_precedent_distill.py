@@ -12,10 +12,12 @@ from trellis.learning.precedent_distill import (
     RULE_FAILED_STEP_AVOID,
     RULE_FAILED_STEP_DO,
     SKIP_ERROR_WITHOUT_RECOVERY,
+    SKIP_INVALID_RECORD,
     SKIP_NO_SIGNAL,
     SKIP_OUTCOME_WITHOUT_SUMMARY,
     SKIP_RESTATES_INTENT,
     SKIP_SMOOTH_RUN,
+    SKIP_TRANSIENT_RETRY,
     distill_trace,
     distill_traces,
     restates_intent,
@@ -25,10 +27,12 @@ from trellis.schemas.enums import OutcomeStatus, TraceSource
 from trellis.schemas.precedent_record import (
     MAX_ACTION_CHARS,
     MAX_BECAUSE_CHARS,
+    MAX_DOMAIN_CHARS,
+    MAX_ID_CHARS,
     MAX_TRIGGER_CHARS,
     PrecedentRecord,
 )
-from trellis.schemas.trace import Outcome, Trace, TraceContext, TraceStep
+from trellis.schemas.trace import EvidenceRef, Outcome, Trace, TraceContext, TraceStep
 
 
 def _trace(steps, outcome=None, intent="deploy the service") -> Trace:
@@ -74,11 +78,114 @@ def test_an_error_with_no_later_success_of_the_same_step_gives_nothing() -> None
     assert _reasons(trace) == [SKIP_ERROR_WITHOUT_RECOVERY]
 
 
-def test_a_retry_loop_pairs_the_last_failure_once() -> None:
-    steps = [_step(error="e1", n=1), _step(error="e2", n=2), _step(n=3)]
-    result = distill_trace(_trace(steps, Outcome(status="success")))
-    assert {r.evidence.step_indexes[0] for r in result.records} == {1}
-    assert len(result.records) == 2
+def _records(trace: Trace) -> dict[str, list[PrecedentRecord]]:
+    by_rule: dict[str, list[PrecedentRecord]] = {}
+    for record in distill_trace(trace).records:
+        by_rule.setdefault(record.rule, []).append(record)
+    return by_rule
+
+
+def test_a_retry_with_identical_arguments_is_transient_and_gives_nothing() -> None:
+    trace = _trace([_step(error="timeout", a=1), _step(a=1)], Outcome(status="success"))
+
+    result = distill_trace(trace)
+
+    # Never "avoid" the call that worked, and "retry it" is not reusable.
+    assert result.records == ()
+    assert [s.reason for s in result.skips] == [SKIP_TRANSIENT_RETRY]
+
+
+def test_a_failure_with_other_arguments_avoids_it_and_uses_the_one_that_worked() -> (
+    None
+):
+    trace = _trace(
+        [_step(error="bad mode", a=1), _step(a=2)], Outcome(status="success")
+    )
+
+    by_rule = _records(trace)
+
+    [avoid] = by_rule[RULE_FAILED_STEP_AVOID]
+    [do] = by_rule[RULE_FAILED_STEP_DO]
+    assert '"a": 1' in avoid.action.text
+    assert '"a": 2' not in avoid.action.text
+    assert '"a": 2' in do.action.text
+    assert avoid.evidence.step_indexes == do.evidence.step_indexes == [0, 1]
+    assert _reasons(trace) == []
+
+
+def test_every_distinct_failed_approach_is_avoided_and_one_do_is_given() -> None:
+    steps = [
+        _step(error="e1", a=1),
+        _step(error="e3", a=3),
+        _step(error="e1 again", a=1),
+        _step(a=2),
+    ]
+
+    by_rule = _records(_trace(steps, Outcome(status="success")))
+
+    avoids = by_rule[RULE_FAILED_STEP_AVOID]
+    [do] = by_rule[RULE_FAILED_STEP_DO]
+    # a=1 is avoided once, from its latest failure; a=3 once.
+    assert sorted(r.evidence.step_indexes for r in avoids) == [[1, 3], [2, 3]]
+    assert {r.situation.trigger for r in avoids} == {"e3", "e1 again"}
+    assert do.evidence.step_indexes == [1, 2, 3]
+    assert do.situation.trigger == "e1 again"
+    assert "failing once" not in do.action.text + do.because
+    assert all('"a": 2' not in r.action.text for r in avoids)
+
+
+def test_a_transient_failure_among_real_ones_is_not_avoided() -> None:
+    steps = [_step(error="e1", a=1), _step(error="blip", a=2), _step(a=2)]
+
+    by_rule = _records(_trace(steps, Outcome(status="success")))
+
+    [avoid] = by_rule[RULE_FAILED_STEP_AVOID]
+    assert '"a": 1' in avoid.action.text
+    assert avoid.evidence.step_indexes == [0, 2]
+    [do] = by_rule[RULE_FAILED_STEP_DO]
+    assert do.evidence.step_indexes == [0, 2]
+
+
+def test_interleaved_step_names_are_paired_by_kind() -> None:
+    steps = [
+        _step("load", error="e-load", a=1),
+        _step("save", error="e-save", b=1),
+        _step("load", a=2),
+        _step("save", b=1),
+    ]
+    trace = _trace(steps, Outcome(status="success"))
+
+    by_rule = _records(trace)
+
+    [avoid] = by_rule[RULE_FAILED_STEP_AVOID]
+    [do] = by_rule[RULE_FAILED_STEP_DO]
+    assert "tool_call/load" in avoid.action.text
+    assert avoid.evidence.step_indexes == do.evidence.step_indexes == [0, 2]
+    assert _reasons(trace) == [SKIP_TRANSIENT_RETRY]
+
+
+def test_arguments_that_differ_only_past_the_display_cut_are_different() -> None:
+    long = "x" * 300
+    trace = _trace(
+        [_step(error="boom", blob=long + "1"), _step(blob=long + "2")],
+        Outcome(status="success"),
+    )
+
+    # Equality compares the whole arguments, not the shortened display text.
+    assert RULE_FAILED_STEP_AVOID in _records(trace)
+    assert _reasons(trace) == []
+
+
+def test_failures_that_never_worked_skip_once_per_step_kind() -> None:
+    steps = [_step("a", error="1"), _step("a", error="2"), _step("b", error="3")]
+    trace = _trace(steps, Outcome(status="success"))
+
+    assert distill_trace(trace).records == ()
+    assert _reasons(trace) == [SKIP_ERROR_WITHOUT_RECOVERY] * 2
+
+
+def test_an_unknown_outcome_is_no_signal_not_a_smooth_run() -> None:
+    assert _reasons(_trace([_step()], Outcome(status="unknown"))) == [SKIP_NO_SIGNAL]
 
 
 def test_a_failed_outcome_with_a_summary_gives_an_avoid_with_the_summary() -> None:
@@ -158,11 +265,15 @@ def test_the_intent_family_is_the_frozen_learning_key() -> None:
 def test_every_text_field_is_bounded() -> None:
     long = "x " * 2000
     trace = _trace(
-        [_step(error=long, big=long), _step(big=long)],
+        [_step(error=long, big=long), _step(big=long + "!")],
         Outcome(status="failure", summary=long),
     )
     records = distill_trace(trace).records
-    assert records
+    assert {r.rule for r in records} == {
+        RULE_FAILED_STEP_AVOID,
+        RULE_FAILED_STEP_DO,
+        RULE_FAILED_OUTCOME,
+    }
     for r in records:
         assert len(r.situation.trigger) <= MAX_TRIGGER_CHARS
         assert len(r.action.text) <= MAX_ACTION_CHARS
@@ -194,3 +305,40 @@ def test_a_batch_tallies_rules_and_skips() -> None:
     assert tally.traces_read == 2
     assert tally.by_rule[RULE_FAILED_STEP_AVOID] == 1
     assert tally.skips_by_reason[SKIP_SMOOTH_RUN] == 1
+
+
+def test_every_field_copied_from_the_trace_is_bounded() -> None:
+    trace = _trace(
+        [_step()], Outcome(status="failure", summary="s"), intent="deploy the service"
+    ).model_copy(
+        update={
+            "context": TraceContext(domain="d" * 130),
+            "evidence_used": [
+                EvidenceRef(evidence_id="ok-id"),
+                EvidenceRef(evidence_id="e" * (MAX_ID_CHARS + 1)),
+            ],
+        }
+    )
+
+    [record] = distill_trace(trace).records
+
+    assert record.situation.domain is not None
+    assert len(record.situation.domain) <= MAX_DOMAIN_CHARS
+    # An id cannot be shortened and stay an id, so an over-long one is left out.
+    assert record.situation.entity_ids == ["ok-id"]
+
+
+def test_a_trace_that_cannot_make_a_valid_record_is_a_skip_not_a_crash() -> None:
+    bad = _trace([_step()], Outcome(status="failure", summary="s")).model_copy(
+        update={"trace_id": "t" * (MAX_ID_CHARS + 1)}
+    )
+    good = _trace([_step()], Outcome(status="failure", summary="s"))
+
+    result = distill_trace(bad)
+    tally = distill_traces([bad, good, bad])
+
+    assert result.records == ()
+    assert [s.reason for s in result.skips] == [SKIP_INVALID_RECORD]
+    assert tally.traces_read == 3
+    assert tally.skips_by_reason[SKIP_INVALID_RECORD] == 2
+    assert [r.evidence.trace_ids for r in tally.records] == [["t1"]]

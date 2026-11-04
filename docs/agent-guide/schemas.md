@@ -599,14 +599,14 @@ length-bounded; unknown fields are rejected.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `candidate_id` | `string` | Derived from (trace ids, rule, step indexes, `distiller_version`); must equal what the record's content derives |
+| `candidate_id` | `string` | A hash of the record's evidence and content (rule, situation, action, because, confidence, tier, version), evidence lists sorted first; must equal what the record's content derives |
 | `rule` | `string` | The distiller rule that produced it (`failed_step_avoid`, `failed_step_do`, `failed_outcome`) |
 | `situation` | object | `intent_family`, `domain`, `entity_ids`, `trigger` (the error or situation that makes the lesson apply) |
 | `action` | object | `kind` (`do` or `avoid`) and `text` |
 | `because` | `string` | Why, from the trace |
 | `evidence` | object | `trace_ids`, `step_indexes`, `feedback_ids`, `pack_ids` (the last two stay empty from the deterministic tier) |
 | `confidence` | `float` | 0.0 to 1.0 |
-| `provenance_tier` | `string` | `deterministic` (default), `local_model` or `human` |
+| `provenance_tier` | `string` | `deterministic` (default), `local_model` or `human`; only `deterministic` is recorded for now |
 | `distiller_version` | `string` | Version of the rules that produced it |
 | `lifecycle` | `string` | Always `candidate`; not a `LifecycleState` value |
 

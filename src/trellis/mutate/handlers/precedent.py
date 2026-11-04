@@ -15,7 +15,7 @@ from trellis.core.precedent_document import (
     is_promoted_precedent_document,
 )
 from trellis.core.vector_metadata import resolve_vector_store
-from trellis.errors import IdempotencyError, ValidationError
+from trellis.errors import IdempotencyError, PolicyViolationError, ValidationError
 from trellis.learning.candidate_auto_promote import AUTO_PROMOTE_REQUESTED_BY
 from trellis.mutate.commands import Command, Operation
 from trellis.mutate.handlers._common import (
@@ -805,6 +805,13 @@ class PrecedentReinstateHandler:
 CANDIDATE_EVENT_SOURCE = "mutation_executor"
 CANDIDATE_RECORDED_ACTION = "precedent_candidate_recorded"
 
+#: The only ``provenance_tier`` this operation records for now. ``local_model``
+#: and ``human`` are reserved by the schema for later tiers, each of which will
+#: get its own caller check; until then a record naming one is refused rather
+#: than recorded under a claim nothing here can back.
+PERMITTED_PROVENANCE_TIERS = frozenset({"deterministic"})
+CANDIDATE_TIER_POLICY_ID = "precedent_candidate_provenance_tier"
+
 
 def precedent_candidate_recorded(event_log: EventLog, candidate_id: str) -> bool:
     """Whether ``candidate_id`` already has a recorded candidate event or key."""
@@ -826,9 +833,13 @@ class PrecedentCandidateHandler:
     document, graph or vector row is written, so no retrieval surface can serve
     a candidate. ``args["record"]`` must validate as a
     :class:`~trellis.schemas.precedent_record.PrecedentRecord` whose
-    ``candidate_id`` is the id its own content derives; the event carries the
-    whole record. A candidate already recorded is a duplicate, whether or not
-    the caller named an idempotency key.
+    ``candidate_id`` is the id its own content derives (evidence and text both),
+    so a forged record cannot take the id the distiller derives for a real
+    trace; the event carries the whole record. Only the ``deterministic``
+    provenance tier is recorded: ``local_model`` and ``human`` are refused as a
+    policy violation until those tiers get their own caller checks. A candidate
+    already recorded is a duplicate, whether or not the caller named an
+    idempotency key.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -845,6 +856,12 @@ class PrecedentCandidateHandler:
             raise ValidationError(
                 msg, errors=[msg], code="precedent_record_invalid"
             ) from exc
+        if record.provenance_tier not in PERMITTED_PROVENANCE_TIERS:
+            msg = (
+                "precedent.candidate records only the deterministic provenance "
+                f"tier for now; {record.provenance_tier!r} records are refused"
+            )
+            raise PolicyViolationError(msg, policy_id=CANDIDATE_TIER_POLICY_ID)
         if record.candidate_id != record.expected_candidate_id():
             msg = "precedent.candidate candidate_id does not match the record's content"
             raise ValidationError(msg, errors=[msg], code="candidate_id_mismatch")

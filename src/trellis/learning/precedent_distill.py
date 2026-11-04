@@ -9,25 +9,40 @@ Rules, applied to one :class:`~trellis.schemas.trace.Trace` in order:
 
 ``failed_step_avoid`` / ``failed_step_do``
     A step with a non-blank ``error``, followed later by a step of the same
-    ``step_type`` and ``name`` with no error, is a recovery. Steps are paired
-    in order: a later failure of the same kind replaces an earlier one that
-    has not yet been answered, so a retry loop yields one pair, not one per
-    attempt. The failed step gives an ``avoid`` record and the step that
-    worked gives a ``do`` record. The trigger of both is the error, and the
-    evidence step indexes are ``[failed, succeeded]``. A failed step never
-    followed by a success is skipped as ``error_without_recovery``.
+    ``step_type`` and ``name`` with no error, is a recovery. Every failed step of
+    that kind since the last success is weighed against the step that worked:
+
+    * A failure whose arguments equal the success's was transient (the same call
+      worked on a retry), so it teaches nothing about *what* to avoid and gives
+      no ``avoid``. It is the one thing this module never does: recommend
+      avoiding the step that worked.
+    * Each *distinct* failed approach (arguments that differ from the success's)
+      gives one ``avoid`` record, from its latest failure.
+    * The step that worked gives one ``do`` record, but only when at least one
+      different approach failed before it. A recovery whose failures were all
+      transient is skipped whole as ``transient_retry`` (counted): "retry it"
+      says nothing a later agent can reuse.
+
+    The trigger of each ``avoid`` is its own error; the ``do``'s is the latest
+    failure's. Evidence step indexes are ``[failed, succeeded]`` for an
+    ``avoid`` and the failed approaches' indexes then ``succeeded`` for the
+    ``do``. A failed step never followed by a success is skipped as
+    ``error_without_recovery``, once per step kind.
 
 ``failed_outcome``
     A ``failure`` or ``partial`` outcome with a summary gives an ``avoid``
     record whose ``because`` is that summary and whose action names the steps
     taken. An outcome without a summary is skipped as ``outcome_without_summary``.
 
-A success trace with no errored step gives nothing (``smooth_run``): a smooth
-run teaches nothing reusable at this tier. A trace with no outcome and no
-errored step gives nothing (``no_signal``). A candidate whose action text would
-only restate the trace's intent is dropped as ``restates_intent``; a failed
-outcome with no steps is the usual case, since the only text left to say is the
-intent itself.
+A ``success`` trace with no errored step gives nothing (``smooth_run``): a smooth
+run teaches nothing reusable at this tier. A trace with no errored step and no
+outcome, or an ``unknown`` one, gives nothing (``no_signal``). A candidate whose
+action text would only restate the trace's intent is dropped as
+``restates_intent``; a failed outcome with no steps is the usual case, since the
+only text left to say is the intent itself.
+
+A trace whose records fail the schema's bounds is skipped as ``invalid_record``
+(counted, no text) and the batch goes on: one bad trace never stops a run.
 
 ``intent_family`` uses the frozen learning key
 :func:`~trellis.learning.scoring.normalize_intent_family`, never the offline
@@ -45,12 +60,16 @@ from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
+from pydantic import ValidationError
+
 from trellis.learning.scoring import normalize_intent_family
 from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.schemas.enums import OutcomeStatus
 from trellis.schemas.precedent_record import (
     MAX_ACTION_CHARS,
     MAX_BECAUSE_CHARS,
+    MAX_DOMAIN_CHARS,
+    MAX_ID_CHARS,
     MAX_LIST_ITEMS,
     MAX_TRIGGER_CHARS,
     ActionKind,
@@ -74,6 +93,8 @@ SKIP_NO_SIGNAL = "no_signal"
 SKIP_ERROR_WITHOUT_RECOVERY = "error_without_recovery"
 SKIP_OUTCOME_WITHOUT_SUMMARY = "outcome_without_summary"
 SKIP_RESTATES_INTENT = "restates_intent"
+SKIP_TRANSIENT_RETRY = "transient_retry"
+SKIP_INVALID_RECORD = "invalid_record"
 
 #: A deterministic rule never claims more than this: it saw one trace.
 _CONFIDENCE_RECOVERY = 0.6
@@ -120,11 +141,15 @@ def _label(step: TraceStep) -> str:
     return f"{step.step_type}/{step.name}"
 
 
-def _args_digest(step: TraceStep) -> str:
+def _args_key(step: TraceStep) -> str:
+    """The step's whole arguments as a canonical string: for equality, not display."""
     if not step.args:
         return ""
-    raw = json.dumps(step.args, sort_keys=True, default=str, ensure_ascii=False)
-    return truncate_excerpt(raw, _MAX_ARGS_CHARS)
+    return json.dumps(step.args, sort_keys=True, default=str, ensure_ascii=False)
+
+
+def _args_digest(step: TraceStep) -> str:
+    return truncate_excerpt(_args_key(step), _MAX_ARGS_CHARS)
 
 
 def _describe(step: TraceStep) -> str:
@@ -160,52 +185,96 @@ def _record(
     step_indexes: list[int],
     confidence: float,
 ) -> PrecedentRecord:
-    evidence_ids = [ref.evidence_id for ref in trace.evidence_used][:MAX_LIST_ITEMS]
+    # Every field copied from the trace is cut or filtered to the schema's bound
+    # here, so a long domain or id cannot fail the schema and stop a run.
+    entity_ids = [
+        ref.evidence_id
+        for ref in trace.evidence_used
+        if len(ref.evidence_id) <= MAX_ID_CHARS
+    ][:MAX_LIST_ITEMS]
+    domain = trace.context.domain
+    situation = PrecedentSituation(
+        intent_family=normalize_intent_family(intent=trace.intent),
+        domain=None if domain is None else truncate_excerpt(domain, MAX_DOMAIN_CHARS),
+        entity_ids=entity_ids,
+        trigger=truncate_excerpt(_clean(trigger), MAX_TRIGGER_CHARS),
+    )
+    action = PrecedentAction(
+        kind=kind, text=truncate_excerpt(_clean(action_text), MAX_ACTION_CHARS)
+    )
+    because_text = truncate_excerpt(_clean(because), MAX_BECAUSE_CHARS)
+    evidence = PrecedentEvidence(trace_ids=[trace.trace_id], step_indexes=step_indexes)
     return PrecedentRecord(
         candidate_id=derive_candidate_id(
-            trace_ids=[trace.trace_id],
             rule=rule,
-            step_indexes=step_indexes,
+            situation=situation,
+            action=action,
+            because=because_text,
+            evidence=evidence,
+            confidence=confidence,
+            provenance_tier="deterministic",
             distiller_version=DISTILLER_VERSION,
         ),
         rule=rule,
-        situation=PrecedentSituation(
-            intent_family=normalize_intent_family(intent=trace.intent),
-            domain=trace.context.domain,
-            entity_ids=evidence_ids,
-            trigger=truncate_excerpt(_clean(trigger), MAX_TRIGGER_CHARS),
-        ),
-        action=PrecedentAction(
-            kind=kind, text=truncate_excerpt(_clean(action_text), MAX_ACTION_CHARS)
-        ),
-        because=truncate_excerpt(_clean(because), MAX_BECAUSE_CHARS),
-        evidence=PrecedentEvidence(
-            trace_ids=[trace.trace_id], step_indexes=step_indexes
-        ),
+        situation=situation,
+        action=action,
+        because=because_text,
+        evidence=evidence,
         confidence=confidence,
+        provenance_tier="deterministic",
         distiller_version=DISTILLER_VERSION,
     )
 
 
-def _recoveries(steps: list[TraceStep]) -> tuple[list[tuple[int, int]], list[int]]:
-    """Pair each errored step with the later success of the same kind.
+@dataclass(frozen=True)
+class _Recovery:
+    """One step that worked, and the failed attempts of its kind before it."""
 
-    Returns ``(pairs, unrecovered)`` as step indexes. A later failure of a kind
-    replaces an unanswered earlier one, so a retry loop pairs once.
+    worked: int
+    #: The latest failure of each *distinct* failed approach (arguments that
+    #: differ from the success's), ascending, at most ``MAX_LIST_ITEMS - 1``.
+    failed: tuple[int, ...]
+
+
+def _recoveries(steps: list[TraceStep]) -> tuple[list[_Recovery], int]:
+    """Pair each success with the failed attempts of its kind since the last one.
+
+    Returns ``(recoveries, unrecovered)``: a failure whose arguments equal the
+    success's was transient and is dropped from ``failed``, so a recovery with
+    an empty ``failed`` was a pure retry. ``unrecovered`` counts the step kinds
+    that failed and never worked, once each however many attempts failed.
     """
-    pending: dict[tuple[str, str], int] = {}
-    pairs: list[tuple[int, int]] = []
+    pending: dict[tuple[str, str], list[int]] = {}
+    recoveries: list[_Recovery] = []
     for index, step in enumerate(steps):
         key = (step.step_type, step.name)
         if _clean(step.error):
-            pending[key] = index
+            pending.setdefault(key, []).append(index)
         elif key in pending:
-            pairs.append((pending.pop(key), index))
-    return pairs, sorted(pending.values())
+            worked_args = _args_key(step)
+            latest: dict[str, int] = {}
+            for failed in pending.pop(key):
+                args = _args_key(steps[failed])
+                if args != worked_args:
+                    latest[args] = failed
+            kept = sorted(latest.values())[-(MAX_LIST_ITEMS - 1) :]
+            recoveries.append(_Recovery(worked=index, failed=tuple(kept)))
+    return recoveries, len(pending)
 
 
 def distill_trace(trace: Trace) -> DistillResult:
-    """Distill one trace into zero or more candidate records, plus why not."""
+    """Distill one trace into zero or more candidate records, plus why not.
+
+    A trace whose records fail the schema's bounds yields no records and one
+    ``invalid_record`` skip, never an exception.
+    """
+    try:
+        return _distill(trace)
+    except ValidationError:
+        return DistillResult(skips=(DistillSkip(trace.trace_id, SKIP_INVALID_RECORD),))
+
+
+def _distill(trace: Trace) -> DistillResult:
     records: list[PrecedentRecord] = []
     skips: list[DistillSkip] = []
 
@@ -219,47 +288,49 @@ def distill_trace(trace: Trace) -> DistillResult:
         else:
             records.append(record)
 
-    pairs, unrecovered = _recoveries(trace.steps)
-    for failed, worked in pairs:
-        bad, good = trace.steps[failed], trace.steps[worked]
-        trigger = _clean(bad.error)
-        indexes = [failed, worked]
-        retried = _args_digest(bad) == _args_digest(good)
-        keep(
-            _record(
-                trace,
-                rule=RULE_FAILED_STEP_AVOID,
-                kind="avoid",
-                action_text=f"Avoid {_describe(bad)}",
-                trigger=trigger,
-                because=f"{_label(bad)} failed with: {trigger}",
-                step_indexes=indexes,
-                confidence=_CONFIDENCE_RECOVERY,
-            ),
-            _describe(bad),
-        )
+    recoveries, unrecovered = _recoveries(trace.steps)
+    for recovery in recoveries:
+        if not recovery.failed:
+            skip(SKIP_TRANSIENT_RETRY)
+            continue
+        good = trace.steps[recovery.worked]
+        for failed in recovery.failed:
+            bad = trace.steps[failed]
+            trigger = _clean(bad.error)
+            keep(
+                _record(
+                    trace,
+                    rule=RULE_FAILED_STEP_AVOID,
+                    kind="avoid",
+                    action_text=f"Avoid {_describe(bad)}",
+                    trigger=trigger,
+                    because=f"{_label(bad)} failed with: {trigger}",
+                    step_indexes=[failed, recovery.worked],
+                    confidence=_CONFIDENCE_RECOVERY,
+                ),
+                _describe(bad),
+            )
+        trigger = _clean(trace.steps[recovery.failed[-1]].error)
         keep(
             _record(
                 trace,
                 rule=RULE_FAILED_STEP_DO,
                 kind="do",
-                action_text=(
-                    f"Retry {_label(good)}; it succeeded after failing once"
-                    if retried
-                    else f"Use {_describe(good)}"
-                ),
+                action_text=f"Use {_describe(good)}",
                 trigger=trigger,
                 because=(
                     f"{_label(good)} succeeded after an earlier attempt "
                     f"failed with: {trigger}"
                 ),
-                step_indexes=indexes,
+                step_indexes=[*recovery.failed, recovery.worked],
                 confidence=_CONFIDENCE_RECOVERY,
             ),
             _describe(good),
         )
-    for _ in unrecovered:
-        skip(SKIP_ERROR_WITHOUT_RECOVERY)
+    skips.extend(
+        DistillSkip(trace.trace_id, SKIP_ERROR_WITHOUT_RECOVERY)
+        for _ in range(unrecovered)
+    )
 
     outcome = trace.outcome
     if outcome is not None and outcome.status in {
@@ -292,8 +363,11 @@ def distill_trace(trace: Trace) -> DistillResult:
                 ),
                 approach,
             )
-    elif not records and not pairs and not unrecovered:
-        skip(SKIP_SMOOTH_RUN if outcome is not None else SKIP_NO_SIGNAL)
+    elif not recoveries and not unrecovered:
+        # Only a stated success is a smooth run; an absent or unknown outcome
+        # says nothing either way.
+        smooth = outcome is not None and outcome.status == OutcomeStatus.SUCCESS
+        skip(SKIP_SMOOTH_RUN if smooth else SKIP_NO_SIGNAL)
 
     return DistillResult(tuple(records), tuple(skips))
 
@@ -317,10 +391,12 @@ __all__ = [
     "RULE_FAILED_STEP_AVOID",
     "RULE_FAILED_STEP_DO",
     "SKIP_ERROR_WITHOUT_RECOVERY",
+    "SKIP_INVALID_RECORD",
     "SKIP_NO_SIGNAL",
     "SKIP_OUTCOME_WITHOUT_SUMMARY",
     "SKIP_RESTATES_INTENT",
     "SKIP_SMOOTH_RUN",
+    "SKIP_TRANSIENT_RETRY",
     "DistillResult",
     "DistillSkip",
     "DistillTally",

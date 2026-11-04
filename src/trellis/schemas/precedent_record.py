@@ -22,9 +22,10 @@ later tier can fill them.
 from __future__ import annotations
 
 import hashlib
-from typing import Final, Literal
+import json
+from typing import Annotated, Final, Literal
 
-from pydantic import Field
+from pydantic import Field, StringConstraints
 
 from trellis.core.base import TrellisModel
 
@@ -39,6 +40,10 @@ MAX_DOMAIN_CHARS = 120
 MAX_ID_CHARS = 200
 MAX_LIST_ITEMS = 20
 
+#: An id list holds ids, each bounded like ``candidate_id``: a list cap alone
+#: would let twenty unbounded strings into the append-only event log.
+BoundedId = Annotated[str, StringConstraints(max_length=MAX_ID_CHARS)]
+
 #: The record's own lifecycle vocabulary. One value for now: activation is a
 #: later step and would add its own states.
 RECORD_LIFECYCLE_CANDIDATE: Final = "candidate"
@@ -52,7 +57,7 @@ class PrecedentSituation(TrellisModel):
 
     intent_family: str = Field(max_length=MAX_INTENT_FAMILY_CHARS)
     domain: str | None = Field(default=None, max_length=MAX_DOMAIN_CHARS)
-    entity_ids: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
+    entity_ids: list[BoundedId] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
     trigger: str = Field(max_length=MAX_TRIGGER_CHARS)
 
 
@@ -66,10 +71,12 @@ class PrecedentAction(TrellisModel):
 class PrecedentEvidence(TrellisModel):
     """Where the lesson came from."""
 
-    trace_ids: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
+    trace_ids: list[BoundedId] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
     step_indexes: list[int] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
-    feedback_ids: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
-    pack_ids: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
+    feedback_ids: list[BoundedId] = Field(
+        default_factory=list, max_length=MAX_LIST_ITEMS
+    )
+    pack_ids: list[BoundedId] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
 
 
 class PrecedentRecord(TrellisModel):
@@ -89,40 +96,70 @@ class PrecedentRecord(TrellisModel):
     def expected_candidate_id(self) -> str:
         """The id this record's own content derives; ``candidate_id`` must equal it."""
         return derive_candidate_id(
-            trace_ids=self.evidence.trace_ids,
             rule=self.rule,
-            step_indexes=self.evidence.step_indexes,
+            situation=self.situation,
+            action=self.action,
+            because=self.because,
+            evidence=self.evidence,
+            confidence=self.confidence,
+            provenance_tier=self.provenance_tier,
             distiller_version=self.distiller_version,
         )
 
 
 def derive_candidate_id(
     *,
-    trace_ids: list[str],
     rule: str,
-    step_indexes: list[int],
+    situation: PrecedentSituation,
+    action: PrecedentAction,
+    because: str,
+    evidence: PrecedentEvidence,
+    confidence: float,
+    provenance_tier: str,
     distiller_version: str,
 ) -> str:
-    """A stable id from (trace ids, rule, step indexes, distiller version).
+    """A stable id from the record's evidence and its whole content.
 
     The same input always gives the same id, so a rerun over the same trace
     derives the candidates it derived before and the idempotency key catches
-    them. A new ``distiller_version`` mints new ids on purpose: a changed rule
-    is a different candidate.
+    them. The id covers the content too (rule, situation, action, because,
+    confidence, provenance tier, distiller version), so a record whose text was
+    forged cannot carry the id the distiller derives for a real trace: its own
+    content derives a different one, and ``candidate_id`` must equal that.
+    A new ``distiller_version`` mints new ids on purpose: a changed rule is a
+    different candidate.
+
+    The input is encoded as JSON with sorted keys, not joined with a separator,
+    so ``["x,y"]`` and ``["x", "y"]`` cannot collide. The evidence lists are
+    sorted first: the same lesson cited in another order is the same lesson.
+    ``ensure_ascii`` keeps the encoding total over any string.
     """
-    parts = [
-        ",".join(trace_ids),
-        rule,
-        ",".join(str(i) for i in step_indexes),
-        distiller_version,
-    ]
-    digest = hashlib.sha256("\x1f".join(parts).encode()).hexdigest()
+    canonical = {
+        "rule": rule,
+        "situation": situation.model_dump(mode="json"),
+        "action": action.model_dump(mode="json"),
+        "because": because,
+        "evidence": {
+            "trace_ids": sorted(evidence.trace_ids),
+            "step_indexes": sorted(evidence.step_indexes),
+            "feedback_ids": sorted(evidence.feedback_ids),
+            "pack_ids": sorted(evidence.pack_ids),
+        },
+        "confidence": confidence,
+        "provenance_tier": provenance_tier,
+        "distiller_version": distiller_version,
+    }
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(encoded.encode("ascii")).hexdigest()
     return f"pcand_{digest[:24]}"
 
 
 __all__ = [
     "MAX_ACTION_CHARS",
     "MAX_BECAUSE_CHARS",
+    "MAX_DOMAIN_CHARS",
+    "MAX_ID_CHARS",
+    "MAX_LIST_ITEMS",
     "MAX_TRIGGER_CHARS",
     "RECORD_LIFECYCLE_CANDIDATE",
     "PrecedentAction",

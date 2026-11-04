@@ -13,6 +13,7 @@ from tests.precedent_candidates import SENTINEL, recovering_trace
 from trellis.mutate.policy_source import resolve_policy_path
 from trellis.schemas.enums import OutcomeStatus, PolicyType, TraceSource
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
+from trellis.schemas.precedent_record import MAX_DOMAIN_CHARS, MAX_ID_CHARS
 from trellis.schemas.trace import Outcome, Trace, TraceContext, TraceStep
 from trellis.stores.base.event_log import EventType
 from trellis.stores.policy_store import PolicyStore
@@ -165,3 +166,55 @@ def test_a_policy_refusal_exits_the_same_in_both_formats(
 
     assert codes[0] == codes[1] != 0
     assert _candidates(stores) == 0
+
+
+def _seed_one_good_and_one(stores: StoreRegistry, bad: Trace) -> None:
+    for trace in (recovering_trace(), bad):
+        stores.operational.trace_store.append(trace)
+
+
+@pytest.mark.parametrize("fmt", ["json", "text"])
+def test_a_long_domain_is_clamped_and_does_not_stop_the_run(
+    stores: StoreRegistry, fmt: str
+) -> None:
+    long_domain = recovering_trace(trace_id="trace-long", domain="d" * 130)
+    assert len(long_domain.context.domain or "") > MAX_DOMAIN_CHARS
+    _seed_one_good_and_one(stores, long_domain)
+
+    result = _run("--apply", "--format", fmt)
+
+    assert result.exit_code == 0
+    assert _candidates(stores) == 4
+    if fmt == "json":
+        assert json.loads(result.stdout)["recorded"] == 4
+    domains = {
+        e.payload["record"]["situation"]["domain"]
+        for e in stores.operational.event_log.get_events(
+            event_type=EventType.PRECEDENT_CANDIDATE_MINED, limit=10
+        )
+    }
+    assert "data" in domains
+    assert len(domains) == 2
+    assert all(len(d) <= MAX_DOMAIN_CHARS for d in domains)
+
+
+@pytest.mark.parametrize("fmt", ["json", "text"])
+def test_a_trace_that_cannot_make_a_valid_record_is_counted_and_the_run_goes_on(
+    stores: StoreRegistry, fmt: str
+) -> None:
+    bad = recovering_trace(trace_id="t" * (MAX_ID_CHARS + 1))
+    _seed_one_good_and_one(stores, bad)
+
+    result = _run("--apply", "--format", fmt)
+
+    assert result.exit_code == 0
+    assert _candidates(stores) == 2  # the good trace's pair
+    assert "t" * (MAX_ID_CHARS + 1) not in result.stdout
+    if fmt == "json":
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "ok"
+        assert payload["traces_read"] == 2
+        assert payload["recorded"] == 2
+        assert payload["skipped"] == {"invalid_record": 1}
+    else:
+        assert "skipped invalid_record: 1" in plain(result.stdout)

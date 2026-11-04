@@ -5047,10 +5047,16 @@ trellis worker distill-precedents [--since ISO] [--until ISO] [--limit N] \
 | `--apply` | off | Record the new candidates through the governed `precedent.candidate` operation. |
 
 Rules (see `trellis.learning.precedent_distill`): a step with an `error`
-followed later by a step of the same `step_type`/`name` without one gives an
-`avoid` and a `do` (`failed_step_avoid`, `failed_step_do`); a `failure` or
-`partial` outcome with a summary gives an `avoid` (`failed_outcome`); a smooth run
-gives nothing. A candidate that would only restate the intent is skipped.
+followed later by a step of the same `step_type`/`name` without one is a
+recovery. Each distinct failed approach (arguments that differ from the step that
+worked) gives an `avoid`, and the step that worked gives one `do`
+(`failed_step_avoid`, `failed_step_do`). A failure with the same arguments as the
+success was transient: it gives no `avoid`, and a recovery with only transient
+failures is skipped as `transient_retry`. A `failure` or `partial` outcome with a
+summary gives an `avoid` (`failed_outcome`); a smooth run gives nothing. A
+candidate that would only restate the intent is skipped, and a trace whose
+records fail the schema's bounds is skipped as `invalid_record`; neither stops the
+run.
 
 The JSON report carries `mode`, `traces_read`, `truncated`, `candidates`,
 `by_rule`, `skipped` (by reason), `duplicates` (already recorded), `would_record`
@@ -5062,7 +5068,9 @@ carries no trace text. The exit code does not depend on `--format`.
 document, graph or vector store, so `get_lessons`, `GET /precedents`, the domain
 list and every pack skip them. The idempotency key is the candidate id: a rerun
 records nothing new and counts the repeats as `duplicates`. Activation (minting a
-servable precedent from a candidate) is deferred; see
+servable precedent from a candidate) is deferred. Only the `deterministic`
+provenance tier is recorded; a record naming `local_model` or `human` is refused
+as a policy violation. See
 [`adr-precedent-record.md`](../design/adr-precedent-record.md).
 
 ### `trellis worker capture-sessions`
