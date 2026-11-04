@@ -4,6 +4,17 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`trellis analyze health` reports whether agents retrieve at all.** A new `retrieval`
+  section (`--format json` key `retrieval`) counts the sessions the capture sweep parsed in
+  the window and how many of them were served at least one pack, from the
+  `CAPTURE_SESSION_PACKS` events the sweep already writes; it adds no probe and no setting.
+  Below 10 captured sessions it reports `insufficient_data` and withholds the rate, and never
+  warns; at or above 10 it turns `warn`, with a named reason, when fewer than half of them
+  retrieved. Exit codes are unchanged. See `docs/agent-guide/operations.md`, "Retrieval
+  adoption in `trellis analyze health`".
+
 ### Fixed
 
 - **The two commonest trace-shape mistakes are repaired at the write boundary instead of
