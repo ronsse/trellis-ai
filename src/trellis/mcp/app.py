@@ -14,6 +14,7 @@ from trellis.mcp.rejections import (
     _SanitizeUncaughtToolErrors,
 )
 from trellis.mcp.wiring import _get_registry
+from trellis_wire.loop_text import mcp_instructions
 
 # The ``instructions`` string is returned in the MCP ``initialize`` response and
 # is the only guidance that travels with the connector itself — every client
@@ -31,39 +32,12 @@ from trellis.mcp.wiring import _get_registry
 #   * ``domain=`` was widely believed unsafe after a since-fixed hard-exclusion
 #     defect, so callers avoided a working scope.
 # Keep it short — it is injected into every session on every client.
+#
+# The text lives in ``trellis_wire.loop_text``, beside every other statement of
+# the loop, so the surfaces are edited in one file.
 mcp = FastMCP(
     "trellis",
-    instructions=(
-        "Trellis — persistent memory for AI agents. Retrieval responses are concise "
-        "markdown sized for LLM context windows.\n"
-        "\n"
-        "Use it as a loop, not a lookup table:\n"
-        "\n"
-        "1. BEFORE non-trivial work, call `get_context(intent=...)`. Prior "
-        "traces and precedents are cheap; re-deriving them is not. Pass "
-        "`session_id` to dedup across calls in one conversation. `domain=` is "
-        "safe to pass — it scopes with default-pass semantics and never "
-        "hard-excludes memories that carry no domain. The pack header carries "
-        "its `pack_id`, and each item's id is in backticks. An empty pack is a "
-        "real answer: it means greenfield, so say so; a `**Withheld:**` line, "
-        "when present, counts what matched but was not served.\n"
-        "\n"
-        "2. AFTER meaningful work — a fix, a discovery, an instructive failure "
-        "— call `save_experience`. Each step's `result` is an object, never a "
-        "bare string. Put failures in the step's `error` field; a workaround "
-        "the next agent would otherwise rediscover is the most reusable thing "
-        "you can leave behind.\n"
-        "\n"
-        "3. GRADE what you were served: `record_feedback(pack_id=..., "
-        "rating=0.0-1.0)` naming `helpful_item_ids` and `unhelpful_item_ids` "
-        "(and `followed_advisory_ids` for advisories you acted on). Feedback "
-        "without item ids cannot join to the pack and is invisible to the "
-        "learning loop, so a reflexive success=true teaches nothing. An honest "
-        "low `rating` is worth more than a polite high one.\n"
-        "\n"
-        "The common failure is retrieval that never happens, not retrieval "
-        "that returns nothing."
-    ),
+    instructions=mcp_instructions(),
 )
 
 

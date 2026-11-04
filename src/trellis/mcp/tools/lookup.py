@@ -21,6 +21,7 @@ from trellis.mcp.boundary import (
     _raise_not_found,
     _refuse_public_caller,
 )
+from trellis.mcp.grading_trailer import with_grading_trailer
 from trellis.mcp.tools.context import _track_tokens
 from trellis.mcp.wiring import _get_registry
 from trellis.retrieve.builder_factory import _get_lessons_pack_event_enabled
@@ -299,6 +300,7 @@ def get_items(
             max_tokens=max_tokens,
             pack_id=pack_id.strip() or None,
         )
+        result = with_grading_trailer(registry, result, pack_id.strip() or None)
 
         note_served_items(served_ids)
 

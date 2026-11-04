@@ -634,6 +634,35 @@ _SPECS: tuple[SettingSpec, ...] = (
         env_var=ENV_VAR_BY_FIELD["knowledge_link_or_mint"],
     ),
     SettingSpec(
+        name="grading_trailer",
+        label="Grading trailer",
+        type="bool",
+        default=False,
+        description=(
+            "When on, every MCP retrieval reply that names a pack "
+            "(get_context, search, the sectioned tools, and get_items when "
+            "given a pack id) ends with one line telling the reader how to "
+            "grade that pack: the pack id and the minimal record_feedback "
+            "call. The line is added text in a reply an agent reads, so "
+            "turning this on changes what a subject of the holdout sees: "
+            "leave it off until the serving freeze lifts. Off, every reply "
+            "is byte-identical to a build without the knob."
+        ),
+        surfaces=("mcp",),
+        restart_required=False,
+        risk="caution",
+        risk_note=(
+            "Adds a line to every pack reply, which is part of the "
+            "treatment environment of a running holdout. Leave off until "
+            "the serving freeze lifts and the readout is in. A minimal "
+            "record_feedback call without a rating records a success "
+            "(rating 1.0), so the trailer names rating."
+        ),
+        group="ops",
+        settings_live=True,
+        env_var=ENV_VAR_BY_FIELD["grading_trailer"],
+    ),
+    SettingSpec(
         name="graph_seeding",
         label="Graph seeding",
         type="bool",

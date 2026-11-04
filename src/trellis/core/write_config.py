@@ -202,6 +202,16 @@ ACCESS_LOG_ENV = "TRELLIS_ACCESS_LOG"
 #: ``docs/design/adr-knowledge-link-or-mint.md``.
 KNOWLEDGE_LINK_OR_MINT_ENV = "TRELLIS_KNOWLEDGE_LINK_OR_MINT"
 
+#: Opt-in: end every MCP retrieval reply that names a pack (``get_context``,
+#: ``search`` and the sectioned tools, ``get_items`` when given a pack id) with
+#: one line saying how to grade it, from
+#: :func:`trellis_wire.loop_text.grading_trailer`.  The line is added text in a
+#: reply an agent reads, so it is part of the holdout's treatment environment:
+#: leave it off until the serving freeze lifts.  Read with the shared
+#: ``TRUTHY`` spellings; unset, blank or unrecognised leaves it off, and off
+#: every reply is byte-identical to a build without the knob.
+GRADING_TRAILER_ENV = "TRELLIS_GRADING_TRAILER"
+
 # ---------------------------------------------------------------------------
 # Defaults.  Unchanged from the per-module values they were lifted from.
 # ---------------------------------------------------------------------------
@@ -446,6 +456,7 @@ class WriteBehaviourConfig:
     reconcile_timeout_s: float = DEFAULT_RECONCILE_TIMEOUT_S
     access_log: bool = False
     knowledge_link_or_mint: bool = False
+    grading_trailer: bool = False
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> WriteBehaviourConfig:
@@ -467,6 +478,7 @@ class WriteBehaviourConfig:
             reconcile_timeout_s=_reconcile_timeout(src),
             access_log=_truthy(src, ACCESS_LOG_ENV),
             knowledge_link_or_mint=_truthy(src, KNOWLEDGE_LINK_OR_MINT_ENV),
+            grading_trailer=_truthy(src, GRADING_TRAILER_ENV),
         )
 
     @classmethod
@@ -663,6 +675,7 @@ ENV_VAR_BY_FIELD: dict[str, str] = {
     "reconcile_timeout_s": RECONCILE_TIMEOUT_ENV,
     "access_log": ACCESS_LOG_ENV,
     "knowledge_link_or_mint": KNOWLEDGE_LINK_OR_MINT_ENV,
+    "grading_trailer": GRADING_TRAILER_ENV,
 }
 
 
@@ -683,6 +696,7 @@ __all__ = [
     "DEFAULT_RECONCILE_TIMEOUT_S",
     "EMBED_ON_INGEST_FLAG",
     "ENV_VAR_BY_FIELD",
+    "GRADING_TRAILER_ENV",
     "KNOWLEDGE_LINK_OR_MINT_ENV",
     "MEMORY_EXTRACTION_FLAG",
     "MINHASH_SEED_MAX_DOCS_ENV",

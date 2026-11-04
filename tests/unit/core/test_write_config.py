@@ -849,3 +849,34 @@ class TestKnowledgeLinkOrMintKnob:
         assert knowledge_link_or_mint_enabled() is False
         monkeypatch.setenv("TRELLIS_KNOWLEDGE_LINK_OR_MINT", "1")
         assert knowledge_link_or_mint_enabled() is True
+
+
+class TestGradingTrailer:
+    """``grading_trailer`` ships off and follows the shared truthy convention."""
+
+    def test_default_is_off(self) -> None:
+        assert WriteBehaviourConfig().grading_trailer is False
+        assert WriteBehaviourConfig.from_env({}).grading_trailer is False
+
+    def test_env_var_name(self) -> None:
+        assert ENV_VAR_BY_FIELD["grading_trailer"] == "TRELLIS_GRADING_TRAILER"
+
+    @pytest.mark.parametrize("spelling", ["1", "true", "TRUE", "yes", "on"])
+    def test_truthy_spellings_turn_it_on(self, spelling: str) -> None:
+        env = {ENV_VAR_BY_FIELD["grading_trailer"]: spelling}
+        assert WriteBehaviourConfig.from_env(env).grading_trailer is True
+
+    @pytest.mark.parametrize("spelling", ["", "0", "false", "off", "no"])
+    def test_everything_else_leaves_it_off(self, spelling: str) -> None:
+        env = {ENV_VAR_BY_FIELD["grading_trailer"]: spelling}
+        assert WriteBehaviourConfig.from_env(env).grading_trailer is False
+
+    def test_it_is_the_only_field_that_moves(self) -> None:
+        defaults = WriteBehaviourConfig().as_dict()
+        config = WriteBehaviourConfig.from_env(
+            {ENV_VAR_BY_FIELD["grading_trailer"]: "1"}
+        )
+        changed = {
+            name for name, value in config.as_dict().items() if value != defaults[name]
+        }
+        assert changed == {"grading_trailer"}
