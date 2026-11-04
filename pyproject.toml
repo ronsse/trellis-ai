@@ -149,6 +149,8 @@ trellis-api = "trellis_api.app:console_main"
 # ship the script so that name resolves. Also reachable as
 # `trellis worker capture-sessions` and `python -m trellis_workers.session_capture`.
 trellis-session-capture = "trellis_workers.session_capture.__main__:main"
+# The packaged Claude Code hooks (`trellis admin install-hooks`): stdlib only, fail-open.
+trellis-hook = "trellis_cli.hooks:main"
 
 [tool.hatch.version]
 source = "vcs"

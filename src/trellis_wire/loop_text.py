@@ -301,14 +301,82 @@ def grading_trailer(pack_id: str | None) -> str | None:
     )
 
 
+# ---------------------------------------------------------------------------
+# What the ``trellis-hook`` commands say (``trellis_cli.hooks``).
+# ---------------------------------------------------------------------------
+#
+# The hooks are the loop told to an agent by its harness rather than by its
+# prompt, so their sentences live here with the rest of the loop text. They are
+# new fragments: none of the surfaces above reads them, and the goldens that pin
+# those surfaces are untouched.
+
+#: Added to the context of a session (or a dispatched subagent) that has not
+#: retrieved yet.
+HOOK_PREWORK_NUDGE = (
+    "Trellis memory: this session has not called get_context yet. Before you "
+    "read files or edit anything, call get_context(intent=<what you are about "
+    "to do and why>, session_id=<your agent id or the task id>). An empty pack "
+    "is a valid answer: say so and continue."
+)
+
+#: The reason a first edit is refused once, in a session that has not retrieved.
+HOOK_EDIT_DENY_REASON = (
+    "Trellis memory: this session has not called get_context yet. Call "
+    "get_context(intent=<what you are about to do and why>, session_id=<your "
+    "agent id or the task id>) first, then retry this edit."
+)
+
+#: The trace half of the closing ask, for a session that saved none.
+HOOK_TRACE_ASK = (
+    "Also record the work with save_experience(trace_json=<a JSON string>), so "
+    "the next agent can retrieve it; a step's `result` is a JSON object, never "
+    "a bare string."
+)
+
+#: Closes the ask, so a session with nothing to grade can say so and stop.
+HOOK_NOT_WARRANTED = (
+    "If a step is not warranted here, say why in one line, then finish."
+)
+
+
+def hook_grading_ask(pack_id: str | None, *, ask_trace: bool = False) -> str | None:
+    """The one message that asks a session to grade the pack it was served.
+
+    Names the pack and the call that attributes feedback to items. With
+    ``ask_trace`` it also asks for a trace, so a session is asked once and not
+    twice. ``None`` for anything that is not a well-formed pack id, so no
+    transcript text is ever echoed into a reply.
+    """
+    if not pack_id or _PACK_ID.fullmatch(pack_id) is None:
+        return None
+    parts = [
+        (
+            f"Trellis memory: you were served pack {pack_id} and have not graded "
+            f"it. Grade it with {feedback_call(pack_id)}, naming only item ids you "
+            "read: the ones that helped and the ones that cost you time or were "
+            f"wrong. {NAME_ITEM_IDS} An honest low rating is worth more than a "
+            "polite high one."
+        )
+    ]
+    if ask_trace:
+        parts.append(HOOK_TRACE_ASK)
+    parts.append(HOOK_NOT_WARRANTED)
+    return " ".join(parts)
+
+
 __all__ = [
     "AGENT_RULE",
+    "HOOK_EDIT_DENY_REASON",
+    "HOOK_NOT_WARRANTED",
+    "HOOK_PREWORK_NUDGE",
+    "HOOK_TRACE_ASK",
     "MCP_INSTRUCTION_PARAGRAPHS",
     "NAME_ITEM_IDS",
     "agent_rule",
     "claude_md_section",
     "feedback_call",
     "grading_trailer",
+    "hook_grading_ask",
     "loop_skill",
     "mcp_instructions",
     "sdk_feedback_call",

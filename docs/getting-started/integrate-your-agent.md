@@ -77,6 +77,52 @@ You can install or reinstall the skills on their own at any time with
 `trellis admin install-skills user` (or `project`). It is idempotent — existing
 skills are skipped and reported; pass `--force` to overwrite.
 
+### Hooks that keep the loop closed (Claude Code)
+
+Skills and a `CLAUDE.md` paragraph ask the agent to retrieve and to grade; a
+hook makes the harness do the asking, which is what keeps the loop closed in
+long sessions and in subagents that never read a skill. One command installs
+the set into a `settings.json`:
+
+```bash
+trellis admin install-hooks              # ~/.claude/settings.json
+trellis admin install-hooks --scope project
+trellis admin install-hooks --dry-run    # print the result, write nothing
+trellis admin install-hooks --uninstall  # remove exactly what was added
+```
+
+Which hook does what:
+
+| Hook (event) | What it does | When it stays silent |
+|---|---|---|
+| Pre-work nudge (`UserPromptSubmit`, `SubagentStart`) | Once per session, says to call `get_context` before reading files. | The session has already retrieved from Trellis, or has already been nudged. |
+| First-edit soft deny (`PreToolUse` on `Edit`, `Write`, `MultiEdit`, `NotebookEdit`) | Declines the first edit of a session that has not retrieved yet and says why; the retry goes through. On for subagents by default (`--edit-deny subagents`), `all` adds the main session, `off` removes it. | The session has retrieved, or has already been told once. |
+| Grading ask (`Stop`, `SubagentStop`) | Once per served pack, asks the agent to call `record_feedback` naming `helpful_item_ids` / `unhelpful_item_ids`, and to save a trace if none was saved. | Fewer tool uses than `--grading-threshold` (default 10), no pack served, or a pack already graded with item ids. |
+
+The hooks read only the session transcript Claude Code hands them: no store,
+no network, no Trellis config. Each one fails open: an error, a missing,
+oversized or slow transcript, or `TRELLIS_HOOKS_DISABLED=1` makes it do
+nothing. They need the `trellis-hook` console script (installed with the
+package) on the `PATH` of the shell Claude Code runs hooks through.
+
+A hook recognises a retrieval only when the MCP server's registered name
+contains `trellis` (`trellis`, `claude_ai_Trellis` and `trellis-http` all do).
+Under any other name, such as `memory`, the edit deny fires even after the
+agent retrieved, the nudge fires, and the grade ask never fires, so register
+the server with `trellis` in its name.
+
+Subagents can also be given the rule directly. This appends the agent rule to
+each `*.md` agent definition in a directory, after the frontmatter, and
+`--uninstall` removes it again:
+
+```bash
+trellis admin install-agent-rule --agents-dir path/to/agents
+```
+
+The hooks raise retrieval rates, so a deployment that runs a holdout should
+install them at a window boundary. Options, exit codes and JSON output:
+[`install-hooks`](../agent-guide/operations.md#trellis-admin-install-hooks).
+
 ### How you know it worked
 
 In your agent, ask it to **call `get_context`** with a one-sentence intent
