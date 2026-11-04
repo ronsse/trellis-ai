@@ -17,6 +17,7 @@ All notable changes to Trellis will be documented in this file.
   which; a scan that hit its limit says so too. A refusal names the CLI flags. Replay only: serving
   is unchanged and a default `ReplayPolicy` replays byte-identically.
 
+- **`analyze value` reports implicit signals and disclosure tiers, report-only.** An `implicit` block adds items fetched through `get_items` (joined by pack and item, every unjoined fetch counted by reason), the fetched-and-unjudged tokens, P(helpful | fetched) beside the base rate (withheld below 30 fetched-and-graded servings) and packs re-retrieved in the same session within 30 minutes, a weak pack-level hint. A `by_tier` block splits served tokens into `body`, `pointer` and `unknown`, read from what the pack recorded and never inferred from rank. Neither feeds the useful-token fraction, `analyze trend` or any demotion path; every existing field is unchanged. Also in `GET /api/v1/analyze/value`.
 - **`trellis analyze pack-judge`: an offline relevance judge for served pack items, and a
   calibration report against agent feedback (shadow only).** The judge phase (`--out`) asks a
   model, built through the `llm:` router as the new `pack_judge` consumer so any

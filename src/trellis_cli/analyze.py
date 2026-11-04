@@ -1115,6 +1115,116 @@ def _print_graph_selection_axis(cells: list[Any], *, minimum: int) -> None:
     console.print(table)
 
 
+def _print_tier_axis(cells: list[Any], *, minimum: int) -> None:
+    """Render served tokens by disclosure tier: body, pointer, unknown.
+
+    ``unknown`` is a row whose pack recorded no tier (a sectioned pack, or
+    one from before ``disclosure`` was recorded). It is never inferred from
+    rank, so it prints even when it is the largest row.
+    """
+    if not any(cell.items for cell in cells):
+        return
+    table = Table(title="Served tokens by disclosure tier")
+    table.add_column("tier", style="cyan")
+    table.add_column("items (n)", justify="right")
+    table.add_column("injected tokens", justify="right")
+    table.add_column("helpful", justify="right")
+    table.add_column("unhelpful", justify="right")
+    table.add_column("no verdict", justify="right")
+    table.add_column("no verdict share", justify="right")
+    refused = f"[dim]refused (n<{minimum})[/dim]"
+    for cell in cells:
+        share = (
+            refused
+            if cell.suppressed
+            else "[dim]—[/dim]"
+            if cell.unjudged_token_fraction is None
+            else f"{cell.unjudged_token_fraction:.1%}"
+        )
+        table.add_row(
+            escape(cell.tier),
+            str(cell.items),
+            f"{cell.injected_tokens:,}",
+            f"{cell.helpful_tokens:,}",
+            f"{cell.unhelpful_tokens:,}",
+            f"{cell.unjudged_tokens:,}",
+            share,
+        )
+    console.print(table)
+
+
+def _pct1(value: float | None) -> str:
+    """One-decimal percent, or a dash for a ratio that has no value."""
+    return "-" if value is None else f"{value:.1%}"
+
+
+def _print_implicit_block(implicit: Any) -> None:
+    """Render the report-only implicit signals, apart from the headline.
+
+    Prints counts for a refused ratio too: only the ratio is withheld, so a
+    reader sees how far short of the floor the sample is.
+    """
+    if not implicit.packs:
+        return
+    console.print()
+    console.print(
+        "  [bold]Implicit signals[/bold] "
+        "[dim](report-only; never merged into the useful-token fraction)[/dim]"
+    )
+    if implicit.fetch_scan.truncated:
+        console.print(
+            f"    [yellow]fetch window[/yellow] {escape(implicit.fetch_scan.note)}"
+        )
+    if implicit.fetch_suppressed:
+        console.print(
+            f"    fetched tokens: {implicit.fetched_tokens:,} of "
+            f"{implicit.injected_tokens:,} injected "
+            f"[dim](share refused: {escape(implicit.fetch_suppressed_reason)})[/dim]"
+        )
+    else:
+        console.print(
+            f"    fetched tokens: {implicit.fetched_tokens:,} of "
+            f"{implicit.injected_tokens:,} injected "
+            f"({_pct1(implicit.fetched_token_fraction)}, "
+            f"n={implicit.packs} pack(s))"
+        )
+    console.print(
+        f"    fetched items: {implicit.fetched_items} from "
+        f"{implicit.fetch_events} fetch event(s); "
+        f"{implicit.fetched_unjudged_tokens:,} fetched tokens had no verdict"
+    )
+    console.print(
+        f"    unjoined fetched items: {implicit.fetch_unjoined} "
+        f"(no pack {implicit.fetch_unjoined_no_pack}, "
+        f"pack not in window {implicit.fetch_unjoined_pack_not_in_window}, "
+        f"item not served {implicit.fetch_unjoined_item_not_served})"
+    )
+    counts = (
+        f"{implicit.fetched_graded_helpful_servings}/"
+        f"{implicit.fetched_graded_servings} fetched-and-graded helpful vs "
+        f"{implicit.graded_helpful_servings}/{implicit.graded_servings} graded"
+    )
+    if implicit.agreement_suppressed:
+        console.print(
+            f"    agreement refused: {counts} "
+            f"[dim]({escape(implicit.agreement_suppressed_reason)}, "
+            f"floor {implicit.min_fetch_overlap})[/dim]"
+        )
+    else:
+        console.print(
+            f"    P(helpful | fetched) {_pct1(implicit.p_helpful_given_fetched)}"
+            f" vs P(helpful) {_pct1(implicit.p_helpful)} [dim]({counts})[/dim]"
+        )
+    console.print(
+        f"    re-retrieved packs: {implicit.re_retrieved_packs} of "
+        f"{implicit.packs_with_session} with a session "
+        f"[dim](weak signal; {implicit.re_retrieval_window_minutes}-minute "
+        f"window; {implicit.packs_without_session} without a session)[/dim]"
+    )
+    for note in implicit.notes:
+        console.print(f"    [dim]note: {escape(note)}[/dim]")
+
+
 @analyze_app.command("replay")
 def replay(  # noqa: PLR0912, PLR0915 - one flag per arm, dispatched here
     days: int = typer.Option(30, help="Days of history to replay"),
@@ -1840,6 +1950,8 @@ def value(
     _print_graph_selection_axis(
         report.by_graph_selection, minimum=report.min_attributed_packs
     )
+    _print_tier_axis(report.by_tier, minimum=report.min_attributed_packs)
+    _print_implicit_block(report.implicit)
 
     console.print()
     console.print(
