@@ -1,0 +1,74 @@
+{
+ "chunks_with_store": {
+  "applied_config": "mode=withhold forms=['conversation', 'note'] axes=['keyword', 'semantic'] scope=parents_and_chunks",
+  "attributed_packs": 2,
+  "helpful_lost": 3,
+  "matched_servings": 8,
+  "matched_via_parent": 3,
+  "notes": [
+   "Counterfactual over the SAME packs and the SAME citations. This arm classifies and counts already-served items; it does not re-run the token-budget walk, so tokens_freed is the gross cost of the matched servings, not a repriced pack. It cannot say which item the freed budget would have admitted instead, and it cannot grade one, because that item was never served and nobody rated it.",
+   "scope is \"parents_and_chunks\". Historical PACK_ASSEMBLED rows carry no chunk form, so each chunk-id serving on a configured axis with no document_form of its own was resolved through the document store: the stored row's parent_doc_id (else the chunk id's own prefix, as serving reads it), then that parent's document_form. This reads the store as it is now, not as it was at serving time. 5 serving(s) were looked up; 3 reached a parent with a form and 1 could not be resolved (parent no longer stored, or a store error), counted as not matched; 3 of the matched servings matched only through their parent. The rest of the lookups reached a parent with no form."
+  ],
+  "parent_form_resolved": 3,
+  "parent_form_unresolved": 1,
+  "parent_lookups": 5,
+  "still_served_by_other_axis": 0,
+  "tokens_freed": 214,
+  "unhelpful_removed": 4,
+  "window_days": 30
+ },
+ "chunks_without_store": {
+  "applied_config": "mode=withhold forms=['conversation'] axes=['semantic'] scope=parents_and_chunks",
+  "attributed_packs": 2,
+  "helpful_lost": 0,
+  "matched_servings": 1,
+  "matched_via_parent": 0,
+  "notes": [
+   "Counterfactual over the SAME packs and the SAME citations. This arm classifies and counts already-served items; it does not re-run the token-budget walk, so tokens_freed is the gross cost of the matched servings, not a repriced pack. It cannot say which item the freed budget would have admitted instead, and it cannot grade one, because that item was never served and nobody rated it.",
+   "1 matched serving(s) are not counted as removed, as freed tokens, or as a helpful/unhelpful loss: the gate is axis-scoped, and the off pack's own rejected_items has a dedup row for a copy of the same id on an axis outside config.axes, which withhold may still serve. Under budget pressure that copy can miss the cut, so this count is an upper bound on survivals, not a tally of them. See still_served_by_other_axis.",
+   "scope is \"parents_and_chunks\" but no document store was supplied, so no chunk's parent could be looked up: 4 chunk serving(s) with no form of their own were left unresolved and counted as not matched. The counts above are parents only."
+  ],
+  "parent_form_resolved": 0,
+  "parent_form_unresolved": 4,
+  "parent_lookups": 4,
+  "still_served_by_other_axis": 1,
+  "tokens_freed": 0,
+  "unhelpful_removed": 0,
+  "window_days": 30
+ },
+ "keyword_conversation": {
+  "applied_config": "mode=withhold forms=['conversation'] axes=['keyword']",
+  "attributed_packs": 2,
+  "helpful_lost": 0,
+  "matched_servings": 3,
+  "matched_via_parent": 0,
+  "notes": [
+   "Counterfactual over the SAME packs and the SAME citations. This arm classifies and counts already-served items; it does not re-run the token-budget walk, so tokens_freed is the gross cost of the matched servings, not a repriced pack. It cannot say which item the freed budget would have admitted instead, and it cannot grade one, because that item was never served and nobody rated it.",
+   "1 matched serving(s) are not counted as removed, as freed tokens, or as a helpful/unhelpful loss: the gate is axis-scoped, and the off pack's own rejected_items has a dedup row for a copy of the same id on an axis outside config.axes, which withhold may still serve. Under budget pressure that copy can miss the cut, so this count is an upper bound on survivals, not a tally of them. See still_served_by_other_axis."
+  ],
+  "parent_form_resolved": 0,
+  "parent_form_unresolved": 0,
+  "parent_lookups": 0,
+  "still_served_by_other_axis": 1,
+  "tokens_freed": 65,
+  "unhelpful_removed": 2,
+  "window_days": 30
+ },
+ "two_axes_conversation": {
+  "applied_config": "mode=withhold forms=['conversation'] axes=['keyword', 'semantic']",
+  "attributed_packs": 2,
+  "helpful_lost": 1,
+  "matched_servings": 4,
+  "matched_via_parent": 0,
+  "notes": [
+   "Counterfactual over the SAME packs and the SAME citations. This arm classifies and counts already-served items; it does not re-run the token-budget walk, so tokens_freed is the gross cost of the matched servings, not a repriced pack. It cannot say which item the freed budget would have admitted instead, and it cannot grade one, because that item was never served and nobody rated it."
+  ],
+  "parent_form_resolved": 0,
+  "parent_form_unresolved": 0,
+  "parent_lookups": 0,
+  "still_served_by_other_axis": 0,
+  "tokens_freed": 127,
+  "unhelpful_removed": 3,
+  "window_days": 30
+ }
+}
