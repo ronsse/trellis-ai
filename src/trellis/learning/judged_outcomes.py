@@ -65,6 +65,7 @@ from pydantic import Field
 
 from trellis.core.base import TrellisModel
 from trellis.feedback.attribution import is_sectioned_payload
+from trellis.feedback.pack_rows import has_served_rows, served_rows_from_payload
 from trellis.ingest_corpus.models import chunk_parent_id
 from trellis.learning.pack_observations import join_pack_events_with_coverage
 from trellis.retrieve.pack_value import collect_pack_verdicts
@@ -230,11 +231,17 @@ class _ServingIndex:
         for pack_id, event in flat_packs.items():
             at = _as_utc(event.occurred_at)
             served = self.served_ids.setdefault(pack_id, set())
-            for raw in (event.payload or {}).get("injected_items") or []:
-                if not isinstance(raw, Mapping):
-                    continue
-                item_id = raw.get("item_id")
-                if not isinstance(item_id, str) or not item_id or item_id in served:
+            # Sectioned packs included (their rows carry ``(pack, item)``
+            # serving identity like a flat pack's); withheld packs were dropped
+            # by the join that built ``flat_packs``, so no holdout policy here.
+            for row in served_rows_from_payload(
+                pack_id,
+                event.payload or {},
+                include_sectioned=True,
+                include_holdout=True,
+            ):
+                item_id = row.item_id
+                if not item_id or item_id in served:
                     continue
                 served.add(item_id)
                 serving = _Serving(pack_id=pack_id, item_id=item_id, at=at)
@@ -351,7 +358,7 @@ def summarize_judged_outcomes(
     flat_packs = {
         pack_id: event
         for pack_id, event in pack_events.items()
-        if (event.payload or {}).get("injected_items")
+        if has_served_rows(event.payload or {})
     }
     verdicts = collect_pack_verdicts(
         feedback_events,
@@ -398,7 +405,7 @@ def summarize_judged_outcomes(
         1
         for event in pack_events.values()
         if is_sectioned_payload(event.payload or {})
-        and not (event.payload or {}).get("injected_items")
+        and not has_served_rows(event.payload or {})
     )
     attributed_packs = len(set(helpful_by_pack) | set(unhelpful_by_pack))
 

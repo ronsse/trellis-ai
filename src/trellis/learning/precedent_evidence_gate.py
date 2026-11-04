@@ -62,6 +62,7 @@ from typing import Any
 import structlog
 
 from trellis.core.base import TrellisModel
+from trellis.feedback.pack_rows import iter_served_rows
 from trellis.learning.pack_observations import join_pack_events_with_coverage
 from trellis.mutate.commands import Operation
 from trellis.mutate.retention import ARCHIVED_STATE, CURRENT_STATE
@@ -300,14 +301,14 @@ def _attribute_precedent_citation_evidence(
         pack_event = pack_events.get(pack_id)
         if pack_event is None or pack_event.occurred_at < since:
             continue
-        pack_payload = pack_event.payload or {}
-        injected = pack_payload.get("injected_items")
-        if not isinstance(injected, Sequence) or isinstance(injected, str | bytes):
-            continue
+        # Flat and sectioned packs alike. The pack events come from
+        # ``join_pack_events_with_coverage``, which already dropped withheld
+        # packs, so this read applies no holdout policy of its own.
         served_ids = {
-            str(raw.get("item_id") or "").strip()
-            for raw in injected
-            if isinstance(raw, dict)
+            str(served.item_id or "").strip()
+            for served in iter_served_rows(
+                pack_event, include_sectioned=True, include_holdout=True
+            )
         }
         if entity_id not in served_ids:
             continue

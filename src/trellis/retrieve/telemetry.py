@@ -25,6 +25,7 @@ from pydantic import Field
 from trellis.core.base import TrellisModel
 from trellis.core.pack_holdout import drop_holdout
 from trellis.feedback.attribution import is_sectioned_payload
+from trellis.feedback.pack_rows import iter_served_rows
 from trellis.stores.base.event_log import (
     DEFAULT_SCAN_LIMIT,
     EventType,
@@ -154,16 +155,19 @@ def analyze_pack_telemetry(  # noqa: PLR0915
 
     for event in events:
         payload = event.payload or {}
-        injected_items = (
-            [] if is_sectioned_payload(payload) else payload.get("injected_items") or []
+        # A flat walk: a sectioned pack's rows are skipped (counted above).
+        # Withheld packs were dropped by ``drop_holdout`` at the scan, so the
+        # holdout switch is the same policy stated at the read.
+        served = list(
+            iter_served_rows(event, include_sectioned=False, include_holdout=False)
         )
         rejected_items = payload.get("rejected_items") or []
 
-        total_injected += len(injected_items)
+        total_injected += len(served)
         total_rejected += len(rejected_items)
 
-        for item in injected_items:
-            strategy = item.get("strategy_source") or "unknown"
+        for row in served:
+            strategy = row.strategy_source or "unknown"
             per_strategy[strategy]["injected"] += 1
 
         hit_max_items = False
