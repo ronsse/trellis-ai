@@ -9,12 +9,12 @@ from trellis.analyze.holdout import analyze_holdout
 from trellis.core.pack_holdout import drop_holdout, is_holdout
 from trellis.feedback.attribution import lookup_pack_item_ids
 from trellis.mcp.server import get_lessons as _get_lessons
-from trellis.retrieve.lessons_pack import lessons_pack_payload
 from trellis.retrieve.builder_factory import (
     GET_LESSONS_PACK_EVENT_ENV,
     GET_LESSONS_PACK_EVENT_SETTING,
     _get_lessons_pack_event_enabled,
 )
+from trellis.retrieve.lessons_pack import lessons_pack_payload
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
