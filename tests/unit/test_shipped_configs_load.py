@@ -27,9 +27,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPLOY_CONFIG = REPO_ROOT / "deploy" / "config.compose.yaml"
 AWS_EXAMPLE = REPO_ROOT / "docs" / "deployment" / "config.yaml.aws.example"
 RECOMMENDED = REPO_ROOT / "docs" / "deployment" / "recommended-config.yaml"
+TEAM_CONFIG = REPO_ROOT / "docs" / "deployment" / "config.team.yaml"
 
 #: The in-tree files that are a config.yaml, or hold one in comments.
-SHIPPED = {DEPLOY_CONFIG, AWS_EXAMPLE, RECOMMENDED}
+SHIPPED = {DEPLOY_CONFIG, AWS_EXAMPLE, RECOMMENDED, TEAM_CONFIG}
 
 _TOP_LEVEL_KEY = re.compile(r"^# [a-z_]+:\s*(#.*)?$")
 
@@ -89,6 +90,17 @@ def test_the_compose_config_loads(tmp_path: Path) -> None:
     assert registry.configured_backend("blob") == "local"
     assert registry.configured_backend("trace") == "postgres"
     assert registry.configured_backend("event_log") == "postgres"
+
+
+def test_the_team_config_loads_and_keeps_api_keys_in_postgres(tmp_path: Path) -> None:
+    registry = _registry_for(tmp_path, TEAM_CONFIG.read_text(encoding="utf-8"))
+
+    assert registry.configured_backend("document") == "postgres"
+    assert registry.configured_backend("graph") == "postgres"
+    assert registry.configured_backend("vector") == "pgvector"
+    assert registry.configured_backend("trace") == "postgres"
+    assert registry.configured_backend("event_log") == "postgres"
+    assert registry.configured_backend("api_key") == "postgres"
 
 
 def test_the_aws_example_loads(tmp_path: Path) -> None:

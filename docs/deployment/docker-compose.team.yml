@@ -1,0 +1,103 @@
+# Trellis for a small team: API + MCP server + Postgres (pgvector).
+#
+# Run it from the repository root so the build context and the mounted files
+# resolve; the walkthrough is docs/deployment/team-compose.md:
+#
+#   cp docs/deployment/.env.example docs/deployment/.env   # then fill it in
+#   docker compose -f docs/deployment/docker-compose.team.yml config   # validate
+#   docker compose -f docs/deployment/docker-compose.team.yml up -d --build
+#
+# Differences from the repository's docker-compose.yml (a single-user rehearsal):
+#   * authentication is required on the API and on the MCP server, and the
+#     API keys are kept in Postgres (config.team.yaml);
+#   * the Postgres password comes from the environment, with no default;
+#   * every published port binds the address in .env (loopback unless you
+#     change it), and Postgres is published to loopback only, for pg_dump.
+#
+# Nothing here stores a secret: ${VAR:?message} makes compose refuse to start
+# with a named error when a value is missing.
+
+name: trellis-team
+
+x-trellis-env: &trellis-env
+  TRELLIS_LOG_FORMAT: json
+  TRELLIS_CONFIG_DIR: /etc/trellis
+  TRELLIS_DATA_DIR: /var/lib/trellis
+  TRELLIS_KNOWLEDGE_PG_DSN: postgresql://trellis:${TRELLIS_PG_PASSWORD:?set TRELLIS_PG_PASSWORD in .env}@postgres:5432/trellis_knowledge
+  TRELLIS_OPERATIONAL_PG_DSN: postgresql://trellis:${TRELLIS_PG_PASSWORD:?set TRELLIS_PG_PASSWORD in .env}@postgres:5432/trellis_operational
+
+x-trellis-image: &trellis-image
+  build:
+    context: ../..
+    dockerfile: Dockerfile
+    args:
+      # Stamps the image with the sha it was built from, so GET /api/version
+      # and every event it writes can be attributed to a commit.
+      TRELLIS_BUILD_VERSION: ${TRELLIS_BUILD_VERSION:-}
+  image: trellis-team:local
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: trellis
+      POSTGRES_PASSWORD: ${TRELLIS_PG_PASSWORD:?set TRELLIS_PG_PASSWORD in .env}
+      POSTGRES_DB: postgres
+    ports:
+      # Loopback only. It is here so `trellis admin backup` and pg_dump on this
+      # machine can reach the database; never publish it on another address.
+      - "127.0.0.1:${TRELLIS_PG_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ../../deploy/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trellis -d trellis_knowledge"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    <<: *trellis-image
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *trellis-env
+      # Every /api/v1 request needs a key. Mint the first one with
+      # `trellis admin api-keys create` (see team-compose.md).
+      TRELLIS_AUTH_MODE: required
+    ports:
+      - "${TRELLIS_BIND_ADDRESS:-127.0.0.1}:${TRELLIS_API_PORT:-8420}:8420"
+    volumes:
+      - ./config.team.yaml:/etc/trellis/config.yaml:ro
+      - trellis-data:/var/lib/trellis
+
+  mcp:
+    <<: *trellis-image
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # The image's entrypoint is `trellis serve`; this runs the MCP server in the
+    # same image over HTTP. It reads the same api_key store as the API.
+    entrypoint: ["trellis-mcp"]
+    command: []
+    environment:
+      <<: *trellis-env
+      TRELLIS_MCP_TRANSPORT: http
+      TRELLIS_MCP_HOST: 0.0.0.0
+      TRELLIS_MCP_PORT: "8421"
+      TRELLIS_MCP_AUTH_MODE: required
+    ports:
+      - "${TRELLIS_BIND_ADDRESS:-127.0.0.1}:${TRELLIS_MCP_PORT:-8421}:8421"
+    volumes:
+      - ./config.team.yaml:/etc/trellis/config.yaml:ro
+      # The same volume as the api service: the SQLite-only stores and the
+      # feedback log live on it.
+      - trellis-data:/var/lib/trellis
+
+volumes:
+  postgres-data:
+  trellis-data:

@@ -161,6 +161,16 @@ jobs:
       - name: Install Trellis with live-infra extras
         run: pip install -e ".[dev,cloud,neo4j]"
 
+      # ``trellis admin backup`` shells out to ``pg_dump``, and
+      # ``tests/unit/ops/test_postgres_ops_live.py`` runs the real one against the
+      # Postgres service. pg_dump refuses a server newer than itself, so install the
+      # client that matches the ``pg16`` service image rather than trusting the
+      # runner image to carry one.
+      - name: Install the PostgreSQL client tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends postgresql-client-16
+
       # Do not CREATE EXTENSION here. ``PgVectorStore`` now runs
       # ``CREATE EXTENSION IF NOT EXISTS vector`` on a plain connection
       # (``_provision_vector_extension``) before ``super().__init__``
@@ -353,6 +363,7 @@ jobs:
             tests/unit/stores/test_pgvector.py \
             tests/unit/stores/test_postgres_stores.py \
             tests/unit/stores/test_api_key_store.py \
+            tests/unit/ops/test_postgres_ops_live.py \
             tests/unit/stores/test_arcadedb_graph.py \
             tests/unit/stores/test_arcadedb_vector.py \
             tests/unit/stores/test_neo4j_graph.py \

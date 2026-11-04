@@ -209,7 +209,8 @@ hashes the pack id, so no holdout arm is affected.
 
 ### `trellis admin backup`
 
-Copy the SQLite stores to a directory while they are in use.
+Copy the SQLite stores to a directory while they are in use, and dump the Postgres
+stores with `pg_dump`.
 
 ```bash
 trellis admin backup --output DIR [--format text|json]
@@ -232,11 +233,18 @@ trellis admin backup --output DIR [--format text|json]
 
 **What is not copied, and how it is reported.** Nothing is skipped silently:
 
-- A store on a backend other than SQLite (for example `postgres`, `pgvector`, `neo4j`, `arcadedb`) has status `skipped`. Use that backend's own tool: `pg_dump` for Postgres and pgvector, `neo4j-admin database dump` for Neo4j, ArcadeDB's `BACKUP DATABASE` command. A `null` event log has nothing to copy and is `not_applicable`, not a gap.
+- A store on a backend other than SQLite or Postgres (for example `neo4j`, `arcadedb`) has status `skipped`. Use that backend's own tool: `neo4j-admin database dump` for Neo4j, ArcadeDB's `BACKUP DATABASE` command. A `null` event log has nothing to copy and is `not_applicable`, not a gap.
 - A local blob directory with files in it is `skipped`: this command does not copy the tree. Copy `stores/blobs/` with your file tooling, or rely on S3 bucket versioning for the `s3` backend.
 - `not_copied` lists every other entry under the stores directory, such as the JSON state files (`settings.json`, `advisories.json`, `schedule.json`) and any other directory. They are not copied, only named. `config.yaml` and `learning_params.yaml` live in the config directory, outside it, and are never copied: back them up yourself, because the restore below needs the `data_dir` line in `config.yaml`.
 
-**Exit codes.** `0` only when every configured store was copied and its copy passed `integrity_check`. `5` when a store failed (`status: error`), when something was skipped (`status: incomplete`), or when no store file was found at all (a wrong data directory looks like this). `2` when `--output` is refused. A backup that left data out never exits `0`.
+**Postgres stores (`postgres` and `pgvector` backends).** Each distinct database is dumped once with `pg_dump --format=custom` to `OUTPUT/postgres/postgres-<planes>.dump`, where `<planes>` names the planes whose stores share that DSN (so the knowledge plane's document, graph and vector stores are one `postgres-knowledge.dump`, and a separate operational database is `postgres-operational.dump`). Restore a dump with `pg_restore` (see below), not by copying it into the data directory. `pg_dump` must be on `PATH` and at least as new as the server.
+
+- **The connection string never appears on a command line, in the output, in a log line or in the manifest.** It is read from the store's `dsn` or its plane's environment variable (`TRELLIS_KNOWLEDGE_PG_DSN`, `TRELLIS_OPERATIONAL_PG_DSN`), split into the libpq environment variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`, `PGPASSWORD`, and the others a URL or keyword string can carry) and handed to `pg_dump` through its environment; the process arguments hold only the tool, `--format=custom`, `--no-password` and `--file`. Error text from `pg_dump` is stripped of the password before it is shown. A DSN that carries a parameter the command does not translate is refused by parameter name, never by value.
+- **A missing `pg_dump` is its own status, `tool_missing`,** reported per store with the install hint. It is not `skipped` and it is not folded into `failed`, so a host that simply lacks the tool reads differently from a dump that broke. A Postgres store with no DSN configured, or whose dump fails (server unreachable, bad credentials, version mismatch), is `failed`; a partial file is removed.
+- The dump is `pg_dump`'s own single-transaction snapshot of that database, so a database is consistent with itself; two databases are dumped one after the other, as the SQLite stores are.
+- A backup run from a host that lacks the SQLite files (for example one that only reaches the Postgres server) reports those stores as `absent`; it is not an error to omit them there.
+
+**Exit codes.** `0` only when every configured store was copied or dumped and its SQLite copy passed `integrity_check`. `5` when a store failed (`status: error`), when a dump tool is missing (`status: error`), when something was skipped (`status: incomplete`), or when no store file or dump was produced at all (a wrong data directory looks like this). `2` when `--output` is refused. A backup that left data out never exits `0`.
 
 **The stores are copied one after another**, so the set is not a single instant. Each store is internally consistent; documents and events written between the first and last copy may not line up across stores. Stop the writers (the API, the MCP server, the capture sweep) first if the stores must agree with each other.
 
@@ -244,7 +252,7 @@ trellis admin backup --output DIR [--format text|json]
 
 #### Restoring a backup
 
-There is no restore command: a restore is placing files while nothing is writing to them.
+There is no restore command: a restore is placing files while nothing is writing to them. A Postgres dump is loaded with `pg_restore` instead, against the server that is to hold the data, for example `pg_restore --clean --if-exists --no-owner -d <database> OUTPUT/postgres/postgres-knowledge.dump` (put the connection through `PG*` environment variables from your secret store, not on the command line).
 
 1. **Stop every process that opens the stores:** the API, the MCP server (including the HTTP container), the capture sweep and any scheduled job. A running server keeps the old files open and goes on writing to them.
 2. **Choose the target data directory** and make sure `OUTPUT/stores/` goes to `<data_dir>/stores/`. For an in-place restore, move the damaged `stores/` aside first rather than deleting it.
@@ -321,6 +329,48 @@ renders this report: `last_run_at` labelled UTC with relative age, a row
 flagged `stale` when that age exceeds 36h regardless of its own
 `last_status`, `null` rendered as "Not measured", and a fetch failure
 rendered as a visible error rather than a silent empty list.
+
+### `trellis admin migrate`
+
+Report, and explicitly apply, the schema version of each store.
+
+```bash
+trellis admin migrate [--apply] [--format text|json] [--no-meta-trace]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--apply` | off | Record the baseline for each store that has no record and run its pending steps. Without it the command only reads. |
+| `--format` | `text` | Output format. The exit code does not depend on it. |
+| `--no-meta-trace` | off | With `--apply`, skip the meta-Activity that records the run. |
+
+**Explicit only.** Opening a store never records a version or runs a step, in the CLI, the API server or the MCP server: stores still create and upgrade their own tables when they open, as before, and the schema-fingerprint check in `stores/_trellis_meta.json` is unchanged. This command is the only writer of the version record, so a new image started against a database cannot change its schema by itself. `tests/unit/ops/test_schema_migrate_not_on_open.py` pins that on every surface that opens stores, and scans `src/` so nothing else may name the migrator.
+
+**The record.** A table `trellis_schema_migrations` (columns `store`, `version`, `description`, `applied_at`; primary key `(store, version)`) is created in the store's own database by the first `--apply`, and each step's DDL and its version row commit in one transaction, so a failed step leaves the store at the version it had. It lives in the database, so it travels with a backup. A store without a record is read from its table shape: if it has the baseline tables it is version 1, shown as "from shape" (`recorded: false`). A shape that matches no known version is `unrecognized`, refused and never stamped.
+
+**Which stores.** Every SQLite store and every Postgres store (`postgres`, `pgvector`, and the Postgres key, trace, document, graph and event-log stores) in the resolved config. A backend this command does not version (a local blob directory, `neo4j`, `arcadedb`, `s3`) is `unsupported` and is not a failure. A SQLite store with no file yet is `absent`: the report creates no file, and neither does `--apply`.
+
+**What a run states, per store.** `current` (at the target), `pending` (report mode: steps would run; listed by version), `stamped` (the baseline was recorded), `applied` (one or more steps ran), `absent`, `unsupported`, `unrecognized` and `failed` (the store could not be read, or a step raised; the reason is shown with credentials removed). A build with no step beyond the baseline has nothing `pending`; `--apply` then only stamps the baseline. A second `--apply` changes nothing.
+
+```json
+{
+  "status": "ok",
+  "mode": "report",
+  "baseline_version": 1,
+  "run_at": "2026-01-01T00:00:00+00:00",
+  "stores": [
+    {"store": "document", "status": "current", "backend": "postgres",
+     "current_version": 1, "target_version": 1, "recorded": false,
+     "pending": [], "applied": []}
+  ]
+}
+```
+
+**Exit codes** (the same under both formats): `0` when every store is readable and, with `--apply`, at its target (a pending step in a report is not a failure); `5` when a store could not be read, matched no known shape, or a step failed.
+
+**Governance.** A run with `--apply` records a meta-Activity (analyzer `cli.admin.migrate`) in the graph the way `migrate-graph` does, unless `--no-meta-trace`; a report records nothing. There is no `--dry-run`: the report is the default.
+
+**How it relates to the other two.** `migrate-graph` copies graph *rows* from one backend to another and `migrate-provenance` backfills edge provenance in place; both move data. `admin migrate` versions the *schema* of the store where it already is, and moves no rows. On a Postgres deployment, run it from a host or container that has `psycopg` (`pip install "trellis-ai[cloud]"`); without it the Postgres stores read as `failed` with that reason.
 
 ### `trellis admin migrate-graph`
 
