@@ -17,6 +17,7 @@ from mcp.server.auth.middleware.auth_context import AuthenticatedUser, auth_cont
 from mcp.shared.exceptions import McpError
 
 import trellis.mcp.server as server_mod
+import trellis.mcp.tools.memory as memory_tools_mod
 from tests.unit.mcp.conftest import unwrap_tool
 from tests.unit.retrieve.test_sensitivity import label
 from trellis.ingest_corpus.models import chunk_doc_id
@@ -263,9 +264,13 @@ class TestProducer:
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         calls: list[str] = []
-        monkeypatch.setattr(server_mod, "_get_memory_extractor", lambda _r: object())
         monkeypatch.setattr(
-            server_mod, "run_memory_extraction", lambda *a, **k: calls.append("ran")
+            memory_tools_mod, "_get_memory_extractor", lambda _r: object()
+        )
+        monkeypatch.setattr(
+            memory_tools_mod,
+            "run_memory_extraction",
+            lambda *a, **k: calls.append("ran"),
         )
         with as_http(ADMIN):
             plain = save_memory("an ordinary note about queues")

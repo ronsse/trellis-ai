@@ -104,12 +104,14 @@ class Entry:
         return (self.via,) if isinstance(self.via, str) else self.via
 
 
-_SERVER_EXTRACTION = Entry("trellis/mcp/server.py", "_emit_memory_stored_and_enrich")
+_SERVER_EXTRACTION = Entry(
+    "trellis/mcp/tools/memory.py", "_emit_memory_stored_and_enrich"
+)
 _SYNC_EXTRACTION = Entry("trellis/ingest_corpus/sync.py", "_apply_record")
 _ENRICH_BATCH = Entry("trellis_cli/worker.py", "_run_batch_enrichment")
 _SHADOW_ITEM = Entry("trellis/classify/shadow.py", "shadow_classify_item")
 _SERVER_RECONCILE = Entry(
-    "trellis/mcp/server.py",
+    "trellis/mcp/tools/memory.py",
     "_compute_reconcile_outcome",
     via="_reconcile_egress_permits",
 )
@@ -131,6 +133,10 @@ _CAPTURE_DISTILL = Entry(
     via="_session_egress_verdict",
 )
 
+# ``judge_window`` asks ``gate.permits`` of every stored document it loads and
+# only then hands the text to ``_ask_judge``.
+_PACK_JUDGE = Entry("trellis/learning/pack_judge.py", "judge_window")
+
 #: Inner sender -> the entry points that reach it. Hand-written.
 _GATED: dict[tuple[str, str], tuple[Entry, ...]] = {
     ("trellis/extract/llm.py", "extract"): (_SERVER_EXTRACTION, _SYNC_EXTRACTION),
@@ -143,6 +149,7 @@ _GATED: dict[tuple[str, str], tuple[Entry, ...]] = {
         _CAPTURE_DISTILL,
     ),
     ("trellis_workers/learning/miner.py", "_ask_llm"): (_MINER_MINE,),
+    ("trellis/learning/pack_judge.py", "_ask_judge"): (_PACK_JUDGE,),
 }
 
 #: Inner senders that do not send a stored, labelled document, each with why.
@@ -154,6 +161,7 @@ _SINK_NAMES = frozenset(
         "judge_reconcile",
         "distill_session",
         "_ask_llm",
+        "_ask_judge",
         "run_memory_extraction",
         "EnrichmentService",
         "build_llm_facet_classifier",
@@ -180,15 +188,17 @@ _CONSTRUCT_ONLY: dict[tuple[str, str], str] = {
     ),
 }
 
-#: Hand-read off ``src/``: extract, enrich, judge_reconcile, distill, _ask_llm.
-_SENDER_FLOOR = 5
+#: Hand-read off ``src/``: extract, enrich, judge_reconcile, distill, _ask_llm,
+#: _ask_judge.
+_SENDER_FLOOR = 6
 #: Hand-read: two extraction sites, enrich batch, shadow item, two reconcile,
-#: the miner's plan, the capture distillation.
-_ENTRY_FLOOR = 8
+#: the miner's plan, the capture distillation, the pack judge.
+_ENTRY_FLOOR = 9
 #: Hand-read: judge_reconcile x2, run_memory_extraction x2, EnrichmentService x2,
 #: build_llm_facet_classifier x1, LLMExtractor x1, LLMFacetClassifier x1,
-#: distill_session x1, ``_ask_llm`` x1 (in ``PrecedentMiner.mine``).
-_SINK_CALL_FLOOR = 11
+#: distill_session x1, ``_ask_llm`` x1 (in ``PrecedentMiner.mine``),
+#: ``_ask_judge`` x1 (in ``judge_window``).
+_SINK_CALL_FLOOR = 12
 #: Hand-read: ``trellis worker mine-precedents`` builds the only ``PrecedentMiner``.
 _MINER_CONSTRUCTION_FLOOR = 1
 

@@ -1077,7 +1077,7 @@ NoopReason = Literal["exact_duplicate", "fuzzy_duplicate", "judged_covered"]
 
 #: The ``mcp:record_feedback`` surface and the ``source`` its accepted
 #: ``FEEDBACK_RECORDED`` events carry (``record_feedback`` in
-#: ``trellis.mcp.server``). The REST route and the reconcile command stamp a
+#: ``trellis.mcp.tools.feedback``). The REST route and the reconcile command stamp a
 #: different source, so filtering on it isolates the MCP tool. The tool never
 #: reaches ``MutationExecutor``, so its accepted side is that event rather
 #: than ``MUTATION_EXECUTED``; ``tests/unit/mcp/test_write_recovery.py``

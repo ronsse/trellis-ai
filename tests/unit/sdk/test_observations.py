@@ -97,6 +97,7 @@ class TestSDKToMCPConsistency:
 
     def test_sdk_record_visible_via_mcp_query(self, tmp_path: Path) -> None:
         import trellis.mcp.server as mcp_server_module
+        import trellis.mcp.wiring as wiring_mod
 
         subject_id_holder: dict[str, str] = {}
         observation_id_holder: dict[str, str] = {}
@@ -106,7 +107,7 @@ class TestSDKToMCPConsistency:
             # point it at the same registry the SDK is writing through.
             import trellis_api.app as api_app_module
 
-            mcp_server_module._registry = api_app_module._registry
+            wiring_mod._registry = api_app_module._registry
 
             subject_id = sdk_client.create_entity("users", entity_type="Dataset")
             subject_id_holder["id"] = subject_id
@@ -133,7 +134,7 @@ class TestSDKToMCPConsistency:
             ids = {row["observation_id"] for row in result["observations"]}
             assert observation_id in ids
 
-            mcp_server_module._registry = None
+            wiring_mod._registry = None
 
 
 class TestMeasurementsSDK:

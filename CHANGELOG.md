@@ -7,6 +7,23 @@ All notable changes to Trellis will be documented in this file.
 ### Added
 
 - **`analyze value` reports implicit signals and disclosure tiers, report-only.** An `implicit` block adds items fetched through `get_items` (joined by pack and item, every unjoined fetch counted by reason), the fetched-and-unjudged tokens, P(helpful | fetched) beside the base rate (withheld below 30 fetched-and-graded servings) and packs re-retrieved in the same session within 30 minutes, a weak pack-level hint. A `by_tier` block splits served tokens into `body`, `pointer` and `unknown`, read from what the pack recorded and never inferred from rank. Neither feeds the useful-token fraction, `analyze trend` or any demotion path; every existing field is unchanged. Also in `GET /api/v1/analyze/value`.
+- **`trellis analyze pack-judge`: an offline relevance judge for served pack items, and a
+  calibration report against agent feedback (shadow only).** The judge phase (`--out`) asks a
+  model, built through the `llm:` router as the new `pack_judge` consumer so any
+  OpenAI-compatible `base_url` works, whether each item in the window's non-held-out packs
+  helps its intent, and appends one id-and-label JSONL row per `(pack_id, item_id)` (no intent
+  or item text; resumable by pair, prompt version and model; nothing written to any store).
+  The calibrate phase (`--judged`) joins those rows to `FEEDBACK_RECORDED` through the typed
+  pack-row reader and reports the confusion matrix, overall and unhelpful-side agreement,
+  Cohen's kappa, coverage and the judge-implied useful-token fraction beside the agent-graded
+  lower bound, refusing below 30 graded items, and printing no kappa when fewer than 30 of
+  them are items the judge committed on (`unsure` is left out of kappa). Nothing it writes
+  feeds serving, tags, demotion or promotion. On a route not declared `local`, a pack that
+  served a withheld or unreadable document is withheld whole (every item
+  `unjudgeable: pack_egress_withheld`, none sent), since the intent sent beside any item
+  would name it. An `unjudgeable` pair is asked about again on the next run, and a route that
+  names no model needs `--model-id` (exit `2`). See `docs/agent-guide/operations.md`,
+  "`trellis analyze pack-judge`".
 - **`trellis analyze trend` reports the loop week by week.** One read-only row per ISO week (`--weeks` 1 to 26, optional `--until`; the current week is marked `partial`), composed from the existing readers: pack value, serve attribution, judged outcomes, capture rejection rate and retrieval adoption, plus a follow-up retrieval rate with the `retrieval_phase` mix and the precedents served under `precedent://learning/`. `builds[]` splits the series at `write_provenance` changes (a null commit stays null) and a graph-shape row gives the semantic-edge and isolated-node shares. Held-out packs are dropped, the holdout outcome is never read, and a scan that hits its cap marks the week `truncated` and exits 5. JSON, a Rich table and `--format markdown`; also `GET /api/v1/analyze/trend`. The windowed readers gained optional `since`/`until` with unchanged defaults.
 - **`get_lessons` can emit a gradable `PACK_ASSEMBLED`, behind `TRELLIS_GET_LESSONS_PACK_EVENT`
   (default off).** With the knob on, a call that serves lessons writes one event
@@ -50,6 +67,8 @@ All notable changes to Trellis will be documented in this file.
   project to.
 
 ### Changed
+
+- **`trellis.mcp.server` is split by tool family, behind a façade.** The 5,500-line `server.py` became `mcp/boundary.py`, `rejections.py`, `app.py`, `wiring.py` and `mcp/tools/` (ten modules, none over about 1,030 lines); `server.py` keeps `main`, signal handling and the re-exports, so nearly every name still imports from it (the registry and extractor state, which a function rebinds, and the two `_build_llm_client*` builders now live on `wiring` only), and the 18 tools list in the same order with the same schemas. A move only; a test that patches a server name now patches the module that reads it, and moved code logs under its new module's name.
 
 - **`trellis.mutate.handlers` is a package, one submodule per handler family.** The 5,400-line
   `handlers.py` became `mutate/handlers/` (`precedent`, `classify_rules`, `graph`, `redaction`,

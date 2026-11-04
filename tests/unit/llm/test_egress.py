@@ -23,6 +23,8 @@ import yaml
 from pydantic import ValidationError
 
 import trellis.mcp.server as server_mod
+import trellis.mcp.tools.memory as memory_tools_mod
+import trellis.mcp.wiring as wiring_mod
 from tests.llm_routes import per_consumer_config, route_from
 from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.llm.egress import (
@@ -372,9 +374,9 @@ def _reconcile_registry(
         built.append(consumer)
         return _Judge()
 
-    monkeypatch.setattr(server_mod, "_build_llm_client", _build)
-    monkeypatch.setattr(server_mod, "configured_model_id", lambda _r: "m")
-    monkeypatch.setattr(server_mod, "reconcile_timeout_seconds", lambda _r: 5.0)
+    monkeypatch.setattr(memory_tools_mod, "_build_llm_client", _build)
+    monkeypatch.setattr(memory_tools_mod, "configured_model_id", lambda _r: "m")
+    monkeypatch.setattr(memory_tools_mod, "reconcile_timeout_seconds", lambda _r: 5.0)
     return _registry(store, local=local), built
 
 
@@ -491,9 +493,9 @@ class TestClientFallbackRespectsALocalDeclaration:
         reached: list[str] = []
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
         monkeypatch.setattr(
-            server_mod, "_build_llm_client_from_env", lambda: reached.append("env")
+            wiring_mod, "_build_llm_client_from_env", lambda: reached.append("env")
         )
-        client = server_mod._build_llm_client(
+        client = wiring_mod._build_llm_client(
             self._registry({"local": True}),
             LLMConsumer.RECONCILE,  # type: ignore[arg-type]
         )
@@ -512,8 +514,8 @@ class TestClientFallbackRespectsALocalDeclaration:
             return sentinel
 
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
-        monkeypatch.setattr(server_mod, "_build_llm_client_from_env", _from_env)
-        client = server_mod._build_llm_client(
+        monkeypatch.setattr(wiring_mod, "_build_llm_client_from_env", _from_env)
+        client = wiring_mod._build_llm_client(
             self._registry({}),
             LLMConsumer.RECONCILE,  # type: ignore[arg-type]
         )

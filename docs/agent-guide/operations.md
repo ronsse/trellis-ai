@@ -111,7 +111,7 @@ authenticated read by an API key:
 - **REST:** any `GET` under `/api/v1/` and `POST /api/v1/packs` and `/api/v1/packs/sectioned`,
   when the answer is 200. A 403, 404 or 422 returned nothing and records nothing.
 - **MCP:** each tool registered at the `read` scope (`tests/unit/mcp/test_access_log.py`
-  pins the list against `server.py`). A tool that raises records nothing.
+  pins the list against the server modules). A tool that raises records nothing.
 
 Payload: `{key_id, surface, route, item_count, item_ids, item_ids_truncated}`. `route` is the
 matched route template (`GET /api/v1/documents/{doc_id:path}`) or the MCP tool name, never
@@ -2756,7 +2756,7 @@ that this one does. Every registered knob now resolves env > settings >
 default at its real enforcement site — each per-knob reader
 (`classify/ingest.py`, `extract/memory_ingest_hook.py`,
 `extract/trace_ingest_hook.py`, `retrieve/embed_ingest_hook.py`,
-`mcp/reconcile.py`, `mcp/server.py`) delegates to
+`mcp/reconcile.py`, `mcp/wiring.py`) delegates to
 `write_config.resolve_write_behaviour()`, `graph_seeding` /
 `graph_recency_fallback` / `filter_legacy_advisories` each carry their own settings-aware read in
 `builder_factory.py` / `pack_builder.py`, and `class_prior_mode`
@@ -3950,6 +3950,122 @@ means joined to an outcome. `gate_verdict` is decided on rows cited after their
 judgment; `gate_readings` lists every looser reading, so `fails_strict_reading`
 means a looser count would have passed. When a scan truncates, rows older than
 the evidence start are dropped and rates use the covered window.
+
+### `trellis analyze pack-judge`
+
+Offline relevance judge for served pack items, and the report that measures it
+against agent feedback. **Shadow only.** Nothing it writes feeds serving, tags,
+demotion or promotion: CLAUDE.md's rule is that demotion requires evidence of
+unhelpfulness, so a judge's label is not evidence until a measured agreement floor
+holds, and the calibrate phase is how that floor is measured. It lives under
+`analyze` because both phases read the event log and the document store and write
+nothing to either.
+
+```bash
+trellis analyze pack-judge --out judged.jsonl [--since DATE] [--until DATE] [--days N] \
+    [--limit N] [--scan-limit N] [--model-id LABEL] [--format text|json]
+trellis analyze pack-judge --judged judged.jsonl [--since DATE] [--until DATE] [--days N] \
+    [--min-graded N] [--model-id LABEL] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--out` | (judge phase) | JSONL file to append to. Exactly one of `--out` and `--judged` is required |
+| `--judged` | (calibrate phase) | JSONL a judge run wrote |
+| `--since` / `--until` | | Window bounds, ISO-8601 (UTC if naive); `--until` is exclusive |
+| `--days` | `30` | Window length when `--since` is not given |
+| `--limit` | `0` | Judge phase: stop after this many attempts (`0` = no cap). Items an agent graded are judged first, so a cap spends calls where calibration can use them |
+| `--scan-limit` | `5000` | Max events scanned per event type; the newest are kept, and the report states when a scan truncated |
+| `--model-id` | route's model | Label written on each row and part of the resume key; required when the route names no model (exit `2`, under either format), so two unnamed endpoints never share a key. In the calibrate phase it selects which judge's rows to use |
+| `--min-graded` | `30` | Calibrate phase: refuse below this many agent-graded items the judge answered |
+
+**Judge phase.** Reads `PACK_ASSEMBLED` rows in the window, drops held-out packs
+with `drop_holdout` (a held-out pack served nothing), loads each injected item from
+the document store and asks the model one versioned question (`PROMPT_VERSION`,
+`pack-judge/v1`): is this item relevant and useful for this intent? The reply is
+parsed strictly as `helpful`, `unhelpful` or `unsure`; anything else is recorded as
+`unparsed`, never coerced. One row per `(pack_id, item_id)` is appended and flushed
+as it is judged:
+
+| Field | Meaning |
+|-------|---------|
+| `pack_id`, `item_id` | The served pair |
+| `label` | `helpful`, `unhelpful`, `unsure`, `unparsed` or `unjudgeable` |
+| `reason` | For `unjudgeable`: `missing` (no stored row), `pack_egress_withheld` (a route not declared local, and the pack served a document labelled above `internal` or one the gate could not read), `egress_withheld`, `empty`, `no_intent`. Null otherwise |
+| `model`, `reported_model` | The configured label, and the model name the endpoint answered with |
+| `prompt_version`, `judged_at`, `item_tokens` | Version of the question, UTC instant, estimated tokens served |
+
+No intent text, item text or excerpt is written to the file, to the report or to a
+log. The command writes no event, no mutation and no document or vector row, and
+the module takes no event log to write to. A rerun skips every pair already
+answered in the file for the same `prompt_version` and `model`, so an interrupted
+run resumes. An `unjudgeable` pair is not skipped: a missing document can appear
+and a route can become local, so the next run asks about it again, after the pairs
+never tried, and a changed outcome supersedes the old row (a reader keeps the last
+row for a key; an unchanged outcome adds no row). A failed model call or document
+read writes no row (the pair is retried next run) and exits `5`, logging the
+exception's type and never its message; five consecutive failed calls abort the run
+with the rows written so far kept.
+
+**Egress is per pack.** The pack's intent goes to the model with every item, and it
+names what the session was asked to do, so a pack that served a document labelled
+above `internal` (or one the gate could not read) is withheld whole from a route not
+declared local: every item in it is written `unjudgeable: pack_egress_withheld` and
+none is sent. A declared-local route sends everything, as before.
+
+**Calibrate phase.** Joins the judged rows to `FEEDBACK_RECORDED`
+`helpful_item_ids` / `unhelpful_item_ids` through `trellis.feedback.pack_rows`, the
+same typed reader every feedback surface uses (a helpful grade beats an unhelpful
+one for the same pair). Over the agent-graded items the judge answered it reports:
+
+- the confusion matrix (agent rows by judge columns, including `unsure`);
+- overall agreement, where `unsure` counts against the judge;
+- agreement on the unhelpful side, the share of agent-unhelpful items the judge also
+  marked unhelpful. This is the harder target, because reflexive helpful grades make
+  the helpful side cheap. It is withheld, with the reason, below 10 agent-unhelpful
+  items;
+- Cohen's kappa over the items the judge committed on (`unsure` is an abstention and
+  is left out of kappa). Kappa has the same floor as `--min-graded`, counted over
+  those committed items: below it `kappa` is null and `kappa_unavailable` says why,
+  so 30 graded items of which 28 are `unsure` print no kappa;
+- coverage, judged tokens over injected tokens;
+- the token-weighted useful fraction the judge implies over **all** judged items,
+  beside the agent-graded lower bound over the same judged-token denominator.
+
+Fewer than `--min-graded` overlapping items (`insufficient_graded_overlap`), no
+judged rows for the prompt version (`no_judged_rows`), or a file holding rows from
+more than one model with no `--model-id` to choose (`ambiguous_judge`) returns a
+typed refusal with no kappa and no agreement figures. A refusal exits `2`, and `--format` never changes an exit
+code.
+
+**Pointing it at a local model.** The client is built by the router, never by this
+command. Give `pack_judge` its own tier and route it there, so the endpoint and the
+`local` declaration apply to this one consumer and not to the other six:
+
+```yaml
+llm:
+  provider: openai                     # the parent block: every other consumer keeps it
+  model: gpt-4o-mini
+  api_key_env: OPENAI_API_KEY
+  tiers:
+    local_judge:
+      base_url: http://localhost:8000/v1   # any OpenAI-compatible server
+      api_key_env: PACK_JUDGE_API_KEY      # a non-empty value; a local server ignores it
+      model: my-local-model
+      local: true                          # your statement that content stays on this host
+  routes:
+    pack_judge: local_judge
+```
+
+`local: true` and `base_url` sit on the tier because the same keys on the parent
+`llm:` block would declare all seven consumers local and send them to that endpoint,
+lifting the egress gate for every one of them.
+
+Set `PACK_JUDGE_API_KEY` (or whatever `api_key_env` names) to any non-empty value.
+`trellis admin llm-routes` shows the resolved route without building a client.
+Without `local: true` the route is not local and a pack that served a document
+labelled above `internal` is recorded as `unjudgeable: pack_egress_withheld` instead
+of being sent. See "Keeping labelled content off a hosted model" below.
 
 ### `trellis analyze trend`
 
@@ -5799,7 +5915,7 @@ day-window selector drive all charts.
 
 ## MCP Macro Tools
 
-Start with `trellis-mcp`. 16 tools: 10 core tools and 3 sectioned-context tools for richer pack assembly return markdown, and 3 structured tools (observations + the mutation escape hatch) return JSON.
+Start with `trellis-mcp`. The server is a package: `mcp/server.py` is the entry point and re-exports the old module's names, and the tools live in `mcp/tools/<family>.py` (see [testing.md § Patching a name in the MCP server](testing.md#patching-a-name-in-the-mcp-server)). 16 tools: 10 core tools and 3 sectioned-context tools for richer pack assembly return markdown, and 3 structured tools (observations + the mutation escape hatch) return JSON.
 
 **Core tools**
 
@@ -5885,7 +6001,7 @@ Executor rejections with `reason="idempotency_replay"` are excluded — a replay
 | `config:policy_file` | yes | any accepted **governed** write (`MUTATION_EXECUTED`, any `requested_by`) newer than the last rejection (see [Policy Commands](#policy-commands)). `MEMORY_STORED` does **not** clear it — widening the accept set for `save_memory` did not widen this rule |
 | `(unknown)` | yes | nothing — deliberately unclearable |
 
-Two labels used to be structurally unclearable. `mcp:save_memory`'s only `MUTATION_EXECUTED` then came from memory extraction (a stored memory now carries its own, from the `evidence.ingest` command it submits, so the premise no longer holds, but `MEMORY_STORED` stays the executor-independent signal), which is gated on `TRELLIS_ENABLE_MEMORY_EXTRACTION` (**off** by default) and emits nothing when extraction yields no drafts — so on a default deployment a perfectly healthy `save_memory` cleared nothing and three rejections pinned the banner for a full window. `MEMORY_STORED` is its unconditional success signal and now clears it. And `mcp:record_feedback` captures no experience at all: its success path is `FEEDBACK_RECORDED`, which no `MUTATION_EXECUTED` accompanies, so the headline *"New experience from this session is NOT being saved"* was false in both halves. It is out of the banner and unchanged in `trellis analyze health`. Exclusion is a deny-list — a surface is watched unless explicitly named — and `tests/unit/mcp/test_capture_surface_roster.py` enumerates every boundary-rejection site, fails if its tool cannot demonstrate an accept by actually making a successful call, and separately sweeps all of `src/` — both call spellings — so no module outside `mcp/server.py` can raise a banner no roster has classified, while inside `mcp/server.py` every emitter call must route through the wrapper the roster scans for. The hand-written success recipes are asserted against the scan too: every other guard divides by the scan's own output, so only a hand count catches the scan silently shrinking.
+Two labels used to be structurally unclearable. `mcp:save_memory`'s only `MUTATION_EXECUTED` then came from memory extraction (a stored memory now carries its own, from the `evidence.ingest` command it submits, so the premise no longer holds, but `MEMORY_STORED` stays the executor-independent signal), which is gated on `TRELLIS_ENABLE_MEMORY_EXTRACTION` (**off** by default) and emits nothing when extraction yields no drafts — so on a default deployment a perfectly healthy `save_memory` cleared nothing and three rejections pinned the banner for a full window. `MEMORY_STORED` is its unconditional success signal and now clears it. And `mcp:record_feedback` captures no experience at all: its success path is `FEEDBACK_RECORDED`, which no `MUTATION_EXECUTED` accompanies, so the headline *"New experience from this session is NOT being saved"* was false in both halves. It is out of the banner and unchanged in `trellis analyze health`. Exclusion is a deny-list — a surface is watched unless explicitly named — and `tests/unit/mcp/test_capture_surface_roster.py` enumerates every boundary-rejection site, fails if its tool cannot demonstrate an accept by actually making a successful call, and separately sweeps all of `src/` — both call spellings — so no module outside the MCP server modules (`mcp/server.py`, `mcp/app.py`, `mcp/boundary.py`, `mcp/rejections.py`, `mcp/wiring.py`, `mcp/tools/`) can raise a banner no roster has classified, while inside them every emitter call must route through the wrapper the roster scans for. The hand-written success recipes are asserted against the scan too: every other guard divides by the scan's own output, so only a hand count catches the scan silently shrinking.
 
 One residue, named rather than hidden: `save_memory` emits nothing on a *dedup* hit, so a surface whose every successful call is a duplicate has no accept to clear with. It also produces no rejections, so it cannot raise the banner on its own.
 

@@ -1,6 +1,6 @@
 """Ratchet for raw exception text reaching an MCP caller (trellis-ai#748).
 
-A caller-facing site in ``src/trellis/mcp/server.py`` renders a caught
+A caller-facing site in ``src/trellis/mcp/`` renders a caught
 exception through ``_exception_detail``, which sanitizes text Trellis did
 not write (``test_store_error_sanitization.py`` pins two sites). The sites
 below still embed the exception on purpose: the caller's own JSON/pydantic
@@ -72,12 +72,18 @@ EXCEPTION_TEXT_EXEMPTIONS: dict[str, str] = {
 #: in server.py does. A key naming a module the scan does not visit, one
 #: renamed or deleted, fails the build too.
 _MODULE_EXEMPTIONS: dict[str, dict[str, str]] = {
-    "server.py": EXCEPTION_TEXT_EXEMPTIONS,
+    "server.py": {"main": EXCEPTION_TEXT_EXEMPTIONS["main"]},
+    "rejections.py": {
+        key: reason
+        for key, reason in EXCEPTION_TEXT_EXEMPTIONS.items()
+        if key.startswith("_SanitizeUncaughtToolErrors.")
+    },
 }
 
 # Hand count (trellis-ai#748, shrunk by the MCP/CLI describe-dont-quote
-# follow-up sweep and its fix round): 2, in server.py:
-# _SanitizeUncaughtToolErrors.on_call_tool and main's startup error line.
+# follow-up sweep and its fix round): 2:
+# _SanitizeUncaughtToolErrors.on_call_tool (rejections.py) and main's
+# startup error line (server.py).
 # save_experience, record_observation and execute_mutation each used to
 # carry one more (a raw pydantic ValidationError interpolated into the
 # caller-facing message) -- the follow-up sweep switched all three to
@@ -92,14 +98,13 @@ _MODULE_EXEMPTIONS: dict[str, dict[str, str]] = {
 # both sites now go through sanitize_error_message(str(exc)) first, which
 # again passes a call argument rather than stringifying exc directly, and
 # the entry was removed rather than left stale. Re-grep '{exc}\|str(exc)'
-# in src/trellis/mcp/server.py and subtract the one log-only site
-# (_build_llm_client, excluded structurally above) to reconcile. The
+# under src/trellis/mcp and subtract the log-only and sanitizer-argument
+# sites (excluded structurally above) to reconcile. The
 # scan's other shapes, repr(), an attribute chain inside str()/repr()/an
 # f-string, a `%` right operand and a `.format(...)` argument, have no
-# site in server.py: re-grep 'repr(exc\|{exc\.\|str(exc\.\|% exc\|format(exc'
-# finds none. Every other module under src/trellis/mcp (__init__.py,
-# auth.py, knowledge_links.py, reconcile.py, supersession.py) hand-reads
-# clean at this count.
+# site under src/trellis/mcp: re-grep 'repr(exc\|{exc\.\|str(exc\.\|% exc\|format(exc'
+# finds none. Every module under src/trellis/mcp other than server.py and
+# rejections.py hand-reads clean at this count.
 _HAND_READ_SITE_COUNT = 2
 
 _SERVER_PATH = Path(inspect.getsourcefile(server_mod) or "")

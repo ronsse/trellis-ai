@@ -10,7 +10,7 @@ indistinguishable, from the outside, from one that never turned it on.
 The signal is one event, :attr:`EventType.MEMORY_EXTRACTION_STATE`, emitted
 on a **state change** and never per write (:func:`emit_memory_extraction_state`
 is the writer; the state machine that decides *when* lives next to the
-extractor cache in :mod:`trellis.mcp.server`). Two states are written:
+extractor cache in :mod:`trellis.mcp.wiring`). Two states are written:
 
 * ``unavailable`` — the flag is on and no extractor could be built.
   ``reason`` is a closed slug (:data:`UNAVAILABLE_REASONS`).
@@ -32,7 +32,7 @@ newest event in the window says, and since when. Three limits are deliberate:
   process writes nothing, so the row ages out of the window instead.
 * **A window with no event is ``unobserved``, not healthy.** The writer
   refreshes a persistent ``unavailable`` (either reason) once a day
-  (``trellis.mcp.server._MEMORY_EXTRACTOR_REFRESH_SECONDS``) so a broken
+  (``trellis.mcp.wiring._MEMORY_EXTRACTOR_REFRESH_SECONDS``) so a broken
   process older than the window does not vanish from the report. There is no
   background timer: the refresh is written by a save that arrives after the
   retry interval, so a broken process that stops receiving saves stops

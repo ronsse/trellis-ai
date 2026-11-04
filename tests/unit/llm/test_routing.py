@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from trellis.errors import ConfigError
 from trellis.llm.routing import (
@@ -530,3 +533,31 @@ class TestLocalNeedsAnEndpoint:
 
     def test_a_bare_declaration_still_passes(self):
         validate_llm_routing({"local": True})
+
+
+def test_the_documented_local_judge_example_makes_only_pack_judge_local() -> None:
+    """The ``pack-judge`` page's config example is read from the page and resolved.
+
+    The example once put ``local: true`` and ``base_url`` on the parent block,
+    which declared every consumer local. It must resolve per consumer.
+    """
+    page = (
+        Path(__file__).parents[3] / "docs" / "agent-guide" / "operations.md"
+    ).read_text(encoding="utf-8")
+    section = page.split("**Pointing it at a local model.**", 1)[1]
+    block = re.search(r"```yaml\n(.*?)```", section, re.DOTALL)
+    assert block, "the section lost its config example"
+    llm = yaml.safe_load(block.group(1))["llm"]
+
+    judge = resolve_llm_route(llm, LLMConsumer.PACK_JUDGE)
+    assert judge.local is True
+    assert judge.tier == "local_judge"
+    assert judge.base_url == "http://localhost:8000/v1"
+    assert judge.model == "my-local-model"
+    for consumer in LLMConsumer:
+        if consumer is LLMConsumer.PACK_JUDGE:
+            continue
+        other = resolve_llm_route(llm, consumer)
+        assert other.local is False, consumer
+        assert other.tier is None
+        assert other.base_url is None

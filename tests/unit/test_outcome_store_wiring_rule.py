@@ -140,7 +140,7 @@ def _shadows_the_subject(tree: ast.Module) -> bool:
     bare has the import win, so dropping the name there would open a hole
     instead of closing a false positive.
 
-    Live in two modules — ``mcp/server.py`` and ``routes/curate.py`` each
+    Live in two modules — ``mcp/tools/feedback.py`` and ``routes/curate.py`` each
     define their own ``record_feedback`` surface and import the core
     function as ``record_pack_feedback``. Neither calls its own under the
     bare name today, so this currently removes nothing; it is a floor to

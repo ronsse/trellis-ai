@@ -1,7 +1,7 @@
 """Reconcile-on-write — a locally-hosted model's ADD/UPDATE/SUPERSEDE/NOOP
 verdict at memory capture.
 
-The **deterministic tier** already lives in :func:`trellis.mcp.server.save_memory`
+The **deterministic tier** already lives in :func:`trellis.mcp.tools.memory.save_memory`
 (exact content-hash short-circuit, then MinHash/LSH near-duplicate detection,
 serialized by ``_save_memory_lock``). This module layers the **verdict tier**
 on top: when the deterministic tier finds a *near* (not exact) match, a local
@@ -451,7 +451,7 @@ def mark_document_superseded(
     lock race (#994). **Every caller reads it, and the not-applied path is
     logged here** so no caller can drop it silently (#407):
 
-    * ``mcp.server._commit_reconcile_verdict`` downgrades the just-stored
+    * ``mcp.tools.memory._commit_reconcile_verdict`` downgrades the just-stored
       memory to a plain ADD carrying the returned reason, so neither the tool
       result nor the ``MEMORY_OP_JUDGED`` event asserts a supersession that
       did not happen, and the ``RECONCILE_DEGRADED`` event and the stored

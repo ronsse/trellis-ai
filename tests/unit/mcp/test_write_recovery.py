@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 from fastmcp import Client
 
+import trellis.mcp.rejections as rejections_mod
 import trellis.mcp.server as server_mod
 from trellis.mcp.auth import set_auth_enforced
 from trellis.ops.write_health import (
@@ -43,7 +44,7 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     """A fresh tracker per test, on a clock the test advances."""
     now = [5000.0]
     monkeypatch.setattr(
-        server_mod,
+        rejections_mod,
         "_REJECTION_RECOVERY",
         RejectionRecoveryTracker(clock=lambda: now[0]),
     )

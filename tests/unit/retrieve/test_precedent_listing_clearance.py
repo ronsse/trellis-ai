@@ -26,6 +26,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import trellis.mcp.server as server_mod
+import trellis.mcp.wiring as wiring_mod
 import trellis.retrieve.precedents as precedents_mod
 import trellis_api.app as app_module
 from tests.unit.mcp.conftest import unwrap_tool
@@ -144,7 +145,7 @@ def registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     stores_dir = tmp_path / "stores"
     stores_dir.mkdir()
     reg = StoreRegistry(stores_dir=stores_dir)
-    monkeypatch.setattr(server_mod, "_registry", reg)
+    monkeypatch.setattr(wiring_mod, "_registry", reg)
     monkeypatch.setattr(app_module, "_registry", reg)
     reg.knowledge.graph_store.upsert_node("entity://shared", "entity", {"name": "x"})
     yield reg

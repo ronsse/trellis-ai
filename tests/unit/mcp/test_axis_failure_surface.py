@@ -38,7 +38,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import trellis.mcp.server as server_mod
+import trellis.mcp.tools.context as context_tools_mod
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.errors import BackendNotInstalledError, ConfigError
 from trellis.mcp.server import get_context as _get_context
@@ -163,7 +163,7 @@ def test_get_context_reports_failed_axis_for_a_populated_pack(
     temp_registry: StoreRegistry, monkeypatch, index: bool
 ) -> None:
     monkeypatch.setattr(
-        server_mod, "_build_pack_builder", _builder_one_failing_one_surviving
+        context_tools_mod, "_build_pack_builder", _builder_one_failing_one_surviving
     )
 
     result = get_context(INTENT, index=index)
@@ -190,7 +190,7 @@ def test_get_context_reports_failed_axis_for_an_empty_pack(
     read as "No context found", identical to a genuinely empty corpus, with
     no hint that an axis never ran at all."""
     monkeypatch.setattr(
-        server_mod, "_build_pack_builder", _builder_failing_axis_empty_survivor
+        context_tools_mod, "_build_pack_builder", _builder_failing_axis_empty_survivor
     )
 
     result = get_context(INTENT)
@@ -214,7 +214,7 @@ def test_get_context_reports_failed_axis_for_a_held_out_empty_pack(
         empty = _make_axis_strategy("graph", [])
         return PackBuilder(strategies=[bad, empty], holdout_rate=1.0)
 
-    monkeypatch.setattr(server_mod, "_build_pack_builder", _builder)
+    monkeypatch.setattr(context_tools_mod, "_build_pack_builder", _builder)
 
     result = get_context(INTENT)
     lines = result.split("\n")
@@ -278,7 +278,7 @@ def test_get_context_reports_misconfigured_semantic_for_a_populated_pack(
     temp_registry: StoreRegistry, monkeypatch
 ) -> None:
     monkeypatch.setattr(
-        server_mod, "_build_pack_builder", _builder_clean_without_semantic
+        context_tools_mod, "_build_pack_builder", _builder_clean_without_semantic
     )
 
     result = get_context(INTENT)
@@ -293,7 +293,7 @@ def test_get_context_reports_misconfigured_semantic_for_an_empty_pack(
     temp_registry: StoreRegistry, monkeypatch
 ) -> None:
     monkeypatch.setattr(
-        server_mod, "_build_pack_builder", _builder_empty_without_semantic
+        context_tools_mod, "_build_pack_builder", _builder_empty_without_semantic
     )
 
     result = get_context(INTENT)
@@ -311,7 +311,9 @@ def test_get_context_reports_misconfigured_semantic_for_a_held_out_empty_pack(
     other empty pack; the misconfigured note must survive that path too
     (mirrors the failed-axis test for a held-out empty pack)."""
     monkeypatch.setattr(
-        server_mod, "_build_pack_builder", _builder_held_out_empty_without_semantic
+        context_tools_mod,
+        "_build_pack_builder",
+        _builder_held_out_empty_without_semantic,
     )
 
     result = get_context(INTENT)
@@ -333,7 +335,7 @@ def test_get_context_reports_both_failed_and_misconfigured_axes(
     graph" when keyword is one of the axes that just failed -- that claim
     was false in exactly this combination (#805 gate, finding 9)."""
     monkeypatch.setattr(
-        server_mod,
+        context_tools_mod,
         "_build_pack_builder",
         _builder_one_failing_one_surviving_with_configured_embedder,
     )
@@ -358,7 +360,7 @@ def test_search_reports_misconfigured_semantic_axis(
     separately so a future split of the two paths cannot silently drop the
     note from one of them."""
     monkeypatch.setattr(
-        server_mod, "_build_pack_builder", _builder_clean_without_semantic
+        context_tools_mod, "_build_pack_builder", _builder_clean_without_semantic
     )
 
     result = search(INTENT)
@@ -382,7 +384,7 @@ def test_get_context_built_semantic_axis_is_never_misconfigured(
         else _make_axis_strategy("semantic", [_axis_item("d2")])
     )
     monkeypatch.setattr(
-        server_mod,
+        context_tools_mod,
         "_build_pack_builder",
         lambda *_args, **_kwargs: PackBuilder(
             strategies=[keyword, semantic], embedder_configured=True
@@ -421,7 +423,7 @@ def test_sectioned_tools_report_failed_axis_in_exactly_one_line(
     The objective and task presets filter out the fixture's item, so those
     two cases also pin the reply whose every section is empty."""
     monkeypatch.setattr(
-        server_mod, "_build_pack_builder", _builder_one_failing_one_surviving
+        context_tools_mod, "_build_pack_builder", _builder_one_failing_one_surviving
     )
 
     result = _SECTIONED_CALLS[tool_name]()
@@ -440,7 +442,7 @@ def test_sectioned_tools_report_misconfigured_semantic_axis(
     """The misconfigured-semantic line reaches all four sectioned tools too,
     one line, not combined with a failed-axis note that does not apply."""
     monkeypatch.setattr(
-        server_mod, "_build_pack_builder", _builder_clean_without_semantic
+        context_tools_mod, "_build_pack_builder", _builder_clean_without_semantic
     )
 
     result = _SECTIONED_CALLS[tool_name]()

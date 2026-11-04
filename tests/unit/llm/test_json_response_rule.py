@@ -21,8 +21,15 @@ from tests.ast_rules import (
 
 ROOT = Path(__file__).parents[3]
 SRC = ROOT / "src"
-HAND_READ_GENERATE_SITES = 5
-NOT_JSON_SITES: dict[str, str] = {}
+HAND_READ_GENERATE_SITES = 6
+NOT_JSON_SITES: dict[str, str] = {
+    # The shadow pack judge asks for one bare word (helpful, unhelpful or
+    # unsure) and accepts nothing else: a reply the strict label parser does not
+    # recognise is recorded as ``unparsed``, never repaired. The shared JSON
+    # parser's fence stripping and salvage would be the coercion that judge
+    # exists to avoid.
+    "trellis/learning/pack_judge.py": "single-word label, parsed strictly",
+}
 
 
 def _violations(root: Path) -> list[str]:
