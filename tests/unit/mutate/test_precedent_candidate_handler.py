@@ -16,6 +16,7 @@ from tests.precedent_candidates import (
 )
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Command, CommandStatus, Operation
+from trellis.mutate.handlers.precedent import LOCAL_MODEL_CANDIDATE_REQUESTERS
 from trellis.mutate.policy_source import resolve_policy_path
 from trellis.retrieve.precedents import list_precedents
 from trellis.schemas.enums import PolicyType
@@ -240,4 +241,61 @@ def test_only_the_deterministic_tier_is_recorded_for_now(
     assert result.status == CommandStatus.REJECTED
     assert result.metadata["rejection_reason"] == "policy_violation"
     assert "deterministic" in result.message
+    assert _events(registry, EventType.PRECEDENT_CANDIDATE_MINED) == []
+
+
+def _local_model_record() -> dict:
+    [real, *_] = candidates_of(recovering_trace())
+    claimed = real.model_copy(update={"provenance_tier": "local_model"})
+    claimed = claimed.model_copy(
+        update={"candidate_id": claimed.expected_candidate_id()}
+    )
+    return claimed.model_dump(mode="json")
+
+
+def _execute_as(registry: StoreRegistry, payload: dict, requested_by: str):
+    return build_curate_executor(registry, clearance="restricted").execute(
+        Command(
+            operation=Operation.PRECEDENT_CANDIDATE,
+            args={"record": payload},
+            requested_by=requested_by,
+        )
+    )
+
+
+@pytest.mark.parametrize("requester", sorted(LOCAL_MODEL_CANDIDATE_REQUESTERS))
+def test_a_local_model_record_is_accepted_from_the_sanctioned_requester(
+    registry: StoreRegistry, requester: str
+) -> None:
+    result = _execute_as(registry, _local_model_record(), requester)
+
+    assert result.status == CommandStatus.SUCCESS
+    [event] = _events(registry, EventType.PRECEDENT_CANDIDATE_MINED)
+    assert event.payload["record"]["provenance_tier"] == "local_model"
+
+
+@pytest.mark.parametrize(
+    "requester", ["test:payload", "cli:distill-precedents", "mcp:agent"]
+)
+def test_a_local_model_record_is_refused_from_any_other_requester(
+    registry: StoreRegistry, requester: str
+) -> None:
+    result = _execute_as(registry, _local_model_record(), requester)
+
+    assert result.status == CommandStatus.REJECTED
+    assert result.metadata["rejection_reason"] == "policy_violation"
+    assert _events(registry, EventType.PRECEDENT_CANDIDATE_MINED) == []
+
+
+def test_the_human_tier_stays_refused_even_from_the_sanctioned_requester(
+    registry: StoreRegistry,
+) -> None:
+    payload = _local_model_record()
+    payload["provenance_tier"] = "human"
+    record = PrecedentRecord.model_validate(payload)
+    payload["candidate_id"] = record.expected_candidate_id()
+
+    for requester in sorted(LOCAL_MODEL_CANDIDATE_REQUESTERS):
+        result = _execute_as(registry, payload, requester)
+        assert result.status == CommandStatus.REJECTED
     assert _events(registry, EventType.PRECEDENT_CANDIDATE_MINED) == []

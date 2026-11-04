@@ -142,7 +142,7 @@ def test_derive_builds_a_record_whose_id_is_its_content_id() -> None:
     assert built.candidate_id.startswith("pcand_")
 
 
-@pytest.mark.parametrize("field", ["feedback_ids", "pack_ids"])
+@pytest.mark.parametrize("field", ["feedback_ids", "pack_ids", "merged_from"])
 def test_evidence_lists_are_order_free_but_membership_counts(field: str) -> None:
     real = _real()
     base = real.evidence.model_copy(update={field: ["a", "b"]})
@@ -154,3 +154,29 @@ def test_evidence_lists_are_order_free_but_membership_counts(field: str) -> None
 
     assert with_evidence(base) == with_evidence(swapped)
     assert with_evidence(base) != with_evidence(fewer)
+
+
+def test_an_empty_merged_from_leaves_every_existing_id_unchanged() -> None:
+    """``merged_from`` is additive: a record that merged nothing hashes as it did."""
+    real = _real()
+    assert real.evidence.merged_from == []
+    dumped = real.model_dump(mode="json")
+    legacy_evidence = {
+        k: v for k, v in dumped["evidence"].items() if k != "merged_from"
+    }
+    assert "merged_from" in dumped["evidence"]
+    assert derive_candidate_id({**dumped, "evidence": legacy_evidence}) == (
+        real.candidate_id
+    )
+
+
+def test_a_merged_record_never_shares_the_id_of_either_parent() -> None:
+    real = _real()
+    merged = real.model_copy(
+        update={
+            "evidence": real.evidence.model_copy(
+                update={"merged_from": [real.candidate_id, "pcand_other"]}
+            )
+        }
+    )
+    assert merged.expected_candidate_id() != real.candidate_id

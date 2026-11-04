@@ -29,6 +29,10 @@ NOT_JSON_SITES: dict[str, str] = {
     # parser's fence stripping and salvage would be the coercion that judge
     # exists to avoid.
     "trellis/learning/pack_judge.py": "single-word label, parsed strictly",
+    # The local precedent distiller and merger ask for one JSON object of an
+    # exact shape and record anything else as ``unparsed``: the shared parser's
+    # fence stripping and salvage would be the repair that tier refuses.
+    "trellis/learning/precedent_local.py": "exact-shape JSON, parsed strictly",
 }
 
 

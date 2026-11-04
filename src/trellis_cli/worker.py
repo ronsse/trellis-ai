@@ -21,6 +21,9 @@ surfaces from ``docs/design/adr-autonomy-ladder.md``:
   :meth:`PrecedentMiner.mine`.
 * ``trellis worker distill-precedents`` — deterministic candidate precedents
   from traces, dry-run first; lives in :mod:`trellis_cli.worker_distill_precedents`.
+* ``trellis worker distill-precedents-local`` — the local-model tier of the same
+  (distill and merge, both refused on any route not declared ``local: true``);
+  lives in :mod:`trellis_cli.worker_distill_precedents_local`.
 * :func:`capture_sessions_cmd` (``trellis worker capture-sessions``) — one
   Claude Code session-capture sweep, delegating to the same
   :func:`~trellis_workers.session_capture.sweep.run_sweep` the
@@ -2854,6 +2857,10 @@ def _render_embed_traces_text(payload: dict[str, Any]) -> None:
         )
 
 
-from trellis_cli import worker_distill_precedents  # noqa: E402
+from trellis_cli import (  # noqa: E402
+    worker_distill_precedents,
+    worker_distill_precedents_local,
+)
 
 worker_distill_precedents.register(worker_app)
+worker_distill_precedents_local.register(worker_app)

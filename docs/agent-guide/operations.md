@@ -4119,7 +4119,7 @@ llm:
 ```
 
 `local: true` and `base_url` sit on the tier because the same keys on the parent
-`llm:` block would declare all seven consumers local and send them to that endpoint,
+`llm:` block would declare every consumer local and send them to that endpoint,
 lifting the egress gate for every one of them.
 
 Set `PACK_JUDGE_API_KEY` (or whatever `api_key_env` names) to any non-empty value.
@@ -5131,10 +5131,99 @@ depend on `--format`.
 document, graph or vector store, so `get_lessons`, `GET /precedents`, the domain
 list and every pack skip them. The idempotency key is the candidate id: a rerun
 records nothing new and counts the repeats as `duplicates`. Activation (minting a
-servable precedent from a candidate) is deferred. Only the `deterministic`
-provenance tier is recorded; a record naming `local_model` or `human` is refused
+servable precedent from a candidate) is deferred. The `deterministic`
+tier is recorded from any caller; a `local_model` record is recorded only from
+`trellis worker distill-precedents-local`, and a record naming `human` is refused
 as a policy violation. See
 [`adr-precedent-record.md`](../design/adr-precedent-record.md).
+
+### `trellis worker distill-precedents-local`
+
+Distill candidate precedents with a **local** model, and merge near-duplicate
+candidates. The deterministic distiller covers what a rule can see; this covers
+the rest. Dry run by default. **Every model call is a logged judged op**, and no
+call leaves the host: both consumers refuse any route not declared `local: true`.
+
+```bash
+trellis worker distill-precedents-local [--since ISO] [--until ISO] [--limit N] \
+  [--merge-limit N] [--domain D] [--apply] [--model-id LABEL] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--since` / `--until` | (none) | Read traces created in this ISO-8601 window (inclusive). |
+| `--limit` | 10 | Most traces sent to the model, newest first (each is a call). A window with more behind it reports `truncated: true`. |
+| `--merge-limit` | 5 | Most candidate pairs sent to the merge model. `0` skips merging. |
+| `--domain` | (all) | Restrict the read to one trace domain. |
+| `--apply` | off | Record the new candidates through the governed `precedent.candidate` operation. |
+| `--model-id` | the route's `model` | The label the judged events carry. A route with no `model` needs it. |
+
+Routing. The command builds two clients, for the `precedent_distill` and
+`precedent_merge` consumers (`LLMConsumer` in
+[`llm/routing.py`](../../src/trellis/llm/routing.py)). `local: true` is declared,
+never inferred, and an unrouted consumer inherits the parent block's flag, so a
+cloud parent keeps both consumers refused. Generic placeholders:
+
+```yaml
+llm:
+  provider: openai                       # any OpenAI-compatible endpoint
+  base_url: http://localhost:11434/v1
+  api_key_env: LOCAL_LLM_API_KEY
+  model: placeholder-model
+  local: true                            # this endpoint stays on the host
+  tiers:
+    local-judge:
+      model: placeholder-larger-model    # same endpoint, so the tier stays local
+  routes:
+    precedent_distill: local-judge       # leave routes: out and both consumers
+    precedent_merge: local-judge         # inherit the parent block, flag included
+```
+
+A route that is not local is refused before any call: the run exits with
+`EXIT_POLICY` (3), `refusals` reads `{"route_not_local": N}`, and no model is
+called. This is stricter than the egress gate, which only keeps content labelled
+above `internal` off a non-local route; the gate also runs here, and a trace whose
+documents it withholds is skipped.
+
+Distillation (`precedent-distill/v1`, [`trellis.learning.precedent_local`](../../src/trellis/learning/precedent_local.py)).
+A trace the deterministic tier already covers is skipped (`deterministic_covered`,
+the rule wins), as is one with no usable content (`no_content`), and a lesson that
+only restates the trace's intent (`restates_intent`). The model must answer with
+one JSON object of exactly the documented shape; anything else (a fence, prose
+around it, an extra or missing key) is `unparsed`, logged and counted, never
+repaired. Prompt text is bounded with `truncate_excerpt` and marked with
+`elide_text`. Records carry `provenance_tier: local_model` and a confidence capped
+at 0.5.
+
+Merge (`precedent-merge/v1`). Two candidates are paired when they share an
+`intent_family` and their trigger words overlap (or they name a common entity),
+cheaply and deterministically. On a `same` verdict the command produces one new
+candidate whose evidence is the union of both and whose `evidence.merged_from`
+names both parents. **A merge never deletes or rewrites a recorded candidate**;
+the parents stay recorded.
+
+Judged ops. Each model call emits one `MEMORY_OP_JUDGED` event, in dry-run and
+`--apply` alike, because the events are the training stream: `distillation`
+(`lesson` / `no_lesson` / `unparsed`) for a trace, `reconciliation` (`same` /
+`different` / `unparsed`) for a pair, since two stored items are judged to be the
+same thing or not. The payload holds ids, a digest of the prompt, the model label
+and the verdict, never trace or record text; the prompt version rides on the
+event's `source` (`learning:precedent-distill/v1`).
+
+The JSON report carries `status`, `mode`, `prompt_versions`, `models`, `window`,
+`traces_read`, `truncated`, `model_calls` (by op), `outcomes`, `refusals` (by
+reason), `skipped` (by reason), `llm_errors`, `judged_events` (the number emitted,
+by op and in total), `candidates`, `duplicates`, `would_record` (dry run) or
+`recorded` (`--apply`), `rejected`, `failed` and `candidate_ids`. It carries no
+trace or record text. The exit code does not depend on `--format`: 3 for a refused
+route, 5 when model calls failed, 2 for a bad window or a missing model label.
+A rerun asks the model again (a `no_lesson` or `different` verdict is not
+remembered); recorded candidates are never duplicated.
+
+**Candidates are still never served,** and the command is in no nightly script.
+The governed operation accepts a `local_model` record only from this command's
+`requested_by`; any other caller, and every `human` record, is still refused as a
+policy violation.
 
 ### `trellis curate evaluate-precedent-gate`
 

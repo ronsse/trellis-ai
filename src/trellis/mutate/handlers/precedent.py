@@ -810,6 +810,10 @@ CANDIDATE_RECORDED_ACTION = "precedent_candidate_recorded"
 #: get its own caller check; until then a record naming one is refused rather
 #: than recorded under a claim nothing here can back.
 PERMITTED_PROVENANCE_TIERS = frozenset({"deterministic"})
+#: ``local_model`` is recorded only for the callers named here, the local-model
+#: distillation command (``requested_by`` is the caller's own claim, as for every
+#: command; it keeps an unrelated caller from stamping a tier it did not earn).
+LOCAL_MODEL_CANDIDATE_REQUESTERS = frozenset({"cli:distill-precedents-local"})
 CANDIDATE_TIER_POLICY_ID = "precedent_candidate_provenance_tier"
 
 
@@ -835,9 +839,10 @@ class PrecedentCandidateHandler:
     :class:`~trellis.schemas.precedent_record.PrecedentRecord` whose
     ``candidate_id`` is the id its own content derives (evidence and text both),
     so a forged record cannot take the id the distiller derives for a real
-    trace; the event carries the whole record. Only the ``deterministic``
-    provenance tier is recorded: ``local_model`` and ``human`` are refused as a
-    policy violation until those tiers get their own caller checks. A candidate
+    trace; the event carries the whole record. The ``deterministic`` provenance
+    tier is recorded, and ``local_model`` from the local distillation command
+    only; ``human`` and any other ``local_model`` caller are refused as a policy
+    violation. A candidate
     already recorded is a duplicate, whether or not the caller named an
     idempotency key.
     """
@@ -856,10 +861,15 @@ class PrecedentCandidateHandler:
             raise ValidationError(
                 msg, errors=[msg], code="precedent_record_invalid"
             ) from exc
-        if record.provenance_tier not in PERMITTED_PROVENANCE_TIERS:
+        local_ok = (
+            record.provenance_tier == "local_model"
+            and command.requested_by in LOCAL_MODEL_CANDIDATE_REQUESTERS
+        )
+        if record.provenance_tier not in PERMITTED_PROVENANCE_TIERS and not local_ok:
             msg = (
-                "precedent.candidate records only the deterministic provenance "
-                f"tier for now; {record.provenance_tier!r} records are refused"
+                "precedent.candidate records the deterministic provenance tier, "
+                "and the local_model tier from the local distillation command; "
+                f"{record.provenance_tier!r} records from this caller are refused"
             )
             raise PolicyViolationError(msg, policy_id=CANDIDATE_TIER_POLICY_ID)
         if record.candidate_id != record.expected_candidate_id():

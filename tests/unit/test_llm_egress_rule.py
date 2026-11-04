@@ -133,6 +133,15 @@ _CAPTURE_DISTILL = Entry(
     via="_session_egress_verdict",
 )
 
+# The local precedent senders ask ``_egress_skip``, which asks the predicate of
+# each stored document a trace or candidate names, before ``_ask_local`` sends anything.
+_DISTILL_LOCAL = Entry(
+    "trellis/learning/precedent_local.py", "distill_trace_local", via="_egress_skip"
+)
+_MERGE_LOCAL = Entry(
+    "trellis/learning/precedent_local.py", "merge_pair_local", via="_egress_skip"
+)
+
 # ``judge_window`` asks ``gate.permits`` of every stored document it loads and
 # only then hands the text to ``_ask_judge``.
 _PACK_JUDGE = Entry("trellis/learning/pack_judge.py", "judge_window")
@@ -150,6 +159,10 @@ _GATED: dict[tuple[str, str], tuple[Entry, ...]] = {
     ),
     ("trellis_workers/learning/miner.py", "_ask_llm"): (_MINER_MINE,),
     ("trellis/learning/pack_judge.py", "_ask_judge"): (_PACK_JUDGE,),
+    ("trellis/learning/precedent_local.py", "_ask_local"): (
+        _DISTILL_LOCAL,
+        _MERGE_LOCAL,
+    ),
 }
 
 #: Inner senders that do not send a stored, labelled document, each with why.
@@ -162,6 +175,7 @@ _SINK_NAMES = frozenset(
         "distill_session",
         "_ask_llm",
         "_ask_judge",
+        "_ask_local",
         "run_memory_extraction",
         "EnrichmentService",
         "build_llm_facet_classifier",

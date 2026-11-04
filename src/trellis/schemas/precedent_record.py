@@ -78,6 +78,12 @@ class PrecedentEvidence(TrellisModel):
         default_factory=list, max_length=MAX_LIST_ITEMS
     )
     pack_ids: list[BoundedId] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
+    #: Candidate ids a merge combined (``precedent.merge``). Empty for every
+    #: other record, and then left out of the id's input so records recorded
+    #: before this field existed keep the ids they were recorded under.
+    merged_from: list[BoundedId] = Field(
+        default_factory=list, max_length=MAX_LIST_ITEMS
+    )
 
 
 class PrecedentRecord(TrellisModel):
@@ -142,6 +148,7 @@ def derive_candidate_id(record: Mapping[str, Any]) -> str:
         canonical["evidence"] = {
             key: sorted(value) if isinstance(value, list) else value
             for key, value in evidence.items()
+            if not (key == "merged_from" and value == [])
         }
     encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(encoded.encode("ascii")).hexdigest()

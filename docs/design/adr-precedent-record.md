@@ -28,13 +28,38 @@ field is length-bounded. `lifecycle` is the record's own vocabulary; it is not
 added to `LifecycleState`, whose retrieval gates withhold only `demoted` and
 `archived`.
 
-**Tiers.** `deterministic` (this change: rules over one trace, no LLM),
-`local_model` and `human` are reserved so a later tier can fill `feedback_ids`
-and `pack_ids`, which the deterministic tier leaves empty. Only the
-deterministic tier exists, so `precedent.candidate` refuses a record naming
-`local_model` or `human` as a policy violation (`policy_violation`, policy id
-`precedent_candidate_provenance_tier`); a later tier gets its own caller check
-when it lands.
+**Tiers.** `deterministic` (rules over one trace, no LLM), `local_model` and
+`human`. The deterministic tier records from any caller. `human` is reserved and
+refused as a policy violation (`policy_violation`, policy id
+`precedent_candidate_provenance_tier`).
+
+**The local-model tier.** `local_model` records come from
+`trellis worker distill-precedents-local` (`learning/precedent_local.py`): a
+local model distils the traces the rules do not cover and merges near-duplicate
+candidates. Four rules hold it.
+
+* *Local only.* The two router consumers, `precedent_distill` and
+  `precedent_merge`, refuse any route not declared `local: true`
+  (`route_not_local`, a typed error, counted, no call made), because traces carry
+  internal content. The check reads the resolved flag, so an unrouted consumer
+  that inherits a cloud parent block is refused. The egress gate runs as well.
+* *Caller check.* `precedent.candidate` accepts a `local_model` record only from
+  a `requested_by` in `LOCAL_MODEL_CANDIDATE_REQUESTERS`; any other caller keeps
+  the refusal above. The tier on the record is a claim, so the caller is checked
+  too.
+* *Merge never rewrites.* A merge records a new candidate whose evidence is the
+  union of both parents and whose `evidence.merged_from` names them. It deletes
+  nothing and rewrites nothing; the parents stay recorded, and the merged
+  record's own id differs from both. `merged_from` is hashed like any evidence
+  list, but an empty list is left out so no existing id changes.
+* *Every call is a judged op.* One `MEMORY_OP_JUDGED` event per model call, in
+  dry-run and apply (`distillation` for a trace, `reconciliation` for a pair),
+  with ids, digests and the verdict, never text. The prompt version
+  (`precedent-distill/v1`, `precedent-merge/v1`) is the event's `source`, because
+  the payload's field set is pinned. A reply that is not exactly the documented
+  JSON shape is `unparsed`, logged, and never repaired.
+
+Candidates from this tier are event-only and unserved like every other.
 
 **The distiller.** `learning/precedent_distill.py` is pure. A failed step with a
 later success of the same `step_type`/`name` is a recovery, and every failure of

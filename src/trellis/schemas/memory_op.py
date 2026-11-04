@@ -80,6 +80,14 @@ REF_TYPE_DOCUMENT = "doc"
 #: the emitters are written independently.
 REF_TYPE_SESSION = "session"
 
+#: ``SubjectRef.ref_type`` for a trace a judged operation read (precedent
+#: distillation). One spelling, for the same reason as the constants above.
+REF_TYPE_TRACE = "trace"
+
+#: ``SubjectRef.ref_type`` for a pair of precedent candidates judged for a merge.
+#: ``ref_id`` is the two candidate ids, sorted and joined with ``|``.
+REF_TYPE_PRECEDENT_PAIR = "precedent_pair"
+
 
 class InputDigest(TrellisModel):
     """Leak-safe fingerprint of the input a judged op saw.
@@ -155,7 +163,9 @@ class MemoryOpJudgedPayload(TrellisModel):
     ``op_type``. What the shipped emitters write: reconciliation ``add`` /
     ``update`` / ``supersede`` / ``noop``; distillation ``keep`` /
     ``discard``; extraction the drafted entity type; classification the
-    proposed ``content_type``. A label, not prose.
+    proposed ``content_type``; precedent distillation ``lesson`` / ``no_lesson`` /
+    ``unparsed``; precedent merge ``same`` / ``different`` / ``unparsed``. A label,
+    not prose.
 
     **A one-valued vocabulary is a defect, not a simple stage.** The
     distillation arm passed a literal ``keep`` over a list of survivors and
