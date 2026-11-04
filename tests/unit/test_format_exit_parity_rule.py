@@ -893,6 +893,11 @@ def test_the_must_exit_helper_set_is_exactly_the_must_exit_helpers() -> None:
         # format branch, and its Typer wrapper only delegates to it. Admitted
         # deliberately, per this docstring.
         "admin_access_log": {"access_log_command", "access_log"},
+        # ``trellis analyze pack-judge``: each phase renders on the caller's
+        # surface, then raises ``typer.Exit`` as its last statement with the
+        # code derived above the format branch; both are typed ``NoReturn``
+        # and define no ``return``. Admitted deliberately, per this docstring.
+        "analyze_pack_judge": {"_calibrate_phase", "_judge_phase"},
         # ``analyze._refuse_sealed_holdout``: a sealed holdout outcome read
         # renders the horizon on the caller's surface, then raises
         # ``typer.Exit`` below the format branch with no ``return``, and is
