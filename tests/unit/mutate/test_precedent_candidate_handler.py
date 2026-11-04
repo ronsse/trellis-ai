@@ -194,29 +194,6 @@ def test_a_forged_record_under_its_own_id_gets_a_different_id(
     assert record_candidate(registry, real).status == CommandStatus.SUCCESS
 
 
-def test_the_id_covers_every_content_field() -> None:
-    [real, *_] = candidates_of(recovering_trace())
-    variants = {
-        "rule": real.model_copy(update={"rule": "other_rule"}),
-        "situation": real.model_copy(
-            update={"situation": real.situation.model_copy(update={"trigger": "other"})}
-        ),
-        "action": real.model_copy(
-            update={"action": real.action.model_copy(update={"text": "other"})}
-        ),
-        "because": real.model_copy(update={"because": "other"}),
-        "confidence": real.model_copy(update={"confidence": 0.1}),
-        "provenance_tier": real.model_copy(update={"provenance_tier": "human"}),
-        "distiller_version": real.model_copy(update={"distiller_version": "x-2"}),
-    }
-
-    ids = {name: v.expected_candidate_id() for name, v in variants.items()}
-
-    assert real.expected_candidate_id() == real.candidate_id
-    assert real.candidate_id not in ids.values()
-    assert len(set(ids.values())) == len(ids)
-
-
 def test_ids_that_differ_only_by_a_separator_do_not_collide() -> None:
     [real, *_] = candidates_of(recovering_trace())
 

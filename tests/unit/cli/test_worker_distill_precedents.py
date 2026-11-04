@@ -14,7 +14,13 @@ from trellis.mutate.policy_source import resolve_policy_path
 from trellis.schemas.enums import OutcomeStatus, PolicyType, TraceSource
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.schemas.precedent_record import MAX_DOMAIN_CHARS, MAX_ID_CHARS
-from trellis.schemas.trace import Outcome, Trace, TraceContext, TraceStep
+from trellis.schemas.trace import (
+    EvidenceRef,
+    Outcome,
+    Trace,
+    TraceContext,
+    TraceStep,
+)
 from trellis.stores.base.event_log import EventType
 from trellis.stores.policy_store import PolicyStore
 from trellis.stores.registry import StoreRegistry
@@ -218,3 +224,31 @@ def test_a_trace_that_cannot_make_a_valid_record_is_counted_and_the_run_goes_on(
         assert payload["skipped"] == {"invalid_record": 1}
     else:
         assert "skipped invalid_record: 1" in plain(result.stdout)
+
+
+@pytest.mark.parametrize("fmt", ["json", "text"])
+def test_what_the_schema_bounds_cut_is_counted_not_silent(
+    stores: StoreRegistry, fmt: str
+) -> None:
+    long_id = "e" * (MAX_ID_CHARS + 1)
+    trace = _failed_trace().model_copy(
+        update={"evidence_used": [EvidenceRef(evidence_id=long_id)]}
+    )
+    stores.operational.trace_store.append(trace)
+
+    result = _run("--format", fmt)
+
+    assert result.exit_code == 0
+    assert long_id not in result.stdout
+    if fmt == "json":
+        assert json.loads(result.stdout)["dropped"] == {"entity_id_overlong": 1}
+    else:
+        assert "dropped entity_id_overlong: 1" in plain(result.stdout)
+
+
+def test_a_run_that_cuts_nothing_reports_an_empty_dropped(
+    stores: StoreRegistry,
+) -> None:
+    _seed(stores)
+
+    assert json.loads(_run("--format", "json").stdout)["dropped"] == {}
