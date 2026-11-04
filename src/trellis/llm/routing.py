@@ -90,6 +90,8 @@ class LLMConsumer(StrEnum):
     PRECEDENT_MINING = "precedent_mining"
     SESSION_CAPTURE = "session_capture"
     PACK_JUDGE = "pack_judge"
+    PRECEDENT_DISTILL = "precedent_distill"
+    PRECEDENT_MERGE = "precedent_merge"
 
 
 #: Keys a tier may set; the same fields the parent block's builder reads.

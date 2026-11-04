@@ -21,6 +21,9 @@ surfaces from ``docs/design/adr-autonomy-ladder.md``:
   :meth:`PrecedentMiner.mine`.
 * ``trellis worker distill-precedents`` — deterministic candidate precedents
   from traces, dry-run first; lives in :mod:`trellis_cli.worker_distill_precedents`.
+* ``trellis worker distill-precedents-local`` — the local-model tier of the same
+  (distill and merge, both refused on any route not declared ``local: true``);
+  lives in :mod:`trellis_cli.worker_distill_precedents_local`.
 * ``trellis worker distill-advisory-precedents`` — candidate precedents from stored
   ANTI_PATTERN advisories, dry-run first; lives in
   :mod:`trellis_cli.worker_distill_advisory_precedents`.
@@ -2861,6 +2864,10 @@ from trellis_cli import worker_distill_advisory_precedents  # noqa: E402
 
 worker_distill_advisory_precedents.register(worker_app)
 
-from trellis_cli import worker_distill_precedents  # noqa: E402
+from trellis_cli import (  # noqa: E402
+    worker_distill_precedents,
+    worker_distill_precedents_local,
+)
 
 worker_distill_precedents.register(worker_app)
+worker_distill_precedents_local.register(worker_app)
