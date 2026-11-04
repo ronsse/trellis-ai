@@ -34,6 +34,7 @@ from trellis.core.reserved_doc_ids import (
     reserved_trace_summary_id_message,
 )
 from trellis.core.vector_metadata import resolve_vector_store
+from trellis.core.write_config import knowledge_link_or_mint_enabled
 from trellis.extract.commands import result_to_batch
 from trellis.extract.dispatcher import ExtractionDispatcher
 from trellis.extract.registry import ExtractorRegistry
@@ -555,7 +556,11 @@ def ingest_dbt_manifest(
         )
         nodes, edges, outcome = _execute_batch(
             registry,
-            result_to_batch(result, requested_by="cli:dbt-manifest"),
+            result_to_batch(
+                result,
+                requested_by="cli:dbt-manifest",
+                bind_identity=knowledge_link_or_mint_enabled(registry),
+            ),
         )
     except Exception as exc:
         if output_format == "json":
@@ -636,7 +641,11 @@ def ingest_openlineage(
         )
         nodes, edges, outcome = _execute_batch(
             registry,
-            result_to_batch(result, requested_by="cli:openlineage"),
+            result_to_batch(
+                result,
+                requested_by="cli:openlineage",
+                bind_identity=knowledge_link_or_mint_enabled(registry),
+            ),
         )
     except Exception as exc:
         if output_format == "json":

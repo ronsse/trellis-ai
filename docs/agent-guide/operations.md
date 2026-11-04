@@ -101,6 +101,52 @@ two keys are returned by `GET /api/v1/stats`, field for field.
 > that wants that number reads `document_rows`. Nothing errors on the change —
 > a reader that is not updated silently reports a different population.
 
+### `save_knowledge` link-or-mint and extractor alias binding (`TRELLIS_KNOWLEDGE_LINK_OR_MINT`)
+
+**Off by default, and off until the serving readout.** Set `TRELLIS_KNOWLEDGE_LINK_OR_MINT=1`
+(or the `knowledge_link_or_mint` setting) to turn it on. A minted `domain:<slug>` node is something
+graph seeding resolves, so turning it on changes which packs seed the graph axis; the design is in
+[`adr-knowledge-link-or-mint.md`](../design/adr-knowledge-link-or-mint.md). Off, every surface
+writes and replies exactly as before (`tests/unit/mcp/test_knowledge_link_or_mint_differential.py`
+pins that against a golden captured from `main`). On:
+
+- **`save_knowledge` mints a missing domain.** `properties.domain` is normalised to a slug
+  (NFKC, case-folded, runs of letters and digits joined by `-`, the form trace extraction uses). If
+  `domain:<slug>` does not exist it is created as a `Concept` through the executor, then the note is
+  linked to it with `appliesTo`. The reply gains `Domain minted: domain:<slug>`. A `domain:`
+  prefix is stripped first (`domain:finance` mints `domain:finance`), and a value carrying another
+  namespace prefix (`tool:x`) mints nothing. A value with no letters or digits, or a mint a policy
+  denies, also mints nothing; all of these count as unresolved. The mint carries a key derived from
+  the domain id and is checked against the graph immediately before it is written, so it never
+  replaces the properties of a `domain:<slug>` node that already exists.
+- **A same-named note is attached to, not duplicated.** If the normalised name already resolves (via
+  its `name` alias) to a current, semantic, non-namespaced node of the same `entity_type`, no node
+  is created. An attach **writes no caller properties**, so naming a note cannot archive it
+  (`lifecycle`), noise-tag it (`content_tags`) or change what it is. The only write is one
+  `entity.update` that appends the new evidence document id to the node's `document_ids` and sets
+  `evidence_ref` when the node has none; nothing to add means no write. The reply starts `Entity
+  exists: <id> ... attached, not created`. `supersedes=` always creates.
+- **`relates_to` resolves raw ids through external aliases.** After the existing id, slug and name
+  resolution, a value is tried as a raw id under `dbt`, `openlineage_dataset`, `openlineage_job` and
+  `unity_catalog`, or as `<source_system>:<raw_id>` for any other system. Two nodes claiming one raw
+  id is ambiguous and links nothing. Raw ids are matched verbatim except for `unity_catalog`, whose
+  identifiers are case-insensitive: `Main.Sales.Orders` and `` `main`.`sales`.`orders` `` find the
+  node bound as `main.sales.orders`. A resolved reference is reported by position
+  (`Resolved relates_to (position 1) -> <node id> (...)`), not by the text typed.
+- **Unresolvable references are reported by count and position.** One line, only when something is
+  unresolved: `Unresolved: 2 of 3 references (positions 1, 2) - not linked`. References are
+  `relates_to` (when given) and then each domain value, in order. The caller's text is not echoed.
+- **Extraction binds external identities.** `result_to_batch(..., bind_identity=True)` (the CLI
+  `ingest dbt-manifest`, `ingest openlineage`, `extract refresh` and demo call sites read the knob)
+  emits a bind-if-absent `alias.upsert` after each entity that carries
+  `EntityDraft.aliases`, and passes the result's tier on every edge as `extractor_tier`. dbt binds
+  `unique_id` under `dbt`; OpenLineage binds `namespace/name` under `openlineage_job` or
+  `openlineage_dataset`; a JSON rule binds under its `alias_source_system` (a Unity Catalog
+  `catalog.schema.table` id under `unity_catalog`, case-folded and unquoted by the same function the
+  lookup uses, needs no other support). A bound pair is never
+  rebound, and an alias for an entity whose create did not land is refused. The REST extraction
+  routes and the memory and trace ingest hooks do not bind aliases.
+
 ### Per-key access log (`trellis admin access-log`, `GET /api/v1/access-log/keys`)
 
 Answers "what did this key read, and when did it last run?" from `access.key_read`
