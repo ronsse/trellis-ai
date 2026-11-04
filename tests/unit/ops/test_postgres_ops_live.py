@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from tests.integration._live_server import repo_src_pythonpath
 from tests.pg_scratch import configured_dsn, scratch_dsn
 from trellis.ops.backup_postgres import DUMPED, run_pg_dump
 from trellis.ops.schema_migrate import (
@@ -93,6 +94,7 @@ class TestRealDump:
         assert restore is not None
         listing = subprocess.run(  # noqa: S603 - fixed argv, no DSN
             [restore, "--list", str(dest)],
+            env={**os.environ, "PYTHONPATH": repo_src_pythonpath()},
             capture_output=True,
             text=True,
             check=True,

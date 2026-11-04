@@ -6,10 +6,18 @@ never builds an argv that contains any part of one: it takes the DSN apart
 into the libpq environment variables ``pg_dump`` itself reads (``PGHOST``,
 ``PGPORT``, ``PGUSER``, ``PGPASSWORD``, ``PGDATABASE``, ``PGSSLMODE``, ...) and
 passes those to the child process through its environment. The argv is the tool,
-``--format=custom``, ``--file`` and ``--no-password``.
+``--format=custom``, ``--file`` and ``--no-password``. The DSN is parsed by
+libpq's own parser (``psycopg.conninfo.conninfo_to_dict``), so it means to this
+module what it means to a connection.
 
-Nothing is printed from the DSN. A failure's text comes from ``pg_dump``'s
-stderr, is redacted of the password and run through
+The child's environment is ours with every ``PG*`` variable removed and the DSN's
+added, so nothing inherited can redirect the dump.
+
+Nothing is printed from the DSN. A refusal names a parameter, never a value (libpq's
+own parse errors quote a slice of the string, so none of that text is used). A
+failure's text comes from ``pg_dump``'s stderr, is redacted of every
+secret-bearing parameter (``password``, ``sslpassword``, whatever libpq marks
+secret) and run through
 :func:`~trellis.core.error_sanitize.sanitize_error_message`, so a driver that
 echoes a connection string cannot carry the credential into a report, a
 manifest or a log.
@@ -22,11 +30,11 @@ ignored ``sslmode`` or ``options`` would be a dump of the wrong connection.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import parse_qsl, unquote, urlsplit
 
 import structlog
 
@@ -62,6 +70,23 @@ _ENV_BY_PARAM: dict[str, str] = {
 #: Seconds ``pg_dump`` waits to connect when the DSN names no timeout.
 DEFAULT_CONNECT_TIMEOUT_S = "30"
 
+#: Seconds one dump may run before it is killed and reported ``failed``. Generous:
+#: a large database takes a long time, a stuck connection takes forever.
+PG_DUMP_TIMEOUT_S = 3600
+
+#: The ``reason`` of a dump that outran :data:`PG_DUMP_TIMEOUT_S`.
+TIMEOUT_REASON = "timeout"
+
+_NO_PSYCOPG = (
+    "psycopg is not installed, so the Postgres store cannot run either;"
+    " install trellis-ai[cloud]"
+)
+# The two libpq parse errors that quote a parameter *name* (and nothing else).
+_NAMED_IN_ERROR = re.compile(
+    r'invalid connection option "([^"]*)"|invalid URI query parameter: "([^"]*)"'
+)
+_PARAM_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
 # Statuses of one dump attempt.
 DUMPED = "dumped"
 TOOL_MISSING = "tool_missing"
@@ -81,89 +106,42 @@ class DumpResult:
     reason: str | None = None
 
 
-def _split_hostport(item: str) -> tuple[str, str | None]:
-    if item.startswith("["):
-        host, _, rest = item[1:].partition("]")
-        return host, rest.lstrip(":") or None
-    host, sep, port = item.rpartition(":")
-    return (host, port or None) if sep else (item, None)
+def _parse_failure(exc: Exception) -> str:
+    """What to say about a DSN libpq refused, without echoing any of its text.
 
-
-def _params_from_uri(dsn: str) -> dict[str, str]:
-    parts = urlsplit(dsn)
-    userinfo, at, hostlist = parts.netloc.rpartition("@")
-    params: dict[str, str] = {}
-    if at:
-        user, colon, password = userinfo.partition(":")
-        if user:
-            params["user"] = unquote(user)
-        if colon:
-            params["password"] = unquote(password)
-    hosts: list[str] = []
-    ports: list[str | None] = []
-    for item in filter(None, hostlist.split(",")):
-        host, port = _split_hostport(item)
-        hosts.append(unquote(host))
-        ports.append(port)
-    if hosts:
-        params["host"] = ",".join(hosts)
-    if any(ports):
-        params["port"] = ",".join(p or "5432" for p in ports)
-    if parts.path.strip("/"):
-        params["dbname"] = unquote(parts.path.lstrip("/"))
-    params.update(parse_qsl(parts.query, keep_blank_values=True))
-    return params
-
-
-def _read_value(dsn: str, i: int) -> tuple[str, int]:
-    """Read one libpq value starting at ``i``: ``'quoted'`` or a bare word."""
-    n = len(dsn)
-    quoted = i < n and dsn[i] == "'"
-    i += 1 if quoted else 0
-    value: list[str] = []
-    while i < n and (dsn[i] != "'" if quoted else not dsn[i].isspace()):
-        if dsn[i] == "\\" and i + 1 < n:
-            i += 1
-        value.append(dsn[i])
-        i += 1
-    return "".join(value), i + (1 if quoted else 0)
-
-
-def _params_from_keywords(dsn: str) -> dict[str, str]:
-    """Parse libpq ``key=value`` pairs, with ``'single quoted'`` values."""
-    params: dict[str, str] = {}
-    i, n = 0, len(dsn)
-    while True:
-        while i < n and dsn[i].isspace():
-            i += 1
-        if i >= n:
-            return params
-        start = i
-        while i < n and dsn[i] not in "= \t\n":
-            i += 1
-        key = dsn[start:i]
-        while i < n and dsn[i].isspace():
-            i += 1
-        if not key or i >= n or dsn[i] != "=":
-            msg = "connection string is not a postgres URI or key=value list"
-            raise UnsupportedDsnError(msg)
-        i += 1
-        while i < n and dsn[i].isspace():
-            i += 1
-        params[key], i = _read_value(dsn, i)
-
-
-def pg_env_from_dsn(dsn: str) -> dict[str, str]:
-    """The libpq environment variables that say what ``dsn`` says.
-
-    Raises :class:`UnsupportedDsnError` (naming a parameter, never a value) for
-    a DSN it cannot express.
+    libpq's own message quotes the offending token, and for a bad
+    percent-escape that token is a slice of the password. The only part kept is a
+    parameter *name* from the two messages that carry one, and only when it is
+    shaped like a name.
     """
-    text = dsn.strip()
-    if text.startswith(("postgres://", "postgresql://")):
-        params = _params_from_uri(text)
-    else:
-        params = _params_from_keywords(text)
+    match = _NAMED_IN_ERROR.search(str(exc))
+    name = match and (match.group(1) or match.group(2))
+    if name and _PARAM_NAME.fullmatch(name):
+        return f"connection parameter {name!r} cannot be passed to pg_dump"
+    return "connection string is not a postgres URI or key=value list"
+
+
+def _read_params(dsn: str) -> dict[str, str]:
+    """The connection parameters ``dsn`` carries, as libpq itself reads them.
+
+    ``psycopg`` hands the string to ``PQconninfoParse``, so a ``?`` or ``#`` in an
+    unencoded password, a ``+`` in a query value, quoting and escapes in a
+    ``key=value`` list and a multi-host URI all resolve the way a connection would.
+    A parser of our own disagreed with libpq on exactly those, and a disagreement
+    here is a dump of the wrong host or a password fragment in a report.
+    """
+    try:
+        from psycopg.conninfo import conninfo_to_dict  # noqa: PLC0415
+    except ImportError:
+        # The Postgres store cannot run without psycopg either.
+        raise UnsupportedDsnError(_NO_PSYCOPG) from None
+    try:
+        return {k: str(v) for k, v in conninfo_to_dict(dsn.strip()).items()}
+    except Exception as exc:  # psycopg raises ProgrammingError; echo none of it
+        raise UnsupportedDsnError(_parse_failure(exc)) from None
+
+
+def _env_from_params(params: dict[str, str]) -> dict[str, str]:
     env: dict[str, str] = {}
     for key, value in params.items():
         name = _ENV_BY_PARAM.get(key)
@@ -175,11 +153,75 @@ def pg_env_from_dsn(dsn: str) -> dict[str, str]:
     return env
 
 
+def _secret_names() -> frozenset[str]:
+    """Parameters whose value must never be printed: ``password`` and whatever
+    libpq marks secret (its ``*`` display character: ``sslpassword`` and others)."""
+    names = {"password"}
+    try:
+        from psycopg import pq  # noqa: PLC0415
+
+        names.update(
+            o.keyword.decode() for o in pq.Conninfo.get_defaults() if o.dispchar == b"*"
+        )
+    except Exception:  # advisory: the fixed name above is the floor
+        logger.debug("pg_secret_names_unavailable")
+    return frozenset(names)
+
+
+def _secret_values(params: dict[str, str]) -> list[str]:
+    names = _secret_names()
+    return sorted(
+        {v for k, v in params.items() if k in names and v}, key=len, reverse=True
+    )
+
+
+def pg_env_from_dsn(dsn: str) -> dict[str, str]:
+    """The libpq environment variables that say what ``dsn`` says.
+
+    Raises :class:`UnsupportedDsnError` (naming a parameter, never a value) for
+    a DSN it cannot express.
+    """
+    return _env_from_params(_read_params(dsn))
+
+
 def _redact(text: str, secrets: list[str]) -> str:
     for secret in secrets:
-        if secret:
-            text = text.replace(secret, "[redacted]")
+        text = text.replace(secret, "[redacted]")
     return text
+
+
+def _child_env(conn_env: dict[str, str]) -> dict[str, str]:
+    """The child's environment: ours without any ``PG*`` variable, plus the DSN's.
+
+    An inherited ``PGHOSTADDR``, ``PGSERVICE``, ``PGPASSFILE`` or ``PGOPTIONS``
+    would otherwise redirect or reconfigure a connection the DSN described.
+    """
+    inherited = {k: v for k, v in os.environ.items() if not k.upper().startswith("PG")}
+    return {**inherited, **conn_env}
+
+
+def _spawn(
+    argv: list[str], conn_env: dict[str, str], dest: Path
+) -> subprocess.CompletedProcess[str] | DumpResult:
+    """Run the dump; a timeout or a launch failure is already a :class:`DumpResult`."""
+    try:
+        return subprocess.run(  # noqa: S603 - argv is the tool plus fixed flags
+            argv,
+            env=_child_env(conn_env),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=PG_DUMP_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        dest.unlink(missing_ok=True)
+        logger.warning("pg_dump_timeout", timeout_s=PG_DUMP_TIMEOUT_S)
+        return DumpResult(DUMP_FAILED, reason=TIMEOUT_REASON)
+    except OSError as exc:
+        dest.unlink(missing_ok=True)
+        return DumpResult(
+            DUMP_FAILED, reason=f"pg_dump could not start: {type(exc).__name__}"
+        )
 
 
 def run_pg_dump(dsn: str, dest: Path) -> DumpResult:
@@ -197,26 +239,18 @@ def run_pg_dump(dsn: str, dest: Path) -> DumpResult:
                 " tools (a version at least as new as the server)"
             ),
         )
+    params: dict[str, str] = {}
     try:
-        conn_env = pg_env_from_dsn(dsn)
+        params = _read_params(dsn)
+        conn_env = _env_from_params(params)
     except UnsupportedDsnError as exc:
-        return DumpResult(DUMP_FAILED, reason=str(exc))
-    secrets = [conn_env.get("PGPASSWORD", "")]
+        return DumpResult(DUMP_FAILED, reason=_redact(str(exc), _secret_values(params)))
+    secrets = _secret_values(params)
     argv = [tool, "--format=custom", "--no-password", f"--file={dest}"]
     dest.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        proc = subprocess.run(  # noqa: S603 - argv is the tool plus fixed flags
-            argv,
-            env={**os.environ, **conn_env},
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError as exc:
-        dest.unlink(missing_ok=True)
-        return DumpResult(
-            DUMP_FAILED, reason=f"pg_dump could not start: {type(exc).__name__}"
-        )
+    proc = _spawn(argv, conn_env, dest)
+    if isinstance(proc, DumpResult):
+        return proc
     if proc.returncode != 0:
         dest.unlink(missing_ok=True)
         lines = _redact(proc.stderr or "", secrets).strip().splitlines()
@@ -235,6 +269,8 @@ def run_pg_dump(dsn: str, dest: Path) -> DumpResult:
 __all__ = [
     "DUMPED",
     "DUMP_FAILED",
+    "PG_DUMP_TIMEOUT_S",
+    "TIMEOUT_REASON",
     "TOOL_MISSING",
     "DumpResult",
     "UnsupportedDsnError",

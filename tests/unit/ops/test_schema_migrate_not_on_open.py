@@ -9,6 +9,11 @@ So every surface that opens stores is run here on a fresh deployment and on a
 database a previous open created (the shape every existing deployment has), and
 the schema is read back with ``sqlite_master`` and compared. The same suite
 scans ``src/`` so a store, the registry or a server cannot import the migrator.
+
+**What is pinned for Postgres.** Only the source scan. The behavioural tests read
+``sqlite_master``; nothing here opens a Postgres store, so a mutation in a
+Postgres store's ``_init_schema`` that created or wrote the version table would
+be caught by the scan only if it imported the migrator or named the table.
 """
 
 from __future__ import annotations
@@ -16,10 +21,10 @@ from __future__ import annotations
 import re
 import sqlite3
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
-from typer.testing import CliRunner
 
 import trellis.mcp.wiring as mcp_wiring
 from trellis.ops.schema_migrate import VERSION_TABLE
@@ -28,7 +33,9 @@ from trellis_api.app import get_registry, lifespan
 from trellis_cli.main import app
 from trellis_cli.stores import _get_registry, _reset_registry
 
-runner = CliRunner()
+if TYPE_CHECKING:
+    from tests.structlog_isolation import IsolatedCliRunner
+
 
 SRC = Path(__file__).resolve().parents[3] / "src"
 
@@ -141,8 +148,10 @@ class TestRegistryOpen:
 
 
 class TestEverySurfaceThatOpensStores:
-    def test_admin_init_creates_no_version_table_and_is_stable(self, env: Path) -> None:
-        first = runner.invoke(app, ["admin", "init"])
+    def test_admin_init_creates_no_version_table_and_is_stable(
+        self, env: Path, cli_runner: IsolatedCliRunner
+    ) -> None:
+        first = cli_runner.invoke(app, ["admin", "init"])
         assert first.exit_code == 0, first.output
         # ``init`` itself creates no database; opening the stores does.
         open_every_store(_get_registry())
@@ -151,7 +160,7 @@ class TestEverySurfaceThatOpensStores:
         assert version_tables(seeded) == []
         _reset_registry()
 
-        second = runner.invoke(app, ["admin", "init"])
+        second = cli_runner.invoke(app, ["admin", "init"])
         assert second.exit_code == 0, second.output
         open_every_store(_get_registry())
 

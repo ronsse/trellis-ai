@@ -163,13 +163,16 @@ jobs:
 
       # ``trellis admin backup`` shells out to ``pg_dump``, and
       # ``tests/unit/ops/test_postgres_ops_live.py`` runs the real one against the
-      # Postgres service. pg_dump refuses a server newer than itself, so install the
-      # client that matches the ``pg16`` service image rather than trusting the
-      # runner image to carry one.
+      # Postgres service. pg_dump refuses a server newer than itself, and a newer
+      # pg_dump reads an older server, so the distribution's current client is
+      # enough for the ``pg16`` service image. The unversioned package is used
+      # because the runner image's repositories do not all carry a pinned
+      # ``postgresql-client-16``; the version is printed so a log shows which ran.
       - name: Install the PostgreSQL client tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends postgresql-client-16
+          sudo apt-get install -y -qq --no-install-recommends postgresql-client
+          pg_dump --version
 
       # Do not CREATE EXTENSION here. ``PgVectorStore`` now runs
       # ``CREATE EXTENSION IF NOT EXISTS vector`` on a plain connection

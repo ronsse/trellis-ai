@@ -9,12 +9,15 @@ the test (:data:`SHIPPED_MIGRATIONS` is empty: this build has one version).
 from __future__ import annotations
 
 import sqlite3
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from trellis.errors import ConfigError
+from trellis.ops import schema_migrate
 from trellis.ops.schema_migrate import (
     BASELINE_TABLES,
     BASELINE_VERSION,
@@ -227,20 +230,42 @@ class TestApply:
         assert not list(registry.stores_dir.iterdir())
         assert by_store(report)["document"].status == "absent"
 
-    def test_a_shape_that_matches_no_version_is_refused_and_not_stamped(
+    def test_a_partial_store_is_refused_and_not_stamped(
         self, registry: StoreRegistry
     ) -> None:
-        open_every_store(registry)
-        foreign = db_path(registry, "document").with_name("other.db")
+        """Some of a store's tables but not all: a shape no build created."""
+        foreign = db_path(registry, "graph").with_name("other.db")
         conn = sqlite3.connect(foreign)
-        conn.execute("CREATE TABLE unrelated (x INTEGER)")
+        conn.execute("CREATE TABLE nodes (x INTEGER)")  # the graph owns nodes AND edges
         conn.commit()
         conn.close()
-        # Point the document store at the foreign file by config.
         reg = StoreRegistry(
             config={
-                "knowledge": {
-                    "document": {"backend": "sqlite", "db_path": str(foreign)}
+                "knowledge": {"graph": {"backend": "sqlite", "db_path": str(foreign)}}
+            },
+            stores_dir=registry.stores_dir,
+        )
+
+        report = run_migrate(reg, apply=True)
+
+        graph = by_store(report)["graph"]
+        assert graph.status == "unrecognized"
+        assert report.status == "error"
+        assert VERSION_TABLE not in tables_of(foreign)
+
+    def test_a_file_holding_only_another_stores_tables_reads_absent_not_unrecognized(
+        self, registry: StoreRegistry
+    ) -> None:
+        shared = db_path(registry, "document").with_name("shared.db")
+        conn = sqlite3.connect(shared)
+        conn.execute("CREATE TABLE events (x INTEGER)")  # the event log's table
+        conn.commit()
+        conn.close()
+        reg = StoreRegistry(
+            config={
+                "operational": {
+                    "trace": {"backend": "sqlite", "db_path": str(shared)},
+                    "event_log": {"backend": "sqlite", "db_path": str(shared)},
                 }
             },
             stores_dir=registry.stores_dir,
@@ -248,10 +273,11 @@ class TestApply:
 
         report = run_migrate(reg, apply=True)
 
-        doc = by_store(report)["document"]
-        assert doc.status == "unrecognized"
-        assert report.status == "error"
-        assert VERSION_TABLE not in tables_of(foreign)
+        states = by_store(report)
+        assert states["trace"].status == "absent"
+        assert states["event_log"].status == "stamped"
+        assert report.status == "ok"
+        assert recorded_rows(shared) == [("event_log", 1, "baseline")]
 
 
 class TestStepsRunInOrderAndOnce:
@@ -348,3 +374,162 @@ class TestMigrationSetValidation:
         assert chain.target("document", "sqlite") == 2
         assert chain.target("graph", "sqlite") == 2
         assert chain.target("document", "postgres") == BASELINE_VERSION
+
+
+class FakePostgres(schema_migrate._Db):
+    """A shared Postgres database: it holds ``tables`` and notes every stamp."""
+
+    def __init__(self, tables: set[str]) -> None:
+        self.tables = frozenset(tables)
+        self.stamped: list[tuple[str, int]] = []
+        self.opened_writable: list[bool] = []
+
+    def inspect(self, store: str) -> tuple[frozenset[str], int | None]:
+        return self.tables, None
+
+    def record(self, store, version, description, step, now) -> None:
+        self.stamped.append((store, version))
+
+    def close(self) -> None:
+        pass
+
+
+def postgres_registry() -> StoreRegistry:
+    return StoreRegistry(
+        config={
+            "knowledge": {
+                "document": {"backend": "postgres"},
+                "graph": {"backend": "postgres"},
+                "vector": {"backend": "pgvector"},
+            },
+            "operational": {
+                "trace": {"backend": "postgres"},
+                "event_log": {"backend": "postgres"},
+                "api_key": {"backend": "postgres"},
+            },
+        },
+        stores_dir=None,
+    )
+
+
+def run_against(
+    monkeypatch: pytest.MonkeyPatch, planes: dict[str, FakePostgres], *, apply: bool
+) -> Any:
+    """Run ``run_migrate`` with each plane's stores sharing that plane's database."""
+
+    def fake_open(reg, store_type, dialect, *, writable):
+        return planes[schema_migrate._PLANE_OF[store_type]]
+
+    monkeypatch.setattr(schema_migrate, "_open", fake_open)
+    return run_migrate(postgres_registry(), apply=apply)
+
+
+class TestAbsentIsPerStoreOnASharedDatabase:
+    """Postgres stores share one database per plane, so a neighbour's tables
+    must not make a store that was never opened look unrecognized."""
+
+    def test_an_operational_database_with_only_api_keys_reads_trace_and_events_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        knowledge = FakePostgres(set())
+        operational = FakePostgres({"trellis_api_keys"})
+
+        report = run_against(
+            monkeypatch,
+            {"knowledge": knowledge, "operational": operational},
+            apply=False,
+        )
+
+        states = by_store(report)
+        assert states["trace"].status == "absent"
+        assert states["event_log"].status == "absent"
+        assert states["api_key"].status == "current"
+        assert report.status == "ok"
+
+    def test_a_knowledge_database_with_only_documents_reads_graph_and_vectors_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        knowledge = FakePostgres({"documents"})
+        operational = FakePostgres(set())
+
+        report = run_against(
+            monkeypatch,
+            {"knowledge": knowledge, "operational": operational},
+            apply=True,
+        )
+
+        states = by_store(report)
+        assert states["graph"].status == "absent"
+        assert states["vector"].status == "absent"
+        assert states["document"].status == "stamped"
+        assert report.status == "ok"
+        # Only the store that exists is stamped.
+        assert knowledge.stamped == [("document", 1)]
+
+    def test_a_partial_store_on_a_shared_database_is_still_unrecognized(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        knowledge = FakePostgres({"documents", "nodes"})  # graph without its edges
+        operational = FakePostgres(set())
+
+        report = run_against(
+            monkeypatch,
+            {"knowledge": knowledge, "operational": operational},
+            apply=True,
+        )
+
+        states = by_store(report)
+        assert states["graph"].status == "unrecognized"
+        assert states["vector"].status == "absent"
+        assert report.status == "error"
+        assert ("graph", 1) not in knowledge.stamped
+
+
+class TestPostgresReportIsReadOnly:
+    @staticmethod
+    def fake_psycopg(monkeypatch: pytest.MonkeyPatch) -> list[SimpleNamespace]:
+        conns: list[SimpleNamespace] = []
+
+        def connect(dsn: str, **_kw: Any) -> SimpleNamespace:
+            conn = SimpleNamespace(read_only=False)
+            conns.append(conn)
+            return conn
+
+        monkeypatch.setitem(sys.modules, "psycopg", SimpleNamespace(connect=connect))
+        return conns
+
+    def test_a_report_opens_its_transactions_read_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conns = self.fake_psycopg(monkeypatch)
+
+        schema_migrate._PostgresDb("postgresql://u@h/db", writable=False)
+
+        assert conns[0].read_only is True
+
+    def test_apply_does_not(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conns = self.fake_psycopg(monkeypatch)
+
+        schema_migrate._PostgresDb("postgresql://u@h/db", writable=True)
+
+        assert conns[0].read_only is False
+
+    def test_the_runner_asks_for_a_read_only_connection_in_report_mode(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        asked: list[bool] = []
+
+        def fake_pg(dsn: str, *, writable: bool) -> FakePostgres:
+            asked.append(writable)
+            return FakePostgres(set())
+
+        monkeypatch.setattr(schema_migrate, "_PostgresDb", fake_pg)
+        reg = StoreRegistry(
+            config={"operational": {"api_key": {"backend": "postgres", "dsn": "x"}}},
+            stores_dir=None,
+        )
+
+        schema_migrate._open(reg, "api_key", "postgres", writable=False)
+        schema_migrate._open(reg, "api_key", "postgres", writable=True)
+
+        assert asked == [False, True]

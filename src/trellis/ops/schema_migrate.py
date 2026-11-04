@@ -20,15 +20,17 @@ The model, kept small on purpose:
 * A store's *version* is an integer. A store with no record reads as the
   baseline, :data:`BASELINE_VERSION`, *derived from its shape*
   (:func:`detect_version`): the tables the baseline owns are there. A store
-  whose shape matches nothing known is ``unrecognized`` and is never
-  stamped.
+  none of whose tables exist is ``absent`` (Postgres stores share a database,
+  so a neighbour's tables do not count), and one with some but not all of them,
+  or a shape that matches nothing known, is ``unrecognized`` and never stamped.
 * A :class:`Migration` moves one ``(store, backend)`` from ``version - 1`` to
   ``version``. A :class:`MigrationSet` holds the steps and refuses a chain with
   a gap or a repeat. The shipped set is empty: this build has no migration,
   so ``--apply`` on today's stores only stamps the baseline.
 * A step and the row that records it commit in one transaction (SQLite and
-  Postgres DDL are both transactional), so a failed step leaves the version
-  where it was and the schema as it was.
+  Postgres DDL are both transactional, with the exceptions listed on
+  :class:`Migration`), so a failed step leaves the version where it was and the
+  schema as it was.
 
 Adding the first real migration also means teaching :func:`detect_version` the
 new shape: a store that a newer build created fresh has no record yet, and its
@@ -117,6 +119,20 @@ class Migration:
     ``psycopg.Connection``) inside the step's transaction. It must not commit,
     roll back or open its own connection: the runner commits the step and its
     version row together, or neither.
+
+    What a step must not do, because it would break that:
+
+    * **SQLite:** call ``executescript``. It issues a ``COMMIT`` first, which ends
+      the runner's transaction and applies the step's earlier statements for good.
+      Use ``execute`` one statement at a time.
+    * **Postgres:** use ``CREATE INDEX CONCURRENTLY``, ``VACUUM`` or any other
+      statement that cannot run inside a transaction block. Build the index
+      without ``CONCURRENTLY`` (it takes a lock), or do that part by hand.
+    * **Assume a column that ``_init_schema`` adds at open.** The baseline is
+      judged by *table names* only (:data:`BASELINE_TABLES`), so a store created
+      by an older build and never reopened since reads as the baseline while
+      missing a column a newer build adds when it opens the store. A step that
+      reads or alters such a column must add it first if absent.
     """
 
     store_type: str
@@ -316,13 +332,17 @@ class _SqliteDb(_Db):
 
 
 class _PostgresDb(_Db):
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, *, writable: bool) -> None:
         try:
             import psycopg  # noqa: PLC0415
         except ImportError as exc:
             msg = "psycopg is not installed; install trellis-ai[cloud] for Postgres"
             raise ConfigError(msg, setting="postgres") from exc
         self._conn = psycopg.connect(dsn, connect_timeout=30)
+        if not writable:
+            # Every transaction this connection opens is ``BEGIN READ ONLY``, so
+            # a report cannot write even by mistake; the server refuses it.
+            self._conn.read_only = True
 
     def inspect(self, store: str) -> tuple[frozenset[str], int | None]:
         with self._conn.cursor() as cur:
@@ -376,7 +396,7 @@ def _open(
     if not dsn:
         msg = f"no DSN configured for the {store_type} store"
         raise ConfigError(msg, setting=store_type)
-    return _PostgresDb(dsn)
+    return _PostgresDb(dsn, writable=writable)
 
 
 def _failure(exc: BaseException) -> str:
@@ -388,22 +408,40 @@ def _failure(exc: BaseException) -> str:
 _DIALECT_OF = {"postgres": POSTGRES, "pgvector": POSTGRES, "sqlite": SQLITE}
 
 
+def _owns_any_table(store_type: str, dialect: str, tables: frozenset[str]) -> bool:
+    """Does the database hold any table this store owns?
+
+    Postgres stores share one database per plane (and a SQLite ``db_path`` can
+    be shared), so "the database has no tables" is the wrong test for a store
+    that has not been opened yet: its neighbours' tables are there. A store is
+    absent when *none of its own* tables exist, and unrecognized only when some
+    but not all do.
+    """
+    owned = BASELINE_TABLES.get((dialect, store_type))
+    if owned is None:
+        return bool(tables)
+    return not owned.isdisjoint(tables)
+
+
 def _read_state(
     db: _Db, state: StoreState, dialect: str, migrations: MigrationSet
 ) -> tuple[list[Migration], int | None] | None:
     """Fill ``state`` from the database; return ``(pending steps, recorded)``.
 
-    ``None`` when the store has nothing to migrate (no tables) or its shape is
-    unknown; ``state`` then carries the status and reason.
+    ``None`` when the store has nothing to migrate (none of its own tables) or
+    its shape is unknown; ``state`` then carries the status and reason.
     """
     store_type = state.store
     tables, recorded = db.inspect(store_type)
     state.target_version = migrations.target(store_type, dialect)
     state.recorded = recorded is not None
     if recorded is None:
-        if not tables:
+        if not _owns_any_table(store_type, dialect, tables):
             state.status = ABSENT
-            state.reason = "no tables yet: a store creates its schema when first opened"
+            state.reason = (
+                "none of this store's tables exist yet: a store creates its"
+                " schema when first opened"
+            )
             return None
         current = detect_version(store_type, dialect, tables)
         if current is None:

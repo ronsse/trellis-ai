@@ -165,14 +165,17 @@ result out:
 
 ```bash
 docker compose -f docs/deployment/docker-compose.team.yml exec api \
-  trellis admin backup --output /var/lib/trellis/backup-1
+  trellis admin backup --skip-postgres --output /var/lib/trellis/backup-1
 docker compose -f docs/deployment/docker-compose.team.yml cp api:/var/lib/trellis/backup-1 ./backup-1
 ```
 
-That image carries no `pg_dump`, so this run reports every Postgres store as
-`tool_missing` and exits `5`: expected here, and the SQLite files and the manifest
-are still written. The blob directory is only named, not copied, by the command:
-copy `/var/lib/trellis/stores/blobs/` with `docker compose cp` if you store blobs.
+That image carries no `pg_dump`, so `--skip-postgres` tells the command not to look
+for one: every Postgres store is reported `skipped` (reason `skip_postgres_flag`),
+no dump runs, and that choice alone does not make the run incomplete. Whatever
+SQLite stores exist are copied, and the manifest names everything else under
+`not_copied`. A local blob directory is only named, not copied, and one with files
+in it still makes the run `incomplete` (exit `5`): copy
+`/var/lib/trellis/stores/blobs/` with `docker compose cp` if you store blobs.
 Remove `backup-1` from the volume when you have copied it.
 
 Keep the output off shared storage: it holds every memory, and the key hashes.

@@ -86,15 +86,15 @@ def _activities() -> list[dict[str, Any]]:
     )
 
 
-def _break_document_store(deploy: _Deployment) -> None:
-    """Replace the document database with one of a shape no version matches."""
-    path = deploy.stores / "documents.db"
+def _break_graph_store(deploy: _Deployment) -> None:
+    """Replace the graph database with a partial one: ``nodes`` without ``edges``."""
+    path = deploy.stores / "graph.db"
     _get_registry().close()
     _reset_registry()
     for suffix in ("", "-wal", "-shm"):
         Path(f"{path}{suffix}").unlink(missing_ok=True)
     conn = sqlite3.connect(path)
-    conn.execute("CREATE TABLE unrelated (x INTEGER)")
+    conn.execute("CREATE TABLE nodes (x INTEGER)")
     conn.commit()
     conn.close()
 
@@ -183,7 +183,7 @@ class TestExitCodeDoesNotDependOnFormat:
     def test_an_unrecognised_store_exits_five_in_both_formats(
         self, deploy: _Deployment, arm: list[str]
     ) -> None:
-        _break_document_store(deploy)
+        _break_graph_store(deploy)
 
         result = _migrate("--apply", "--no-meta-trace", *arm)
 
@@ -191,10 +191,10 @@ class TestExitCodeDoesNotDependOnFormat:
         if arm:
             payload = json.loads(result.stdout)
             assert payload["status"] == "error"
-            assert _stores(payload)["document"]["status"] == "unrecognized"
+            assert _stores(payload)["graph"]["status"] == "unrecognized"
         else:
             assert "UNRECOGNIZED" in plain(result.output)
-        assert not _has_version_table(deploy.stores / "documents.db")
+        assert not _has_version_table(deploy.stores / "graph.db")
 
     @_ARMS
     def test_a_pending_report_is_not_a_failure(
