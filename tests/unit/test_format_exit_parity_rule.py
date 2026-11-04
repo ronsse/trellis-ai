@@ -893,6 +893,11 @@ def test_the_must_exit_helper_set_is_exactly_the_must_exit_helpers() -> None:
         # format branch, and its Typer wrapper only delegates to it. Admitted
         # deliberately, per this docstring.
         "admin_access_log": {"access_log_command", "access_log"},
+        # ``trellis admin install-hooks`` and ``install-agent-rule``: an
+        # invalid-option refusal that prints in the chosen format and raises
+        # ``typer.Exit(EXIT_VALIDATION)`` on every path, typed ``NoReturn``,
+        # with no ``return``. Admitted deliberately, per this docstring.
+        "admin_hooks": {"_refuse"},
         # ``trellis analyze pack-judge``: each phase renders on the caller's
         # surface, then raises ``typer.Exit`` as its last statement with the
         # code derived above the format branch; both are typed ``NoReturn``
@@ -966,6 +971,9 @@ def test_the_conditional_exit_helper_roster_is_exactly_the_private_may_exiters()
     }
     assert {k: v for k, v in conditional.items() if v} == {
         "admin": ["_load_graph_store_from_yaml", "_lookup_candidate_payload"],
+        # Refuses a scope that is not user or project, or both --scope and
+        # --settings, through ``_refuse`` and returns the path otherwise.
+        "admin_hooks": ["_settings_path"],
         # Same shape as curate._execute_command below: exits on a REJECTED
         # or FAILED Command and returns on any other.
         "admin_settings": ["_execute"],

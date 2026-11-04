@@ -542,6 +542,64 @@ The text is the packaged file in `trellis_cli/prompts/`, printed byte for byte (
 
 An unknown `--variant` exits `EXIT_VALIDATION` (2) under both formats. `trellis admin install-skills` and `trellis admin quickstart --with-skills` end their text output with the `agent-rule` paragraph and a pointer to this command, and their `--format json` payload carries the same paragraph as an additive `agent_rule` key.
 
+### `trellis admin install-hooks`
+
+Install the packaged Claude Code hooks into a `settings.json`. An agent retrieves from Trellis only when its harness tells it to; the hooks are that telling, done by the harness instead of by a prompt. Which hook does what is in [`docs/getting-started/integrate-your-agent.md`](../getting-started/integrate-your-agent.md#hooks-that-keep-the-loop-closed-claude-code).
+
+```bash
+trellis admin install-hooks [--scope user|project | --settings PATH]
+                            [--grading-threshold N] [--edit-deny subagents|all|off]
+                            [--uninstall] [--dry-run] [--format text|json]
+```
+
+| Option | Meaning |
+|---|---|
+| `--scope` | `user` (default) is `~/.claude/settings.json`; `project` is `./.claude/settings.json`. |
+| `--settings PATH` | Edit this file instead. Not with `--scope`. |
+| `--grading-threshold N` | Tool uses a session must reach before it is asked to grade a served pack (default 10). |
+| `--edit-deny` | Where the first-edit soft deny applies: `subagents` (default), `all` sessions, or `off` (no edit hook). |
+| `--uninstall` | Remove exactly the entries this command added. |
+| `--dry-run` | Print the resulting settings JSON and write nothing. |
+
+The merge reads the file, adds five entries (`UserPromptSubmit` and `SubagentStart` run `trellis-hook prework`, `PreToolUse` on `Edit|Write|MultiEdit|NotebookEdit` runs `trellis-hook edit-guard`, `Stop` and `SubagentStop` run `trellis-hook grade`) and writes it back.
+
+- **Idempotent.** A re-run changes nothing and writes nothing. Changing an option updates the entry in place; turning the edit hook `off` removes only that entry.
+- **Preserving.** Every other key and every foreign hook stays, in order. An entry is ours when its command starts `trellis-hook <name>`, which is how `--uninstall` finds exactly what it added; an uninstall of a fresh install restores the original bytes. The file's indent and final newline are kept.
+- **Safe to run.** A file that is not a JSON object, or whose `hooks` section has the wrong type, is refused with exit 2 and left as it was. A write goes to a temp file beside the target and is renamed over it (a symlinked settings file stays a link), and the previous content is kept as `<file>.trellis-bak`.
+- **Where `trellis-hook` must be found.** Claude Code runs a hook through the shell, so the `trellis-hook` console script (shipped by this package, standard library only apart from the hook text) has to be on that shell's `PATH`. The command says so when it is not.
+
+The hooks decide from the transcript Claude Code names on stdin and nothing else: no store, no network, no Trellis config. Each finishes in well under a second, and each **fails open**: any error, unreadable input, a missing, oversized or slow-to-read transcript exits 0 with no output, because a hook that breaks a session is worse than a loop that stays open. One-time state ("already said it") is an empty marker file per session under `$TRELLIS_HOOK_STATE_DIR`, or `trellis-hooks-<uid>` in the temp directory; nothing is written under `~/.trellis`. `TRELLIS_HOOKS_DISABLED=1` makes every hook a no-op without editing the settings.
+
+**The hooks raise retrieval rates.** A deployment that runs a holdout or any other measurement of retrieval and grading should install them at a window boundary, not in the middle of one: a session that would not have retrieved now does, and the population changes. The hooks change no pack and no served item.
+
+**JSON output:**
+
+```json
+{
+  "status": "ok",
+  "action": "install",
+  "dry_run": false,
+  "settings_path": "/work/.claude/settings.json",
+  "changed": true,
+  "written": true,
+  "backup_path": "/work/.claude/settings.json.trellis-bak",
+  "hooks": [{"event": "Stop", "hook": "grade", "status": "added"}],
+  "command_on_path": true
+}
+```
+
+`hooks[].status` is `added`, `updated`, `unchanged` or `removed`. With `--dry-run` the payload also carries the resulting file as `settings`; in text mode the resulting JSON is the only thing on stdout and the summary goes to stderr. Exit codes, the same under both formats: `0` done or nothing to do; `2` a bad option or a malformed settings file; `1` the file could not be read or written.
+
+### `trellis admin install-agent-rule`
+
+Add the agent rule (`trellis admin show-prompt --variant agent-rule`) to every agent definition in a directory, so a dispatched subagent is told to retrieve and to grade.
+
+```bash
+trellis admin install-agent-rule --agents-dir DIR [--dry-run] [--uninstall] [--format text|json]
+```
+
+The rule is appended to the end of each `*.md` file directly under `DIR`, inside a block delimited by `<!-- trellis-agent-rule:begin -->` and `<!-- trellis-agent-rule:end -->`, so the frontmatter is never touched. A file that already carries the rule, as one of these blocks or pasted by hand, is left alone (`present`), so a re-run changes nothing. `--uninstall` removes exactly the blocks this command added, byte for byte, and leaves a hand-pasted copy. One file that cannot be read is reported `failed` and the rest are still done. Per-file `status` is `added`, `present`, `removed`, `absent` or `failed`. Exit codes, the same under both formats: `0`; `2` the directory does not exist; `1` a file failed (the payload `status` is `partial`).
+
 ### `trellis admin serve`
 
 Start the REST API server.

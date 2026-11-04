@@ -3821,3 +3821,8 @@ _register_backup(admin_app)
 from trellis_cli.admin_migrate import register as _register_migrate  # noqa: E402
 
 _register_migrate(admin_app)
+
+# install-hooks / install-agent-rule — harness hooks and the agent rule
+from trellis_cli.admin_hooks import register as _register_hooks  # noqa: E402
+
+_register_hooks(admin_app)
