@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from trellis.auth import SCOPE_ADMIN, SCOPE_EXTERNAL, clearance_of
 from trellis.feedback.attribution import is_sectioned_payload
+from trellis.feedback.pack_rows import has_served_rows
 from trellis.retrieve.public_rank import PublicRead, public_keyword_rows
 from trellis.retrieve.sensitivity import (
     DocumentClearance,
@@ -604,7 +605,7 @@ def _is_sectioned(payload: dict[str, Any]) -> bool:
 
 def _is_attributable(payload: dict[str, Any]) -> bool:
     """Whether the pack carries per-item rows a verdict can join to."""
-    return bool(payload.get("injected_items"))
+    return has_served_rows(payload)
 
 
 def _pack_summary(event: Event) -> dict[str, Any]:
