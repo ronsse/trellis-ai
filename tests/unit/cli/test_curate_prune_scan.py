@@ -14,8 +14,8 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
-from trellis.mutate import handlers as handlers_module
 from trellis.mutate import retention as retention_module
+from trellis.mutate.handlers import retention_handlers as retention_handlers_module
 from trellis.schemas.extraction import (
     EXTRACTION_STATUS_PROPERTY,
     EXTRACTION_STATUS_UNCONFIRMED,
@@ -52,7 +52,7 @@ def stores_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _cap(monkeypatch: pytest.MonkeyPatch, cap: int) -> None:
     monkeypatch.setattr(retention_module, "MAX_ENTITIES_SCANNED", cap)
-    monkeypatch.setattr(handlers_module, "MAX_ENTITIES_SCANNED", cap)
+    monkeypatch.setattr(retention_handlers_module, "MAX_ENTITIES_SCANNED", cap)
     monkeypatch.setattr(retention_module, "_SCAN_PAGE", 2)
 
 

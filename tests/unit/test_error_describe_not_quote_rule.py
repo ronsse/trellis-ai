@@ -53,7 +53,7 @@ _SRC = Path(__file__).resolve().parents[2] / "src" / "trellis"
 
 #: Hand count at HEAD, 2026-10-11: every ``except ... as name:`` handler in
 #: ``src/trellis`` whose body raises a TrellisError-family exception, across
-#: 14 files (``llm/providers/openai.py`` x1, ``mutate/handlers.py`` x6 --
+#: 14 files (``llm/providers/openai.py`` x1, ``mutate/handlers/`` x6 --
 #: three pre-existing plus three added by ``SettingsUpdateHandler``, which
 #: read ``exc.message`` off a ``DegradedStoreWriteError``/
 #: ``StaleStoreWriteError`` (both already-composed ``TrellisError`` text)
@@ -490,7 +490,7 @@ def f():
 def test_reverting_a_real_site_is_caught() -> None:
     """Reverting one real site to its pre-fix shape makes the scan flag it.
 
-    This is the exact text ``src/trellis/mutate/handlers.py`` raised before
+    This is the exact text ``src/trellis/mutate/handlers`` raised before
     this fix: pydantic's rendered ``ValidationError`` text, which can carry
     ``input_value=`` -- the
     caller's own field value -- pasted straight into the message. The real

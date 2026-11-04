@@ -17,8 +17,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
-from trellis.mutate import handlers as handlers_module
 from trellis.mutate import retention as retention_module
+from trellis.mutate.handlers import retention_handlers as retention_handlers_module
 from trellis.schemas.extraction import (
     EXTRACTION_STATUS_PROPERTY,
     EXTRACTION_STATUS_UNCONFIRMED,
@@ -81,7 +81,7 @@ def test_the_message_says_the_scan_stopped_early_only_when_it_did(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, cap: int, named: bool
 ) -> None:
     monkeypatch.setattr(retention_module, "MAX_ENTITIES_SCANNED", cap)
-    monkeypatch.setattr(handlers_module, "MAX_ENTITIES_SCANNED", cap)
+    monkeypatch.setattr(retention_handlers_module, "MAX_ENTITIES_SCANNED", cap)
     monkeypatch.setattr(retention_module, "_SCAN_PAGE", 2)
 
     result = _prune(client)

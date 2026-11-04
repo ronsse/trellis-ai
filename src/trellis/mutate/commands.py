@@ -52,7 +52,7 @@ class Operation(StrEnum):
     # JOB_RUN_REQUEST go through ``build_schedule_executor`` (see
     # ``mutate/schedule_handlers.py``); SETTINGS_UPDATE is a *separate*
     # executor, ``build_settings_executor`` (see
-    # ``mutate/handlers.py::create_settings_handlers``) — the two
+    # ``mutate/handlers/factories.py::create_settings_handlers``) — the two
     # executors are disjoint, not one shared admin executor (gate #860b,
     # follow-up 9).
     SCHEDULE_UPDATE = "schedule.update"
@@ -166,7 +166,7 @@ class CommandBatch(VersionedModel):
 #: Operation-specific ``args`` keys whose value is a stored identifier or an
 #: exact-match lookup key -- never scanned generically, because free-text
 #: args (names, descriptions, reasons, comments) must stay accepted. Found
-#: by reading every handler in ``mutate/handlers.py``: the value each key
+#: by reading every handler in ``mutate/handlers/``: the value each key
 #: names is either minted fresh (``entity.create``'s ``entity_id``,
 #: ``alias.upsert``'s owner ``entity_id``, ``link.create``'s edge endpoints
 #: and its ``edge_kind`` -- stored as ``edge_type`` and filtered on exactly

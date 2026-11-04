@@ -728,7 +728,7 @@ def run_precedent_auto_demotion(
             ``executor`` was given.
     """
     if requested_by is None:
-        from trellis.mutate.handlers import (  # noqa: PLC0415
+        from trellis.mutate.handlers.precedent import (  # noqa: PLC0415
             AUTO_DEMOTE_REQUESTED_BY,
         )
 
