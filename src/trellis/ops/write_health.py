@@ -42,7 +42,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from enum import Enum
 from types import UnionType
@@ -94,6 +94,7 @@ from trellis.stores.base.event_log import (
     EventType,
     ScanCoverage,
     merge_coverage,
+    resolve_scan_window,
     scan_events,
 )
 
@@ -1775,6 +1776,8 @@ def summarize_write_health(
     *,
     days: int = 7,
     limit: int = _DEFAULT_EVENT_LIMIT,
+    since: datetime | None = None,
+    until: datetime | None = None,
 ) -> WriteHealthReport:
     """Aggregate write acceptance vs rejection over the window.
 
@@ -1801,15 +1804,19 @@ def summarize_write_health(
     Both are absent from windows written before their events existed, which
     makes a rate read over such a window overstate.
     """
-    now = datetime.now(tz=UTC)
-    since = now - timedelta(days=days)
+    now = until if until is not None else datetime.now(tz=UTC)
+    since, until = resolve_scan_window(days, since=since, until=until, now=now)
     by_tool: dict[str, ToolWriteStats] = {}
 
     def stats(key: str) -> ToolWriteStats:
         return by_tool.setdefault(key or "(unknown)", ToolWriteStats())
 
     accepted_scan = scan_events(
-        event_log, event_type=EventType.MUTATION_EXECUTED, since=since, limit=limit
+        event_log,
+        event_type=EventType.MUTATION_EXECUTED,
+        since=since,
+        until=until,
+        limit=limit,
     )
     for event in accepted_scan.events:
         tool_stats = stats(str(event.payload.get("requested_by") or ""))
@@ -1820,26 +1827,42 @@ def summarize_write_health(
         )
 
     feedback_scan = scan_events(
-        event_log, event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
+        event_log,
+        event_type=EventType.FEEDBACK_RECORDED,
+        since=since,
+        until=until,
+        limit=limit,
     )
     for event in feedback_scan.events:
         if event.source == _FEEDBACK_EVENT_SOURCE:
             stats(FEEDBACK_SURFACE).accepted += 1
 
     noop_scan = scan_events(
-        event_log, event_type=EventType.WRITE_NOOP, since=since, limit=limit
+        event_log,
+        event_type=EventType.WRITE_NOOP,
+        since=since,
+        until=until,
+        limit=limit,
     )
     for event in noop_scan.events:
         stats(surface_label(str(event.payload.get("tool") or ""))).noop += 1
 
     coerced_scan = scan_events(
-        event_log, event_type=EventType.WRITE_COERCED, since=since, limit=limit
+        event_log,
+        event_type=EventType.WRITE_COERCED,
+        since=since,
+        until=until,
+        limit=limit,
     )
     coerced_by_rule = _tally_coercions(coerced_scan.events, stats)
 
     executor_reasons: dict[str, int] = {}
     rejected_scan = scan_events(
-        event_log, event_type=EventType.MUTATION_REJECTED, since=since, limit=limit
+        event_log,
+        event_type=EventType.MUTATION_REJECTED,
+        since=since,
+        until=until,
+        limit=limit,
     )
     for event in rejected_scan.events:
         tool_stats = stats(str(event.payload.get("requested_by") or ""))
@@ -1852,11 +1875,19 @@ def summarize_write_health(
         executor_reasons[reason] = executor_reasons.get(reason, 0) + 1
 
     boundary_scan = scan_events(
-        event_log, event_type=EventType.WRITE_REJECTED, since=since, limit=limit
+        event_log,
+        event_type=EventType.WRITE_REJECTED,
+        since=since,
+        until=until,
+        limit=limit,
     )
     boundary = _tally_boundary_rejections(boundary_scan.events, stats)
     recovered_scan = scan_events(
-        event_log, event_type=EventType.WRITE_RECOVERED, since=since, limit=limit
+        event_log,
+        event_type=EventType.WRITE_RECOVERED,
+        since=since,
+        until=until,
+        limit=limit,
     )
     recoveries = _tally_recoveries(recovered_scan.events)
 
@@ -1968,17 +1999,27 @@ def summarize_serve_attribution(
     *,
     days: int = 7,
     limit: int = _DEFAULT_EVENT_LIMIT,
+    since: datetime | None = None,
+    until: datetime | None = None,
 ) -> ServeAttributionReport:
     """Coverage of the two joins the learning loop depends on."""
-    since = datetime.now(tz=UTC) - timedelta(days=days)
+    since, until = resolve_scan_window(days, since=since, until=until)
 
     packs = packs_with_items = 0
     served_by_pack: dict[str, set[str]] = {}
     pack_scan = scan_events(
-        event_log, event_type=EventType.PACK_ASSEMBLED, since=since, limit=limit
+        event_log,
+        event_type=EventType.PACK_ASSEMBLED,
+        since=since,
+        until=until,
+        limit=limit,
     )
     feedback_scan = scan_events(
-        event_log, event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
+        event_log,
+        event_type=EventType.FEEDBACK_RECORDED,
+        since=since,
+        until=until,
+        limit=limit,
     )
     # Every scanned pack, not the holdout-filtered population below: a
     # withheld pack still ran its strategies. A malformed entry is skipped

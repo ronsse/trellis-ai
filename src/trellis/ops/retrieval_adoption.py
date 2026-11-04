@@ -40,7 +40,7 @@ section.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import Field
@@ -52,6 +52,7 @@ from trellis.stores.base.event_log import (
     EventLog,
     EventType,
     ScanCoverage,
+    resolve_scan_window,
     scan_events,
 )
 
@@ -102,17 +103,22 @@ def summarize_retrieval_adoption(
     days: int = 7,
     limit: int = DEFAULT_SCAN_LIMIT,
     now: datetime | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
 ) -> RetrievalAdoptionReport:
     """Retrieval adoption over the trailing *days* of captured sessions.
 
     ``now`` pins the window's end for a caller that needs the edge exact; the
-    window opens at ``now - days``.
+    window opens at ``now - days``. ``since`` and ``until`` name a window that
+    is not trailing (a calendar week); both default to ``None``, which leaves
+    the window as it was.
     """
-    since = (now or datetime.now(tz=UTC)) - timedelta(days=days)
+    since, until = resolve_scan_window(days, since=since, until=until, now=now)
     scan = scan_events(
         event_log,
         event_type=EventType.CAPTURE_SESSION_PACKS,
         since=since,
+        until=until,
         limit=limit,
     )
     # Ascending, so a later event for the same session overwrites the earlier:

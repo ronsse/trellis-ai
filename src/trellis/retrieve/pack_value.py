@@ -114,7 +114,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -148,6 +148,7 @@ from trellis.stores.base.event_log import (
     EventType,
     ScanCoverage,
     merge_coverage,
+    resolve_scan_window,
     scan_events,
 )
 
@@ -508,6 +509,8 @@ def summarize_pack_value(
     limit: int = _DEFAULT_EVENT_LIMIT,
     model: str | None = None,
     price_per_mtok: float | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
 ) -> PackValueReport:
     """Compute serving precision and cost-per-cited-item over a window.
 
@@ -519,15 +522,19 @@ def summarize_pack_value(
         limit: Per-event-type scan limit.
         model: Consuming model for pricing (else ``TRELLIS_COST_MODEL``).
         price_per_mtok: Explicit input price override, USD/Mtok.
+        since: Explicit window start; overrides ``days``. Default ``None``.
+        until: Window end (exclusive). Default ``None``: open-ended, as ever.
 
     Returns:
         A :class:`PackValueReport`. Ratios are ``None`` — never ``0.0``
         — when the sample is too thin to state one, so a reader cannot
         mistake "refused" for "measured zero".
     """
-    since = datetime.now(tz=UTC) - timedelta(days=days)
+    since, until = resolve_scan_window(days, since=since, until=until)
     feedback_events, pack_payloads, pack_event_count, join_coverage = (
-        join_pack_feedback_with_coverage(event_log, since=since, limit=limit)
+        join_pack_feedback_with_coverage(
+            event_log, since=since, limit=limit, until=until
+        )
     )
 
     # A pack with no per-item rows (a sectioned pack from before #958, or a
@@ -585,7 +592,11 @@ def summarize_pack_value(
     injected_dollars = estimate_dollars(injected, price)
 
     response = _response_token_join(
-        event_log, since=since, limit=limit, attributed_ids=set(attributed_ids)
+        event_log,
+        since=since,
+        until=until,
+        limit=limit,
+        attributed_ids=set(attributed_ids),
     )
     response_dollars = estimate_dollars(response["tokens"], price)
     scan = merge_coverage(join_coverage, response["coverage_scan"])
@@ -962,6 +973,7 @@ def _response_token_join(
     since: datetime,
     limit: int,
     attributed_ids: set[str],
+    until: datetime | None = None,
 ) -> dict[str, Any]:
     """Join ``TOKEN_TRACKED`` to attributed packs on ``pack_id``.
 
@@ -979,7 +991,11 @@ def _response_token_join(
     coverage = ScanCoverage()
     try:
         scan = scan_events(
-            event_log, event_type=EventType.TOKEN_TRACKED, since=since, limit=limit
+            event_log,
+            event_type=EventType.TOKEN_TRACKED,
+            since=since,
+            until=until,
+            limit=limit,
         )
         coverage = scan.coverage
         # ``scan.events`` is ascending, which is what "last write wins"
