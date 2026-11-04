@@ -439,6 +439,21 @@ class TestAnExpiredKeyIsNeverRevived:
         assert store.get(old_id).expires_at == window  # type: ignore[union-attr]
         assert verify_token(old_token, store) is not None
 
+    def test_a_key_in_grace_rotated_without_a_grace_period_is_refused_too(
+        self, registry: StoreRegistry
+    ) -> None:
+        old_token, old_id = _mint(registry)
+        self._rotate(registry, old_id, grace=timedelta(hours=1))
+        store = registry.operational.api_key_store
+        window = store.get(old_id).expires_at  # type: ignore[union-attr]
+        again = self._rotate(registry, old_id)
+        assert again.refusal is not None
+        assert again.refusal[0] == "already_in_grace"
+        assert again.token is None
+        assert len(store.list()) == 2
+        assert store.get(old_id).expires_at == window  # type: ignore[union-attr]
+        assert verify_token(old_token, store) is not None
+
     def test_a_key_not_yet_expiring_still_rotates_with_a_grace_period(
         self, registry: StoreRegistry
     ) -> None:
