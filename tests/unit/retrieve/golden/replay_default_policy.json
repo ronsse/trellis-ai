@@ -1,0 +1,149 @@
+{
+ "default": {
+  "admitted_ungraded_items": 0,
+  "attributed_packs": 6,
+  "baseline": {
+   "body_items_served": 18,
+   "helpful_tokens": 360,
+   "injected_tokens": 780,
+   "items": 18,
+   "label": "as served",
+   "pointer_items_served": 0,
+   "unhelpful_tokens": 120,
+   "unjudged_tokens": 300,
+   "useful_token_fraction": 0.4615
+  },
+  "counterfactual": {
+   "body_items_served": 18,
+   "helpful_tokens": 360,
+   "injected_tokens": 780,
+   "items": 18,
+   "label": "refill=on",
+   "pointer_items_served": 0,
+   "unhelpful_tokens": 120,
+   "unjudged_tokens": 300,
+   "useful_token_fraction": 0.4615
+  },
+  "estimator": "estimate_4_chars_per_token",
+  "fraction_delta": 0.0,
+  "helpful_bodies_served": 6,
+  "helpful_bodies_withheld": 0,
+  "helpful_items_dropped": 0,
+  "helpful_items_total": 6,
+  "min_attributed_packs": 5,
+  "notes": [
+   "Counterfactual over the SAME packs and the SAME citations: only the serving policy differs. Excerpt lengths are inverted from estimated_tokens (~4 chars/token), so per-item costs are accurate to about one token.",
+   "3 attributed pack(s) carry no usable budget_trace or token budget and could not be re-priced; they are excluded from both arms."
+  ],
+  "packs_without_budget_trace": 3,
+  "policy": "refill=on",
+  "suppressed": false,
+  "suppressed_reason": "",
+  "token_delta": 0.0,
+  "window_days": 30
+ },
+ "describe": "refill=on",
+ "max2": {
+  "admitted_ungraded_items": 0,
+  "attributed_packs": 6,
+  "baseline": {
+   "body_items_served": 18,
+   "helpful_tokens": 360,
+   "injected_tokens": 780,
+   "items": 18,
+   "label": "as served",
+   "pointer_items_served": 0,
+   "unhelpful_tokens": 120,
+   "unjudged_tokens": 300,
+   "useful_token_fraction": 0.4615
+  },
+  "counterfactual": {
+   "body_items_served": 12,
+   "helpful_tokens": 360,
+   "injected_tokens": 600,
+   "items": 12,
+   "label": "max_items=2, refill=on",
+   "pointer_items_served": 0,
+   "unhelpful_tokens": 120,
+   "unjudged_tokens": 120,
+   "useful_token_fraction": 0.6
+  },
+  "estimator": "estimate_4_chars_per_token",
+  "fraction_delta": 0.3001,
+  "helpful_bodies_served": 6,
+  "helpful_bodies_withheld": 0,
+  "helpful_items_dropped": 0,
+  "helpful_items_total": 6,
+  "min_attributed_packs": 5,
+  "notes": [
+   "Counterfactual over the SAME packs and the SAME citations: only the serving policy differs. Excerpt lengths are inverted from estimated_tokens (~4 chars/token), so per-item costs are accurate to about one token.",
+   "3 attributed pack(s) carry no usable budget_trace or token budget and could not be re-priced; they are excluded from both arms."
+  ],
+  "packs_without_budget_trace": 3,
+  "policy": "max_items=2, refill=on",
+  "suppressed": false,
+  "suppressed_reason": "",
+  "token_delta": -0.2308,
+  "window_days": 30
+ },
+ "norefill": {
+  "admitted_ungraded_items": 0,
+  "attributed_packs": 6,
+  "baseline": {
+   "body_items_served": 18,
+   "helpful_tokens": 360,
+   "injected_tokens": 780,
+   "items": 18,
+   "label": "as served",
+   "pointer_items_served": 0,
+   "unhelpful_tokens": 120,
+   "unjudged_tokens": 300,
+   "useful_token_fraction": 0.4615
+  },
+  "counterfactual": {
+   "body_items_served": 18,
+   "helpful_tokens": 78,
+   "injected_tokens": 234,
+   "items": 18,
+   "label": "excerpt_max_chars=50, refill=off",
+   "pointer_items_served": 0,
+   "unhelpful_tokens": 39,
+   "unjudged_tokens": 117,
+   "useful_token_fraction": 0.3333
+  },
+  "estimator": "estimate_4_chars_per_token",
+  "fraction_delta": -0.2778,
+  "helpful_bodies_served": 6,
+  "helpful_bodies_withheld": 0,
+  "helpful_items_dropped": 0,
+  "helpful_items_total": 6,
+  "min_attributed_packs": 5,
+  "notes": [
+   "Counterfactual over the SAME packs and the SAME citations: only the serving policy differs. Excerpt lengths are inverted from estimated_tokens (~4 chars/token), so per-item costs are accurate to about one token.",
+   "3 attributed pack(s) carry no usable budget_trace or token budget and could not be re-priced; they are excluded from both arms."
+  ],
+  "packs_without_budget_trace": 3,
+  "policy": "excerpt_max_chars=50, refill=off",
+  "suppressed": false,
+  "suppressed_reason": "",
+  "token_delta": -0.7,
+  "window_days": 30
+ },
+ "prior": {
+  "applied_config": "mode=withhold forms=['conversation'] axes=['keyword']",
+  "attributed_packs": 9,
+  "helpful_lost": 1,
+  "matched_servings": 2,
+  "matched_via_parent": 0,
+  "notes": [
+   "Counterfactual over the SAME packs and the SAME citations. This arm classifies and counts already-served items; it does not re-run the token-budget walk, so tokens_freed is the gross cost of the matched servings, not a repriced pack. It cannot say which item the freed budget would have admitted instead, and it cannot grade one, because that item was never served and nobody rated it."
+  ],
+  "parent_form_resolved": 0,
+  "parent_form_unresolved": 0,
+  "parent_lookups": 0,
+  "still_served_by_other_axis": 0,
+  "tokens_freed": 55,
+  "unhelpful_removed": 1,
+  "window_days": 30
+ }
+}

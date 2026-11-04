@@ -76,7 +76,12 @@ from trellis.retrieve.class_prior import (
 )
 from trellis.retrieve.concentration import parent_id_of
 from trellis.retrieve.disclosure import POINTER_LABEL_MAX_CHARS
-from trellis.retrieve.excerpts import EXCERPT_MAX_CHARS
+from trellis.retrieve.excerpts import (
+    DEFAULT_FLOOR_EXEMPT_ITEM_TYPES,
+    EXCERPT_MAX_CHARS,
+    count_substance_words,
+    truncate_excerpt,
+)
 from trellis.retrieve.pack_value import MIN_ATTRIBUTED_PACKS, collect_pack_verdicts
 from trellis.retrieve.strategies import GRAPH_STRATEGY_NAME
 from trellis.schemas.document_metadata import document_form_of
@@ -84,6 +89,7 @@ from trellis.schemas.document_metadata import document_form_of
 if TYPE_CHECKING:
     from trellis.stores.base.document import DocumentStore
     from trellis.stores.base.event_log import EventLog
+    from trellis.stores.base.graph import GraphStore
 
 logger = structlog.get_logger(__name__)
 
@@ -133,12 +139,27 @@ class ReplayPolicy:
         a policy that makes items cheaper without an item ceiling does not
         produce a cheaper pack, it produces a wider one. Set ``False`` only
         to isolate the pricing effect from the admission effect.
+    ``entity_requires_description``
+        Substance arm: withhold a served graph entity whose stored node has
+        no (or only a blank) ``description``. Priced by
+        :func:`replay_substance`, never by :func:`replay_pack_value`.
+    ``min_distinct_words``
+        Substance arm: withhold a served item whose served text has fewer
+        than this many distinct words
+        (:func:`~trellis.retrieve.excerpts.count_substance_words`, the
+        content floor's own measure). Priced by :func:`replay_substance`.
+
+    The two substance arms are removal-only: they take servings out of a
+    pack and never admit or re-rank anything, so they do not combine with
+    the walk-re-running levers above.
     """
 
     excerpt_max_chars: int | None = None
     body_items: int | None = None
     max_items: int | None = None
     refill: bool = True
+    entity_requires_description: bool = False
+    min_distinct_words: int | None = None
 
     def __post_init__(self) -> None:
         if self.excerpt_max_chars is not None and self.excerpt_max_chars < 1:
@@ -150,6 +171,33 @@ class ReplayPolicy:
         if self.max_items is not None and self.max_items < 1:
             msg = f"max_items must be >= 1; got {self.max_items!r}"
             raise ValueError(msg)
+        if self.min_distinct_words is not None and self.min_distinct_words < 1:
+            msg = f"min_distinct_words must be >= 1; got {self.min_distinct_words!r}"
+            raise ValueError(msg)
+        if self.has_substance_arms:
+            walk_levers = [
+                name
+                for name, given in (
+                    ("excerpt_max_chars", self.excerpt_max_chars is not None),
+                    ("body_items", self.body_items is not None),
+                    ("max_items", self.max_items is not None),
+                    ("no-refill", not self.refill),
+                )
+                if given
+            ]
+            if walk_levers:
+                msg = (
+                    "the substance arms (entity_requires_description, "
+                    "min_distinct_words) are removal-only and cannot be "
+                    f"combined with {', '.join(walk_levers)}, which re-run "
+                    "the token walk"
+                )
+                raise ValueError(msg)
+
+    @property
+    def has_substance_arms(self) -> bool:
+        """Whether either removal-only substance arm is set."""
+        return self.entity_requires_description or self.min_distinct_words is not None
 
     def describe(self) -> str:
         """One-line rendering, for the report and the CLI header."""
@@ -160,6 +208,12 @@ class ReplayPolicy:
             parts.append(f"body_items={self.body_items}")
         if self.max_items is not None:
             parts.append(f"max_items={self.max_items}")
+        if self.has_substance_arms:
+            if self.entity_requires_description:
+                parts.append("entity_requires_description")
+            if self.min_distinct_words is not None:
+                parts.append(f"min_distinct_words={self.min_distinct_words}")
+            return ", ".join(parts)
         parts.append(f"refill={'on' if self.refill else 'off'}")
         return ", ".join(parts)
 
@@ -478,7 +532,15 @@ def replay_pack_value(
         the attributed sample is below
         :data:`~trellis.retrieve.pack_value.MIN_ATTRIBUTED_PACKS`, so a
         refused ratio cannot be read as a measured zero.
+
+    Raises:
+        ValueError: ``policy`` sets a substance arm. They are removal-only
+            and are priced by :func:`replay_substance`; ignoring them here
+            would report a policy that removed nothing.
     """
+    if policy.has_substance_arms:
+        msg = "substance arms are priced by replay_substance, not replay_pack_value"
+        raise ValueError(msg)
     since = datetime.now(tz=UTC) - timedelta(days=days)
     feedback_events, pack_payloads, _ = join_pack_feedback(
         event_log, since=since, limit=limit
@@ -955,8 +1017,14 @@ def _tally_class_prior_pack(
     config: ClassPriorConfig,
     lookup: _ParentFormLookup,
     tally: _ClassPriorTally,
+    removed_ids: set[str] | None = None,
 ) -> None:
     """Fold one attributed pack's served rows into ``tally``.
+
+    ``removed_ids``, when given, also receives the id of every serving the
+    rule would remove (a match with no copy surviving on another axis), so a
+    caller combining this rule with another counts a serving both remove
+    once. Counting is unchanged whether or not it is given.
 
     A row is judged under its own ``document_form``; only when it has none,
     ``config.scope`` is ``"parents_and_chunks"``, the row is on a configured
@@ -992,6 +1060,8 @@ def _tally_class_prior_pack(
         if _dedup_copy_outside_axes(item_id, rejected_rows, config.axes):
             tally.still_served_by_other_axis += 1
             continue
+        if removed_ids is not None:
+            removed_ids.add(item_id)
         raw_tokens = row.get("estimated_tokens")
         if isinstance(raw_tokens, int | float):
             tally.tokens_freed += int(raw_tokens)
@@ -1110,6 +1180,452 @@ def replay_class_prior(
         applied_config=applied_config,
         attributed_packs=report.attributed_packs,
         matched_servings=tally.matched_servings,
+    )
+    return report
+
+
+# ---------------------------------------------------------------------------
+# Substance arms: withhold stubs, price what that loses
+# ---------------------------------------------------------------------------
+
+#: Where a substance predicate read its input. Neither predicate can be judged
+#: from ``PACK_ASSEMBLED.injected_items[]``: the row carries ``item_type``,
+#: ``estimated_tokens`` and a ``title`` that graph entities mostly lack (the
+#: graph strategy folds the name into the excerpt), but neither a description
+#: flag nor the served text, only a content hash of it. So both arms read the
+#: stores as they are *now*. A node edited, re-minted or deleted since the
+#: serving answers for a different row, and the report says so rather than
+#: presenting the count as an as-served measurement.
+SUBSTANCE_BASIS_CURRENT_STATE = "current_state"
+
+_RULE_ENTITY_DESCRIPTION = "entity_requires_description"
+_RULE_MIN_WORDS = "min_distinct_words"
+_RULE_CLASS_PRIOR = "class_prior"
+
+#: ``item_type`` the graph strategy stamps on a served entity.
+_ENTITY_ITEM_TYPE = "entity"
+
+
+class SubstanceTally(TrellisModel):
+    """Servings and their tokens, split by the verdict the caller gave them.
+
+    Counts are per ``(pack_id, item_id)`` serving, the convention every other
+    replay arm uses. ``tokens`` is the row's recorded ``estimated_tokens``.
+    """
+
+    items: int = 0
+    tokens: int = 0
+    helpful_items: int = 0
+    helpful_tokens: int = 0
+    unhelpful_items: int = 0
+    unhelpful_tokens: int = 0
+    unjudged_items: int = 0
+    unjudged_tokens: int = 0
+
+
+class SubstanceReplayReport(TrellisModel):
+    """What the substance arms would have removed from packs already served.
+
+    Like :class:`ClassPriorReplayReport` this never re-runs the token walk: it
+    counts servings the original pack actually served and cannot say what the
+    freed budget would have admitted, nor grade it. Read ``removed`` next to
+    ``served``: an arm can always raise a fraction by serving less, and
+    ``removed.helpful_*`` is what serving less lost.
+
+    A serving is exactly one of removed (some active rule judged it and
+    removes it), unresolved (no rule removed it and at least one active rule
+    could not be judged) or kept (the rest). ``unresolved`` is never folded
+    into either of the others.
+    """
+
+    window_days: int
+    #: The :meth:`ReplayPolicy.describe` of the arms replayed.
+    policy: str = ""
+    #: ``mode=... forms=... axes=...`` when ``--class-prior`` was combined, else empty.
+    class_prior: str = ""
+    attributed_packs: int = 0
+    #: Rule name to where its input came from. Only ``"current_state"`` exists
+    #: today; see :data:`SUBSTANCE_BASIS_CURRENT_STATE`.
+    judged_on: dict[str, str] = Field(default_factory=dict)
+    #: Every serving in the attributed packs.
+    served: SubstanceTally = Field(default_factory=SubstanceTally)
+    #: Servings at least one active rule removes, counted once however many do.
+    removed: SubstanceTally = Field(default_factory=SubstanceTally)
+    #: Servings no rule removed and at least one active rule could not judge.
+    unresolved: SubstanceTally = Field(default_factory=SubstanceTally)
+    #: Servings each rule removes on its own, so two rules' counts can sum
+    #: past ``removed.items``; ``removed_by_several_rules`` is the overlap.
+    removed_by_entity_description: int = 0
+    removed_by_min_distinct_words: int = 0
+    removed_by_class_prior: int = 0
+    removed_by_several_rules: int = 0
+    #: Servings a rule could not judge (node or document unreadable now), each
+    #: rule counted alone, so a serving removed by the other rule still shows here.
+    unresolved_entity_description: int = 0
+    unresolved_min_distinct_words: int = 0
+    #: Servings of an item type the content floor exempts, which the
+    #: word-count arm never withholds (structured text, not prose).
+    exempt_from_min_distinct_words: int = 0
+    notes: list[str] = Field(default_factory=list)
+
+
+@dataclass
+class _VerdictTally:
+    items: int = 0
+    tokens: int = 0
+    by_verdict: dict[str, list[int]] = field(
+        default_factory=lambda: {
+            "helpful": [0, 0],
+            "unhelpful": [0, 0],
+            "unjudged": [0, 0],
+        }
+    )
+
+    def add(self, verdict: str, tokens: int) -> None:
+        self.items += 1
+        self.tokens += tokens
+        self.by_verdict[verdict][0] += 1
+        self.by_verdict[verdict][1] += tokens
+
+    def model(self) -> SubstanceTally:
+        h, u, j = (self.by_verdict[v] for v in ("helpful", "unhelpful", "unjudged"))
+        return SubstanceTally(
+            items=self.items,
+            tokens=self.tokens,
+            helpful_items=h[0],
+            helpful_tokens=h[1],
+            unhelpful_items=u[0],
+            unhelpful_tokens=u[1],
+            unjudged_items=j[0],
+            unjudged_tokens=j[1],
+        )
+
+
+class _CurrentStateReader:
+    """Read the graph and document stores for the substance predicates.
+
+    One read per distinct id, memoized, so an entity served in forty packs
+    costs one. A missing row, a missing store and a store that raises all read
+    as ``None``: the caller counts that as unresolved, never as a verdict. A
+    raising store is caught whole, as :class:`_ParentFormLookup` does, because
+    one unreadable row must not abort a measurement.
+    """
+
+    def __init__(
+        self, graph_store: GraphStore | None, document_store: DocumentStore | None
+    ) -> None:
+        self._graph = graph_store
+        self._documents = document_store
+        self._nodes: dict[str, Mapping[str, Any] | None] = {}
+        self._docs: dict[str, Mapping[str, Any] | None] = {}
+
+    def node_properties(self, item_id: str) -> Mapping[str, Any] | None:
+        if item_id not in self._nodes:
+            node: Mapping[str, Any] | None = None
+            if self._graph is not None:
+                try:
+                    node = self._graph.get_node(item_id)
+                except Exception:
+                    logger.warning("substance_replay_node_read_failed")
+            self._nodes[item_id] = node
+        node = self._nodes[item_id]
+        if node is None:
+            return None
+        props = node.get("properties")
+        return props if isinstance(props, Mapping) else {}
+
+    def document_content(self, item_id: str) -> str | None:
+        if item_id not in self._docs:
+            doc: Mapping[str, Any] | None = None
+            if self._documents is not None:
+                try:
+                    doc = self._documents.get(item_id)
+                except Exception:
+                    logger.warning("substance_replay_document_read_failed")
+            self._docs[item_id] = doc
+        doc = self._docs[item_id]
+        if doc is None:
+            return None
+        content = doc.get("content")
+        return content if isinstance(content, str) else ""
+
+
+def _has_description(props: Mapping[str, Any]) -> bool:
+    """Whether a node's ``description`` property holds anything but whitespace.
+
+    Only ``description``: it is the one property whose text becomes the
+    served excerpt (``comment`` earns the score boost but never reaches the
+    excerpt), and the arm judges what was served. A ``None`` description
+    counts as none; any other value is read as the strategy reads it, through
+    ``str()``.
+    """
+    description = props.get("description")
+    return description is not None and bool(str(description).strip())
+
+
+def _entity_served_text(props: Mapping[str, Any]) -> str:
+    """The text ``GraphSearch`` serves for a node: its description, else its
+    name, else its title.
+
+    Mirrors the fallback in ``trellis.retrieve.strategies.GraphSearch``
+    (``props.get("description", props.get("name", props.get("title", "")))``).
+    That is a ``dict.get`` default, so a *present* blank description wins over
+    the name and serves as empty text, exactly as it was served.
+    ``tests/unit/retrieve/test_pack_replay_substance.py`` checks the two agree
+    on a store the real strategy reads.
+    """
+    return str(props.get("description", props.get("name", props.get("title", ""))))
+
+
+def _served_word_count(text: str) -> int:
+    """Distinct words in ``text`` as the content floor counts the served excerpt.
+
+    The text is cut as a pack cuts it at the default excerpt width first, so a
+    long document is judged on what it served, not on words past the cut. A
+    deployment that serves a narrower excerpt would count fewer.
+    """
+    return count_substance_words(truncate_excerpt(text, limit=EXCERPT_MAX_CHARS))
+
+
+def _substance_notes(
+    *,
+    policy: ReplayPolicy,
+    report: SubstanceReplayReport,
+    class_prior_off: bool,
+) -> list[str]:
+    notes = [
+        (
+            "Counterfactual over the SAME packs and the SAME citations. This "
+            "arm counts already-served items; it does not re-run the "
+            "token-budget walk, so tokens are the gross cost of the removed "
+            "servings, not a repriced pack. It cannot say what the freed "
+            "budget would have admitted instead, and cannot grade it."
+        ),
+        (
+            "judged on current state, not as served: PACK_ASSEMBLED records "
+            "no description flag and no served text, so each predicate read "
+            "the graph or document store as it is now. A node or document "
+            "edited or removed since the serving answers for a different "
+            "row; a row that cannot be read is counted as unresolved, "
+            "neither removed nor kept."
+        ),
+    ]
+    if policy.min_distinct_words is not None:
+        notes.append(
+            "min_distinct_words counts distinct case-folded words as the "
+            "content floor does (a path or URL is one word; punctuation is "
+            "not a word), over the text cut to the default excerpt width. "
+            "Item types the content floor exempts are never withheld."
+        )
+    if class_prior_off:
+        notes.append(
+            'class prior is combined but its mode is "off" (or it has no '
+            "forms or axes), so it removes nothing here."
+        )
+    elif report.class_prior:
+        notes.append(
+            "class prior was judged as `analyze replay --class-prior` judges "
+            "it; run that alone for its parent-lookup counts."
+        )
+    if report.removed_by_several_rules:
+        notes.append(
+            f"{report.removed_by_several_rules} serving(s) are removed by more "
+            "than one rule and are counted once in `removed`."
+        )
+    if report.unresolved.items:
+        notes.append(
+            f"{report.unresolved.items} serving(s) could not be judged "
+            "(node or document unreadable now) and are in `unresolved`, not "
+            "in `removed`."
+        )
+    return notes
+
+
+def replay_substance(  # noqa: PLR0912, PLR0915 - one pass over the rows, one tally
+    event_log: EventLog,
+    *,
+    policy: ReplayPolicy,
+    days: int = 30,
+    limit: int = _DEFAULT_EVENT_LIMIT,
+    graph_store: GraphStore | None = None,
+    document_store: DocumentStore | None = None,
+    class_prior_config: ClassPriorConfig | None = None,
+) -> SubstanceReplayReport:
+    """Price the substance arms of ``policy`` over a window already served.
+
+    Args:
+        event_log: Operational log holding ``PACK_ASSEMBLED`` and
+            ``FEEDBACK_RECORDED``. Held-out packs and the feedback naming them
+            are dropped by the join, so the blind arm is never read.
+        policy: Sets ``entity_requires_description`` and/or
+            ``min_distinct_words``.
+        days: Look-back window.
+        limit: Per-event-type scan limit.
+        graph_store: Read for an entity's description and served text.
+        document_store: Read for a document's served text, and for a chunk's
+            parent under a chunk-scope ``class_prior_config``. A missing
+            store makes every serving that needs it unresolved.
+        class_prior_config: When given, the class-prior rule is judged beside
+            the substance arms and a serving both remove counts once.
+
+    Raises:
+        ValueError: ``policy`` sets no substance arm.
+    """
+    if not policy.has_substance_arms:
+        msg = "replay_substance needs entity_requires_description or min_distinct_words"
+        raise ValueError(msg)
+    class_prior_active = (
+        class_prior_config is not None
+        and class_prior_config.mode != "off"
+        and bool(class_prior_config.forms)
+        and bool(class_prior_config.axes)
+    )
+    since = datetime.now(tz=UTC) - timedelta(days=days)
+    feedback_events, pack_payloads, _ = join_pack_feedback(
+        event_log, since=since, limit=limit
+    )
+    flat_packs = {
+        pack_id: payload
+        for pack_id, payload in pack_payloads.items()
+        if has_served_rows(payload) and not is_sectioned_payload(payload)
+    }
+    verdicts = collect_pack_verdicts(feedback_events, flat_packs)
+    helpful_by_pack = verdicts["helpful"]
+    unhelpful_by_pack = verdicts["unhelpful"]
+    attributed = sorted(set(helpful_by_pack) | set(unhelpful_by_pack))
+
+    reader = _CurrentStateReader(graph_store, document_store)
+    parent_lookup = _ParentFormLookup(document_store)
+    served = _VerdictTally()
+    removed = _VerdictTally()
+    unresolved = _VerdictTally()
+    by_rule = {_RULE_ENTITY_DESCRIPTION: 0, _RULE_MIN_WORDS: 0, _RULE_CLASS_PRIOR: 0}
+    several = 0
+    unresolved_by_rule = {_RULE_ENTITY_DESCRIPTION: 0, _RULE_MIN_WORDS: 0}
+    exempt = 0
+
+    for pack_id in attributed:
+        payload = flat_packs[pack_id]
+        rows = [
+            s.row
+            for s in served_rows_from_payload(
+                pack_id, payload, include_sectioned=False, include_holdout=True
+            )
+            if s.item_id is not None
+        ]
+        helpful = helpful_by_pack.get(pack_id, set())
+        unhelpful = unhelpful_by_pack.get(pack_id, set())
+        class_removed: set[str] = set()
+        if class_prior_active and class_prior_config is not None:
+            _tally_class_prior_pack(
+                rows,
+                rejected_rows=[
+                    r
+                    for r in (payload.get("rejected_items") or [])
+                    if isinstance(r, Mapping)
+                ],
+                helpful=helpful,
+                unhelpful=unhelpful,
+                config=class_prior_config,
+                lookup=parent_lookup,
+                tally=_ClassPriorTally(),
+                removed_ids=class_removed,
+            )
+        seen: set[str] = set()
+        for row in rows:
+            item_id = row["item_id"]
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+            raw_tokens = row.get("estimated_tokens")
+            tokens = int(raw_tokens) if isinstance(raw_tokens, int | float) else 0
+            verdict = (
+                "helpful"
+                if item_id in helpful
+                else "unhelpful"
+                if item_id in unhelpful
+                else "unjudged"
+            )
+            raw_type = row.get("item_type")
+            item_type = raw_type if isinstance(raw_type, str) else ""
+            is_entity = item_type == _ENTITY_ITEM_TYPE
+            fired: list[str] = []
+            could_not_judge = False
+            if item_id in class_removed:
+                fired.append(_RULE_CLASS_PRIOR)
+            if policy.entity_requires_description and is_entity:
+                props = reader.node_properties(item_id)
+                if props is None:
+                    unresolved_by_rule[_RULE_ENTITY_DESCRIPTION] += 1
+                    could_not_judge = True
+                elif not _has_description(props):
+                    fired.append(_RULE_ENTITY_DESCRIPTION)
+            if policy.min_distinct_words is not None:
+                if item_type in DEFAULT_FLOOR_EXEMPT_ITEM_TYPES:
+                    exempt += 1
+                else:
+                    text: str | None
+                    if is_entity:
+                        props = reader.node_properties(item_id)
+                        text = None if props is None else _entity_served_text(props)
+                    else:
+                        text = reader.document_content(item_id)
+                    if text is None:
+                        unresolved_by_rule[_RULE_MIN_WORDS] += 1
+                        could_not_judge = True
+                    elif _served_word_count(text) < policy.min_distinct_words:
+                        fired.append(_RULE_MIN_WORDS)
+            served.add(verdict, tokens)
+            for rule in fired:
+                by_rule[rule] += 1
+            if len(fired) > 1:
+                several += 1
+            if fired:
+                removed.add(verdict, tokens)
+            elif could_not_judge:
+                unresolved.add(verdict, tokens)
+
+    report = SubstanceReplayReport(
+        window_days=days,
+        policy=policy.describe(),
+        class_prior=(
+            f"mode={class_prior_config.mode} forms="
+            f"{sorted(class_prior_config.forms)} axes="
+            f"{sorted(class_prior_config.axes)}"
+            if class_prior_config is not None
+            else ""
+        ),
+        attributed_packs=len(attributed),
+        judged_on={
+            rule: SUBSTANCE_BASIS_CURRENT_STATE
+            for rule, active in (
+                (_RULE_ENTITY_DESCRIPTION, policy.entity_requires_description),
+                (_RULE_MIN_WORDS, policy.min_distinct_words is not None),
+            )
+            if active
+        },
+        served=served.model(),
+        removed=removed.model(),
+        unresolved=unresolved.model(),
+        removed_by_entity_description=by_rule[_RULE_ENTITY_DESCRIPTION],
+        removed_by_min_distinct_words=by_rule[_RULE_MIN_WORDS],
+        removed_by_class_prior=by_rule[_RULE_CLASS_PRIOR],
+        removed_by_several_rules=several,
+        unresolved_entity_description=unresolved_by_rule[_RULE_ENTITY_DESCRIPTION],
+        unresolved_min_distinct_words=unresolved_by_rule[_RULE_MIN_WORDS],
+        exempt_from_min_distinct_words=exempt,
+    )
+    report.notes = _substance_notes(
+        policy=policy,
+        report=report,
+        class_prior_off=class_prior_config is not None and not class_prior_active,
+    )
+    logger.debug(
+        "pack_value_substance_replayed",
+        window_days=days,
+        policy=report.policy,
+        attributed_packs=report.attributed_packs,
+        removed_servings=report.removed.items,
     )
     return report
 
@@ -1751,12 +2267,16 @@ def replay_graph_selection(
 
 __all__ = [
     "EXCERPT_MAX_CHARS",
+    "SUBSTANCE_BASIS_CURRENT_STATE",
     "ClassPriorReplayReport",
     "GraphSelectionReplayReport",
     "ReplayArm",
     "ReplayPolicy",
     "ReplayReport",
+    "SubstanceReplayReport",
+    "SubstanceTally",
     "replay_class_prior",
     "replay_graph_selection",
     "replay_pack_value",
+    "replay_substance",
 ]

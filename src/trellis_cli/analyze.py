@@ -1116,7 +1116,7 @@ def _print_graph_selection_axis(cells: list[Any], *, minimum: int) -> None:
 
 
 @analyze_app.command("replay")
-def replay(
+def replay(  # noqa: PLR0912, PLR0915 - one flag per arm, dispatched here
     days: int = typer.Option(30, help="Days of history to replay"),
     excerpt_max_chars: int | None = typer.Option(
         None,
@@ -1153,6 +1153,26 @@ def replay(
             "actually configured to do; TRELLIS_CLASS_PRIOR_SCOPE="
             "parents_and_chunks prices the chunks of a form too, resolving "
             "each served chunk's parent through the document store."
+        ),
+    ),
+    entity_requires_description: bool = typer.Option(
+        False,
+        "--entity-requires-description",
+        help=(
+            "Substance arm: withhold every served graph entity whose stored "
+            "node has no (or only a blank) description. Removal-only; reads "
+            "the graph store as it is now, not as served. Combines with "
+            "--class-prior and --min-distinct-words."
+        ),
+    ),
+    min_distinct_words: int | None = typer.Option(
+        None,
+        "--min-distinct-words",
+        help=(
+            "Substance arm: withhold every served item whose text has fewer "
+            "than this many distinct words (the content floor's measure). "
+            "Removal-only; reads the graph and document stores as they are "
+            "now, not as served."
         ),
     ),
     graph_selection: str | None = typer.Option(
@@ -1200,7 +1220,16 @@ def replay(
     set) and re-runs each
     affected pack's token walk to say what the freed budget would admit; see
     ``trellis.retrieve.pack_replay.replay_graph_selection``. It cannot be
-    combined with ``--class-prior`` or the width options.
+    combined with ``--class-prior``, the substance arms or the width options.
+
+    ``--entity-requires-description`` and ``--min-distinct-words N`` price
+    withholding stubs: removal-only arms that report, per served
+    ``(pack, item)``, how many helpful, unhelpful and unjudged items and tokens
+    the cut removes. Neither predicate is recorded in PACK_ASSEMBLED, so both
+    read the graph / document stores as they are now and say so; a row that
+    cannot be read is counted ``unresolved``, never removed or kept. They
+    combine with each other and with ``--class-prior`` (a serving two rules
+    remove counts once), not with the width options.
 
     Examples::
 
@@ -1210,6 +1239,8 @@ def replay(
         trellis analyze replay --max-items 12
         trellis analyze replay --class-prior
         trellis analyze replay --graph-selection recency_window
+        trellis analyze replay --entity-requires-description
+        trellis analyze replay --min-distinct-words 5 --class-prior
     """
     if graph_selection is not None:
         refusal = _graph_selection_refusal(
@@ -1222,6 +1253,8 @@ def replay(
                     ("--body-items", body_items is not None),
                     ("--max-items", max_items is not None),
                     ("--no-refill", no_refill),
+                    ("--entity-requires-description", entity_requires_description),
+                    ("--min-distinct-words", min_distinct_words is not None),
                 )
                 if given
             ],
@@ -1237,6 +1270,34 @@ def replay(
             raise typer.Exit(code=2)
         _replay_graph_selection_command(
             graph_selection,
+            days=days,
+            output_format=output_format,
+            no_meta_trace=no_meta_trace,
+        )
+        return
+    if entity_requires_description or min_distinct_words is not None:
+        from trellis.retrieve.pack_replay import ReplayPolicy  # noqa: PLC0415
+
+        # The exit sits below the format branch, so a refused invocation
+        # exits 2 whatever ``--format`` says.
+        try:
+            substance_policy = ReplayPolicy(
+                excerpt_max_chars=excerpt_max_chars,
+                body_items=body_items,
+                max_items=max_items,
+                refill=not no_refill,
+                entity_requires_description=entity_requires_description,
+                min_distinct_words=min_distinct_words,
+            )
+        except ValueError as exc:
+            if output_format == "json":
+                emit_json({"status": "error", "message": str(exc)})
+            else:
+                console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
+            raise typer.Exit(code=2) from exc
+        _replay_substance_command(
+            substance_policy,
+            class_prior=class_prior,
             days=days,
             output_format=output_format,
             no_meta_trace=no_meta_trace,
@@ -1319,6 +1380,106 @@ def replay(
         return
 
     _render_replay(report)
+
+
+def _replay_substance_command(
+    policy: Any,
+    *,
+    class_prior: bool,
+    days: int,
+    output_format: str,
+    no_meta_trace: bool,
+) -> None:
+    """The substance arms of ``analyze replay``, once the policy is validated.
+
+    Only the stores a predicate needs are opened: the graph store for the
+    entity arms, the document store for the word arm and for a chunk-scope
+    class prior, so the invocation touches nothing it does not read.
+    """
+    from trellis.retrieve.class_prior import (  # noqa: PLC0415
+        PARENTS_AND_CHUNKS_SCOPE,
+        resolve_class_prior_config,
+    )
+    from trellis.retrieve.pack_replay import replay_substance  # noqa: PLC0415
+
+    event_log = get_event_log()
+    prior_config = (
+        resolve_class_prior_config(
+            settings=load_settings_values(_get_registry().stores_dir)
+        )
+        if class_prior
+        else None
+    )
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.replay-substance",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        knowledge = _get_registry().knowledge
+        needs_documents = policy.min_distinct_words is not None or (
+            prior_config is not None and prior_config.scope == PARENTS_AND_CHUNKS_SCOPE
+        )
+        report = replay_substance(
+            event_log,
+            policy=policy,
+            days=days,
+            graph_store=knowledge.graph_store,
+            document_store=knowledge.document_store if needs_documents else None,
+            class_prior_config=prior_config,
+        )
+        if _meta_record.enabled and report.attributed_packs > 0:
+            _meta_record.produced_finding(
+                f"pack-replay-substance-report-d{days}",
+                finding_type="SubstanceReplayReport",
+            )
+    if output_format == "json":
+        print(json.dumps(report.model_dump()))
+        return
+    _render_substance_replay(report)
+
+
+def _render_substance_replay(report: Any) -> None:
+    """Render a SubstanceReplayReport: counts only, never item text."""
+    console.print(
+        f"[bold]Substance Replay[/bold] (last {report.window_days} days, "
+        f"n={report.attributed_packs} attributed packs)"
+    )
+    console.print(f"  policy: [cyan]{escape(report.policy)}[/cyan]")
+    if report.class_prior:
+        console.print(f"  class prior: [cyan]{escape(report.class_prior)}[/cyan]")
+    for rule, basis in report.judged_on.items():
+        console.print(f"  {escape(rule)} judged on: [cyan]{escape(basis)}[/cyan]")
+    console.print()
+    for label, tally in (
+        ("served", report.served),
+        ("removed", report.removed),
+        ("unresolved", report.unresolved),
+    ):
+        console.print(
+            f"  [bold]{label:<10}[/bold] {tally.items:>5} servings "
+            f"{tally.tokens:>8,} tok   helpful {tally.helpful_items} "
+            f"({tally.helpful_tokens:,} tok)  unhelpful {tally.unhelpful_items} "
+            f"({tally.unhelpful_tokens:,} tok)  unjudged {tally.unjudged_items} "
+            f"({tally.unjudged_tokens:,} tok)"
+        )
+    console.print()
+    console.print(
+        f"  removed by entity_requires_description: "
+        f"{report.removed_by_entity_description}   "
+        f"min_distinct_words: {report.removed_by_min_distinct_words}   "
+        f"class_prior: {report.removed_by_class_prior}   "
+        f"(several: {report.removed_by_several_rules})"
+    )
+    console.print(
+        f"  unresolved by entity_requires_description: "
+        f"{report.unresolved_entity_description}   "
+        f"min_distinct_words: {report.unresolved_min_distinct_words}   "
+        f"exempt from min_distinct_words: {report.exempt_from_min_distinct_words}"
+    )
+    if report.notes:
+        console.print()
+        for note in report.notes:
+            console.print(f"  [dim]{escape(note)}[/dim]")
 
 
 def _graph_selection_refusal(

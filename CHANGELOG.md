@@ -6,6 +6,13 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`trellis analyze replay --entity-requires-description` and `--min-distinct-words N`: two
+  removal-only replay arms that price withholding title-only stubs.** Each reports served, removed
+  and `unresolved` servings and tokens, split helpful / unhelpful / unjudged per `(pack_id, item_id)`
+  like `--class-prior`, and combines with it. Neither predicate is recorded in `PACK_ASSEMBLED`, so
+  both are judged on the graph and document stores as they are now, and the report says so.
+  Replay only: serving is unchanged and a default `ReplayPolicy` replays byte-identically.
+
 - **`trellis analyze pack-judge`: an offline relevance judge for served pack items, and a
   calibration report against agent feedback (shadow only).** The judge phase (`--out`) asks a
   model, built through the `llm:` router as the new `pack_judge` consumer so any

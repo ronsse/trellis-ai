@@ -172,6 +172,16 @@ def _replay_bad_policy(tmp_path, monkeypatch):
     return args, "body_items must be >= 1", EXIT_VALIDATION
 
 
+def _replay_substance_bad_words(tmp_path, monkeypatch):
+    args = ["analyze", "replay", "--min-distinct-words", "0"]
+    return args, "min_distinct_words must be >= 1", EXIT_VALIDATION
+
+
+def _replay_substance_with_a_walk_lever(tmp_path, monkeypatch):
+    args = ["analyze", "replay", "--entity-requires-description", "--max-items", "5"]
+    return args, "removal-only", EXIT_VALIDATION
+
+
 def _worker_enrich_no_client(tmp_path, monkeypatch):
     _llm_unavailable(monkeypatch, worker_cli, sdk_missing=False)
     phrase = "worker enrich requires an LLM client but none is configured"
@@ -405,6 +415,8 @@ CASES: dict[str, Setup] = {
     "analyze-replay-graph-selection-conflict": _replay_graph_selection_conflict,
     "analyze-replay-graph-selection-unknown": _replay_graph_selection_unknown,
     "analyze-replay-bad-policy": _replay_bad_policy,
+    "analyze-replay-substance-bad-words": _replay_substance_bad_words,
+    "analyze-replay-substance-with-a-walk-lever": _replay_substance_with_a_walk_lever,
     "worker-enrich-no-llm-client": _worker_enrich_no_client,
     "worker-enrich-sdk-missing": _worker_enrich_sdk_missing,
     "worker-mine-precedents-no-llm-client": _worker_mine_no_client,
