@@ -185,9 +185,9 @@ REST_PACK_MAX_TOKENS_DEFAULT = 8000
 #: defaults are not restated here: they are owned by the modules whose
 #: behaviour they set (``trellis.retrieve.disclosure.DEFAULT_BODY_ITEMS``
 #: and ``trellis.retrieve.excerpts.EXCERPT_MAX_CHARS``, both also used as
-#: plain function/dataclass defaults elsewhere) and read lazily, because
-#: importing ``trellis.retrieve`` at module scope from here would cycle
-#: through ``trellis.classify.demotion_gate``, which imports this module.
+#: plain function/dataclass defaults elsewhere) and read lazily, so that
+#: importing this core module never loads ``trellis.retrieve``. No import
+#: cycle forces this today; it keeps the dependency pointing one way.
 BODY_ITEMS_ENV = "TRELLIS_DISCLOSURE_BODY_ITEMS"
 BODY_ITEMS_SETTING = "disclosure_body_items"
 EXCERPT_MAX_CHARS_ENV = "TRELLIS_EXCERPT_MAX_CHARS"
