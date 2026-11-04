@@ -18,6 +18,7 @@ from structlog.testing import capture_logs
 import trellis_api.app as app_module
 from tests.duplicate_trace import graph_state, synthetic_trace
 from tests.mined_precedents import emit_historical_miner_row, promote_through_executor
+from trellis.core import knobs
 from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.errors import StaleStoreWriteError, StoreError
 from trellis.retrieve.pack_builder import PackBuilder
@@ -4034,35 +4035,34 @@ class TestVectorsResetUnsupportedBackend:
 
 
 class TestResolveIntKnobWarningEventNames:
-    """Pins ``_resolve_int_knob``'s warning event names before any
-    refactor moves its body into a shared ``trellis.core.knobs`` helper.
-    Unlike its near-copies in ``capture_health``/``demotion_gate``, this
-    call site had no test naming ``retrieve_route.bad_env_int`` /
-    ``retrieve_route.bad_settings_int`` at all.
+    """Pins the ``retrieve_route.bad_env_int`` /
+    ``retrieve_route.bad_settings_int`` warning event names of the
+    ``POST /packs`` budget resolvers, which live in ``trellis.core.knobs``
+    and keep the event prefix they had in this route module.
     """
 
     def test_bad_env_value_logs_retrieve_route_bad_env_int(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv(retrieve._REST_PACK_MAX_ITEMS_ENV, "not-an-int")
+        monkeypatch.setenv(knobs.REST_PACK_MAX_ITEMS_ENV, "not-an-int")
 
         with capture_logs() as logs:
-            value = retrieve._resolve_rest_pack_max_items(None)
+            value = knobs.resolve_rest_pack_max_items(None)
 
         assert value == 50
         lines = [e for e in logs if e["event"] == "retrieve_route.bad_env_int"]
         assert len(lines) == 1
-        assert lines[0]["var"] == retrieve._REST_PACK_MAX_ITEMS_ENV
+        assert lines[0]["var"] == knobs.REST_PACK_MAX_ITEMS_ENV
         assert "value" not in lines[0]
 
     def test_bad_settings_value_logs_retrieve_route_bad_settings_int(self) -> None:
-        settings = {retrieve._REST_PACK_MAX_ITEMS_SETTING: "not-an-int"}
+        settings = {knobs.REST_PACK_MAX_ITEMS_SETTING: "not-an-int"}
 
         with capture_logs() as logs:
-            value = retrieve._resolve_rest_pack_max_items(settings)
+            value = knobs.resolve_rest_pack_max_items(settings)
 
         assert value == 50
         lines = [e for e in logs if e["event"] == "retrieve_route.bad_settings_int"]
         assert len(lines) == 1
-        assert lines[0]["setting"] == retrieve._REST_PACK_MAX_ITEMS_SETTING
+        assert lines[0]["setting"] == knobs.REST_PACK_MAX_ITEMS_SETTING
         assert "value" not in lines[0]

@@ -22,6 +22,7 @@ from tests.duplicate_trace import graph_state, synthetic_trace
 from tests.mined_precedents import emit_historical_miner_row, promote_through_executor
 from tests.structlog_isolation import clear_cached_logger_proxies
 from tests.unit.mcp.conftest import unwrap_tool
+from trellis.core import knobs
 from trellis.core.hashing import content_hash
 from trellis.core.write_config import MINHASH_SEED_MAX_DOCS_ENV
 from trellis.errors import ConfigError, StoreError
@@ -3601,11 +3602,9 @@ class TestServerInstructions:
 
 
 class TestResolveIntKnobWarningEventNames:
-    """Pins ``_resolve_int_knob``'s warning event names before any
-    refactor moves its body into a shared ``trellis.core.knobs`` helper.
-    Unlike its near-copies in ``capture_health``/``demotion_gate``, this
-    call site had no test naming ``mcp_server.bad_env_int`` /
-    ``mcp_server.bad_settings_int`` at all.
+    """Pins the ``mcp_server.bad_env_int`` / ``mcp_server.bad_settings_int``
+    warning event names of the MCP pack-size resolvers, which live in
+    ``trellis.core.knobs`` and keep the event prefix they had in this module.
     """
 
     @pytest.fixture
@@ -3627,25 +3626,25 @@ class TestResolveIntKnobWarningEventNames:
     def test_bad_env_value_logs_mcp_server_bad_env_int(
         self, monkeypatch: pytest.MonkeyPatch, logs: list[dict[str, Any]]
     ) -> None:
-        monkeypatch.setenv(server_mod._GET_CONTEXT_MAX_TOKENS_ENV, "not-an-int")
+        monkeypatch.setenv(knobs.GET_CONTEXT_MAX_TOKENS_ENV, "not-an-int")
 
-        value = server_mod._resolve_get_context_max_tokens(None)
+        value = knobs.resolve_get_context_max_tokens(None)
 
         assert value == 2000
         lines = [e for e in logs if e["event"] == "mcp_server.bad_env_int"]
         assert len(lines) == 1
-        assert lines[0]["var"] == server_mod._GET_CONTEXT_MAX_TOKENS_ENV
+        assert lines[0]["var"] == knobs.GET_CONTEXT_MAX_TOKENS_ENV
         assert "value" not in lines[0]
 
     def test_bad_settings_value_logs_mcp_server_bad_settings_int(
         self, logs: list[dict[str, Any]]
     ) -> None:
-        settings = {server_mod._GET_CONTEXT_MAX_TOKENS_SETTING: "not-an-int"}
+        settings = {knobs.GET_CONTEXT_MAX_TOKENS_SETTING: "not-an-int"}
 
-        value = server_mod._resolve_get_context_max_tokens(settings)
+        value = knobs.resolve_get_context_max_tokens(settings)
 
         assert value == 2000
         lines = [e for e in logs if e["event"] == "mcp_server.bad_settings_int"]
         assert len(lines) == 1
-        assert lines[0]["setting"] == server_mod._GET_CONTEXT_MAX_TOKENS_SETTING
+        assert lines[0]["setting"] == knobs.GET_CONTEXT_MAX_TOKENS_SETTING
         assert "value" not in lines[0]

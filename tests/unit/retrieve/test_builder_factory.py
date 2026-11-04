@@ -23,10 +23,14 @@ from tests.ast_rules import (
     calls_to_any,
     construction_names,
 )
+from trellis.core.knobs import (
+    BODY_ITEMS_ENV,
+    BODY_ITEMS_SETTING,
+    EXCERPT_MAX_CHARS_ENV,
+    resolve_body_items,
+)
 from trellis.ingest_corpus.models import chunk_doc_id
 from trellis.retrieve.builder_factory import (
-    BODY_ITEMS_ENV,
-    EXCERPT_MAX_CHARS_ENV,
     GRAPH_RECENCY_FALLBACK_ENV,
     GRAPH_SEEDING_ENV,
     SEMANTIC_AXIS_NOTES,
@@ -1145,11 +1149,10 @@ def test_every_surface_label_reaches_the_advisory_loader(
 
 
 class TestResolveIntKnobWarningEventNames:
-    """Pins ``_resolve_int_knob``'s warning event names before any
-    refactor moves its body into a shared ``trellis.core.knobs`` helper.
-    Unlike its near-copies in ``capture_health``/``demotion_gate``, this
-    call site had no test naming ``builder_factory.bad_env_int`` /
-    ``builder_factory.bad_settings_int`` at all.
+    """Pins the ``builder_factory.bad_env_int`` /
+    ``builder_factory.bad_settings_int`` warning event names of the
+    disclosure/excerpt resolvers, which live in ``trellis.core.knobs`` and
+    keep the event prefix they had in this module.
     """
 
     def test_bad_env_value_logs_builder_factory_bad_env_int(
@@ -1157,12 +1160,10 @@ class TestResolveIntKnobWarningEventNames:
     ) -> None:
         from structlog.testing import capture_logs
 
-        import trellis.retrieve.builder_factory as factory_mod
-
         monkeypatch.setenv(BODY_ITEMS_ENV, "not-an-int")
 
         with capture_logs() as logs:
-            value = factory_mod._resolve_body_items(None)
+            value = resolve_body_items(None)
 
         assert value == DEFAULT_BODY_ITEMS
         lines = [e for e in logs if e["event"] == "builder_factory.bad_env_int"]
@@ -1173,15 +1174,13 @@ class TestResolveIntKnobWarningEventNames:
     def test_bad_settings_value_logs_builder_factory_bad_settings_int(self) -> None:
         from structlog.testing import capture_logs
 
-        import trellis.retrieve.builder_factory as factory_mod
-
-        settings = {factory_mod.BODY_ITEMS_SETTING: "not-an-int"}
+        settings = {BODY_ITEMS_SETTING: "not-an-int"}
 
         with capture_logs() as logs:
-            value = factory_mod._resolve_body_items(settings)
+            value = resolve_body_items(settings)
 
         assert value == DEFAULT_BODY_ITEMS
         lines = [e for e in logs if e["event"] == "builder_factory.bad_settings_int"]
         assert len(lines) == 1
-        assert lines[0]["setting"] == factory_mod.BODY_ITEMS_SETTING
+        assert lines[0]["setting"] == BODY_ITEMS_SETTING
         assert "value" not in lines[0]
