@@ -4,6 +4,25 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **One typed reader for a pack's served rows and for a feedback row.**
+  `trellis.feedback.pack_rows` reads `PACK_ASSEMBLED.injected_items[]`
+  (`iter_served_rows`, `served_rows_from_payload`, `has_served_rows`, yielding
+  `ServedRow`) and both `FEEDBACK_RECORDED` families (`feedback_row`,
+  `iter_feedback_rows`, yielding `FeedbackRow`; the governed family's attribution
+  fields are empty, never invented). The two policies every hand-written reader had
+  to decide, whether to skip a sectioned pack and whether to drop a held-out one, are
+  required keyword arguments with no default. Pack telemetry, the learning join, the
+  precedent evidence gate, the judged-outcome serving index, pack-value, pack replay,
+  write-health and the explore route's attributable test now read through it. Reader
+  side only: every migrated caller states the policy it already had, so no output
+  changes for a payload the writers emit, and serving is untouched. A payload from
+  outside the writers can differ in one narrow way: a value of the wrong type in a
+  typed field (a non-string `strategy_source`, say) reads as absent rather than being
+  passed through. `tests/unit/test_injected_items_reader_rule.py` fails on a new
+  hand-written read of `injected_items` outside a short allowlist.
+
 ## [0.10.1] - 2026-11-04
 
 0.10.0 was tagged but never published: its release build failed type-checking on
@@ -1191,23 +1210,6 @@ Python 3.12. 0.10.1 is 0.10.0 plus the fixes below.
   archives.
 
 ### Changed
-
-- **One typed reader for a pack's served rows and for a feedback row.**
-  `trellis.feedback.pack_rows` reads `PACK_ASSEMBLED.injected_items[]`
-  (`iter_served_rows`, `served_rows_from_payload`, `has_served_rows`, yielding
-  `ServedRow`) and both `FEEDBACK_RECORDED` families (`feedback_row`,
-  `iter_feedback_rows`, yielding `FeedbackRow`; the governed family's attribution
-  fields are empty, never invented). The two policies every hand-written reader had
-  to decide, whether to skip a sectioned pack and whether to drop a held-out one, are
-  required keyword arguments with no default. Pack telemetry, the learning join, the
-  precedent evidence gate, the judged-outcome serving index, pack-value, pack replay,
-  write-health and the explore route's attributable test now read through it. Reader
-  side only: every migrated caller states the policy it already had, so no output
-  changes for a payload the writers emit, and serving is untouched. A payload from
-  outside the writers can differ in one narrow way: a value of the wrong type in a
-  typed field (a non-string `strategy_source`, say) reads as absent rather than being
-  passed through. `tests/unit/test_injected_items_reader_rule.py` fails on a new
-  hand-written read of `injected_items` outside a short allowlist.
 
 - **BREAKING: `trellis admin list-proposals` (a `--limit` below 1, reached by a
   direct call of the command body) and `trellis admin show-proposal` (a blank or
