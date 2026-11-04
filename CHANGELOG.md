@@ -6,6 +6,17 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`trellis analyze replay --entity-requires-description` and `--min-distinct-words N`: two
+  removal-only replay arms that price withholding title-only stubs.** Each reports served, removed
+  and `unresolved` servings and tokens, split helpful / unhelpful / unjudged per `(pack_id, item_id)`
+  like `--class-prior`, and combines with it. Neither predicate is recorded in `PACK_ASSEMBLED`, so
+  the stores answer: a graph entity is judged as served, its node read from the graph's version
+  history at the pack's `occurred_at` (a stub that gained a description later is still a stub, and a
+  node hard-deleted or minted after the serving is `unresolved`), while the word arm reads a document
+  as it is now, since the document store keeps no history. The report's `judged_on` and notes say
+  which; a scan that hit its limit says so too. A refusal names the CLI flags. Replay only: serving
+  is unchanged and a default `ReplayPolicy` replays byte-identically.
+
 - **`analyze value` reports implicit signals and disclosure tiers, report-only.** An `implicit` block adds items fetched through `get_items` (joined by pack and item, every unjoined fetch counted by reason), the fetched-and-unjudged tokens, P(helpful | fetched) beside the base rate (withheld below 30 fetched-and-graded servings) and packs re-retrieved in the same session within 30 minutes, a weak pack-level hint. A `by_tier` block splits served tokens into `body`, `pointer` and `unknown`, read from what the pack recorded and never inferred from rank. Neither feeds the useful-token fraction, `analyze trend` or any demotion path; every existing field is unchanged. Also in `GET /api/v1/analyze/value`.
 - **`trellis analyze pack-judge`: an offline relevance judge for served pack items, and a
   calibration report against agent feedback (shadow only).** The judge phase (`--out`) asks a

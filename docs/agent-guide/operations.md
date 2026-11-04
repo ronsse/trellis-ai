@@ -4134,6 +4134,78 @@ or the graph row is truncated. The route is `GET /api/v1/analyze/trend` with
 `weeks`, `until` and `limit` query params (admin scope, 60 s cache like every
 report), and the same payload as `--format json`.
 
+### `trellis analyze replay`
+
+Read-only counterfactual over the window's already-served packs: the same
+`PACK_ASSEMBLED` and `FEEDBACK_RECORDED` events priced under a different serving
+policy. Nothing it prints changes what any pack serves, and a held-out pack, with
+the feedback naming it, reaches no count in any arm. The width arms
+(`--excerpt-max-chars`, `--body-items`, `--max-items`, `--no-refill`) re-run the
+budget walk; `--class-prior` and `--graph-selection` are removal-only and count
+servings per `(pack_id, item_id)`. The `PACK_ASSEMBLED` table rows for
+`injected_items[]` and `budget_trace[]` describe what each reads.
+
+```bash
+trellis analyze replay --entity-requires-description [--class-prior] [--days N] [--format text|json]
+trellis analyze replay --min-distinct-words N [--entity-requires-description] [--class-prior]
+```
+
+**Substance arms.** Two removal-only arms price withholding title-only stubs:
+
+| Option | Withholds a served item when |
+|--------|------------------------------|
+| `--entity-requires-description` | it is a graph entity (`item_type` `entity`) whose node, as it was when the pack was served, has no `description`, or only a blank one |
+| `--min-distinct-words N` | its served text has fewer than `N` distinct words (`N` >= 1) |
+
+Each reports what `--class-prior` reports: `served`, `removed` and `unresolved`
+tallies of servings and tokens, split into helpful, unhelpful and unjudged items
+by the pack's feedback (an item cited both ways is helpful), plus which rule
+removed what and how many servings two rules both removed (counted once). They
+combine with each other and with `--class-prior`; they refuse to combine with the
+width arms or `--graph-selection` (exit `2`, JSON `{"status": "error", ...}`, the
+same for every `--format`, and the message names the flags, e.g. `--max-items`),
+because a removal arm that also re-ranked would not
+be one. `tokens` are gross, not a repriced pack: replay does not say which
+candidate the freed budget would have admitted.
+
+**As served or current state.** Neither predicate is recorded in `PACK_ASSEMBLED`:
+`injected_items[]` carries no description flag and no served text (the event
+holds only a content hash), so the stores answer, on two bases that the report
+names (`judged_on`, and a note repeats them):
+
+* **Graph entities are judged as served.** The graph keeps SCD history, so each
+  node is read at the pack's own `PACK_ASSEMBLED.occurred_at`
+  (`GraphStore.get_node(..., as_of=...)`, a method every built-in graph backend
+  implements and the graph contract suite pins). A stub that gained a description
+  after it was served is judged as the stub it was, and counts as removed. A node
+  with no version at that time, because it was minted afterwards or hard-deleted
+  (`delete_node` purges every version), is `unresolved`.
+* **Documents are judged on current state.** The document store keeps no history,
+  so the word arm reads a document's `content` as it is now. A document edited
+  since the serving answers for a different row; one removed since is
+  `unresolved`.
+
+| Predicate | `judged_on` key | Basis | Reads |
+|-----------|-----------------|-------|-------|
+| `--entity-requires-description` | `entity_requires_description` | `as_served` | the graph node's `description` property at the pack's time: `None`, empty and whitespace-only all count as none; `name`, `title` and `comment` do not rescue it |
+| `--min-distinct-words N` | `min_distinct_words.entity` | `as_served` | an entity's served text at the pack's time (its `description`, else `name`, else `title`, mirroring the graph strategy) |
+| `--min-distinct-words N` | `min_distinct_words.document` | `current_state` | the document's `content`, for any other item |
+
+When the `PACK_ASSEMBLED` or `FEEDBACK_RECORDED` read hit its scan limit (5000
+events per type), the report says so in a note, with the point where its evidence
+begins: the oldest events fell outside every count.
+
+The word count is the content floor's (`count_substance_words`) over the text cut
+at the default excerpt width: case-folded, so `Alpha alpha ALPHA` is one word;
+punctuation is not part of a word; a path or URL is one unit; CJK and Thai
+characters count one each. An `observation` is exempt from the word arm, as it is
+from the floor, and is counted under `exempt_from_min_distinct_words`.
+
+A serving whose store row cannot be read (the node has no version at the serving
+time, the document is gone, the store is unavailable or raises) is counted under `unresolved`, with
+`unresolved_entity_description` / `unresolved_min_distinct_words` per rule. It is
+never counted as removed or kept. The output names counts only, never item text.
+
 ### `trellis analyze holdout`
 
 Read-only analysis of the pack holdout experiment (`TRELLIS_PACK_HOLDOUT_RATE`,
