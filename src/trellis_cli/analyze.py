@@ -1153,6 +1153,11 @@ def _print_tier_axis(cells: list[Any], *, minimum: int) -> None:
     console.print(table)
 
 
+def _pct1(value: float | None) -> str:
+    """One-decimal percent, or a dash for a ratio that has no value."""
+    return "-" if value is None else f"{value:.1%}"
+
+
 def _print_implicit_block(implicit: Any) -> None:
     """Render the report-only implicit signals, apart from the headline.
 
@@ -1180,7 +1185,7 @@ def _print_implicit_block(implicit: Any) -> None:
         console.print(
             f"    fetched tokens: {implicit.fetched_tokens:,} of "
             f"{implicit.injected_tokens:,} injected "
-            f"({implicit.fetched_token_fraction or 0.0:.1%}, "
+            f"({_pct1(implicit.fetched_token_fraction)}, "
             f"n={implicit.packs} pack(s))"
         )
     console.print(
@@ -1207,8 +1212,8 @@ def _print_implicit_block(implicit: Any) -> None:
         )
     else:
         console.print(
-            f"    P(helpful | fetched) {implicit.p_helpful_given_fetched or 0.0:.1%}"
-            f" vs P(helpful) {implicit.p_helpful or 0.0:.1%} [dim]({counts})[/dim]"
+            f"    P(helpful | fetched) {_pct1(implicit.p_helpful_given_fetched)}"
+            f" vs P(helpful) {_pct1(implicit.p_helpful)} [dim]({counts})[/dim]"
         )
     console.print(
         f"    re-retrieved packs: {implicit.re_retrieved_packs} of "

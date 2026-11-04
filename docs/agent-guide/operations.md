@@ -3882,6 +3882,9 @@ into that fraction, and no existing field changes when they are present.
   injected token in the window's flat packs, which is a wider population than the
   headline's attributed packs) say how much was fetched, and `fetched_unjudged_tokens`
   how much of that nobody graded: the part of the unjudged tail this signal reaches.
+  `fetched_unjudged_token_share` is that over `unjudged_tokens`, which also counts
+  every token of every flat pack nobody graded, so it is not a share of the
+  headline's unjudged tokens and reads far lower than one would be.
   A fetch that cannot join is counted, never dropped: `fetch_unjoined` is the sum of
   `fetch_unjoined_no_pack`, `fetch_unjoined_pack_not_in_window` (a pack outside the
   window, or a held-out one) and `fetch_unjoined_item_not_served`. The fetch
@@ -3895,7 +3898,8 @@ into that fraction, and no existing field changes when they are present.
   `PACK_ASSEMBLED` in the same `session_id` within
   `re_retrieval_window_minutes` (30, inclusive; `RE_RETRIEVAL_WINDOW_MINUTES` in
   `trellis.retrieve.pack_value`). A pack with no `session_id` cannot be tested and is
-  counted apart in `packs_without_session`. This is a weak, pack-level hint: a
+  counted apart in `packs_without_session`. `get_lessons` rows are not context
+  retrievals and are in neither count. This is a weak, pack-level hint: a
   second retrieval may mean the first was not enough, or that the task changed.
 
 **`by_tier`** splits injected, helpful, unhelpful and unjudged tokens and item counts
@@ -3904,8 +3908,10 @@ the payload and never inferred from rank. A row is a `pointer` when its
 `selection_reason` is `disclosure_pointer` or its pack has `index_mode: true`. It
 is a `body` when the pack recorded that graduated disclosure ran (`disclosure.mode`)
 with no index mode and the row carries no pointer stamp. Otherwise it is `unknown`:
-a pack from before `disclosure` was recorded, or a sectioned pack, whose payload
-has neither key. Pointers still count as served tokens, so `by_tier` shows how much
+a pack from before `disclosure` was recorded, or a sectioned or `get_lessons` pack,
+whose payload has neither key. Sectioned and `get_lessons` rows are bodies by
+construction (neither path applies disclosure), so a large `unknown` bucket from
+them is unrecorded, not ambiguous, serving. Pointers still count as served tokens, so `by_tier` shows how much
 of the unjudged tail is pointers.
 
 A held-out pack is in none of this: every `PACK_ASSEMBLED` read goes through

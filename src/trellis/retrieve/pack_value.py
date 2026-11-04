@@ -152,6 +152,7 @@ from trellis.feedback.pack_rows import (
 )
 from trellis.learning.pack_observations import join_pack_events_with_coverage
 from trellis.retrieve.disclosure import POINTER_SELECTION_REASON, DisclosureMode
+from trellis.retrieve.lessons_pack import GET_LESSONS_SURFACE
 from trellis.retrieve.strategies import (
     GRAPH_SELECTION_CALLER_SEEDED,
     GRAPH_SELECTION_RECENCY_WINDOW,
@@ -167,6 +168,7 @@ from trellis.stores.base.event_log import (
     resolve_scan_window,
     scan_events,
 )
+from trellis.stores.base.trace import as_utc
 
 if TYPE_CHECKING:
     from trellis.stores.base.event_log import Event, EventLog
@@ -1256,14 +1258,22 @@ def _count_re_retrieved(pack_events: Iterable[Event]) -> tuple[int, int, int]:
     A pack is re-retrieved when the next pack in its ``session_id``, by
     ``occurred_at``, follows within :data:`RE_RETRIEVAL_WINDOW_MINUTES`
     (inclusive). A pack with no usable ``session_id`` cannot be tested.
+    ``get_lessons`` rows are not context retrievals and are left out, as
+    neither a pack nor a "next" pack. A stored stamp can be naive or aware,
+    so each is read as UTC before it is sorted or subtracted.
     """
     window = timedelta(minutes=RE_RETRIEVAL_WINDOW_MINUTES)
     by_session: dict[str, list[tuple[datetime, str]]] = defaultdict(list)
     without = 0
     for event in pack_events:
-        session = (event.payload or {}).get("session_id")
+        payload = event.payload or {}
+        if payload.get("surface") == GET_LESSONS_SURFACE:
+            continue
+        session = payload.get("session_id")
         if isinstance(session, str) and session.strip():
-            by_session[session.strip()].append((event.occurred_at, event.event_id))
+            by_session[session.strip()].append(
+                (as_utc(event.occurred_at), event.event_id)
+            )
         else:
             without += 1
     re_retrieved = 0
@@ -1393,14 +1403,13 @@ def _implicit_signals(
         notes=_implicit_notes(
             fetch_scan=fetch_scan,
             overlap=len(overlap),
-            re_retrieved=re_retrieved,
             without_session=without_session,
         ),
     )
 
 
 def _implicit_notes(
-    *, fetch_scan: ScanCoverage, overlap: int, re_retrieved: int, without_session: int
+    *, fetch_scan: ScanCoverage, overlap: int, without_session: int
 ) -> list[str]:
     """Caveats for the ``implicit`` block, in both output formats."""
     notes = [
@@ -1409,6 +1418,11 @@ def _implicit_notes(
             "useful_token_fraction. A fetch is a positive hint about one item; "
             "the absence of a fetch is no evidence it was unhelpful, so none of "
             "this is demotion evidence."
+        ),
+        (
+            "fetched_token_fraction and fetched_unjudged_token_share count over "
+            "every flat pack in the window, graded or not, so they are not "
+            "shares of the headline's attributed-pack tokens."
         ),
         (
             "re_retrieved_packs is a weak, pack-level signal: another pack in "
@@ -1423,7 +1437,7 @@ def _implicit_notes(
             f"Agreement withheld: {overlap} fetched-and-graded serving(s) is "
             f"below the {MIN_FETCH_OVERLAP}-serving floor."
         )
-    if without_session and re_retrieved == 0:
+    if without_session:
         notes.append(
             f"{without_session} pack(s) carry no session_id and cannot be "
             "tested for re-retrieval."

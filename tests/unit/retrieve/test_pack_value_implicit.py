@@ -36,8 +36,10 @@ from tests.ast_rules import assert_hand_read_floor, iter_modules
 from tests.unit.retrieve.test_pack_value import _FakeEventLog
 from trellis.retrieve import pack_value
 from trellis.retrieve.disclosure import POINTER_SELECTION_REASON
+from trellis.retrieve.lessons_pack import GET_LESSONS_SURFACE
 from trellis.retrieve.pack_value import MIN_ATTRIBUTED_PACKS, summarize_pack_value
 from trellis.stores.base.event_log import Event, EventType
+from trellis.stores.sqlite.event_log import SQLiteEventLog
 
 _T0 = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
 _SINCE = _T0 - timedelta(days=1)
@@ -445,6 +447,55 @@ def test_re_retrieval_measures_to_the_next_pack_not_any_later_one() -> None:
             session="s",
         )
     assert _report(chain).implicit.re_retrieved_packs == 2  # the last has no successor
+
+
+def test_a_session_mixing_naive_and_aware_stamps_is_read_as_utc(
+    tmp_path: Path,
+) -> None:
+    """SQLite hands a stamp back as it was appended, naive or aware.
+
+    Sorting the two together raised, and the whole report with it. A naive
+    stamp is read as UTC, so the pair five minutes apart is one re-retrieval.
+    """
+    log = SQLiteEventLog(tmp_path / "events.db")
+    first = datetime.now(UTC) - timedelta(hours=2)
+    _pack(log, "tz1", [("tz1_a", 10)], at=first, session="s")
+    _pack(
+        log,
+        "tz2",
+        [("tz2_a", 10)],
+        at=(first + timedelta(minutes=5)).replace(tzinfo=None),
+        session="s",
+    )
+    stamps = {e.occurred_at.tzinfo is None for e in log.get_events(limit=10)}
+    assert stamps == {True, False}  # the store really returned the mix
+
+    implicit = summarize_pack_value(log, days=1).implicit
+    assert (implicit.re_retrieved_packs, implicit.packs_with_session) == (1, 2)
+
+
+def test_get_lessons_rows_are_neither_a_pack_nor_a_next_pack() -> None:
+    log = _FakeEventLog()
+    _pack(log, "g1", [("g1_a", 10)], at=_T0, session="s")
+    _put(
+        log,
+        EventType.PACK_ASSEMBLED,
+        {"surface": GET_LESSONS_SURFACE, "injected_items": [], "session_id": "s"},
+        at=_T0 + timedelta(minutes=1),
+        entity_id="lessons1",
+        entity_type="pack",
+    )
+    _put(
+        log,
+        EventType.PACK_ASSEMBLED,
+        {"surface": GET_LESSONS_SURFACE, "injected_items": []},
+        at=_T0 + timedelta(minutes=2),
+        entity_id="lessons2",
+        entity_type="pack",
+    )
+    implicit = _report(log).implicit
+    assert implicit.re_retrieved_packs == 0
+    assert (implicit.packs_with_session, implicit.packs_without_session) == (1, 0)
 
 
 # ---------------------------------------------------------------------------
