@@ -7,6 +7,9 @@ on:
 
 jobs:
   typecheck:
+    # Branch protection requires a check named exactly `typecheck`; the 3.11
+    # leg keeps that name so the matrix does not orphan the required check.
+    name: ${{ matrix.python-version == '3.11' && 'typecheck' || format('typecheck ({0})', matrix.python-version) }}
     runs-on: ubuntu-latest
     # The release workflow type-checks every supported Python, and each one can
     # resolve a different numpy whose stubs disagree; checking only 3.11 here let
