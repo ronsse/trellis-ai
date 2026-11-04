@@ -1585,6 +1585,17 @@ Creates entities for models, seeds, snapshots, sources, and tests. Creates `depe
 
 An input that cannot be read or parsed as JSON exits `2`, and a typed store or configuration error exits by the exit-code map (e.g. a damaged `policies.json`, `5`). `nodes` and `edges` count only writes that succeeded. When every write is refused or fails, the command exits by the map for the first one (`3` for a policy refusal, `2` for any other refusal, `5` for a failure) with `"status": "error"` and its `message` beside the counts; descriptions are still indexed, so `documents` can be non-zero. A batch that wrote anything exits `0`.
 
+### `trellis extract refresh --type unity-catalog`
+
+Extract a Databricks Unity Catalog export into the graph, through the same `MutationExecutor` path as the dbt and OpenLineage extractors.
+
+```bash
+trellis extract refresh --type unity-catalog --path <export-file-or-dir> [--format text|json]
+trellis extract refresh --source <name>          # sources.yaml entry with type: unity-catalog
+```
+
+`--path` is one JSON file (a document, an array, or one object per line) or a directory, whose `*.json` files are read in name order. The accepted documents are the catalogs, schemas and tables list responses, `system.access.table_lineage` / `column_lineage` rows and a lineage-tracking response; see [Recipe 5](source-modeling-cookbook.md#recipe-5-unity-catalog-databricks-metadata). A file that is not valid JSON, is empty, or holds nothing recognisable is refused with `{"status": "error", "message": ...}` (JSON) or a red line (text), naming the path and a position and never the content, and exits `1` on both formats. The output is the `extract refresh` summary: `new_entities`, `changed_entities`, `unchanged_entities` and the per-entity diffs, so a second run on an unchanged export reports every entity unchanged. The `system` catalogs are left out; the CLI has no flag to include them (`UnityCatalogExtractor(include_system=True)` in Python does). There is no `ingest unity-catalog` command.
+
 ### `trellis ingest openlineage`
 
 Import OpenLineage events into the knowledge graph.

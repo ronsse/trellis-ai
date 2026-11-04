@@ -149,7 +149,7 @@ If two distinct entities can collide in your derivation (e.g., temp tables acros
 
 ## Plugin registration via entry points
 
-Core ships `JSONRulesExtractor`; `trellis_workers.extract` ships `DbtManifestExtractor` and `OpenLineageExtractor`. Third-party extractors register themselves via Python entry points in `pyproject.toml`:
+Core ships `JSONRulesExtractor`; `trellis_workers.extract` ships `DbtManifestExtractor`, `OpenLineageExtractor` and `UnityCatalogExtractor`. Third-party extractors register themselves via Python entry points in `pyproject.toml`:
 
 ```toml
 [project.entry-points."trellis.extractors"]
@@ -404,4 +404,4 @@ See [`src/trellis/extract/json_rules.py`](../../src/trellis/extract/json_rules.p
 - [freshness-and-curation.md](freshness-and-curation.md) — how `trellis extract refresh` re-runs an extractor and diffs the result
 - [`src/trellis/extract/base.py`](../../src/trellis/extract/base.py) — the Protocol definition
 - [`src/trellis/extract/dispatcher.py`](../../src/trellis/extract/dispatcher.py) — routing + tier priority
-- [`src/trellis_workers/extract/dbt_manifest.py`](../../src/trellis_workers/extract/dbt_manifest.py) and [`openlineage.py`](../../src/trellis_workers/extract/openlineage.py) — reference implementations
+- [`src/trellis_workers/extract/dbt_manifest.py`](../../src/trellis_workers/extract/dbt_manifest.py) and [`openlineage.py`](../../src/trellis_workers/extract/openlineage.py) — reference implementations (and [`unity_catalog.py`](../../src/trellis_workers/extract/unity_catalog.py), whose identity matches OpenLineage's so two extractors share one node; see [the cookbook's Recipe 5](source-modeling-cookbook.md))
