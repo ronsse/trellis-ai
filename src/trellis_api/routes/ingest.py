@@ -35,13 +35,14 @@ from trellis.mutate.commands import (
     CommandStatus,
     Operation,
 )
+from trellis.ops.write_health import record_trace_coercion
 from trellis.retrieve.embed_ingest_hook import VECTOR_METADATA_EXCERPT_CHARS
 from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.retrieve.lifecycle import EVIDENCE_REF_KEY
 from trellis.retrieve.strategies import DEFAULT_IMPORTANCE_DECAY_THRESHOLD
 from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.schemas.evidence import Evidence
-from trellis.schemas.trace import Trace
+from trellis.schemas.trace_repair import validate_trace_payload
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
 from trellis_api.routes._principal import (
@@ -95,7 +96,7 @@ def ingest_trace(
 ) -> IngestResponse:
     """Ingest a trace through the governed mutation pipeline."""
     try:
-        trace = Trace.model_validate(body)
+        trace, repairs = validate_trace_payload(body)
     except Exception as exc:
         raise HTTPException(
             status_code=422,
@@ -128,6 +129,15 @@ def ingest_trace(
         raise HTTPException(
             status_code=409, detail=sanitize_error_message(result.message)
         )
+
+    # One health row for a trace the boundary repaired (advisory, wrapped
+    # whole inside: the write has already landed).
+    record_trace_coercion(
+        registry,
+        tool="api:ingest-trace",
+        repairs=repairs,
+        trace_id=result.created_id or trace.trace_id,
+    )
 
     # Feature-flagged post-ingest trace->graph extraction
     # (TRELLIS_ENABLE_TRACE_EXTRACTION=1). Runs after the trace is durably

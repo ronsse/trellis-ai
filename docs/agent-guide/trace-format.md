@@ -370,6 +370,28 @@ Output on validation error:
 | `duration_ms` as string | `Input should be a valid integer` | Use integer, not string |
 | `rating` outside expected range | No schema error, but meaningless | Use 0.0 to 1.0 by convention |
 
+### Repairs the server applies
+
+Two mistakes are common enough that the write boundary repairs them rather than rejecting the
+whole trace. Send the canonical shape anyway: a repaired write is accepted, and the reply says
+what was repaired.
+
+| You sent | Stored as |
+|----------|-----------|
+| `steps[i].result` as a string, e.g. `"ran 12 tests"` | `{"summary": "ran 12 tests"}` |
+| `context.repo` | `metadata["repo"]` (top-level `metadata`, not `context`) |
+
+- **Only a string `result` is repaired.** A number, list or `null` still rejects.
+- **`context.repo` is not moved over a different value.** If `metadata.repo` already exists
+  with another value, or `metadata` is not an object, the trace rejects as it always did.
+- **Nothing else is repaired**, and a trace that still has another error is rejected for that
+  error alone, with its usual path. `extra="forbid"` is unchanged.
+- **It is visible.** MCP `save_experience` and `trellis ingest trace` add one line to the
+  success reply (`repaired 2 fields (...); next time ...`); `trellis ingest trace --format json`
+  adds a `repairs` list of `{path, rule}` items. Every surface, `POST /api/v1/traces` included,
+  emits one `write.coerced` event per repaired write (surface, repair list, trace id, no
+  content), and `trellis analyze health` counts them per rule beside rejections.
+
 ### Minimum Valid Trace
 
 The absolute minimum valid trace JSON:
