@@ -10,7 +10,7 @@
 - [`../../src/trellis/extract/dispatcher.py`](../../src/trellis/extract/dispatcher.py) — Routes extractors, emits `EXTRACTION_DISPATCHED` and `EXTRACTOR_FALLBACK`.
 - [`../../src/trellis/extract/commands.py`](../../src/trellis/extract/commands.py) — `result_to_batch()`, the draft → Command conversion.
 - [`../../src/trellis/mutate/executor.py`](../../src/trellis/mutate/executor.py) — 5-stage governed pipeline; uniform `MUTATION_REJECTED { reason }` on rejection.
-- [`../../src/trellis/mutate/handlers.py`](../../src/trellis/mutate/handlers.py) — `LinkCreateHandler` already does FK validation; `EntityCreateHandler` defers to graph store role validation.
+- [`../../src/trellis/mutate/handlers/`](../../src/trellis/mutate/handlers/) — `LinkCreateHandler` already does FK validation; `EntityCreateHandler` defers to graph store role validation.
 - [`../../src/trellis/schemas/extraction.py`](../../src/trellis/schemas/extraction.py) — `EntityDraft`, `EdgeDraft`, `ExtractionResult.unparsed_residue`.
 - [`../../src/trellis/retrieve/pack_builder.py`](../../src/trellis/retrieve/pack_builder.py) — Assembly-time `RejectedItem` shape and `_build_filters()`.
 - [`../../TODO.md`](../archive/TODO.md) — Logic Gap 1.3.
@@ -35,7 +35,7 @@ The audit's framing — "no downstream validator" — is true at the *extraction
 
 **At the Command boundary (`mutate/executor.py`).** Stage 1 (validate) checks `OperationRegistry` schemas — currently *required-keys-present* only (`commands.py:149-160`). For `ENTITY_CREATE` that's `{entity_type, name}`; for `LINK_CREATE` it's `{source_id, target_id, edge_kind}`. Missing args fire `MUTATION_REJECTED { reason="validate" }`. This is **field-presence only** — it does not look at semantic shape (e.g., "entity has no provenance"), and it operates per-Command, not on the whole `ExtractionResult`.
 
-**At the handler boundary (`mutate/handlers.py`).** `LinkCreateHandler._resolve_endpoints()` does pre-flight FK validation against the graph store and raises `ValidationError` if either endpoint is missing (escape hatch: `allow_dangling=True` for cross-batch edges). `EntityCreateHandler` defers role-vs-`generation_spec` validation to the graph store via `validate_node_role_args` (called inside `upsert_node`). Both surface as `MUTATION_REJECTED { reason="validate" }` from the executor's perspective when the handler raises — *but* per swarm2 B-8 the unified `_emit_rejection()` only fires from the three named stages. **Handler-raised `ValidationError` currently routes through `_emit()` with `MUTATION_REJECTED` and *no* `reason` field** (executor.py:172-182). That asymmetry matters for §4.
+**At the handler boundary (`mutate/handlers/`).** `LinkCreateHandler._resolve_endpoints()` does pre-flight FK validation against the graph store and raises `ValidationError` if either endpoint is missing (escape hatch: `allow_dangling=True` for cross-batch edges). `EntityCreateHandler` defers role-vs-`generation_spec` validation to the graph store via `validate_node_role_args` (called inside `upsert_node`). Both surface as `MUTATION_REJECTED { reason="validate" }` from the executor's perspective when the handler raises — *but* per swarm2 B-8 the unified `_emit_rejection()` only fires from the three named stages. **Handler-raised `ValidationError` currently routes through `_emit()` with `MUTATION_REJECTED` and *no* `reason` field** (executor.py:172-182). That asymmetry matters for §4.
 
 **At the assembly boundary (`retrieve/pack_builder.py`).** `_build_filters()` already excludes `signal_quality:noise` by default and supports tag-based filters. `RejectedItem { item_id, item_type, relevance_score, reason, strategy_source }` is the shape for assembly-time rejections — `dedup`, `semantic_dedup`, `structural_filter`, `session_dedup`, `max_items`, `token_budget`. *No existing rejection reason names "malformed source data".*
 
@@ -239,7 +239,7 @@ src/trellis/extract/telemetry.py           MODIFIED — add analyze_extraction_v
 src/trellis/extract/__init__.py            MODIFIED — re-export
 src/trellis/stores/base/event_log.py       MODIFIED — add EXTRACTION_REJECTED EventType
 src/trellis/mutate/executor.py             MODIFIED — route handler ValidationError through _emit_rejection
-src/trellis/mutate/handlers.py             MODIFIED — LinkCreateHandler raises with structured reason
+src/trellis/mutate/handlers/             MODIFIED — LinkCreateHandler raises with structured reason
 tests/unit/extract/test_validators.py      NEW
 tests/unit/extract/test_dispatcher.py      EXTENDED — validator integration
 tests/unit/extract/test_telemetry.py       EXTENDED — analyze_extraction_validation

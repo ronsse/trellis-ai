@@ -26,7 +26,7 @@ here demotes unattended out of the box.
 
 Every ``precedent.demote`` this module submits is stamped with
 :data:`~trellis.mutate.handlers.AUTO_DEMOTE_REQUESTED_BY` — imported from
-``trellis.mutate.handlers`` rather than re-minted here (lazily, inside
+``trellis.mutate.handlers.precedent`` rather than re-minted here (lazily, inside
 :func:`run_precedent_auto_demotion` itself, to avoid a module-level
 import cycle through ``trellis.core.settings_registry`` — see that
 function's own docstring), so
@@ -728,7 +728,10 @@ def run_precedent_auto_demotion(
             ``executor`` was given.
     """
     if requested_by is None:
-        from trellis.mutate.handlers import (  # noqa: PLC0415
+        # From the defining submodule, not the façade: the immutable-core
+        # rule resolves this constant one hop through a module file, and a
+        # package ``__init__`` re-export would hide its value from that hop.
+        from trellis.mutate.handlers.precedent import (  # noqa: PLC0415
             AUTO_DEMOTE_REQUESTED_BY,
         )
 

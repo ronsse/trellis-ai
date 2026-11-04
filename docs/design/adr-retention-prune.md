@@ -6,7 +6,7 @@
 **Related:**
 - [ronsse/trellis-ai#312](https://github.com/ronsse/trellis-ai/issues/312) — the handler-or-retire disposition this ADR answers; sourced from the claude-mem comparison audit (2026-08-19, TODO.md §"claude-mem comparison audit — steal-list")
 - [`../../src/trellis/mutate/commands.py`](../../src/trellis/mutate/commands.py) — `Operation.RETENTION_PRUNE` enum verb, registered with an empty required-args schema and **no handler**
-- [`../../src/trellis/mutate/handlers.py`](../../src/trellis/mutate/handlers.py) — `RedactionApplyHandler` (#302), the governance template Option A is modeled on
+- [`../../src/trellis/mutate/handlers/`](../../src/trellis/mutate/handlers/) — `RedactionApplyHandler` (#302), the governance template Option A is modeled on
 - [`../../src/trellis/schemas/classification.py`](../../src/trellis/schemas/classification.py) — `Lifecycle` staleness states (candidate-set input); `ContentTags.signal_quality`
 - `src/trellis_workers/maintenance/retention.py` (since removed) — orphaned `RetentionWorker` / `StalenessDetector` (266 lines; `KEEP — VALIDATE` in the orphan audit)
 - [`./audit-trellis-workers-orphan-decision-frames.md`](./audit-trellis-workers-orphan-decision-frames.md) — the orphan audit's decision frame for that module
