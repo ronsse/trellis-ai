@@ -28,7 +28,7 @@ from trellis.analyze.holdout_gate import HOLDOUT_READOUT_AFTER_ENV
 from trellis.stores.registry import StoreRegistry
 from trellis_api.routes import analyze
 
-HORIZON = datetime(2026, 12, 23, tzinfo=UTC)
+HORIZON = datetime(2031, 3, 11, tzinfo=UTC)
 BEFORE = HORIZON - timedelta(seconds=1)
 URL = "/api/v1/analyze/holdout"
 PARAMS = {

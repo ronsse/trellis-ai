@@ -5,11 +5,11 @@ gate is :func:`trellis.analyze.holdout_gate.require_readout_open`, and a gate
 only holds if nothing can reach the outcome around it. Five facts, each pinned
 below by a scan of ``src/``:
 
-1. **The population.** Only two public functions in ``holdout.py`` take an
-   ``event_log``, the only way to reach a stored outcome. One is the outcome
-   read, one the operational read. A third one fails here until a person
-   classifies it. (The module's other public functions, ``weighted_difference``
-   and the like, take numbers the caller already holds and read no store.)
+1. **The population.** Every public function in ``holdout.py`` is classified
+   by hand: the outcome read, the operational read, or pure arithmetic over
+   numbers the caller already holds (``weighted_difference`` and the like). A
+   new public function fails here until a person classifies it, whatever its
+   parameters are called, and only the two reads may take an ``event_log``.
 2. **The only door.** Nothing outside ``holdout.py`` and ``holdout_gate.py``
    names the outcome function; the surfaces name ``analyze_holdout_gated``.
 3. **The roster of surfaces.** The modules that import the holdout analysis
@@ -43,10 +43,24 @@ GATE = Path("trellis/analyze/holdout_gate.py")
 ROUTES = Path("trellis_api/routes/analyze.py")
 CLI = Path("trellis_cli/analyze.py")
 
-#: Public ``holdout.py`` functions that take an ``event_log``, hand-read.
-EVENT_LOG_READERS = {
+#: Every public module-level ``holdout.py`` function, hand-read. ``pure`` ones
+#: take numbers the caller already holds and read no store.
+PUBLIC_FUNCTIONS = {
     "analyze_holdout": "outcome",
     "analyze_holdout_operational": "operational",
+    "weighted_difference": "pure",
+    "permute_within_strata": "pure",
+    "permutation_p_value": "pure",
+    "bootstrap_ci": "pure",
+    "simulate_power": "pure",
+    "binomial_two_sided": "pure",
+    "analytic_mde": "pure",
+    "share_for_rate": "pure",
+    "n_for_mde": "pure",
+}
+#: The public functions that take an ``event_log``: the two reads.
+EVENT_LOG_READERS = {
+    name: kind for name, kind in PUBLIC_FUNCTIONS.items() if kind != "pure"
 }
 OUTCOME_ENTRY = "analyze_holdout"
 GATED_ENTRY = "analyze_holdout_gated"
@@ -79,14 +93,21 @@ def _calls(node: ast.AST, name: str) -> list[ast.Call]:
     ]
 
 
+def _public_functions(
+    modules: dict[Path, ast.Module],
+) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    return [
+        node
+        for node in modules[HOLDOUT].body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and not node.name.startswith("_")
+    ]
+
+
 def _readers(modules: dict[Path, ast.Module]) -> dict[str, str]:
     """Public module-level ``holdout.py`` functions taking ``event_log``."""
     found: dict[str, str] = {}
-    for node in modules[HOLDOUT].body:
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if node.name.startswith("_"):
-            continue
+    for node in _public_functions(modules):
         params = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
         if any(arg.arg == "event_log" for arg in params):
             found[node.name] = "unclassified"
@@ -94,7 +115,15 @@ def _readers(modules: dict[Path, ast.Module]) -> dict[str, str]:
 
 
 def unclassified_readers(modules: dict[Path, ast.Module]) -> list[str]:
-    return sorted(set(_readers(modules)) ^ set(EVENT_LOG_READERS))
+    """A public function nobody classified, or an ``event_log`` reader that is
+    not one of the two reads.
+
+    The first half is what catches a new outcome read whose store parameter is
+    named something other than ``event_log``.
+    """
+    public = {node.name for node in _public_functions(modules)}
+    unlisted = public - set(PUBLIC_FUNCTIONS)
+    return sorted(unlisted | (set(_readers(modules)) ^ set(EVENT_LOG_READERS)))
 
 
 def bypasses(modules: dict[Path, ast.Module]) -> list[str]:
@@ -115,6 +144,13 @@ def bypasses(modules: dict[Path, ast.Module]) -> list[str]:
             )
             if named:
                 out.append(f"{path}:{getattr(node, 'lineno', 0)} names {OUTCOME_ENTRY}")
+            # ``functools.wraps`` exposes the ungated function as ``__wrapped__``.
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr == "__wrapped__"
+                and name_of(node.value) == GATED_ENTRY
+            ):
+                out.append(f"{path}:{node.lineno} unwraps {GATED_ENTRY}")
             if (
                 isinstance(node, ast.ImportFrom)
                 and node.module == ANALYSIS_MODULES[0]
@@ -366,6 +402,9 @@ def weighted_difference(values):
 
 _THIRD_READER = "def analyze_holdout_by_week(event_log, *, days=60):\n    return None\n"
 
+#: A new outcome read whose store parameter is not named ``event_log``.
+_RENAMED_READER = "\n\ndef analyze_holdout_weekly(log, *, days=60):\n    return None\n"
+
 _GATE_GOOD = """
 from trellis.analyze.holdout import analyze_holdout
 
@@ -500,6 +539,10 @@ from trellis.analyze.holdout_gate import analyze_holdout_gated
 
 def holdout_tool():
     return analyze_holdout_gated(None)
+
+
+def holdout_tool_unwrapped():
+    return analyze_holdout_gated.__wrapped__(None)
 """
 
 
@@ -534,7 +577,7 @@ def test_the_scans_name_every_defect_in_a_synthetic_tree(tmp_path: Path) -> None
     modules = _tree(
         tmp_path,
         {
-            HOLDOUT: _HOLDOUT_SRC,
+            HOLDOUT: _HOLDOUT_SRC + _RENAMED_READER,
             GATE: _GATE_BAD,
             ROUTES: _ROUTES_BAD,
             CLI: _CLI_BAD_ALIAS,
@@ -542,8 +585,12 @@ def test_the_scans_name_every_defect_in_a_synthetic_tree(tmp_path: Path) -> None
         },
     )
 
-    # A third public reader nobody classified.
-    assert unclassified_readers(modules) == ["analyze_holdout_by_week"]
+    # A third public reader nobody classified, and one whose store parameter
+    # has another name.
+    assert unclassified_readers(modules) == [
+        "analyze_holdout_by_week",
+        "analyze_holdout_weekly",
+    ]
 
     # The direct import, the aliased import, the attribute and the string spelling
     # in the CLI module, the import in the routes module, and the private import.
@@ -551,6 +598,7 @@ def test_the_scans_name_every_defect_in_a_synthetic_tree(tmp_path: Path) -> None
     assert sum(1 for line in found if line.startswith(f"{CLI}:")) >= 4
     assert any(line.startswith(f"{ROUTES}:") for line in found)
     assert any("private holdout name" in line for line in found)
+    assert any(f"unwraps {GATED_ENTRY}" in line for line in found)
 
     # A module that imports the analysis but is not on the roster (an MCP tool).
     assert unlisted_surfaces(modules) == ["trellis/mcp/holdout_tool.py"]

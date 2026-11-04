@@ -41,7 +41,7 @@ from trellis.errors import (
 )
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 
-HORIZON = datetime(2026, 12, 23, tzinfo=UTC)
+HORIZON = datetime(2031, 3, 11, tzinfo=UTC)
 FAST = {"permutations": 99, "bootstraps": 50, "power_sims": 5}
 
 
@@ -65,13 +65,13 @@ def test_unset_or_blank_seals_nothing() -> None:
 def test_a_read_before_the_horizon_is_refused_and_names_only_the_horizon() -> None:
     with pytest.raises(HoldoutReadoutSealedError) as raised:
         require_readout_open(
-            HORIZON - timedelta(seconds=1), env=_env("2026-12-23T00:00:00Z")
+            HORIZON - timedelta(seconds=1), env=_env("2031-03-11T00:00:00Z")
         )
 
     exc = raised.value
     assert exc.horizon == HORIZON
     assert exc.message == (
-        "The holdout outcome readout is sealed until 2026-12-23T00:00:00+00:00 "
+        "The holdout outcome readout is sealed until 2031-03-11T00:00:00+00:00 "
         f"({HOLDOUT_READOUT_AFTER_ENV}). `{OPERATIONAL_HINT}` shows whether "
         "the experiment is running without reading an outcome."
     )
@@ -80,7 +80,7 @@ def test_a_read_before_the_horizon_is_refused_and_names_only_the_horizon() -> No
 
 
 def test_the_horizon_instant_itself_is_open() -> None:
-    env = _env("2026-12-23")
+    env = _env("2031-03-11")
     with pytest.raises(HoldoutReadoutSealedError):
         require_readout_open(HORIZON - timedelta(microseconds=1), env=env)
     require_readout_open(HORIZON, env=env)
@@ -90,11 +90,11 @@ def test_the_horizon_instant_itself_is_open() -> None:
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        ("2026-12-23", datetime(2026, 12, 23, tzinfo=UTC)),
-        ("2026-12-23T08:30:00", datetime(2026, 12, 23, 8, 30, tzinfo=UTC)),
-        ("2026-12-23T08:30:00Z", datetime(2026, 12, 23, 8, 30, tzinfo=UTC)),
-        ("  2026-12-23T08:30:00+00:00 ", datetime(2026, 12, 23, 8, 30, tzinfo=UTC)),
-        ("2026-12-23T08:30:00-05:00", datetime(2026, 12, 23, 13, 30, tzinfo=UTC)),
+        ("2031-03-11", datetime(2031, 3, 11, tzinfo=UTC)),
+        ("2031-03-11T08:30:00", datetime(2031, 3, 11, 8, 30, tzinfo=UTC)),
+        ("2031-03-11T08:30:00Z", datetime(2031, 3, 11, 8, 30, tzinfo=UTC)),
+        ("  2031-03-11T08:30:00+00:00 ", datetime(2031, 3, 11, 8, 30, tzinfo=UTC)),
+        ("2031-03-11T08:30:00-05:00", datetime(2031, 3, 11, 13, 30, tzinfo=UTC)),
     ],
 )
 def test_the_horizon_is_read_as_utc(raw: str, expected: datetime) -> None:
@@ -102,13 +102,13 @@ def test_the_horizon_is_read_as_utc(raw: str, expected: datetime) -> None:
 
 
 def test_a_naive_now_is_read_as_utc_and_an_offset_now_is_converted() -> None:
-    env = _env("2026-12-23T12:00:00Z")
+    env = _env("2031-03-11T12:00:00Z")
     with pytest.raises(HoldoutReadoutSealedError):
-        require_readout_open(datetime.fromisoformat("2026-12-23T11:59:00"), env=env)
-    require_readout_open(datetime.fromisoformat("2026-12-23T12:00:00"), env=env)
+        require_readout_open(datetime.fromisoformat("2031-03-11T11:59:00"), env=env)
+    require_readout_open(datetime.fromisoformat("2031-03-11T12:00:00"), env=env)
     # 07:30-05:00 is 12:30Z: open, though the wall clock reads earlier.
     require_readout_open(
-        datetime(2026, 12, 23, 7, 30, tzinfo=timezone(timedelta(hours=-5))), env=env
+        datetime(2031, 3, 11, 7, 30, tzinfo=timezone(timedelta(hours=-5))), env=env
     )
 
 
@@ -137,9 +137,9 @@ def test_the_gate_reads_the_process_environment_by_default(
 ) -> None:
     monkeypatch.delenv(HOLDOUT_READOUT_AFTER_ENV, raising=False)
     require_readout_open(datetime(2000, 1, 1, tzinfo=UTC))
-    monkeypatch.setenv(HOLDOUT_READOUT_AFTER_ENV, "2026-12-23")
+    monkeypatch.setenv(HOLDOUT_READOUT_AFTER_ENV, "2031-03-11")
     with pytest.raises(HoldoutReadoutSealedError):
-        require_readout_open(datetime(2026, 12, 22, tzinfo=UTC))
+        require_readout_open(datetime(2031, 3, 10, tzinfo=UTC))
 
 
 def test_the_gated_entry_reads_the_clock_and_keeps_the_signature(

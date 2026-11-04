@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
 runner = CliRunner()
 
-HORIZON = datetime(2026, 12, 23, tzinfo=UTC)
+HORIZON = datetime(2031, 3, 11, tzinfo=UTC)
 BEFORE = HORIZON - timedelta(seconds=1)
 WINDOW = ["--until", UNTIL.isoformat(), "--days", "60", "--rate", "0.2"]
 FAST = ["--permutations", "99", "--bootstraps", "50", "--power-sims", "5"]
