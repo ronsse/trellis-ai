@@ -40,13 +40,13 @@ import json
 import re
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
 from enum import Enum
 from types import UnionType
-from typing import Any, Literal, Union, get_args, get_origin
+from typing import TYPE_CHECKING, Any, Literal, Union, get_args, get_origin
 
 import structlog
 from pydantic import BaseModel, Field, ValidationError
@@ -81,6 +81,7 @@ from trellis.ops.serving_builds import (
 )
 from trellis.schemas.enums import TraceSource
 from trellis.schemas.trace import Outcome, Trace, TraceStep
+from trellis.schemas.trace_repair import TraceRepair
 from trellis.stores.base.event_log import (
     DEFAULT_SCAN_LIMIT,
     Event,
@@ -90,6 +91,9 @@ from trellis.stores.base.event_log import (
     merge_coverage,
     scan_events,
 )
+
+if TYPE_CHECKING:
+    from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
 
@@ -1102,6 +1106,48 @@ def record_write_noop(
         logger.warning("write_health.noop_emit_failed", tool=tool, exc_info=True)
 
 
+def record_trace_coercion(
+    registry: StoreRegistry,
+    *,
+    tool: str,
+    repairs: Sequence[TraceRepair],
+    trace_id: str,
+) -> None:
+    """Emit ``WRITE_COERCED``: ``tool`` accepted a trace after repairing it.
+
+    ``tool`` names the surface the way the other ``write.*`` events do: a bare
+    tool name for an MCP tool (``save_experience``), a colon-prefixed label
+    for the rest (``api:ingest-trace``, ``cli:ingest-trace``). The event's
+    ``source`` is :func:`surface_label` of it, the string the accepted
+    write's ``requested_by`` carries, so a coercion and its
+    ``MUTATION_EXECUTED`` join per surface. The payload is the surface, the
+    repair list (a schema path and a closed rule name each, never a value) and
+    the accepted trace id.
+
+    Called after the write succeeded, and an advisory step: wrapped whole,
+    registry lookup included, because one escaped exception here would fail a
+    write that already landed (the ``resolve_stamp_staleness`` rule). A repair
+    list with nothing in it emits nothing.
+    """
+    if not repairs:
+        return
+    try:
+        event_log = registry.operational.event_log
+        event_log.emit(
+            EventType.WRITE_COERCED,
+            surface_label(tool),
+            payload={
+                "tool": tool,
+                "repairs": [
+                    {"path": str(r["path"]), "rule": str(r["rule"])} for r in repairs
+                ],
+                "trace_id": trace_id,
+            },
+        )
+    except Exception:
+        logger.warning("write_health.coerced_emit_failed", tool=tool, exc_info=True)
+
+
 class ToolWriteStats(TrellisModel):
     """Accept/reject counts for one write surface (``mcp:<tool>``).
 
@@ -1130,6 +1176,15 @@ class ToolWriteStats(TrellisModel):
     executor_rejected: int = 0
     executor_rejected_by_operation: dict[str, int] = Field(default_factory=dict)
     noop: int = 0
+    #: Accepted calls whose payload was repaired at the boundary
+    #: (``WRITE_COERCED``), already inside ``accepted``: a coerced write was
+    #: stored, so it is neither a rejection nor an extra attempt. Broken down
+    #: by rule in ``coerced_by_rule``.
+    coerced: int = 0
+    coerced_by_rule: dict[str, int] = Field(default_factory=dict)
+    #: ``coerced`` over this surface's call-level attempts
+    #: (:func:`_call_attempts`); ``None`` when nothing was coerced.
+    coercion_rate: float | None = None
 
     @property
     def attempts(self) -> int:
@@ -1206,6 +1261,14 @@ class WriteHealthReport(TrellisModel):
     noop: int = 0
     attempts: int
     rejection_rate: float
+    #: Accepted calls repaired at the boundary (``WRITE_COERCED``), counted
+    #: beside ``accepted`` and not in ``boundary_rejected``: the repair is what
+    #: turned a would-be rejection into a stored write. Per rule in
+    #: ``coerced_by_rule``; ``coercion_rate`` is ``coerced / attempts``.
+    #: Windows written before the event existed read zero.
+    coerced: int = 0
+    coerced_by_rule: dict[str, int] = Field(default_factory=dict)
+    coercion_rate: float = 0.0
     by_tool: dict[str, ToolWriteStats] = Field(default_factory=dict)
     #: Counts error **elements**, not attempts: one rejected call listing
     #: eight bad steps adds eight to ``steps[].result``. Read
@@ -1659,6 +1722,43 @@ def _recovery_report(
     )
 
 
+def _tally_coercions(
+    events: Iterable[Event], stats: Callable[[str], ToolWriteStats]
+) -> dict[str, int]:
+    """Count ``WRITE_COERCED`` events per surface; return the per-rule totals.
+
+    A rule repeated inside one call counts once for that rule, so a rule's
+    count is calls repaired and never exceeds ``coerced``. A row whose
+    ``repairs`` is malformed still counts as a coerced call and names no rule:
+    one bad event must not fail health.
+    """
+    by_rule: dict[str, int] = {}
+    for event in events:
+        tool_stats = stats(surface_label(str(event.payload.get("tool") or "")))
+        tool_stats.coerced += 1
+        raw = event.payload.get("repairs")
+        rules = {
+            row["rule"]
+            for row in (raw if isinstance(raw, list) else ())
+            if isinstance(row, dict) and isinstance(row.get("rule"), str)
+        }
+        for rule in rules:
+            tool_stats.coerced_by_rule[rule] = (
+                tool_stats.coerced_by_rule.get(rule, 0) + 1
+            )
+            by_rule[rule] = by_rule.get(rule, 0) + 1
+    return by_rule
+
+
+def _rate_coercions(by_tool: Mapping[str, ToolWriteStats]) -> int:
+    """Set each surface's ``coercion_rate``; return the coerced calls in total."""
+    for surface, tool_stats in by_tool.items():
+        call_attempts = _call_attempts(surface, tool_stats)
+        if tool_stats.coerced and call_attempts:
+            tool_stats.coercion_rate = round(tool_stats.coerced / call_attempts, 4)
+    return sum(s.coerced for s in by_tool.values())
+
+
 def summarize_write_health(
     event_log: EventLog,
     *,
@@ -1721,6 +1821,11 @@ def summarize_write_health(
     for event in noop_scan.events:
         stats(surface_label(str(event.payload.get("tool") or ""))).noop += 1
 
+    coerced_scan = scan_events(
+        event_log, event_type=EventType.WRITE_COERCED, since=since, limit=limit
+    )
+    coerced_by_rule = _tally_coercions(coerced_scan.events, stats)
+
     executor_reasons: dict[str, int] = {}
     rejected_scan = scan_events(
         event_log, event_type=EventType.MUTATION_REJECTED, since=since, limit=limit
@@ -1750,6 +1855,7 @@ def summarize_write_health(
     executor_rejected = sum(s.executor_rejected for s in by_tool.values())
     attempts = accepted + noop + boundary_rejected + executor_rejected
     rate = (boundary_rejected + executor_rejected) / attempts if attempts else 0.0
+    coerced = _rate_coercions(by_tool)
 
     repeated = _repeated_collisions(boundary.collision_attempts, by_tool)
     recovery = _recovery_report(
@@ -1763,6 +1869,7 @@ def summarize_write_health(
         accepted_scan.coverage,
         feedback_scan.coverage,
         noop_scan.coverage,
+        coerced_scan.coverage,
         rejected_scan.coverage,
         boundary_scan.coverage,
         recovered_scan.coverage,
@@ -1803,6 +1910,9 @@ def summarize_write_health(
         noop=noop,
         attempts=attempts,
         rejection_rate=round(rate, 4),
+        coerced=coerced,
+        coerced_by_rule=coerced_by_rule,
+        coercion_rate=round(coerced / attempts, 4) if attempts else 0.0,
         by_tool=by_tool,
         boundary_kinds=boundary.kinds,
         executor_reasons=executor_reasons,

@@ -55,7 +55,11 @@ from trellis.mutate.commands import (
 from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
 from trellis.schemas.evidence import Evidence
 from trellis.schemas.extraction import ExtractionResult
-from trellis.schemas.trace import Trace
+from trellis.schemas.trace_repair import (
+    TraceRepair,
+    describe_repairs,
+    validate_trace_payload,
+)
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.exit_codes import (
     EXIT_VALIDATION,
@@ -125,6 +129,12 @@ ingest_app.command("corpus")(ingest_corpus)
 ingest_app.command("conversations")(ingest_conversations)
 
 
+def _print_repairs(repairs: list[TraceRepair]) -> None:
+    """Say what the boundary repaired in an accepted trace; nothing if nothing."""
+    if repairs:
+        console.print(f"  {describe_repairs(repairs)}", markup=False)
+
+
 @ingest_app.command("trace")
 def ingest_trace(
     file: str = typer.Argument(None, help="Path to trace JSON file, or '-' for stdin"),
@@ -141,7 +151,7 @@ def ingest_trace(
     try:
         raw = sys.stdin.read() if path is None else path.read_text()
         data = json.loads(raw)
-        trace = Trace.model_validate(data)
+        trace, repairs = validate_trace_payload(data)
     except Exception as exc:
         if output_format == "json":
             emit_json(sanitized_error_payload(exc))
@@ -183,6 +193,18 @@ def ingest_trace(
             )
         raise typer.Exit(code=refusal_exit_code(result))
 
+    # One health row for a trace the boundary repaired (advisory, wrapped
+    # whole inside: the write has already landed). Imported here, not at module
+    # level, so every other ``trellis`` command does not pay for write_health.
+    from trellis.ops.write_health import record_trace_coercion  # noqa: PLC0415
+
+    record_trace_coercion(
+        registry,
+        tool="cli:ingest-trace",
+        repairs=repairs,
+        trace_id=result.created_id or trace.trace_id,
+    )
+
     # Feature-flagged post-ingest trace->graph extraction
     # (TRELLIS_ENABLE_TRACE_EXTRACTION=1). Runs the deterministic
     # TraceExtractor through the governed MutationExecutor, and not when the
@@ -203,6 +225,7 @@ def ingest_trace(
             "intent": trace.intent,
             "already_ingested": already_ingested,
         }
+        payload.update({"repairs": list(repairs)} if repairs else {})
         if extraction is not None:
             payload["extraction"] = extraction
         emit_json(payload)
@@ -213,6 +236,7 @@ def ingest_trace(
         console.print("  Traces are immutable: nothing was stored or extracted.")
     else:
         console.print(f"[green]Trace ingested[/green]: {escape(trace.trace_id)}")
+        _print_repairs(repairs)
         console.print(f"  Source: {trace.source}")
         console.print(f"  Intent: {trace.intent}", markup=False, highlight=False)
         if extraction is not None and extraction.get("executed"):

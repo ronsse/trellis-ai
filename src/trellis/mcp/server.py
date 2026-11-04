@@ -155,7 +155,11 @@ from trellis.ops.memory_extraction_health import (
     STATE_UNAVAILABLE,
     emit_memory_extraction_state,
 )
-from trellis.ops.write_health import NoopReason, RejectionRecoveryTracker
+from trellis.ops.write_health import (
+    NoopReason,
+    RejectionRecoveryTracker,
+    record_trace_coercion,
+)
 from trellis.retrieve.builder_factory import (
     AxisReport,
     build_pack_builder,
@@ -200,6 +204,7 @@ from trellis.schemas.classification import (
 from trellis.schemas.memory_op import REF_TYPE_DOCUMENT
 from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
+from trellis.schemas.trace_repair import describe_repairs, validate_trace_json
 from trellis.stores.base.document import DocumentStore
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
@@ -2006,7 +2011,7 @@ def save_experience(trace_json: str) -> str:
         )
 
     try:
-        trace = Trace.model_validate_json(trace_json)
+        trace, repairs = validate_trace_json(trace_json)
     except Exception as exc:
         from trellis.ops.write_health import (  # noqa: PLC0415
             classify_rejection,
@@ -2057,12 +2062,22 @@ def save_experience(trace_json: str) -> str:
                 "message": _result_message(result),
             },
         )
+    # One health row for a trace the boundary repaired, so a repaired write
+    # is neither silent nor counted as a rejection. Advisory: wrapped whole
+    # inside, because the write has already landed.
+    record_trace_coercion(
+        registry,
+        tool="save_experience",
+        repairs=repairs,
+        trace_id=result.created_id or trace.trace_id,
+    )
+    repaired_note = f" | {describe_repairs(repairs)}" if repairs else ""
     if already_ingested:
         # A duplicate's agent and artifacts would land on the stored
         # trace's node, so it is not extracted either.
         return (
             f"Trace already ingested: {result.created_id}; "
-            "this submission was not stored or extracted."
+            f"this submission was not stored or extracted.{repaired_note}"
         )
 
     # Feature-flagged post-ingest trace->graph extraction
@@ -2071,7 +2086,7 @@ def save_experience(trace_json: str) -> str:
     # is durably stored. Fail-soft inside the hook -- never blocks the save.
     run_trace_extraction(registry, trace, requested_by="mcp:save_experience")
 
-    return f"Trace saved: {result.created_id}"
+    return f"Trace saved: {result.created_id}{repaired_note}"
 
 
 # ---------------------------------------------------------------------------
