@@ -25,6 +25,7 @@ the ceiling: which public rows are in reach is a function of public rows alone.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
@@ -674,3 +675,48 @@ class TestThePublicCeilingIsAFunctionOfPublicRows:
         assert none["search"]
         assert none["documents"]
         assert none["pack"]
+
+
+class TestTheTwoTiedPublicDocumentsAreRankedByAStampNoStallCloses:
+    """``pub-drain`` and ``pub-promote`` score alike on every axis but recency.
+
+    Every world holds both, and the payload comparisons above read their order.
+    Ranked by the row write clock, the order is a race: each row reads
+    ``datetime.now()`` for itself, so a scoring loop that stalls for longer
+    than the few milliseconds between the two writes ranks them the other way,
+    in one world and not the next (about one run in six, before ``seed_public``
+    stamped them a day apart). A clock that advances between reads is that stall
+    made certain.
+    """
+
+    @pytest.mark.parametrize("call", ["pack", "sectioned"])
+    def test_a_slow_scoring_loop_does_not_reorder_them(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        call: str,
+    ) -> None:
+        start = datetime.now(UTC)
+
+        class SteppingClock(datetime):
+            reads = 0
+
+            @classmethod
+            def now(cls, _tz: Any = None) -> datetime:
+                cls.reads += 1
+                return start + timedelta(minutes=30) * cls.reads
+
+        monkeypatch.setattr("trellis.retrieve.strategies.datetime", SteppingClock)
+        out = _capture(
+            tmp_path,
+            monkeypatch,
+            lambda reg: None,
+            ["read", "external"],
+            walk=False,
+            calls={call: CALLS[call]},
+        )
+        body = out[call]["body"]
+        items = body["items"] if call == "pack" else body["sections"][0]["items"]
+        ids = [item["item_id"] for item in items]
+        assert SteppingClock.reads, "the patched clock was never read"
+        assert ids.index("pub-promote") < ids.index("pub-drain")
