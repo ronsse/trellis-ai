@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import structlog
 import typer
@@ -24,7 +24,7 @@ from trellis.analyze.graph_shape import (
     analyze_graph_shape,
 )
 from trellis.core.vector_metadata import resolve_vector_store
-from trellis.errors import StoreWriteRefusedError
+from trellis.errors import HoldoutReadoutSealedError, StoreWriteRefusedError
 from trellis.extract.telemetry import analyze_extractor_fallbacks
 from trellis.learning import (
     LEARNING_ARTIFACTS_DIR_ENV,
@@ -85,7 +85,12 @@ from trellis.stores.base.parameter import ParameterStore
 from trellis.stores.settings_store import load_settings_values
 from trellis_cli._meta_wiring import wrap_cli_meta_analysis
 from trellis_cli.config import get_config_dir
-from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_STORE, EXIT_VALIDATION
+from trellis_cli.exit_codes import (
+    EXIT_INTERNAL,
+    EXIT_STORE,
+    EXIT_VALIDATION,
+    exit_code_for,
+)
 from trellis_cli.output import active_output_format, build_console, emit_json
 from trellis_cli.stores import (
     _get_registry,
@@ -2294,6 +2299,31 @@ def _holdout_exclusion_state(exclusion: HoldoutExclusion) -> str:
     return state
 
 
+def _refuse_sealed_holdout(
+    sealed: HoldoutReadoutSealedError, output_format: str
+) -> NoReturn:
+    """Answer a sealed outcome read: the horizon and the way to the operational read.
+
+    Nothing else rides the refusal. The exit sits below the format branch, so
+    json and text exit alike.
+    """
+    from trellis.analyze.holdout_gate import OPERATIONAL_HINT  # noqa: PLC0415
+
+    if output_format == "json":
+        emit_json(
+            {
+                "status": "refused",
+                "reason": "outcome_sealed",
+                "horizon": sealed.horizon.isoformat(),
+                "message": sealed.message,
+                "hint": OPERATIONAL_HINT,
+            }
+        )
+    else:
+        console.print(f"[red]{escape(sealed.message)}[/red]", soft_wrap=True)
+    raise typer.Exit(code=exit_code_for(sealed)) from sealed
+
+
 @analyze_app.command("holdout")
 def holdout(
     days: int = typer.Option(
@@ -2397,13 +2427,17 @@ def holdout(
     capture joins, the capture sweeps and each join's first pack, and nothing
     else from the pack stream; the outcome-derived figures are not computed
     and no pack count is reported.
+
+    When ``TRELLIS_HOLDOUT_READOUT_AFTER`` is set, the outcome report, with or
+    without --by-commit, is refused until that instant (exit 3, status
+    "refused", the horizon and nothing else); --operational is not sealed.
     """
     from trellis.analyze.holdout import (  # noqa: PLC0415
         HoldoutAnalysisError,
         HoldoutRefusal,
-        analyze_holdout,
         analyze_holdout_operational,
     )
+    from trellis.analyze.holdout_gate import analyze_holdout_gated  # noqa: PLC0415
 
     if operational and limit is not None:
         message = (
@@ -2439,7 +2473,7 @@ def holdout(
                 return
             _render_holdout_operational(operational_report)
             return
-        report = analyze_holdout(
+        report = analyze_holdout_gated(
             get_event_log(),
             days=days,
             until=_parse_window_end(until),
@@ -2456,6 +2490,8 @@ def holdout(
             seed=seed,
             limit=DEFAULT_SCAN_LIMIT if limit is None else limit,
         )
+    except HoldoutReadoutSealedError as sealed:
+        _refuse_sealed_holdout(sealed, output_format)
     except HoldoutAnalysisError as exc:
         message = str(exc)
         if output_format == "json":

@@ -10,8 +10,9 @@ All notable changes to Trellis will be documented in this file.
   (default off).** With the knob on, a call that serves lessons writes one event
   (`surface: "get_lessons"`, `injected_items[]` for the served precedents) and its reply ends
   with the `pack_id` and served ids so `record_feedback` can name them. The event is never
-  drawn for the pack holdout (`holdout: false`, `holdout_rate: 0.0`, `variants: {}`). Off, the
-  reply is unchanged and nothing is written. Also settable as `get_lessons_pack_event`.
+  drawn for the pack holdout (no `holdout` key, `variants: {}`), and the knob reads as off
+  while `TRELLIS_PACK_HOLDOUT_RATE` is above zero. Off, the reply is unchanged and nothing is
+  written. Also settable as `get_lessons_pack_event`.
 
 - **`trellis analyze health` reports whether agents retrieve at all.** A new `retrieval`
   section (`--format json` key `retrieval`) counts the sessions the capture sweep parsed in
@@ -29,6 +30,41 @@ All notable changes to Trellis will be documented in this file.
   `0`, and `{}` at `0`. It restates the holdout draw and takes none of its own: pack items,
   order, rendered text, budget and the draw itself are unchanged, and later flags register in
   `trellis.core.variants.active_variants`. Documented in `docs/agent-guide/operations.md`.
+
+- **The pack-holdout outcome can be sealed until a pre-registered horizon, by code.**
+  `TRELLIS_HOLDOUT_READOUT_AFTER` (an ISO-8601 date or timestamp, UTC when naive; unset
+  means no gate) makes every surface that computes an outcome-derived holdout figure refuse
+  until that instant: `trellis analyze holdout` (`--by-commit` included) exits `3` with
+  `status: "refused"`, the horizon and a pointer to `--operational` (the same exit in text and
+  json), and `GET /api/v1/analyze/holdout` answers `409` `holdout_readout_sealed`, which the
+  Reports tab shows as its failure text. The gate, `require_readout_open()`, sits in
+  `trellis.analyze.holdout_gate` and runs before any event is read, so the refusal carries the
+  horizon and nothing about the arms, and it writes no event. A malformed value fails closed
+  (`ConfigError`: exit `5`, REST `409` `config_error`). `trellis analyze holdout --operational`
+  is never sealed. Surfaces call `analyze_holdout_gated`;
+  `tests/unit/analyze/test_holdout_gate_rule.py` fails when a surface reaches the outcome
+  around it. No computed figure changes. A new
+  [decision matrix](docs/design/holdout-decision-matrix.md) says what each result commits the
+  project to.
+
+### Changed
+
+- **One typed reader for a pack's served rows and for a feedback row.**
+  `trellis.feedback.pack_rows` reads `PACK_ASSEMBLED.injected_items[]`
+  (`iter_served_rows`, `served_rows_from_payload`, `has_served_rows`, yielding
+  `ServedRow`) and both `FEEDBACK_RECORDED` families (`feedback_row`,
+  `iter_feedback_rows`, yielding `FeedbackRow`; the governed family's attribution
+  fields are empty, never invented). The two policies every hand-written reader had
+  to decide, whether to skip a sectioned pack and whether to drop a held-out one, are
+  required keyword arguments with no default. Pack telemetry, the learning join, the
+  precedent evidence gate, the judged-outcome serving index, pack-value, pack replay,
+  write-health and the explore route's attributable test now read through it. Reader
+  side only: every migrated caller states the policy it already had, so no output
+  changes for a payload the writers emit, and serving is untouched. A payload from
+  outside the writers can differ in one narrow way: a value of the wrong type in a
+  typed field (a non-string `strategy_source`, say) reads as absent rather than being
+  passed through. `tests/unit/test_injected_items_reader_rule.py` fails on a new
+  hand-written read of `injected_items` outside a short allowlist.
 
 ### Fixed
 

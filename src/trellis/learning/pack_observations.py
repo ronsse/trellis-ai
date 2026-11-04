@@ -30,6 +30,7 @@ import structlog
 
 from trellis.core.pack_holdout import drop_holdout
 from trellis.feedback.attribution import StrayCitationTally, served_item_ids
+from trellis.feedback.pack_rows import served_rows_from_payload
 from trellis.stores.base.event_log import EventType, merge_coverage, scan_events
 
 if TYPE_CHECKING:
@@ -228,13 +229,17 @@ def _join_one(
     unhelpful_ids = _citation_ids(feedback_payload.get("unhelpful_item_ids"))
 
     items: list[dict[str, Any]] = []
-    for raw in pack_payload.get("injected_items", []) or []:
-        if not isinstance(raw, Mapping):
-            continue
-        raw_item_id = str(raw.get("item_id") or "").strip()
+    # Flat and sectioned packs alike: a sectioned pack's rows join like a flat
+    # one's (#958). Withheld packs were dropped by ``drop_holdout`` in the join
+    # that built ``pack_payload``, so this read applies no holdout policy.
+    for served in served_rows_from_payload(
+        "", pack_payload, include_sectioned=True, include_holdout=True
+    ):
+        raw = served.row
+        raw_item_id = str(served.item_id or "").strip()
         item: dict[str, Any] = {
-            "item_id": raw.get("item_id"),
-            "item_type": raw.get("item_type"),
+            "item_id": served.item_id,
+            "item_type": served.item_type,
             # Stamped on every item, not only the cited ones: a bare
             # ``False`` on an item in a graded pack is a real observation
             # — served, and the grader did not name it — which is exactly
@@ -248,7 +253,7 @@ def _join_one(
         # the PackBuilder telemetry stamps the same concept under
         # ``strategy_source``. Map for the bridge so downstream
         # candidate fields populate.
-        strategy_source = raw.get("strategy_source")
+        strategy_source = served.strategy_source
         if strategy_source:
             item["source_strategy"] = strategy_source
         title = raw.get("title")
