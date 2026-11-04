@@ -315,7 +315,7 @@ class TestWhatIsNotCopied:
             yaml.safe_dump(
                 {
                     "data_dir": str(deploy.data),
-                    "knowledge": {"document": {"backend": "postgres"}},
+                    "knowledge": {"graph": {"backend": "neo4j"}},
                 }
             )
         )
@@ -331,17 +331,17 @@ class TestWhatIsNotCopied:
         if arm:
             payload = json.loads(result.stdout)
             assert payload["status"] == "incomplete"
-            doc = _by_name(payload["stores"])["document"]
-            assert doc["status"] == "skipped"
-            assert doc["backend"] == "postgres"
-            assert "pg_dump" in doc["reason"]
+            graph = _by_name(payload["stores"])["graph"]
+            assert graph["status"] == "skipped"
+            assert graph["backend"] == "neo4j"
+            assert "neo4j-admin" in graph["reason"]
             assert _by_name(payload["stores"])["event_log"]["status"] == "copied"
         else:
             assert "SKIPPED" in result.output
             assert "INCOMPLETE" in result.output
         # What was copied is still there, with a manifest saying the rest was not.
         assert (out / "stores" / "events.db").exists()
-        assert not (out / "stores" / "documents.db").exists()
+        assert not (out / "stores" / "graph.db").exists()
         manifest = json.loads((out / "manifest.json").read_text())
         assert manifest["status"] == "incomplete"
 

@@ -3816,3 +3816,8 @@ _register_settings(admin_app)
 from trellis_cli.admin_backup import register as _register_backup  # noqa: E402
 
 _register_backup(admin_app)
+
+# migrate — report, and explicitly apply, schema versions
+from trellis_cli.admin_migrate import register as _register_migrate  # noqa: E402
+
+_register_migrate(admin_app)
