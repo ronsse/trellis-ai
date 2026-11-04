@@ -656,6 +656,27 @@ _SPECS: tuple[SettingSpec, ...] = (
         env_var="TRELLIS_GRAPH_RECENCY_FALLBACK",
     ),
     SettingSpec(
+        name="get_lessons_pack_event",
+        label="get_lessons pack event",
+        type="bool",
+        default=False,
+        description=(
+            "Record a PACK_ASSEMBLED event for each get_lessons call and "
+            "print its pack_id and the served precedent ids in the reply, so "
+            "record_feedback can grade what get_lessons served. Off by "
+            "default: the reply is unchanged and no event is written. The "
+            "event is never subject to the pack holdout draw."
+        ),
+        # Read-side serving telemetry, not a write behaviour, so it stays
+        # out of write_config.py/WriteBehaviourConfig like graph_seeding.
+        surfaces=("mcp",),
+        restart_required=False,
+        risk="low",
+        group="retrieval",
+        settings_live=True,
+        env_var="TRELLIS_GET_LESSONS_PACK_EVENT",
+    ),
+    SettingSpec(
         name="filter_legacy_advisories",
         label="Filter legacy advisories",
         type="bool",

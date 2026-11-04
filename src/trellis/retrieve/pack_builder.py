@@ -45,6 +45,7 @@ from trellis.core.pack_holdout import (
     HOLDOUT_SECTIONS_KEY,
     is_held_out,
 )
+from trellis.core.variants import VARIANTS_KEY, active_variants
 from trellis.learning.scoring import normalize_intent_family
 from trellis.meta.agents import META_AGENT_PREFIX
 from trellis.retrieve.class_prior import (
@@ -2756,6 +2757,10 @@ class PackBuilder:
                 "class_prior": class_prior,
                 "parent_verdict_degraded": parent_verdict_degraded,
                 **holdout,
+                VARIANTS_KEY: active_variants(
+                    holdout_rate=self._holdout_rate,
+                    held_out=withheld_from is not None,
+                ),
                 **token_budget_fields,
             },
         )
@@ -3116,6 +3121,10 @@ class PackBuilder:
                 "class_prior": class_prior,
                 "parent_verdict_degraded": parent_verdict_degraded,
                 **holdout,
+                VARIANTS_KEY: active_variants(
+                    holdout_rate=self._holdout_rate,
+                    held_out=withheld_from is not None,
+                ),
                 **token_budget_fields,
             },
         )

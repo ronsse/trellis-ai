@@ -167,7 +167,8 @@ _HOLDOUT_KEYS = {"holdout", "holdout_rate"}
 #: too), and ``malformed_row_skips`` (#1050: ``{strategy: rows}`` a strategy
 #: skipped for unreadable metadata, ``{}`` when none; passed next to
 #: ``strategy_failures`` for the same reason, since a withheld pack still ran
-#: its strategies).
+#: its strategies), and ``variants`` (``{experiment: arm}``, ``{}`` at rate 0;
+#: ``trellis.core.variants``).
 #: ``_BASE_*_KEYS`` stays an honest historical snapshot of 58be23d4 rather than
 #: being backfilled, so a *later* addition extends this set, not the base one.
 _KEYS_ADDED_SINCE_BASE = _HOLDOUT_KEYS | {
@@ -179,6 +180,7 @@ _KEYS_ADDED_SINCE_BASE = _HOLDOUT_KEYS | {
     "parent_verdict_degraded",
     "graph_axis_state",
     "malformed_row_skips",
+    "variants",
 }
 
 #: Keys only the flat payload gained since the snapshot: ``seed_entity_ids``
@@ -473,9 +475,14 @@ class TestFlatAtRateZero:
         # Served (a draw below 1e-12 has probability 1e-12).
         assert tiny_row["holdout"] is False
         assert tiny_row["holdout_rate"] == 1e-12
+        # ``variants`` names the experiment only while it runs, so it differs
+        # between rate 0 and a tiny rate exactly as ``holdout_rate`` does.
+        assert zero_row["variants"] == {}
+        assert tiny_row["variants"] == {"pack_holdout": "served"}
+        masked = {"holdout_rate", "variants"}
         assert _mask_duration(
-            {k: v for k, v in tiny_row.items() if k != "holdout_rate"}
-        ) == _mask_duration({k: v for k, v in zero_row.items() if k != "holdout_rate"})
+            {k: v for k, v in tiny_row.items() if k not in masked}
+        ) == _mask_duration({k: v for k, v in zero_row.items() if k not in masked})
         assert _comparable(tiny) == _comparable(zero)
 
 

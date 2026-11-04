@@ -48,6 +48,7 @@ from trellis.learning.scoring import summarize_learning_candidates
 from trellis.ops import ParameterRegistry
 from trellis.ops.capture_coverage import CaptureCoverageReport
 from trellis.ops.precedent_sync_health import PrecedentSyncReport
+from trellis.ops.retrieval_adoption import RetrievalAdoptionReport
 from trellis.ops.serving_builds import ServingBuildsReport
 from trellis.retrieve.advisory_generator import (
     DEFAULT_MAX_KEYWORD_DOC_FREQ,
@@ -698,6 +699,30 @@ def _print_precedent_sync(sync: PrecedentSyncReport) -> None:
     )
 
 
+def _print_retrieval_adoption(retrieval: RetrievalAdoptionReport) -> None:
+    """Render the retrieval-adoption line of ``analyze health``.
+
+    Counts and a ratio only, so no identifier reaches Rich. Below the session
+    minimum the ratio is withheld and the line says how many sessions there
+    were against how many are needed, rather than printing a percentage over
+    a handful of sessions.
+    """
+    if retrieval.adoption is None:
+        console.print(
+            f"  Retrieval: [dim]insufficient_data[/dim] \u2014 "
+            f"{retrieval.sessions} captured session(s), "
+            f"{retrieval.min_sessions} needed for a rate"
+        )
+        return
+    style = "yellow" if retrieval.state == "warn" else "green"
+    console.print(
+        f"  Retrieval: {retrieval.sessions_with_packs}/{retrieval.sessions} "
+        f"captured sessions received a pack "
+        f"([{style}]{retrieval.adoption:.0%}[/{style}], "
+        f"floor {retrieval.floor:.0%})"
+    )
+
+
 def _print_tool_table(by_tool: dict[str, ToolWriteStats]) -> None:
     """Render the per-surface accept/reject table in ``analyze health``.
 
@@ -842,6 +867,8 @@ def health(
     capture section reports what fraction of eligible sessions produced a
     memory, distinguishing "never deployed", "stopped" and "running but
     capturing nothing" instead of collapsing them into a low rate. The
+    retrieval section reports what share of captured sessions were served
+    at least one pack, and withholds the rate below ten sessions. The
     serving-builds table groups the window's packs by the build that
     assembled them, and warns when an older build was still serving after
     the newest build began, because a long-lived client can keep
@@ -959,6 +986,7 @@ def health(
         detail = f" ({escape(extraction.reason)})" if extraction.reason else ""
         console.print(f"  Memory extraction: {extraction.state}{detail} since {since}")
     _print_precedent_sync(report.precedent_sync)
+    _print_retrieval_adoption(report.retrieval)
     for reason in report.reasons:
         console.print(f"  [yellow]warn[/yellow] {escape(reason)}")
     if report.status == "ok" and write.attempts == 0 and serve.packs == 0:

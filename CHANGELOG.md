@@ -6,6 +6,31 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`get_lessons` can emit a gradable `PACK_ASSEMBLED`, behind `TRELLIS_GET_LESSONS_PACK_EVENT`
+  (default off).** With the knob on, a call that serves lessons writes one event
+  (`surface: "get_lessons"`, `injected_items[]` for the served precedents) and its reply ends
+  with the `pack_id` and served ids so `record_feedback` can name them. The event is never
+  drawn for the pack holdout (no `holdout` key, `variants: {}`), and the knob reads as off
+  while `TRELLIS_PACK_HOLDOUT_RATE` is above zero. Off, the reply is unchanged and nothing is
+  written. Also settable as `get_lessons_pack_event`.
+
+- **`trellis analyze health` reports whether agents retrieve at all.** A new `retrieval`
+  section (`--format json` key `retrieval`) counts the sessions the capture sweep parsed in
+  the window and how many of them were served at least one pack, from the
+  `CAPTURE_SESSION_PACKS` events the sweep already writes; it adds no probe and no setting.
+  Below 10 captured sessions it reports `insufficient_data` and withholds the rate, and never
+  warns; at or above 10 it turns `warn`, with a named reason, when fewer than half of them
+  retrieved. Exit codes are unchanged. See `docs/agent-guide/operations.md`, "Retrieval
+  adoption in `trellis analyze health`".
+- **Every `PACK_ASSEMBLED` row now names the experiment arm it was assembled under.** A new
+  `variants` key, a `{experiment: arm}` mapping on both the flat and the sectioned payload,
+  lets a reader tell which arm of each running serving experiment produced a pack once
+  several run at once. Today the only experiment is the pack holdout: `{"pack_holdout":
+  "held_out"}` or `{"pack_holdout": "served"}` while `TRELLIS_PACK_HOLDOUT_RATE` is above
+  `0`, and `{}` at `0`. It restates the holdout draw and takes none of its own: pack items,
+  order, rendered text, budget and the draw itself are unchanged, and later flags register in
+  `trellis.core.variants.active_variants`. Documented in `docs/agent-guide/operations.md`.
+
 - **The pack-holdout outcome can be sealed until a pre-registered horizon, by code.**
   `TRELLIS_HOLDOUT_READOUT_AFTER` (an ISO-8601 date or timestamp, UTC when naive; unset
   means no gate) makes every surface that computes an outcome-derived holdout figure refuse
