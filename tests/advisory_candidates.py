@@ -1,4 +1,7 @@
-"""Fixtures for advisory-sourced candidates: stored advisories of both lesson shapes."""
+"""Fixtures for advisory-sourced candidates: stored ANTI_PATTERN advisories.
+
+``approach`` builds an APPROACH advisory, which the mapper skips.
+"""
 
 from __future__ import annotations
 

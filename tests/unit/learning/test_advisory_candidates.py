@@ -1,4 +1,4 @@
-"""``map_advisory``: ANTI_PATTERN and APPROACH advisories as candidate precedents."""
+"""``map_advisory``: ANTI_PATTERN advisories as candidate precedents."""
 
 from __future__ import annotations
 
@@ -14,12 +14,10 @@ from tests.advisory_candidates import (
 from trellis.learning.advisory_candidates import (
     ADVISORY_DISTILLER_VERSION,
     RULE_ADVISORY_ANTI_PATTERN,
-    RULE_ADVISORY_APPROACH,
     SKIP_CATEGORY,
     SKIP_ENTITY_ID_OVERLONG,
     SKIP_MISSING_EVIDENCE,
     SKIP_MISSING_SUBJECT,
-    SKIP_NO_EFFECT,
     SKIP_NOT_A_FAILURE_ASSOCIATION,
     SKIP_RETIRED,
     SKIP_SUPPRESSED,
@@ -96,49 +94,35 @@ def test_the_global_scope_is_no_domain() -> None:
 # -- APPROACH --
 
 
-def test_an_approach_on_the_succeeding_side_gives_a_do() -> None:
-    record = _record(approach("graph", rate_with=0.9, rate_without=0.4))
+@pytest.mark.parametrize(
+    "rate_with",
+    [0.9, 0.3],
+    ids=["succeeding_side", "failing_side"],
+)
+def test_an_approach_advisory_is_skipped_as_not_lesson_shaped(
+    rate_with: float,
+) -> None:
+    # A retrieval-axis association, not an agent lesson: no sign of effect maps.
+    result = map_advisory(approach("graph", rate_with=rate_with, rate_without=0.6))
 
-    assert record.rule == RULE_ADVISORY_APPROACH
-    assert record.action.kind == "do"
-    assert "graph" in record.action.text
-    assert record.situation.entity_ids == []
-    assert record.evidence.advisory_ids == ["adv-approach-graph"]
-    assert record.because.startswith("Association, not a cause")
-    assert "+50%" in record.because
-
-
-def test_an_approach_on_the_failing_side_gives_an_avoid() -> None:
-    record = _record(approach("keyword", rate_with=0.3, rate_without=0.8))
-
-    assert record.action.kind == "avoid"
-    assert "keyword" in record.action.text
+    assert (result.record, result.skip) == (None, SKIP_CATEGORY)
 
 
-def test_an_approach_with_no_effect_is_skipped() -> None:
-    result = map_advisory(approach("graph", effect=0.0))
-
-    assert (result.record, result.skip) == (None, SKIP_NO_EFFECT)
-
-
-@pytest.mark.parametrize("strategy", [None, "", "   "])
-def test_an_approach_without_a_strategy_is_skipped(strategy: str | None) -> None:
-    advisory = make_advisory(
-        AdvisoryCategory.APPROACH, advisory_id="adv-a", strategy=strategy
+def test_an_approach_advisory_is_skipped_whatever_else_it_carries() -> None:
+    complete = approach("graph", effect=0.0)
+    no_strategy = make_advisory(AdvisoryCategory.APPROACH, advisory_id="adv-a")
+    with_item = make_advisory(
+        AdvisoryCategory.APPROACH,
+        advisory_id="adv-b",
+        entity_id="doc-1",
+        strategy="graph",
     )
 
-    assert map_advisory(advisory).skip == SKIP_MISSING_SUBJECT
+    for advisory in (complete, no_strategy, with_item):
+        assert map_advisory(advisory).skip == SKIP_CATEGORY
 
 
-def test_an_approach_whose_strategy_is_not_text_is_skipped() -> None:
-    advisory = make_advisory(
-        AdvisoryCategory.APPROACH, advisory_id="adv-a", metadata={"strategy": 7}
-    )
-
-    assert map_advisory(advisory).skip == SKIP_MISSING_SUBJECT
-
-
-# -- skips common to both --
+# -- skips --
 
 
 def test_an_anti_pattern_without_an_item_is_skipped() -> None:
@@ -147,13 +131,10 @@ def test_an_anti_pattern_without_an_item_is_skipped() -> None:
     assert map_advisory(advisory).skip == SKIP_MISSING_SUBJECT
 
 
-@pytest.mark.parametrize(
-    "build", [anti_pattern, approach], ids=["anti_pattern", "approach"]
-)
-def test_an_advisory_citing_no_pack_or_no_sample_is_skipped(build) -> None:
-    assert map_advisory(build(packs=())).skip == SKIP_MISSING_EVIDENCE
-    assert map_advisory(build(packs=("",))).skip == SKIP_MISSING_EVIDENCE
-    assert map_advisory(build(sample_size=0)).skip == SKIP_MISSING_EVIDENCE
+def test_an_advisory_citing_no_pack_or_no_sample_is_skipped() -> None:
+    assert map_advisory(anti_pattern(packs=())).skip == SKIP_MISSING_EVIDENCE
+    assert map_advisory(anti_pattern(packs=("",))).skip == SKIP_MISSING_EVIDENCE
+    assert map_advisory(anti_pattern(sample_size=0)).skip == SKIP_MISSING_EVIDENCE
 
 
 def test_an_overlong_item_id_is_skipped_not_truncated() -> None:
@@ -211,21 +192,18 @@ def test_a_rerun_over_a_shuffled_batch_gives_the_same_records() -> None:
     one, two = map_advisories(batch), map_advisories(shuffled)
 
     assert one.records == two.records
-    assert one.by_rule == {
-        RULE_ADVISORY_ANTI_PATTERN: 4,
-        RULE_ADVISORY_APPROACH: 1,
-    }
+    assert one.by_rule == {RULE_ADVISORY_ANTI_PATTERN: 4}
+    assert one.skips_by_reason == {SKIP_CATEGORY: 1}
 
 
 def test_two_findings_never_share_an_id() -> None:
     ids = {
         _record(anti_pattern("doc-a")).candidate_id,
         _record(anti_pattern("doc-b")).candidate_id,
-        _record(approach("graph")).candidate_id,
-        _record(approach("keyword")).candidate_id,
+        _record(anti_pattern("doc-b", scope="data")).candidate_id,
     }
 
-    assert len(ids) == 4
+    assert len(ids) == 3
 
 
 def test_the_mapper_does_not_change_the_advisory() -> None:
@@ -237,10 +215,11 @@ def test_the_mapper_does_not_change_the_advisory() -> None:
     assert advisory.model_dump() == before
 
 
-def test_every_text_field_is_cut_to_the_schemas_bound() -> None:
-    long = "s" * 500
+def test_the_longest_inputs_stay_within_the_schemas_bounds() -> None:
+    # The item id is bounded, so only the scope and the pack list are cut.
+    long = "s" * MAX_ID_CHARS
     record = _record(
-        approach(
+        anti_pattern(
             long,
             advisory_id="adv-long",
             scope="d" * 500,

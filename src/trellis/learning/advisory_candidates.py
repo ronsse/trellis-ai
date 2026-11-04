@@ -6,23 +6,21 @@ gives the same record with the same id. The records are *candidates*
 ``precedent.candidate`` operation and never served. Reading an advisory here
 changes nothing the advisory generator produces, stores, suppresses or serves.
 
-Only the two lesson-shaped categories map. Each rule states a *measured
-association*, never a cause: the advisory generator compares the success rate of
-the packs that carried a subject against the packs that did not, and that is all
-a candidate says.
+Only ``ANTI_PATTERN`` advisories map. The rule states a *measured association*,
+never a cause: the advisory generator compares the success rate of the packs that
+carried a subject against the packs that did not, and that is all a candidate
+says.
 
 ``advisory_anti_pattern``
     An ``ANTI_PATTERN`` advisory is an item whose presence goes with failure
     (``effect_size`` below zero). It gives an ``avoid`` on that item. The item
     is the situation's one ``entity_ids`` entry.
 
-``advisory_approach``
-    An ``APPROACH`` advisory is a retrieval *strategy source* (the axis an item
-    reached a pack through: keyword, semantic, graph) whose packs succeeded more
-    or less often than the packs without it. This is the generator's proxy for
-    step-pattern mining; it names a retrieval strategy, not a step an agent took.
-    A positive ``effect_size`` gives a ``do`` and a negative one an ``avoid``
-    (the pattern is the failing side). No entity is named.
+``APPROACH`` advisories do not map. They are a retrieval-axis association (the
+axis an item reached a pack through: keyword, semantic, graph), not an agent
+lesson: ``get_context`` takes no axis, so an agent could not act on "prefer the
+graph strategy". They are skipped as ``category_not_lesson_shaped`` like every
+other category.
 
 Evidence. ``evidence.advisory_ids`` carries the advisory id and ``pack_ids`` the
 pack ids the advisory cites (``AdvisoryEvidence.representative_trace_ids``, which
@@ -42,15 +40,15 @@ Skips, each counted by reason and none carrying advisory text:
     The advisory is not active. A retired row was withdrawn by a rule, a
     suppressed one demoted on outcomes; neither is a finding to carry forward.
 ``category_not_lesson_shaped``
-    Any category but the two above.
+    Any category but ``ANTI_PATTERN``, ``APPROACH`` included.
 ``missing_subject``
-    No item id (``ANTI_PATTERN``) or no strategy name (``APPROACH``).
+    No item id.
 ``missing_evidence``
     No pack id the record can cite, or no sample. Advisories stored before the
     generator filled the pack pointers land here.
-``not_a_failure_association`` / ``no_effect``
-    An ``ANTI_PATTERN`` whose effect is not negative, or an ``APPROACH`` whose
-    effect is zero: the stored numbers do not support the rule.
+``not_a_failure_association``
+    An ``ANTI_PATTERN`` whose effect is not negative: the stored numbers do not
+    support the rule.
 ``entity_id_overlong``
     The item id is longer than the schema's id bound. Unlike a trace's entity
     ids it cannot be left out: the item is the whole situation.
@@ -96,8 +94,7 @@ from trellis.schemas.precedent_record import (
 ADVISORY_DISTILLER_VERSION: Final = "advisory-deterministic-1"
 
 RULE_ADVISORY_ANTI_PATTERN: Final = "advisory_anti_pattern"
-RULE_ADVISORY_APPROACH: Final = "advisory_approach"
-RULES: Final = (RULE_ADVISORY_ANTI_PATTERN, RULE_ADVISORY_APPROACH)
+RULES: Final = (RULE_ADVISORY_ANTI_PATTERN,)
 
 SKIP_SUPPRESSED: Final = "suppressed"
 SKIP_RETIRED: Final = "retired"
@@ -105,7 +102,6 @@ SKIP_CATEGORY: Final = "category_not_lesson_shaped"
 SKIP_MISSING_SUBJECT: Final = "missing_subject"
 SKIP_MISSING_EVIDENCE: Final = "missing_evidence"
 SKIP_NOT_A_FAILURE_ASSOCIATION: Final = "not_a_failure_association"
-SKIP_NO_EFFECT: Final = "no_effect"
 SKIP_ENTITY_ID_OVERLONG: Final = "entity_id_overlong"
 SKIP_INVALID_RECORD: Final = "invalid_record"
 
@@ -227,29 +223,6 @@ def _anti_pattern(advisory: Advisory) -> AdvisoryMapResult:
     )
 
 
-def _approach(advisory: Advisory) -> AdvisoryMapResult:
-    raw = advisory.metadata.get("strategy")
-    strategy = _clean(raw if isinstance(raw, str) else "")
-    if not strategy:
-        return AdvisoryMapResult(skip=SKIP_MISSING_SUBJECT)
-    if not _pack_ids(advisory) or advisory.evidence.sample_size <= 0:
-        return AdvisoryMapResult(skip=SKIP_MISSING_EVIDENCE)
-    effect = advisory.evidence.effect_size
-    if effect == 0:
-        return AdvisoryMapResult(skip=SKIP_NO_EFFECT)
-    kind: ActionKind = "do" if effect > 0 else "avoid"
-    verb = "Prefer" if kind == "do" else "Avoid"
-    return _build(
-        advisory,
-        rule=RULE_ADVISORY_APPROACH,
-        kind=kind,
-        action_text=f"{verb} the '{strategy}' retrieval strategy",
-        trigger=f"A context pack's items come from the '{strategy}' strategy",
-        because=_association(advisory, carried=f"used the '{strategy}' strategy"),
-        entity_ids=[],
-    )
-
-
 def map_advisory(advisory: Advisory) -> AdvisoryMapResult:
     """Map one stored advisory to a candidate record, or say why it gives none."""
     if advisory.status == AdvisoryStatus.SUPPRESSED:
@@ -258,8 +231,6 @@ def map_advisory(advisory: Advisory) -> AdvisoryMapResult:
         )
     if advisory.category == AdvisoryCategory.ANTI_PATTERN:
         return _anti_pattern(advisory)
-    if advisory.category == AdvisoryCategory.APPROACH:
-        return _approach(advisory)
     return AdvisoryMapResult(skip=SKIP_CATEGORY)
 
 
@@ -281,14 +252,12 @@ __all__ = [
     "ADVISORY_DISTILLER_VERSION",
     "RULES",
     "RULE_ADVISORY_ANTI_PATTERN",
-    "RULE_ADVISORY_APPROACH",
     "SKIP_CATEGORY",
     "SKIP_ENTITY_ID_OVERLONG",
     "SKIP_INVALID_RECORD",
     "SKIP_MISSING_EVIDENCE",
     "SKIP_MISSING_SUBJECT",
     "SKIP_NOT_A_FAILURE_ASSOCIATION",
-    "SKIP_NO_EFFECT",
     "SKIP_RETIRED",
     "SKIP_SUPPRESSED",
     "AdvisoryMapResult",

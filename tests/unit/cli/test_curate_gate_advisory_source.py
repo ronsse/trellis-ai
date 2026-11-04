@@ -18,6 +18,7 @@ from tests.advisory_candidates import (
 from tests.cli_output import plain
 from tests.precedent_candidates import recovering_trace
 from trellis.learning.precedent_distill import DISTILLER_VERSION
+from trellis.stores.advisory_source import resolve_advisory_path
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.main import app
 from trellis_cli.stores import _reset_registry
@@ -139,15 +140,17 @@ def test_adding_advisories_changes_only_the_advisory_source(
     block = with_advisories["stage1"].pop("advisory_source")
     assert with_advisories == without
     assert block["advisories_read"] == 3
-    assert block["would_mint"] == block["candidates"] == 2
-    assert block["by_rule"] == {"advisory_anti_pattern": 1, "advisory_approach": 1}
-    assert block["skipped"] == {"retired": 1}
+    assert block["would_mint"] == block["candidates"] == 1
+    assert block["by_rule"] == {"advisory_anti_pattern": 1}
+    assert block["skipped"] == {"category_not_lesson_shaped": 1, "retired": 1}
 
 
 def test_the_advisory_source_reads_and_writes_nothing_to_the_event_log(
     stores: StoreRegistry, candidates: Path
 ) -> None:
-    store_advisories(stores.stores_dir, [anti_pattern("doc-bad"), approach("graph")])
+    store_advisories(
+        stores.stores_dir, [anti_pattern("doc-bad"), anti_pattern("doc-worse")]
+    )
     before = _events(stores)
 
     _report(candidates)
@@ -158,7 +161,9 @@ def test_the_advisory_source_reads_and_writes_nothing_to_the_event_log(
 def test_recorded_advisory_candidates_are_duplicates_not_would_mint(
     stores: StoreRegistry, candidates: Path
 ) -> None:
-    store_advisories(stores.stores_dir, [anti_pattern("doc-bad"), approach("graph")])
+    store_advisories(
+        stores.stores_dir, [anti_pattern("doc-bad"), anti_pattern("doc-worse")]
+    )
     applied = runner.invoke(
         app, ["worker", "distill-advisory-precedents", "--apply", "--format", "json"]
     )
@@ -194,10 +199,59 @@ def test_no_advisory_text_reaches_the_report(
 def test_the_text_report_names_the_advisory_source(
     stores: StoreRegistry, candidates: Path
 ) -> None:
-    store_advisories(stores.stores_dir, [anti_pattern("doc-bad"), approach("graph")])
+    store_advisories(
+        stores.stores_dir, [anti_pattern("doc-bad"), anti_pattern("doc-worse")]
+    )
 
     text = plain(_run(candidates).output)
 
     assert "stage 1 (mint)" in text
     assert "stage 1 (mint, advisory source): read 2 advisory(ies), would mint 2" in text
-    assert "rule advisory_anti_pattern: 1" in text
+    assert "rule advisory_anti_pattern: 2" in text
+
+
+def test_the_text_report_says_the_advisory_source_ignores_the_window(
+    stores: StoreRegistry, candidates: Path
+) -> None:
+    store_advisories(stores.stores_dir, [anti_pattern("doc-bad")])
+
+    text = plain(_run(candidates, "--days", "1").output)
+
+    assert "every stored advisory is read: --days does not bound this source" in text
+    # Said once, beside the advisory block, and not for the trace source.
+    assert text.count("--days does not bound") == 1
+
+
+def test_a_degraded_advisory_file_is_warned_about_in_the_text_report(
+    stores: StoreRegistry, candidates: Path
+) -> None:
+    resolve_advisory_path(stores.stores_dir).write_text("{not json", encoding="utf-8")
+
+    as_json = _report(candidates)["stage1"]["advisory_source"]
+    text = plain(_run(candidates).output)
+
+    assert as_json["store_degraded"] is True
+    assert "the advisory file loaded only in part" in text
+
+
+def test_a_healthy_advisory_file_prints_no_degradation_warning(
+    stores: StoreRegistry, candidates: Path
+) -> None:
+    store_advisories(stores.stores_dir, [anti_pattern("doc-bad")])
+
+    text = plain(_run(candidates).output)
+
+    assert "loaded only in part" not in text
+
+
+def test_an_approach_advisory_alone_mints_nothing(
+    stores: StoreRegistry, candidates: Path
+) -> None:
+    store_advisories(stores.stores_dir, [approach("graph")])
+
+    block = _report(candidates)["stage1"]["advisory_source"]
+
+    assert block["advisories_read"] == 1
+    assert block["would_mint"] == block["candidates"] == 0
+    assert block["by_rule"] == {}
+    assert block["skipped"] == {"category_not_lesson_shaped": 1}

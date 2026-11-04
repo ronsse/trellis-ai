@@ -82,17 +82,17 @@ approaches beyond the cap of `avoid` lines (`failed_approach_over_cap`).
 ## Advisory source
 
 A second deterministic source feeds the same candidate stream: the stored
-`ANTI_PATTERN` and `APPROACH` advisories. The advisory generator measures, over
-graded packs, how the success rate of the packs that carried a subject compares
-with the packs that did not. A candidate states that measurement and nothing more.
+`ANTI_PATTERN` advisories. The advisory generator measures, over graded packs, how
+the success rate of the packs that carried an item compares with the packs that
+did not. A candidate states that measurement and nothing more.
 
 - `advisory_anti_pattern`: an item whose packs succeeded less often than the packs
   without it (negative effect) gives an `avoid` on that item.
-- `advisory_approach`: a retrieval strategy source (keyword, semantic, graph)
-  whose packs succeeded more often gives a `do`, less often an `avoid`. This is
-  the generator's proxy for step-pattern mining: it names a retrieval axis, not a
-  step an agent took, and it carries no item or trace reference, only the
-  advisory id and the pack ids it cites.
+
+`APPROACH` advisories are not mapped: they are a retrieval-axis association (the
+generator tallies which of keyword, semantic or graph an item reached a pack
+through), not an agent lesson, and `get_context` takes no axis for an agent to act
+on. They are skipped as `category_not_lesson_shaped`, like every other category.
 
 `because` is worded as an association ("Association, not a cause: ...") with the
 counts and rates. Evidence carries the advisory id (`advisory_ids`) and the pack
@@ -109,13 +109,15 @@ while empty, so every record the trace distiller already derived keeps its id
 An advisory's id is keyed on its subject and its numbers move, so the same finding
 returns every night with a new record id. The command therefore treats a finding
 (rule, distiller version, advisory id, action kind) already named by a recorded
-candidate as a duplicate: the counts of the night it was first recorded stand. An
-`APPROACH` whose effect changes sign is a new finding.
+candidate as a duplicate: the counts of the night it was first recorded stand. The
+action kind is part of the key, though an `ANTI_PATTERN` only ever gives an `avoid`.
 
 The source only reads advisories. It changes nothing the generator produces,
 stores, suppresses or serves. `trellis worker distill-advisory-precedents` is a
 dry run by default; `trellis curate evaluate-precedent-gate` reports its would-mint
-counts under `stage1.advisory_source`. Neither is wired into a nightly.
+counts under `stage1.advisory_source`. The advisory source reads every stored
+advisory: the gate's `--days` window bounds its traces, packs and feedback, not
+this source. Neither is wired into a nightly.
 
 ## Deferred: activation
 

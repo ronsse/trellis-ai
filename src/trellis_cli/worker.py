@@ -22,7 +22,7 @@ surfaces from ``docs/design/adr-autonomy-ladder.md``:
 * ``trellis worker distill-precedents`` — deterministic candidate precedents
   from traces, dry-run first; lives in :mod:`trellis_cli.worker_distill_precedents`.
 * ``trellis worker distill-advisory-precedents`` — candidate precedents from stored
-  ANTI_PATTERN and APPROACH advisories, dry-run first; lives in
+  ANTI_PATTERN advisories, dry-run first; lives in
   :mod:`trellis_cli.worker_distill_advisory_precedents`.
 * :func:`capture_sessions_cmd` (``trellis worker capture-sessions``) — one
   Claude Code session-capture sweep, delegating to the same

@@ -50,7 +50,7 @@ def stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def _seed(stores: StoreRegistry) -> Path:
-    """Two lesson-shaped advisories, one retired, one of another category."""
+    """Two ANTI_PATTERN advisories, one retired, two of other categories."""
     return store_advisories(
         stores.stores_dir,
         [
@@ -59,6 +59,7 @@ def _seed(stores: StoreRegistry) -> Path:
                 message=f"{ADVISORY_SENTINEL} correlates with failure",
                 scope="data",
             ),
+            anti_pattern("doc-worse"),
             approach("graph"),
             retired(anti_pattern("doc-old")),
             make_advisory(AdvisoryCategory.QUERY, advisory_id="adv-query"),
@@ -91,10 +92,10 @@ def test_a_dry_run_reports_counts_and_writes_nothing(stores: StoreRegistry) -> N
     assert result.exit_code == 0
     assert payload["mode"] == "dry-run"
     assert payload["status"] == "ok"
-    assert payload["advisories_read"] == 4
+    assert payload["advisories_read"] == 5
     assert payload["candidates"] == payload["would_record"] == 2
-    assert payload["by_rule"] == {"advisory_anti_pattern": 1, "advisory_approach": 1}
-    assert payload["skipped"] == {"category_not_lesson_shaped": 1, "retired": 1}
+    assert payload["by_rule"] == {"advisory_anti_pattern": 2}
+    assert payload["skipped"] == {"category_not_lesson_shaped": 2, "retired": 1}
     assert payload["duplicates"] == payload["finding_recorded"] == 0
     assert payload["store_degraded"] is False
     assert len(payload["candidate_ids"]) == 2
@@ -137,13 +138,13 @@ def test_a_recorded_candidate_cites_its_advisory_and_packs(
         )
     ]
 
-    by_rule = {r["rule"]: r for r in records}
-    anti = by_rule["advisory_anti_pattern"]
+    assert {r["rule"] for r in records} == {"advisory_anti_pattern"}
+    anti = next(
+        r for r in records if r["evidence"]["advisory_ids"] == ["adv-anti-doc-bad"]
+    )
     assert anti["provenance_tier"] == "deterministic"
     assert anti["action"]["kind"] == "avoid"
-    assert anti["evidence"]["advisory_ids"] == ["adv-anti-doc-bad"]
     assert anti["evidence"]["pack_ids"] == ["pack-1", "pack-2"]
-    assert by_rule["advisory_approach"]["action"]["kind"] == "do"
 
 
 def test_the_same_finding_with_moved_counts_is_not_recorded_again(
@@ -167,20 +168,6 @@ def test_the_same_finding_with_moved_counts_is_not_recorded_again(
     assert _candidates(stores) == 1
 
 
-def test_a_finding_whose_action_flips_is_a_new_finding(stores: StoreRegistry) -> None:
-    store_advisories(stores.stores_dir, [approach("graph", rate_with=0.9)])
-    _run("--apply")
-
-    store_advisories(
-        stores.stores_dir,
-        [approach("graph", rate_with=0.2, rate_without=0.8)],
-    )
-    again = json.loads(_run("--apply", "--format", "json").stdout)
-
-    assert again["recorded"] == 1
-    assert _candidates(stores) == 2
-
-
 @pytest.mark.parametrize("fmt", ["json", "text"])
 def test_the_output_carries_no_advisory_text(stores: StoreRegistry, fmt: str) -> None:
     store_advisories(
@@ -202,7 +189,7 @@ def test_the_output_carries_no_advisory_text(stores: StoreRegistry, fmt: str) ->
         assert result.exit_code == 0
         assert ADVISORY_SENTINEL not in result.stdout
         assert "correlates with failure" not in result.stdout
-    assert _candidates(stores) == 2
+    assert _candidates(stores) == 1
 
 
 def test_the_exit_code_does_not_depend_on_the_format(stores: StoreRegistry) -> None:
@@ -270,7 +257,8 @@ def test_the_text_report_names_the_mode_rules_and_skips(stores: StoreRegistry) -
     text = plain(_run().stdout)
 
     assert "(dry-run)" in text
-    assert "read 4 advisory(ies)" in text
-    assert "rule advisory_anti_pattern: 1" in text
+    assert "read 5 advisory(ies)" in text
+    assert "rule advisory_anti_pattern: 2" in text
+    assert "skipped category_not_lesson_shaped: 2" in text
     assert "skipped retired: 1" in text
     assert "nothing was written" in text

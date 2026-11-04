@@ -9,7 +9,6 @@ from __future__ import annotations
 from tests.advisory_candidates import (
     ADVISORY_SENTINEL,
     anti_pattern,
-    approach,
     record_advisory_candidates,
 )
 from tests.mined_precedents import promote_through_executor
@@ -33,7 +32,7 @@ QUERY = "prefer the graph strategy and relying on documents"
 def _advisories():
     return [
         anti_pattern(ADVISORY_SENTINEL, message=f"{ADVISORY_SENTINEL} says avoid it"),
-        approach(ADVISORY_SENTINEL),
+        anti_pattern("doc-other", advisory_id="adv-other"),
     ]
 
 
@@ -41,14 +40,13 @@ def test_no_reader_serves_an_advisory_sourced_candidate(
     temp_registry: StoreRegistry,
 ) -> None:
     records = record_advisory_candidates(temp_registry, _advisories())
-    assert {r.rule for r in records} == {"advisory_anti_pattern", "advisory_approach"}
+    assert {r.rule for r in records} == {"advisory_anti_pattern"}
     promote_through_executor(temp_registry, trace_id="trace-1", title="Approved lesson")
     # Text only a candidate carries, and the ids a reader could leak.
     needles = [
         ADVISORY_SENTINEL,
         "Association, not a cause",
         "Avoid relying on item",
-        "retrieval strategy",
         *(r.candidate_id for r in records),
     ]
 

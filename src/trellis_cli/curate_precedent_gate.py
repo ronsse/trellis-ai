@@ -85,7 +85,7 @@ def _stage1(
         "skipped": dict(sorted(tally.skips_by_reason.items())),
         "dropped": dict(sorted(tally.dropped.items())),
         # Beside the trace source's counts, which are unchanged: the same stage
-        # run over the stored ANTI_PATTERN and APPROACH advisories.
+        # run over the stored ANTI_PATTERN advisories.
         "advisory_source": stage1_block(distill_advisory_window(_get_registry())),
     }
 
@@ -234,6 +234,16 @@ def _render(payload: dict[str, Any]) -> None:
         f"{advisory['duplicates']} duplicate(s), "
         f"{advisory['finding_recorded']} finding(s) already recorded"
     )
+    console.print(
+        "    every stored advisory is read: --days does not bound this source",
+        soft_wrap=True,
+    )
+    if advisory["store_degraded"]:
+        console.print(
+            "  [yellow]the advisory file loaded only in part; "
+            "the rows that parsed were read.[/yellow]",
+            soft_wrap=True,
+        )
     for rule, count in advisory["by_rule"].items():
         console.print(f"    rule {escape(rule)}: {count}")
     for reason, count in advisory["skipped"].items():

@@ -5184,7 +5184,7 @@ as a policy violation. See
 
 ### `trellis worker distill-advisory-precedents`
 
-Distill **candidate precedents** from the stored `ANTI_PATTERN` and `APPROACH`
+Distill **candidate precedents** from the stored `ANTI_PATTERN`
 advisories, the sibling of `distill-precedents` whose source is the advisory store
 instead of traces. Dry run by default: it reads the advisories and reports counts,
 and writes nothing. It changes no advisory, and what the advisory generator
@@ -5198,14 +5198,14 @@ trellis worker distill-advisory-precedents [--apply] [--format text|json]
 |--------|---------|-------------|
 | `--apply` | off | Record the new candidates through the governed `precedent.candidate` operation. |
 
-Rules (see `trellis.learning.advisory_candidates`). Each states a measured
+The one rule (see `trellis.learning.advisory_candidates`) states a measured
 association, never a cause. `advisory_anti_pattern`: an item whose packs succeeded
-less often than the packs without it gives an `avoid` on that item.
-`advisory_approach`: a retrieval strategy source whose packs succeeded more often
-gives a `do`, less often an `avoid`; it names a retrieval axis, not an agent step.
-Skipped with a counted reason: `suppressed`, `retired`,
-`category_not_lesson_shaped`, `missing_subject`, `missing_evidence`,
-`not_a_failure_association`, `no_effect`, `entity_id_overlong`, `invalid_record`.
+less often than the packs without it gives an `avoid` on that item. `APPROACH`
+advisories are not mapped: they are a retrieval-axis association, not an agent
+lesson. Skipped with a counted reason: `suppressed`, `retired`,
+`category_not_lesson_shaped` (every other category, `APPROACH` included),
+`missing_subject`, `missing_evidence`, `not_a_failure_association`,
+`entity_id_overlong`, `invalid_record`.
 
 A candidate is new only if neither its id nor its finding (rule, distiller
 version, advisory id, action kind) is recorded. The generator keys an advisory on
@@ -5248,7 +5248,10 @@ window's traces (the same function, not a subprocess) and reports `traces_read`,
 over the stored advisories (`trellis worker distill-advisory-precedents` in
 dry-run): `advisories_read`, `candidates`, `would_mint`, `duplicates`,
 `finding_recorded`, `by_rule`, `skipped` and `store_degraded`. The trace source's
-keys are unchanged.
+keys are unchanged. The advisory source reads every stored advisory: `--days` bounds
+the traces, packs and feedback, not this source, and the text report says so. The
+text report also warns when `store_degraded` is true (the advisory file loaded only
+in part).
 
 **Stage 2 (activate)** tests each promotable learning candidate, the same
 population `auto-promote-candidates` evaluates, against h >= 3 helpful citations,

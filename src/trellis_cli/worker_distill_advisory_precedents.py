@@ -1,8 +1,8 @@
 """``trellis worker distill-advisory-precedents``: advisory findings as candidates.
 
 The sibling of :mod:`trellis_cli.worker_distill_precedents`, whose source is the
-advisory store instead of traces. It reads the stored advisories, maps the two
-lesson-shaped categories (:mod:`trellis.learning.advisory_candidates`) and
+advisory store instead of traces. It reads the stored advisories, maps the
+``ANTI_PATTERN`` category (:mod:`trellis.learning.advisory_candidates`) and
 reports counts. By default it writes nothing. ``--apply`` records each new
 candidate through the governed ``precedent.candidate`` operation, which emits one
 ``PRECEDENT_CANDIDATE_MINED`` event and writes to no document, graph or vector
@@ -242,10 +242,10 @@ def distill_advisory_precedents_command(
 ) -> None:
     """Distill candidate precedents from stored advisories (dry run by default).
 
-    Reads the ANTI_PATTERN and APPROACH advisories and reports counts only:
-    advisories read, candidates by rule, skips by reason, duplicates and findings
-    already recorded. ``--apply`` records the new ones. It changes no advisory.
-    The exit code does not depend on ``--format``.
+    Reads the stored advisories, maps the ANTI_PATTERN ones, and reports counts
+    only: advisories read, candidates by rule, skips by reason, duplicates and
+    findings already recorded. ``--apply`` records the new ones. It changes no
+    advisory. The exit code does not depend on ``--format``.
     """
     payload, code = _distill(apply=apply)
     if output_format == "json":
