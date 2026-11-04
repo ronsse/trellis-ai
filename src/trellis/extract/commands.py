@@ -30,9 +30,15 @@ from typing import TYPE_CHECKING
 import structlog
 
 from trellis.mutate.commands import BatchStrategy, Command, CommandBatch, Operation
+from trellis.schemas.graph import canonical_extractor_tier
 
 if TYPE_CHECKING:
-    from trellis.schemas.extraction import EdgeDraft, EntityDraft, ExtractionResult
+    from trellis.schemas.extraction import (
+        AliasDraft,
+        EdgeDraft,
+        EntityDraft,
+        ExtractionResult,
+    )
     from trellis.stores.base.graph import GraphStore
 
 logger = structlog.get_logger(__name__)
@@ -51,6 +57,7 @@ def result_to_batch(
     requested_by: str,
     strategy: BatchStrategy = BatchStrategy.CONTINUE_ON_ERROR,
     min_confidence: float | None = None,
+    bind_identity: bool = False,
 ) -> CommandBatch:
     """Convert an :class:`ExtractionResult` into a :class:`CommandBatch`.
 
@@ -75,6 +82,18 @@ def result_to_batch(
             a dropped entity.  Opt-in on purpose — silently discarding
             extraction output on a deployment that never asked for a
             threshold is worse than passing a weak draft through.
+        bind_identity: ``False`` (the default) is the historical output,
+            byte for byte.  ``True`` is the ``knowledge_link_or_mint``
+            write-behaviour knob and adds two things: an ``ALIAS_UPSERT``
+            command straight after each entity that has both an
+            ``entity_id`` and :class:`~trellis.schemas.extraction.AliasDraft`
+            entries (bind-if-absent, never rebound, and refused if the
+            entity's own create did not land), and the result's extractor
+            tier passed on every ``LINK_CREATE`` as its ``extractor_tier`` arg,
+            which ``LinkCreateHandler`` writes to the edge's first-class
+            ``extractor_tier`` column.
+            Callers read the knob with
+            :func:`trellis.core.write_config.knowledge_link_or_mint_enabled`.
     """
     entities = list(result.entities)
     edges = list(result.edges)
@@ -115,7 +134,13 @@ def result_to_batch(
                 requested_by=requested_by,
             )
         )
+        if bind_identity and entity.entity_id is not None:
+            commands.extend(
+                _alias_command(entity, alias, requested_by=requested_by)
+                for alias in entity.aliases
+            )
 
+    tier = _edge_tier(result) if bind_identity else None
     for edge in edges:
         edge_props = dict(edge.properties)
         edge_props[CONFIDENCE_PROPERTY] = edge.confidence
@@ -130,6 +155,8 @@ def result_to_batch(
         # the common case.
         if edge.allow_dangling:
             link_args["allow_dangling"] = True
+        if tier is not None:
+            link_args["extractor_tier"] = tier
         commands.append(
             Command(
                 operation=Operation.LINK_CREATE,
@@ -145,6 +172,43 @@ def result_to_batch(
         strategy=strategy,
         requested_by=requested_by,
     )
+
+
+def _alias_command(
+    entity: EntityDraft, alias: AliasDraft, *, requested_by: str
+) -> Command:
+    """Bind-if-absent command for one external identity of ``entity``.
+
+    ``if_absent`` is what makes a second ingest, or a second source claiming
+    the same ``(source_system, raw_id)``, a no-op instead of a rebind.  No
+    ``stale_owner_name_key`` is passed, so the store's stale-owner takeover
+    (which exists for name aliases only) can never fire on one of these.
+    """
+    args: dict[str, object] = {
+        "entity_id": entity.entity_id,
+        "source_system": alias.source_system,
+        "raw_id": alias.raw_id,
+        "if_absent": True,
+        "require_entity": True,
+        "match_confidence": entity.confidence,
+    }
+    if alias.raw_name is not None:
+        args["raw_name"] = alias.raw_name
+    return Command(
+        operation=Operation.ALIAS_UPSERT,
+        args=args,
+        target_id=entity.entity_id,
+        target_type="alias",
+        requested_by=requested_by,
+    )
+
+
+def _edge_tier(result: ExtractionResult) -> str | None:
+    """The result's tier in its stored spelling, or ``None`` if malformed."""
+    try:
+        return canonical_extractor_tier(result.tier)
+    except ValueError:
+        return None
 
 
 def _apply_confidence_gate(
