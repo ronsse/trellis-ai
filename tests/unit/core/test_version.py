@@ -73,6 +73,9 @@ class TestPackagedContext:
             ("0.9.1.dev156+gd7c3e7ace.d20260802", "d7c3e7ace", True),
             # Explicit dirty marker (alternate local scheme).
             ("0.9.1+gabcdef1234.dirty", "abcdef1234", True),
+            # Image built on an exactly tagged commit: `make docker-build`
+            # appends the sha that `git describe` leaves out.
+            ("0.10.1+g05f77dd0a", "05f77dd0a", False),
             # Local segment with no recognisable sha at all.
             ("1.0.0+local", None, False),
         ],

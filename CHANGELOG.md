@@ -4,6 +4,25 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-04
+
+0.10.0 was tagged but never published: its release build failed type-checking on
+Python 3.12. 0.10.1 is 0.10.0 plus the fixes below.
+
+### Fixed
+
+- **The package type-checks on Python 3.12 and 3.13 with numpy 2.5.** numpy 2.5.4's
+  stubs reject a no-argument `ndarray.max()`; the holdout analysis now calls
+  `np.max(...)`, which computes the same value. The type-check workflow now runs on
+  3.11, 3.12 and 3.13 like the release workflow, so a version-specific error fails
+  the pull request instead of the tag.
+- **An image built from an exactly tagged commit names its commit.** `make
+  docker-build` derived its version from `git describe`, which prints only the tag
+  on a tagged commit, so the write-provenance stamp read `commit: null`. The sha is
+  now appended as a PEP 440 local segment (`0.10.1+g<sha>`).
+
+## [0.10.0] - 2026-11-04
+
 ### Added
 
 - **The pack-holdout outcome can be sealed until a pre-registered horizon, by code.**
@@ -1624,8 +1643,6 @@ All notable changes to Trellis will be documented in this file.
   renders undecodable bytes with `backslashreplace` instead of raising. A body
   sent with a JSON content type was already unaffected: FastAPI's own routing
   turns that decode failure into a 422 or 400 before this handler runs.
-
-## [0.10.0] - 2026-10-31
 
 ### Added
 
