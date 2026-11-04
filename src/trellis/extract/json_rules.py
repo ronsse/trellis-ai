@@ -54,6 +54,7 @@ from trellis.core.base import TrellisModel
 from trellis.extract.base import ExtractorTier
 from trellis.schemas.enums import NodeRole
 from trellis.schemas.extraction import (
+    AliasDraft,
     EdgeDraft,
     EntityDraft,
     ExtractionProvenance,
@@ -100,6 +101,7 @@ class EntityRule(TrellisModel):
     property_fields: dict[str, str] = Field(default_factory=dict)
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     allow_structural_leaf: bool = False
+    alias_source_system: str | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
     def _warn_on_anti_pattern_entity_type(self) -> EntityRule:
@@ -265,6 +267,7 @@ class JSONRulesExtractor:
                 node_role=rule.node_role,
                 confidence=rule.confidence,
                 allow_structural_leaf=rule.allow_structural_leaf,
+                aliases=_rule_aliases(rule, id_value, name_value),
             )
             matches.append(
                 _EntityMatch(draft=draft, raw=item, id_value=id_value, trail=trail)
@@ -358,6 +361,26 @@ class JSONRulesExtractor:
 # ----------------------------------------------------------------------
 # Internal match carrier + path helpers
 # ----------------------------------------------------------------------
+
+
+def _rule_aliases(rule: EntityRule, id_value: Any, name_value: Any) -> list[AliasDraft]:
+    """The external-identity alias a rule asks for, as a draft.
+
+    ``alias_source_system`` names the system the matched id is native to
+    (``"unity_catalog"`` for a three-part ``catalog.schema.table`` id, say);
+    the id is kept verbatim as ``raw_id``, so nothing here knows what shape
+    it has.  Empty when the rule names no system, which is every rule that
+    predates the field.
+    """
+    if rule.alias_source_system is None:
+        return []
+    return [
+        AliasDraft(
+            source_system=rule.alias_source_system,
+            raw_id=str(id_value),
+            raw_name=str(name_value) if name_value is not None else None,
+        )
+    ]
 
 
 def _edge_alignment_properties(canonical_kind: str) -> dict[str, Any]:

@@ -17,6 +17,7 @@ import structlog
 from trellis.extract.base import ExtractorTier
 from trellis.schemas import well_known as wk
 from trellis.schemas.extraction import (
+    AliasDraft,
     EdgeDraft,
     EntityDraft,
     ExtractionProvenance,
@@ -25,6 +26,9 @@ from trellis.schemas.extraction import (
 
 if TYPE_CHECKING:
     from trellis.extract.context import ExtractionContext
+
+#: ``source_system`` an entity's dbt ``unique_id`` is bound under.
+DBT_ALIAS_SOURCE_SYSTEM = "dbt"
 
 logger = structlog.get_logger(__name__)
 
@@ -139,6 +143,13 @@ class DbtManifestExtractor:
                     entity_type=entity_type,
                     name=resource.get("name", unique_id),
                     properties=properties,
+                    aliases=[
+                        AliasDraft(
+                            source_system=DBT_ALIAS_SOURCE_SYSTEM,
+                            raw_id=unique_id,
+                            raw_name=resource.get("name"),
+                        )
+                    ],
                 )
             )
 

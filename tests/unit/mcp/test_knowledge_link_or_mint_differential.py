@@ -102,7 +102,13 @@ def _snapshot(registry: StoreRegistry, replies: list[str]) -> dict[str, Any]:
     node_rows = [
         {
             key: node.get(key)
-            for key in ("node_id", "node_type", "properties", "node_role", "document_ids")
+            for key in (
+                "node_id",
+                "node_type",
+                "properties",
+                "node_role",
+                "document_ids",
+            )
         }
         for node in nodes
     ]
@@ -110,13 +116,13 @@ def _snapshot(registry: StoreRegistry, replies: list[str]) -> dict[str, Any]:
     aliases: list[dict[str, Any]] = []
     for node in nodes:
         node_id = str(node["node_id"])
-        for edge in graph.get_edges(node_id, direction="outgoing"):
-            edges.append(
-                {
-                    key: edge.get(key)
-                    for key in ("source_id", "target_id", "edge_type", "properties")
-                }
-            )
+        edges.extend(
+            {
+                key: edge.get(key)
+                for key in ("source_id", "target_id", "edge_type", "properties")
+            }
+            for edge in graph.get_edges(node_id, direction="outgoing")
+        )
         aliases.extend(
             {
                 key: alias.get(key)

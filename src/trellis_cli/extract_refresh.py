@@ -35,6 +35,7 @@ from rich.markup import escape
 
 from trellis.core.base import utc_now
 from trellis.core.error_sanitize import sanitized_error_payload
+from trellis.core.write_config import knowledge_link_or_mint_enabled
 from trellis.errors import TrellisError
 from trellis.extract.commands import (
     batch_draft_counts,
@@ -305,7 +306,11 @@ def _run_refresh(
     entity_types = {e.entity_id: e.entity_type for e in result.entities if e.entity_id}
 
     before_snapshot = _snapshot_entities(registry, entity_ids)
-    batch = result_to_batch(result, requested_by=f"cli:extract-refresh:{source_name}")
+    batch = result_to_batch(
+        result,
+        requested_by=f"cli:extract-refresh:{source_name}",
+        bind_identity=knowledge_link_or_mint_enabled(registry),
+    )
     executor = build_curate_executor(
         registry,
         clearance="restricted",  # trusted: operator CLI

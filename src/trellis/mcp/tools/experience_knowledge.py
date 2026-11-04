@@ -13,6 +13,7 @@ from trellis.core.error_sanitize import (
     describe_validation_error,
     sanitize_error_message,
 )
+from trellis.core.write_config import knowledge_link_or_mint_enabled
 from trellis.extract.trace_ingest_hook import (
     run_trace_extraction,
     trace_already_ingested,
@@ -25,7 +26,11 @@ from trellis.mcp.boundary import (
     _raise_mutation_failed,
     _result_message,
 )
-from trellis.mcp.knowledge_links import link_knowledge_node
+from trellis.mcp.knowledge_links import (
+    attach_to_note,
+    find_attach_target,
+    link_knowledge_node,
+)
 from trellis.mcp.rejections import _record_boundary_rejection
 from trellis.mcp.tools.memory_common import (
     _match_readable,
@@ -561,6 +566,39 @@ def save_knowledge(
     document_ids = [evidence_ref] if evidence_ref is not None else None
 
     executor = build_curate_executor(registry, clearance=current_clearance())
+    # Knob on, no supersedes=: a note whose normalized name already resolves
+    # to a current note of the same type is attached to, not duplicated.
+    link_or_mint = knowledge_link_or_mint_enabled(registry)
+    attach_node = (
+        find_attach_target(
+            registry.knowledge.graph_store, name=name, entity_type=entity_type
+        )
+        if link_or_mint and supersedes is None
+        else None
+    )
+    if attach_node is not None:
+        attached_id = str(attach_node["node_id"])
+        result = (
+            f"Entity exists: {attached_id} ({entity_type}: {name}) "
+            "\u2014 attached, not created"
+        )
+        if evidence_ref is not None:
+            result += f"\nEvidence document: {evidence_ref}"
+        if content_ignored:
+            result += "\nWarning: content ignored \u2014 evidence_ref takes precedence"
+        attach_lines = attach_to_note(
+            executor, attach_node, properties=props, document_ids=document_ids
+        )
+        link_lines = link_knowledge_node(
+            executor,
+            registry.knowledge.graph_store,
+            node_id=attached_id,
+            properties=props,
+            relates_to=relates_to,
+            edge_kind=edge_kind,
+            link_or_mint=True,
+        )
+        return "\n".join([result, *supersede_lines, *attach_lines, *link_lines])
     create_result = executor.execute(
         Command(
             operation=Operation.ENTITY_CREATE,
@@ -597,5 +635,6 @@ def save_knowledge(
         properties=props,
         relates_to=relates_to,
         edge_kind=edge_kind,
+        link_or_mint=link_or_mint,
     )
     return "\n".join([result, *supersede_lines, *link_lines])

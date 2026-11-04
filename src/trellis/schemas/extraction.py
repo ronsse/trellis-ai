@@ -44,6 +44,23 @@ EPISTEMIC_STATUS_PROPERTY = "epistemic_status"
 EPISTEMIC_STATUS_MENTIONED = "mentioned"
 
 
+class AliasDraft(TrellisModel):
+    """An external identity an extracted entity is known by.
+
+    ``(source_system, raw_id)`` is stored verbatim, with no case folding or
+    splitting, so a dbt ``unique_id``, an OpenLineage ``namespace/name`` or
+    a three-part Unity Catalog ``catalog.schema.table`` all take the same
+    shape.  The draft only *names* the identity: ``result_to_batch`` turns
+    it into a bind-if-absent ``alias.upsert`` command when the
+    ``knowledge_link_or_mint`` write-behaviour knob is on, and the draft
+    never touches a store.
+    """
+
+    source_system: str = Field(min_length=1)
+    raw_id: str = Field(min_length=1)
+    raw_name: str | None = None
+
+
 class EntityDraft(TrellisModel):
     """An entity candidate produced by an extractor.
 
@@ -80,6 +97,7 @@ class EntityDraft(TrellisModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     document_ids: list[str] | None = None
     allow_structural_leaf: bool = False
+    aliases: list[AliasDraft] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _warn_on_anti_pattern_entity_type(self) -> EntityDraft:

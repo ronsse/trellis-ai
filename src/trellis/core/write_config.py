@@ -186,6 +186,22 @@ PACK_HOLDOUT_RATE_ENV = "TRELLIS_PACK_HOLDOUT_RATE"
 #: nothing.
 ACCESS_LOG_ENV = "TRELLIS_ACCESS_LOG"
 
+#: Link-or-mint on ``save_knowledge`` and alias binding on extraction
+#: (:mod:`trellis.mcp.knowledge_links`,
+#: :func:`trellis.extract.commands.result_to_batch`).
+#: **Default off, and it must stay off until the serving freeze lifts**: turned
+#: on, ``save_knowledge`` mints a ``domain:<slug>`` node for a domain that has
+#: none, attaches to an existing same-named node instead of creating a
+#: duplicate, resolves ``relates_to`` through external-system aliases and
+#: reports an unresolvable value by count and position; extraction binds each
+#: draft's external identity as an ``EntityAlias``.  A minted domain node is
+#: something ``NamespaceSeedExtractor`` resolves, so enabling this changes
+#: which packs seed the graph axis.  Read with the shared ``TRUTHY``
+#: spellings; unset, blank or unrecognised leaves it off, and off writes
+#: exactly what the code wrote before the knob existed.  See
+#: ``docs/design/adr-knowledge-link-or-mint.md``.
+KNOWLEDGE_LINK_OR_MINT_ENV = "TRELLIS_KNOWLEDGE_LINK_OR_MINT"
+
 # ---------------------------------------------------------------------------
 # Defaults.  Unchanged from the per-module values they were lifted from.
 # ---------------------------------------------------------------------------
@@ -429,6 +445,7 @@ class WriteBehaviourConfig:
     reconcile_model: str = DEFAULT_RECONCILE_MODEL
     reconcile_timeout_s: float = DEFAULT_RECONCILE_TIMEOUT_S
     access_log: bool = False
+    knowledge_link_or_mint: bool = False
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> WriteBehaviourConfig:
@@ -449,6 +466,7 @@ class WriteBehaviourConfig:
             or DEFAULT_RECONCILE_MODEL,
             reconcile_timeout_s=_reconcile_timeout(src),
             access_log=_truthy(src, ACCESS_LOG_ENV),
+            knowledge_link_or_mint=_truthy(src, KNOWLEDGE_LINK_OR_MINT_ENV),
         )
 
     @classmethod
@@ -644,7 +662,18 @@ ENV_VAR_BY_FIELD: dict[str, str] = {
     "reconcile_model": RECONCILE_MODEL_ENV,
     "reconcile_timeout_s": RECONCILE_TIMEOUT_ENV,
     "access_log": ACCESS_LOG_ENV,
+    "knowledge_link_or_mint": KNOWLEDGE_LINK_OR_MINT_ENV,
 }
+
+
+def knowledge_link_or_mint_enabled(registry: StoreRegistry | None = None) -> bool:
+    """Whether link-or-mint and extractor alias binding are on for ``registry``.
+
+    The one reader every call site uses, so the env > settings > default
+    precedence and the never-raises guarantee of :func:`resolve_write_behaviour`
+    apply to this knob like any other.
+    """
+    return resolve_write_behaviour(registry).knowledge_link_or_mint
 
 
 __all__ = [
@@ -654,6 +683,7 @@ __all__ = [
     "DEFAULT_RECONCILE_TIMEOUT_S",
     "EMBED_ON_INGEST_FLAG",
     "ENV_VAR_BY_FIELD",
+    "KNOWLEDGE_LINK_OR_MINT_ENV",
     "MEMORY_EXTRACTION_FLAG",
     "MINHASH_SEED_MAX_DOCS_ENV",
     "PACK_HOLDOUT_RATE_ENV",
@@ -666,6 +696,7 @@ __all__ = [
     "TRACE_EXTRACTION_MIN_CONFIDENCE_FLAG",
     "TRUTHY",
     "WriteBehaviourConfig",
+    "knowledge_link_or_mint_enabled",
     "parse_finite_float",
     "resolve_overridden_by",
     "resolve_write_behaviour",
