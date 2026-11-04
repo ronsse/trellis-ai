@@ -121,6 +121,24 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A sensitivity label can no longer be applied to an id that is not a live document, and the graph-read
+  concealment pins are tightened (no change to what any pack serves).** A pack, a document read and an
+  `external` key judge an id by the document row at that id, so a label written for a graph node, a
+  trace or a deleted document was accepted and did nothing. Both label verbs already answered
+  `target_not_found` for such an id (a `REJECTED` result with a `MUTATION_REJECTED` audit event; HTTP 400
+  on the REST routes; a non-zero CLI exit on either `--format`); tests now pin that on every door (the two
+  REST routes, `POST /commands/batch`, MCP `execute_mutation`, both CLI commands) for each id kind, with a
+  live document still labelled normally, and the operator docs state the policy, including that a label
+  already stored on a non-document id stays inert and is never migrated. Honouring labels on nodes and
+  traces is named as separate, later work. Also pinned: a concealed edge's top-level `evidence_ref` reads
+  `null` (never a missing key) and the stored edge is not mutated; a precedent whose source document is
+  relabelled after promotion is withheld from `GET /precedents` and `get_lessons`, and its
+  `source_item_id` is dropped from `GET /entities/{id}`, below the label. Known gap, pinned as strict
+  expected failures: the promotion's own text (the node's name and description, and the document stored
+  at the precedent's id) still names the source's id, title and opening excerpt after a relabel, so
+  `GET /entities/{id}`, `GET /documents/{id}` and `get_items` serve them to a `read` key. A pack-equality
+  test shows refused label writes leave a pack unchanged for a client with and without a clearance limit.
+
 - **`test_external_key_hidden_corpus.py` no longer fails about one run in six (test-only).**
   `pub-drain` and `pub-promote` in the shared public corpus score alike on every axis, so the
   row write clock ordered them, and each row reads its own `datetime.now()`: a stalled scoring
