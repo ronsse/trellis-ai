@@ -27,6 +27,7 @@ from trellis.mcp.boundary import (
     _raise_internal,
     _raise_invalid_params,
 )
+from trellis.mcp.grading_trailer import with_grading_trailer
 from trellis.mcp.wiring import _build_pack_builder, _get_registry
 from trellis.ops import (
     check_capture_health,
@@ -359,7 +360,8 @@ def _flat_context(
             axis_note=axis_note,
             advisories=pack.advisories,
         )
-        return f"{banner}\n\n{result}" if banner else result
+        result = f"{banner}\n\n{result}" if banner else result
+        return with_grading_trailer(registry, result, pack.pack_id)
 
     item_dicts = [
         {
@@ -392,6 +394,7 @@ def _flat_context(
     note_printed_items(result, (item.item_id for item in pack.items))
     if banner:
         result = f"{banner}\n\n{result}"
+    result = with_grading_trailer(registry, result, pack.pack_id)
     _track_tokens(
         registry,
         operation=operation,
@@ -497,6 +500,7 @@ def _sectioned_context(
         banner = _context_banner(registry)
         if banner:
             result = f"{banner}\n\n{result}"
+        result = with_grading_trailer(registry, result, sectioned_pack.pack_id)
         _track_tokens(
             registry,
             operation=tool,
