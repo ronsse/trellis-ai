@@ -12,7 +12,7 @@ group is ``intent`` (packs) -> new family / rule id, legacy family:
 - ``flaky ingest job N`` (3, ``fix-17``..``fix-19``): bugfix / bugfix.defect,
   general_context
 - ``review PR #12`` (5, ``rev-*``): review / review.verbs, general_context
-- ``add a regression test for the cache`` (3, ``tst-*``): test / test.core,
+- ``add a unit test for the cache`` (3, ``tst-*``): test / test.core,
   validation_diagnostics
 - ``write the release notes`` (2, ``doc-*``): docs / docs.core, general_context
 - ``check data quality of the orders dataset`` (2, ``dat-*``): data /
@@ -28,10 +28,13 @@ Also seeded and expected to stay out of every count: a pack with no item rows
 (``norows``), a pack before the window (``old``), and, unless ``holdout=False``,
 a held-out pack with feedback naming it (``held``).
 
-Grading: all 20 ``fix`` packs carry feedback citing two helpful items and one
-unhelpful (ten at rating 1.0, ten at 0.5). The five ``rev`` packs cite one
-helpful item each; ``rev-0`` has two feedback events naming the same item, so
-it unions to one. ``doc-0`` has a rating and no citation.
+Grading: all 20 ``fix`` packs carry feedback (ten at rating 1.0, ten at 0.5)
+citing, of the three items each served, two helpful and one unhelpful for
+``fix-00``..``fix-09``, three helpful for ``fix-10``..``fix-14`` and one helpful
+and two unhelpful for ``fix-15``..``fix-19``: 40 helpful and 20 unhelpful in all,
+spread unevenly so the pack-level interval is not degenerate. The five ``rev``
+packs cite one helpful item each; ``rev-0`` has two feedback events naming the
+same item, so it unions to one. ``doc-0`` has a rating and no citation.
 """
 
 from __future__ import annotations
@@ -146,8 +149,13 @@ def seed(log: EventLog, *, holdout: bool = True) -> None:
     for i in range(17, 20):
         pack(log, f"fix-{i:02d}", f"flaky ingest job {i}")
     for i in range(20):
+        helpful, unhelpful = (2, 1) if i < 10 else (3, 0) if i < 15 else (1, 2)
         grade(
-            log, f"fix-{i:02d}", helpful=2, unhelpful=1, rating=1.0 if i < 10 else 0.5
+            log,
+            f"fix-{i:02d}",
+            helpful=helpful,
+            unhelpful=unhelpful,
+            rating=1.0 if i < 10 else 0.5,
         )
 
     for i in range(5):
@@ -158,7 +166,7 @@ def seed(log: EventLog, *, holdout: bool = True) -> None:
         grade(log, f"rev-{i}", helpful=1, rating=1.0)
 
     for i in range(3):
-        pack(log, f"tst-{i}", "add a regression test for the cache")
+        pack(log, f"tst-{i}", "add a unit test for the cache")
     for i in range(2):
         pack(log, f"doc-{i}", "write the release notes")
     grade(log, "doc-0", rating=0.8)

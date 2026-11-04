@@ -21,10 +21,12 @@ from trellis.learning.intent_families import (
     IntentFamilyReport,
     RuleSet,
     load_rule_set,
+    pack_bootstrap_interval,
     render_markdown,
     summarize_intent_families,
 )
-from trellis.stores.base.event_log import EventLog
+from trellis.retrieve.pack_value import summarize_pack_value
+from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 
 
@@ -61,8 +63,12 @@ class TestAgainstHandComputedCounts:
         # ``gen-0`` is stamped with a family the legacy map does not return.
         assert report.legacy_stamp_differs == 1
         assert report.rule_set.source == "default"
+        assert report.interval_method == "pack_bootstrap_95"
+        assert report.bootstrap_resamples == 2000
+        assert report.sectioned_packs_without_rows == 0
+        assert report.cited_not_served == 0
         assert report.rule_set.fallback == "general"
-        assert report.rule_set.rules == 12
+        assert report.rule_set.rules == 17
 
     def test_packs_per_new_family(self, log: EventLog) -> None:
         seed_mod.seed(log)
@@ -72,13 +78,16 @@ class TestAgainstHandComputedCounts:
         assert {name: row.packs for name, row in rows.items()} == {
             "review": 5,
             "bugfix": 20,
+            "performance": 0,
             "refactor": 0,
-            "data": 2,
             "investigate": 0,
+            "data": 2,
             "docs": 2,
+            "maintenance": 0,
             "ops": 1,
             "test": 3,
             "feature": 0,
+            "design": 0,
             "general": 5,
         }
 
@@ -92,9 +101,15 @@ class TestAgainstHandComputedCounts:
         assert bugfix.unhelpful_citations == 20
         assert bugfix.withheld_reason == ""
         assert bugfix.helpful_rate == pytest.approx(40 / 60, abs=1e-4)
-        # Wilson 95% for 40 of 60, worked from the closed form.
-        assert bugfix.helpful_rate_low == pytest.approx(0.5406, abs=1e-4)
-        assert bugfix.helpful_rate_high == pytest.approx(0.7727, abs=1e-4)
+        # The interval resamples the 20 packs, which cite 2/3, 3/3 and 1/3 of
+        # their items as helpful (ten, five and five packs); the pair list is
+        # worked by hand from the seed, not read back from the report.
+        pairs = [(2, 3)] * 10 + [(3, 3)] * 5 + [(1, 3)] * 5
+        low, high = pack_bootstrap_interval(pairs) or (None, None)
+        assert bugfix.helpful_rate_low == pytest.approx(low, abs=1e-4)
+        assert bugfix.helpful_rate_high == pytest.approx(high, abs=1e-4)
+        assert 0.5 < bugfix.helpful_rate_low < 40 / 60 < bugfix.helpful_rate_high < 0.85
+        assert bugfix.cited_not_served == 0
         assert bugfix.rated_packs == 20
         assert bugfix.mean_rating == pytest.approx(0.75, abs=1e-4)
         assert [(r.rule_id, r.packs) for r in bugfix.top_rules] == [
@@ -179,7 +194,9 @@ class TestFloor:
         bugfix = _by_family(_report(log))["bugfix"]
 
         assert bugfix.helpful_rate is None
-        assert "no helpful or unhelpful citations" in bugfix.withheld_reason
+        assert "no helpful or unhelpful citation of a served item" in (
+            bugfix.withheld_reason
+        )
         assert bugfix.mean_rating == pytest.approx(0.9, abs=1e-4)
 
 
@@ -303,3 +320,114 @@ class TestNoIntentTextInAnyOutput:
         for name, text in rendered.items():
             assert seed_mod.SENTINEL not in text.lower(), name
         assert "bugfix" in rendered["markdown"]
+
+
+def _value_report(log: EventLog):  # type: ignore[no-untyped-def]
+    return summarize_pack_value(log, days=30, until=seed_mod.UNTIL)
+
+
+class TestCitationsJoinAsValueDoes:
+    """25 packs: a served id cited helpful, a stray id, then the served id unhelpful."""
+
+    def _seed(self, log: EventLog, packs: int = 25) -> None:
+        for i in range(packs):
+            seed_mod.pack(log, f"p{i}", "fix the parser")
+            seed_mod.feedback(
+                log,
+                f"p{i}",
+                helpful=(seed_mod.item(f"p{i}", 0), "doc:never-served"),
+                rating=1.0,
+            )
+            seed_mod.feedback(
+                log, f"p{i}", unhelpful=(seed_mod.item(f"p{i}", 0),), rating=0.0
+            )
+
+    def test_only_served_ids_count_and_helpful_wins(self, log: EventLog) -> None:
+        self._seed(log)
+
+        report = _report(log)
+        bugfix = _by_family(report)["bugfix"]
+
+        assert bugfix.graded_packs == 25
+        assert bugfix.helpful_citations == 25
+        assert bugfix.unhelpful_citations == 0
+        assert bugfix.cited_not_served == 25
+        assert report.cited_not_served == 25
+        assert bugfix.helpful_rate == 1.0
+        assert (bugfix.helpful_rate_low, bugfix.helpful_rate_high) == (1.0, 1.0)
+        assert any("25 cited id(s) were not served" in note for note in report.notes)
+
+    def test_the_counts_agree_with_analyze_value_on_the_same_log(
+        self, log: EventLog
+    ) -> None:
+        self._seed(log)
+
+        bugfix = _by_family(_report(log))["bugfix"]
+        value = _value_report(log)
+
+        # Every seeded item is served at 10 estimated tokens.
+        assert value.cited_ids_not_served == bugfix.cited_not_served == 25
+        assert value.distinct_helpful_items == bugfix.helpful_citations
+        assert value.helpful_tokens == 10 * bugfix.helpful_citations
+        assert value.unhelpful_tokens == 10 * bugfix.unhelpful_citations
+
+    def test_an_unserved_id_alone_grades_no_rate(self, log: EventLog) -> None:
+        for i in range(MIN_GRADED_PACKS):
+            seed_mod.pack(log, f"p{i}", "fix the parser")
+            seed_mod.feedback(log, f"p{i}", helpful=("doc:never-served",))
+
+        bugfix = _by_family(_report(log))["bugfix"]
+
+        assert bugfix.cited_not_served == MIN_GRADED_PACKS
+        assert bugfix.helpful_citations == bugfix.unhelpful_citations == 0
+        assert bugfix.helpful_rate is None
+        assert "no helpful or unhelpful citation" in bugfix.withheld_reason
+
+
+class TestFeedbackAndSectionedCounting:
+    def test_one_feedback_id_recorded_twice_is_one_vote(self, log: EventLog) -> None:
+        for i in range(MIN_GRADED_PACKS):
+            seed_mod.pack(log, f"p{i}", "fix the loader")
+            if i:
+                seed_mod.grade(log, f"p{i}", helpful=1, rating=0.5)
+        for _ in range(2):  # a replay of the same event
+            seed_mod._append(
+                log,
+                EventType.FEEDBACK_RECORDED,
+                at=seed_mod.AT,
+                entity_id="p0",
+                payload={"pack_id": "p0", "feedback_id": "fb-1", "rating": 1.0},
+            )
+        seed_mod._append(
+            log,
+            EventType.FEEDBACK_RECORDED,
+            at=seed_mod.AT,
+            entity_id="p0",
+            payload={"pack_id": "p0", "feedback_id": "fb-2", "rating": 0.0},
+        )
+
+        bugfix = _by_family(_report(log))["bugfix"]
+
+        # p0 is (1.0 + 0.0) / 2 = 0.5, not (1.0 + 1.0 + 0.0) / 3.
+        assert bugfix.rated_packs == MIN_GRADED_PACKS
+        assert bugfix.mean_rating == pytest.approx(0.5, abs=1e-4)
+
+    def test_a_sectioned_pack_without_rows_is_counted_by_name(
+        self, log: EventLog
+    ) -> None:
+        seed_mod.pack(log, "flat-0", "fix the loader")
+        seed_mod._append(
+            log,
+            EventType.PACK_ASSEMBLED,
+            at=seed_mod.AT,
+            entity_id="sec-0",
+            payload={"intent": "fix x", "sections": [{"name": "a", "items": []}]},
+        )
+
+        report = _report(log)
+
+        assert report.packs_served == 2
+        assert report.packs_analyzed == 1
+        assert report.packs_without_item_rows == 1
+        assert report.sectioned_packs_without_rows == 1
+        assert any("sectioned pack(s)" in note for note in report.notes)

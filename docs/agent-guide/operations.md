@@ -4074,9 +4074,10 @@ as "fix flaky test" lands in a data-validation family on the substring "test", a
 "review PR" lands in `general_context`. This command relabels the window's served
 packs under a software-work family set and reports whether helpfulness separates by
 family, offline and read-only. **Serving and learning still use the legacy key**: no
-code that scores, serves, tags or promotes imports the new module
-(`tests/unit/test_intent_families_import_rule.py` pins the allowed importers), and
-changing the key is a decision for after the readout.
+code that scores, serves, tags or promotes imports the new module, its command or its
+route, or names the `intent_families` config key
+(`tests/unit/test_intent_families_import_rule.py` pins the allowed importers, one
+direction only), and changing the key is a decision for after the readout.
 
 ```bash
 trellis analyze intent-families [--days N] [--since DATE] [--until DATE] [--limit N] [--format text|json|markdown]
@@ -4094,12 +4095,23 @@ trellis analyze intent-families [--days N] [--since DATE] [--until DATE] [--limi
 names a family and word-boundary keywords or phrases (matched case-insensitively, a
 phrase tolerating any whitespace between its words), and **the first rule that matches
 wins**. `latest` does not match `test`, `redeploy` counts as `ops`. No match is the
-fallback family, `general`. The shipped families are `bugfix`, `feature`, `refactor`,
-`review`, `investigate`, `test`, `ops` (deploy, CI, infrastructure), `docs`, `data`
-(the old data-platform intents kept together) and the fallback. Order matters where an
-intent could land in two: a verb naming the work (`review`, `fix`) outranks the object
-it works on, and a building verb (`add`, `write`) comes last. Every match records the
-rule id, so the report can show why an intent landed where it did.
+fallback family, `general`. The shipped families are `review` (including merging a
+pull request), `bugfix` (a defect noun, a fix verb or a regression), `performance`,
+`refactor`, `investigate`, `data` (the old data-platform intents kept together), `docs`,
+`maintenance` (dependencies, bumps, upgrades), `ops` (deploy, CI, infrastructure),
+`test`, `feature`, `design` and the fallback. Past tenses and inflections ("refactored",
+"fails", "documented") land where the bare verb does. Order matters where an intent
+could land in two, and each decision is pinned in the classifier table
+(`tests/unit/learning/test_intent_families.py`): a verb naming the work (`review`,
+`fix`) outranks the object it works on, so `investigate` precedes `data` ("debug the SQL
+query" is an investigation); `regression` precedes `performance`, which precedes the
+other `bugfix` rules ("performance regression" is a bug, "optimize the planner" is
+performance); `docs` precedes `design` ("write the design doc" is a document, and so
+are "release notes" and a "pre-release checklist", while "cut the release" is `ops`);
+`implement` precedes `design` ("implement the RFC" is the work, not the plan); and a
+building verb (`add`, `write`) comes last. Nouns that are common in this codebase and
+say nothing about the work ("mutation", "audit", "new") are not keywords. Every match
+records the rule id, so the report can show why an intent landed where it did.
 
 A deployment replaces the shipped set in `config.yaml`:
 
@@ -4116,22 +4128,34 @@ retrieval:
 The block replaces the defaults whole; it does not merge. **A malformed block raises
 `ConfigError`** (a CLI exit of `5`, HTTP `409`) and never reads as the shipped rules:
 a non-mapping or empty block, no `rules`, an unknown key, a rule without `id`, `family`
-or keywords, a blank or over-64-character keyword, a repeated or reserved (`fallback`)
-rule id, or a name that is not a lowercase slug. The message names the key path and
-never the value.
+or keywords, a blank or over-64-character keyword, more than 500 rules or 50 keywords in
+a rule, a repeated or reserved (`fallback`) rule id, or a name that is not a lowercase
+slug. The message names a position (`rules[3]`) or a count and never a value or a key
+you typed, since a config line can hold a credential by accident. A valid block is
+compiled once and reused for an identical block.
 
 **The report**, per new family: packs, graded packs (a rating, or feedback citing
-items, names the pack), helpful and unhelpful citations (distinct items, unioned per
-pack), the helpful rate over cited items with a Wilson 95% interval, the mean pack
-rating over packs that carry one, and the top matched rule ids. Report-wide: packs
-served, packs analysed (those carrying item rows, as in `analyze value`), the share
+items, names the pack), helpful and unhelpful citations, the helpful rate, its
+interval, the mean pack rating over packs that carry one (a `feedback_id` recorded twice
+counts once) and the top matched rule ids. **Citations join as `analyze value` joins
+them**: a cited id counts only if the pack served it, an item cited both ways is
+helpful, and an id the pack never served is counted apart as `cited_not_served` (per
+family and report-wide), in no rate. The rate keeps its citation weight (total helpful
+over total judged citations), but its **interval resamples packs, not citations**
+(`interval_method: "pack_bootstrap_95"`: 2,000 resamples of the family's graded packs
+with replacement, a fixed seed, the 2.5th and 97.5th percentiles), because the citations
+of one pack are not independent; a Wilson interval over them would be several times too
+narrow. Report-wide: packs
+served, packs analysed (those carrying item rows, as in `analyze value`), sectioned
+packs without rows (`sectioned_packs_without_rows`, not analysed), the share
 that fell to the fallback family, a legacy-by-new cross-tab of pack counts, and how
 many packs' stored `intent_family` stamp differs from the legacy family recomputed
 here. **A family's rates are withheld below 20 graded packs**, with the reason stated
 beside it (`withheld_reason`); an uncited item is not an unhelpful one. A good report has
-few packs in the fallback and helpful rates that differ between families by more than
-their intervals; a bad one leaves most packs in the fallback or shows overlapping
-intervals everywhere, which would say the new set does not separate anything.
+few packs in the fallback and helpful rates that differ between families; a bad one
+leaves most packs in the fallback. Read an interval as a hint about which families to
+open and read, not as a test: intervals that do not overlap are not a separation, and
+the interval does not account for comparing several families at once.
 
 **No intent text is printed**, on any format: intents are private corpus text and the
 report gets published, so it carries counts, family names and rule ids only

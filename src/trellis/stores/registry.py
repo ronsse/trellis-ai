@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import inspect
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -2230,9 +2231,11 @@ class StoreRegistry:
         """The raw ``retrieval:`` block of ``config.yaml`` (``{}`` when absent).
 
         For readers of a ``retrieval.*`` key that validate it themselves; a key
-        with a resolver of its own (``budget_config``) is read through that.
+        with a resolver of its own (``budget_config``) is read through that. The
+        caller gets a deep copy, so nothing it does to the block reaches
+        ``budget_config`` or the next reader.
         """
-        return self._retrieval_config
+        return copy.deepcopy(self._retrieval_config)
 
     @property
     def budget_config(self) -> Any:

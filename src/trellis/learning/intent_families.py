@@ -8,29 +8,34 @@ software intent such as "fix flaky test" or "review PR" lands in
 matched. Before the key changes, the open question is whether a software-work
 family set would separate helpfulness at all. This module answers it offline,
 over history, and nothing that serves or learns reads it. Changing the key is a
-post-readout decision, so this module does not import the live normaliser's
-callers and none of them import this module
-(``tests/unit/learning/test_intent_families_isolation.py`` pins both
-directions of that: the allowed importers are this module, its CLI, its REST
-route and tests).
+post-readout decision.
+
+The pin is one direction, and ``tests/unit/test_intent_families_import_rule.py``
+holds it: the scoring, observation, retrieval, tagging and MCP surfaces do not
+import this module, its CLI command or its REST route, and do not spell its config
+key as a string. The other direction is open: this module calls
+``normalize_intent_family`` and the shared pack joins.
 
 **The rule set.** Ordered, deterministic, first match wins. A rule is an id, a
 family and a list of keywords; a keyword is a word or a phrase and matches on
 word boundaries, case-insensitively (``latest`` does not match ``test``, and a
 phrase tolerates any run of whitespace between its words). There is no
 stemming: an inflection the family should catch is listed. The shipped default
-(:data:`DEFAULT_RULES`) carries ``review``, ``bugfix``, ``refactor``, ``data``,
-``investigate``, ``docs``, ``ops``, ``test`` and ``feature``, and an intent no
-rule matches falls to the fallback family (``general``) under the reserved rule
-id ``fallback``.
+(:data:`DEFAULT_RULES`) carries ``review``, ``bugfix``, ``performance``,
+``refactor``, ``investigate``, ``data``, ``docs``, ``maintenance``, ``ops``,
+``test``, ``design`` and ``feature``, and an intent no rule matches falls to the
+fallback family (``general``) under the reserved rule id ``fallback``.
 
 Order is the priority, and it is chosen by which word names the *work* rather
 than its object: a review verb outranks everything, a fix verb outranks the
 thing being fixed (so "fix flaky test" is ``bugfix``, not ``test``), and the
-broad building verbs (``add``, ``implement``) come last so ``add tests`` is
-``test`` and ``add a CI job`` is ``ops``. A long intent that names several
-kinds of work lands in the earliest rule it touches; the report's rule ids
-make that visible.
+broad building verbs (``add``, ``write``) come last so ``add tests`` is ``test``
+and ``add a CI job`` is ``ops``. Three orderings are decisions, each pinned in
+the classifier table: ``regression`` outranks ``performance`` (a "performance
+regression" is a bug), ``investigate`` outranks ``data`` ("debug the SQL query"
+is an investigation), and ``docs`` outranks ``design`` ("write the design doc"
+is a document). A long intent that names several kinds of work lands in the
+earliest rule it touches; the report's rule ids make that visible.
 
 **Per-deployment override.** The ``retrieval.intent_families`` block of
 ``config.yaml`` replaces the shipped rules whole (no merge, so the effective set
@@ -48,19 +53,33 @@ Unlike ``retrieval.budgets``, which degrades to its defaults with a warning, a
 malformed block raises :class:`~trellis.errors.ConfigError`: a silently
 substituted rule set would relabel history under names the operator did not
 choose, and the report would not say so. A present-but-empty block is malformed
-for the same reason; delete it to get the defaults.
+for the same reason; delete it to get the defaults. The error names positions
+(``rules[3]``) and counts, never a rule id, a key name or a keyword, because a
+config line can carry anything. A block is capped at :data:`MAX_RULES` rules of
+:data:`MAX_KEYWORDS_PER_RULE` keywords, and is compiled once per distinct block.
 
 **The report** (:func:`summarize_intent_families`) reads the served packs and
 the feedback that grades them through the same join ``analyze value`` uses
 (:func:`~trellis.learning.pack_observations.join_pack_feedback_with_coverage`,
 which drops held-out packs and the feedback naming them) and the typed readers
 in :mod:`trellis.feedback.pack_rows`. It reads no session outcome and splits
-nothing by holdout arm. Per new family it states the packs, the graded packs,
-the helpful and unhelpful citations, the helpful rate with a Wilson 95%
-interval, the mean pack rating and the top matched rule ids, beside the share of
-packs in the fallback and a legacy-by-new cross-tab. A family below
+nothing by holdout arm. Citations are joined as ``analyze value`` joins them: a
+cited id counts only if the pack served it, an item cited both helpful and
+unhelpful is helpful, and a cited id the pack never served is counted apart as
+``cited_not_served``. Per new family it states the packs, the graded packs, the
+helpful and unhelpful citations, the citation-weighted helpful rate, the mean
+pack rating (one vote per ``feedback_id``) and the top matched rule ids, beside
+the share of packs in the fallback and a legacy-by-new cross-tab. A family below
 :data:`MIN_GRADED_PACKS` graded packs has its rates withheld with the reason
 stated; its counts are still shown.
+
+**The interval's unit is the pack.** Citations cluster by pack (one grader
+cites many items from one delivery), so an interval over citations is far too
+narrow. The helpful rate's 95% interval is a percentile bootstrap that resamples
+graded *packs* with replacement (:data:`BOOTSTRAP_RESAMPLES` resamples, a fixed
+seed, so the output is deterministic) and recomputes the citation-weighted rate
+on each; the payload names it ``interval_method: "pack_bootstrap_95"``. Two
+non-overlapping intervals are a hint to look at the packs, not a separation.
 
 **It never prints an intent.** Intents are private corpus text and the report is
 published. Every string in it is a family name, a rule id or a fixed sentence.
@@ -68,7 +87,9 @@ published. Every string in it is a family name, a rule id or a fixed sentence.
 
 from __future__ import annotations
 
+import json
 import math
+import random
 import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -81,6 +102,7 @@ from pydantic import Field, ValidationError, field_validator, model_validator
 
 from trellis.core.base import TrellisModel
 from trellis.errors import ConfigError
+from trellis.feedback.attribution import is_sectioned_payload, served_item_ids
 from trellis.feedback.pack_rows import has_served_rows, iter_feedback_rows
 from trellis.learning.pack_observations import join_pack_feedback_with_coverage
 from trellis.learning.scoring import normalize_intent_family
@@ -108,10 +130,20 @@ MIN_GRADED_PACKS: Final = 20
 #: Rule ids named per family in the report.
 TOP_RULES: Final = 5
 
+#: A configured block above either cap is a ``ConfigError``.
+MAX_RULES: Final = 500
+MAX_KEYWORDS_PER_RULE: Final = 50
+
+#: The helpful rate's interval: a percentile bootstrap over graded packs.
+INTERVAL_METHOD: Final = "pack_bootstrap_95"
+BOOTSTRAP_RESAMPLES: Final = 2000
+#: Fixed so the same log gives the same interval on every run and every host.
+BOOTSTRAP_SEED: Final = 1179
+_BOOTSTRAP_ALPHA: Final = 0.05
+
 STATUS_OK: Final = "ok"
 STATUS_TRUNCATED: Final = "truncated"
 
-_Z_95: Final = 1.959963984540054
 _NAME = re.compile(r"^[a-z][a-z0-9_.-]*$")
 _MAX_KEYWORD_LENGTH: Final = 64
 _NAME_RULE: Final = (
@@ -131,7 +163,7 @@ class IntentFamilyRule(TrellisModel):
 
     id: str
     family: str
-    keywords: list[str] = Field(min_length=1)
+    keywords: list[str] = Field(min_length=1, max_length=MAX_KEYWORDS_PER_RULE)
 
     @field_validator("id", "family")
     @classmethod
@@ -165,7 +197,7 @@ class IntentFamilyConfig(TrellisModel):
     """The ``retrieval.intent_families`` block."""
 
     fallback: str = DEFAULT_FALLBACK_FAMILY
-    rules: list[IntentFamilyRule] = Field(min_length=1)
+    rules: list[IntentFamilyRule] = Field(min_length=1, max_length=MAX_RULES)
 
     @field_validator("fallback")
     @classmethod
@@ -177,12 +209,15 @@ class IntentFamilyConfig(TrellisModel):
 
     @model_validator(mode="after")
     def _ids_unique(self) -> IntentFamilyConfig:
-        seen: set[str] = set()
-        for rule in self.rules:
-            if rule.id in seen:
-                msg = f"rule id {rule.id!r} appears more than once"
+        first_seen: dict[str, int] = {}
+        for position, rule in enumerate(self.rules):
+            if rule.id in first_seen:
+                # Positions, not the id: a config line can carry anything.
+                msg = (
+                    f"rules[{position}] repeats the id of rules[{first_seen[rule.id]}]"
+                )
                 raise ValueError(msg)
-            seen.add(rule.id)
+            first_seen[rule.id] = position
         return self
 
 
@@ -204,6 +239,40 @@ DEFAULT_RULES: Final[tuple[IntentFamilyRule, ...]] = (
         "code review",
         "critique",
         "lgtm",
+        "merge pr",
+        "merge prs",
+        "merge the pr",
+        "merge the prs",
+        "merge pull request",
+        "merge the pull request",
+    ),
+    # Before ``performance`` on purpose: "performance regression" is a bug.
+    _rule(
+        "bugfix.regression",
+        "bugfix",
+        "regression",
+        "regressions",
+        "regressed",
+    ),
+    _rule(
+        "performance.core",
+        "performance",
+        "optimize",
+        "optimise",
+        "optimized",
+        "optimised",
+        "optimizing",
+        "optimising",
+        "optimization",
+        "optimisation",
+        "performance",
+        "perf",
+        "latency",
+        "throughput",
+        "speed up",
+        "speed-up",
+        "benchmark",
+        "benchmarks",
     ),
     _rule(
         "bugfix.fix",
@@ -215,6 +284,9 @@ DEFAULT_RULES: Final[tuple[IntentFamilyRule, ...]] = (
         "bugfix",
         "hotfix",
         "repair",
+        "repairs",
+        "repaired",
+        "repairing",
         "workaround",
     ),
     _rule(
@@ -224,31 +296,110 @@ DEFAULT_RULES: Final[tuple[IntentFamilyRule, ...]] = (
         "bugs",
         "crash",
         "crashes",
+        "crashed",
         "crashing",
         "broken",
         "flaky",
         "failing",
         "fails",
+        "fail",
+        "failed",
+        "failure",
+        "failures",
+        "error",
+        "errors",
+        "exception",
+        "exceptions",
+        "traceback",
+        "tracebacks",
+        "stack trace",
     ),
     _rule(
         "refactor.core",
         "refactor",
         "refactor",
         "refactors",
+        "refactored",
         "refactoring",
         "restructure",
+        "restructured",
         "reorganize",
+        "reorganized",
         "reorganise",
+        "reorganised",
         "rename",
+        "renames",
+        "renamed",
+        "renaming",
         "cleanup",
         "clean up",
+        "cleaned up",
         "simplify",
+        "simplified",
         "dedupe",
+        "deduped",
         "deduplicate",
+        "deduplicated",
         "consolidate",
+        "consolidated",
         "decompose",
+        "decomposed",
         "split into",
     ),
+    _rule(
+        "investigate.inquiry",
+        "investigate",
+        "investigate",
+        "investigated",
+        "investigating",
+        "investigation",
+        "debug",
+        "debugged",
+        "debugging",
+        "diagnose",
+        "diagnosed",
+        "diagnosing",
+        "triage",
+        "triaged",
+        "root cause",
+        "why",
+        "how does",
+        "how do",
+        "figure out",
+        "find out",
+        "look into",
+        "profile the",
+        "profiled",
+        "profiling",
+        "profiler",
+    ),
+    _rule(
+        "investigate.analysis",
+        "investigate",
+        "analyze",
+        "analyzed",
+        "analyse",
+        "analysed",
+        "analyzing",
+        "analysing",
+        "analysis",
+        "research",
+        "researched",
+        "survey",
+        "explore",
+        "explored",
+        "measure",
+        "measured",
+        "measuring",
+        "compare",
+        "compared",
+        "evaluate",
+        "evaluated",
+        "reproduce",
+        "reproduced",
+    ),
+    # After ``investigate`` on purpose: "debug the SQL query" is an investigation
+    # whose object happens to be data.
     _rule(
         "data.platform",
         "data",
@@ -267,50 +418,15 @@ DEFAULT_RULES: Final[tuple[IntentFamilyRule, ...]] = (
         "anomalies",
         "data drift",
         "schema drift",
-        "profiling",
         "warehouse",
         "lakehouse",
     ),
-    _rule(
-        "investigate.inquiry",
-        "investigate",
-        "investigate",
-        "investigating",
-        "investigation",
-        "debug",
-        "debugging",
-        "diagnose",
-        "diagnosing",
-        "triage",
-        "root cause",
-        "why",
-        "how does",
-        "how do",
-        "figure out",
-        "find out",
-        "look into",
-    ),
-    _rule(
-        "investigate.analysis",
-        "investigate",
-        "analyze",
-        "analyse",
-        "analyzing",
-        "analysis",
-        "research",
-        "audit",
-        "survey",
-        "explore",
-        "measure",
-        "measuring",
-        "compare",
-        "evaluate",
-        "reproduce",
-    ),
+    # Before ``design`` on purpose: "write the design doc" is a document.
     _rule(
         "docs.core",
         "docs",
         "docs",
+        "doc",
         "documentation",
         "readme",
         "changelog",
@@ -326,8 +442,29 @@ DEFAULT_RULES: Final[tuple[IntentFamilyRule, ...]] = (
         "playbooks",
         "runbook",
         "blog post",
+        "checklist",
         "document the",
+        "documented",
         "documenting",
+    ),
+    _rule(
+        "maintenance.deps",
+        "maintenance",
+        "dependency",
+        "dependencies",
+        "deps",
+        "bump",
+        "bumps",
+        "bumped",
+        "bumping",
+        "upgrade",
+        "upgrades",
+        "upgraded",
+        "upgrading",
+        "lockfile",
+        "lock file",
+        "renovate",
+        "dependabot",
     ),
     _rule(
         "ops.deploy",
@@ -339,12 +476,19 @@ DEFAULT_RULES: Final[tuple[IntentFamilyRule, ...]] = (
         "deployment",
         "redeploy",
         "redeploying",
+        "redeployed",
         "redeployment",
         "rollout",
+        "rolled out",
         "rollback",
+        "rolled back",
         "release",
         "releases",
+        "released",
+        "releasing",
         "publish",
+        "published",
+        "publishing",
         "pypi",
     ),
     _rule(
@@ -386,31 +530,62 @@ DEFAULT_RULES: Final[tuple[IntentFamilyRule, ...]] = (
         "coverage",
         "mutant",
         "mutants",
-        "mutation",
         "e2e",
         "end-to-end",
         "fixture",
         "fixtures",
     ),
+    # "Implement the RFC" is the work of implementing, so it outranks ``design``,
+    # whose nouns ("rfc", "spec") would otherwise take it.
     _rule(
-        "feature.build",
+        "feature.implement",
         "feature",
         "implement",
         "implements",
+        "implemented",
         "implementing",
         "implementation",
+    ),
+    _rule(
+        "design.core",
+        "design",
+        "design",
+        "designs",
+        "designed",
+        "designing",
+        "plan",
+        "plans",
+        "planning",
+        "architecture",
+        "architect",
+        "proposal",
+        "proposals",
+        "adr",
+        "rfc",
+        "spec",
+        "specs",
+        "specification",
+    ),
+    _rule(
+        "feature.build",
+        "feature",
         "add",
         "adds",
+        "added",
         "adding",
         "build",
         "building",
         "create",
+        "creates",
+        "created",
         "creating",
         "introduce",
+        "introduced",
         "feature",
         "features",
         "support",
         "wire",
+        "wired",
         "wiring",
         "extend",
         "extending",
@@ -418,9 +593,11 @@ DEFAULT_RULES: Final[tuple[IntentFamilyRule, ...]] = (
         "expose",
         "integrate",
         "migrate",
+        "migrated",
+        "migrating",
         "write",
+        "wrote",
         "writing",
-        "new",
     ),
 )
 
@@ -510,14 +687,40 @@ def default_rule_set() -> RuleSet:
     return _DEFAULT_RULE_SET
 
 
+def _position(loc: tuple[int | str, ...]) -> str:
+    """``rules[3].keywords``: a key path where list positions read as indexes."""
+    text = ""
+    for part in loc:
+        if isinstance(part, int):
+            text += f"[{part}]"
+        else:
+            text += f".{part}" if text else str(part)
+    return text or "(block)"
+
+
 def _describe(exc: ValidationError) -> str:
-    # ``include_input=False``: a config line can carry anything, and the error
-    # names the key path and the problem, which is what an operator edits.
+    # ``include_input=False`` keeps the offending value out of the message. An
+    # unknown key is the other place a config line leaks: pydantic puts the key
+    # itself in the error location, so the location stops at the mapping that
+    # holds it, and the message gives the position and says a key is unrecognised.
     parts = []
     for err in exc.errors(include_input=False, include_url=False):
-        location = ".".join(str(part) for part in err["loc"]) or "(block)"
-        parts.append(f"{location}: {err['msg']}")
+        loc = tuple(err["loc"])
+        if err["type"] == "extra_forbidden":
+            parts.append(f"{_position(loc[:-1])}: has a key that is not recognised")
+        else:
+            parts.append(f"{_position(loc)}: {err['msg']}")
     return "; ".join(parts)
+
+
+#: Compiled blocks by their canonical JSON, so a REST route that loads the block
+#: per request compiles it once. Bounded: a deployment has one block.
+_COMPILED_CACHE: dict[str, RuleSet] = {}
+_COMPILED_CACHE_SIZE: Final = 4
+
+
+def _cache_key(raw: Mapping[str, Any]) -> str:
+    return json.dumps(raw, sort_keys=True, default=repr)
 
 
 def load_rule_set(retrieval_config: Mapping[str, Any] | None) -> RuleSet:
@@ -525,7 +728,8 @@ def load_rule_set(retrieval_config: Mapping[str, Any] | None) -> RuleSet:
 
     Absent block: the shipped defaults. Present block: it replaces them, or the
     call raises :class:`~trellis.errors.ConfigError`. There is no path on which
-    a malformed block yields the defaults.
+    a malformed block yields the defaults. A valid block is compiled once and
+    the compiled set is reused for an identical block.
     """
     if not retrieval_config:
         return default_rule_set()
@@ -541,12 +745,20 @@ def load_rule_set(retrieval_config: Mapping[str, Any] | None) -> RuleSet:
             "list; remove the block to use the shipped rules"
         )
         raise ConfigError(msg, setting=CONFIG_SETTING)
+    key = _cache_key(raw)
+    cached = _COMPILED_CACHE.get(key)
+    if cached is not None:
+        return cached
     try:
         config = IntentFamilyConfig.model_validate(dict(raw))
     except ValidationError as exc:
         msg = f"{CONFIG_SETTING} is malformed: {_describe(exc)}"
         raise ConfigError(msg, setting=CONFIG_SETTING) from exc
-    return RuleSet.from_config(config, source="config")
+    compiled = RuleSet.from_config(config, source="config")
+    if len(_COMPILED_CACHE) >= _COMPILED_CACHE_SIZE:
+        _COMPILED_CACHE.clear()
+    _COMPILED_CACHE[key] = compiled
+    return compiled
 
 
 def classify_intent_family(
@@ -563,16 +775,42 @@ def classify_intent_family(
 # --- Report ----------------------------------------------------------------
 
 
-def wilson_interval(successes: int, n: int, z: float = _Z_95) -> tuple[float, float]:
-    """The Wilson score interval for ``successes`` of ``n`` (``n`` must be positive)."""
-    if n <= 0:
-        msg = "a Wilson interval needs at least one trial"
-        raise ValueError(msg)
-    p = successes / n
-    denom = 1 + z * z / n
-    centre = (p + z * z / (2 * n)) / denom
-    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
-    return max(0.0, centre - half), min(1.0, centre + half)
+def pack_bootstrap_interval(
+    packs: Sequence[tuple[int, int]],
+    *,
+    resamples: int = BOOTSTRAP_RESAMPLES,
+    seed: int = BOOTSTRAP_SEED,
+) -> tuple[float, float] | None:
+    """A 95% percentile bootstrap interval of the citation-weighted helpful rate.
+
+    ``packs`` holds one ``(helpful, judged)`` pair per graded pack, where
+    ``judged`` is the pack's helpful plus unhelpful citations. The unit that is
+    resampled is the pack, with replacement, because the citations of one pack
+    are not independent draws: the rate is recomputed as total helpful over
+    total judged on each resample. A resample with no judged citation has no
+    rate and is skipped. The generator is seeded here, never shared, so the
+    interval depends on ``packs`` alone. ``None`` when no resample has a rate.
+    """
+    count = len(packs)
+    if count == 0 or resamples <= 0:
+        return None
+    helpful = [pair[0] for pair in packs]
+    judged = [pair[1] for pair in packs]
+    rng = random.Random(seed)  # noqa: S311 - a reproducible resample, not security
+    positions = range(count)
+    rates: list[float] = []
+    for _ in range(resamples):
+        drawn = rng.choices(positions, k=count)
+        total = sum(judged[i] for i in drawn)
+        if total:
+            rates.append(sum(helpful[i] for i in drawn) / total)
+    if not rates:
+        return None
+    rates.sort()
+    tail = _BOOTSTRAP_ALPHA / 2
+    low = rates[int(tail * len(rates))]
+    high = rates[min(len(rates) - 1, math.ceil((1 - tail) * len(rates)) - 1)]
+    return low, high
 
 
 class RuleCount(TrellisModel):
@@ -586,10 +824,15 @@ class FamilyRow(TrellisModel):
     family: str
     packs: int = 0
     graded_packs: int = 0
-    #: Distinct helpful / unhelpful item citations, unioned per pack.
+    #: Distinct helpful / unhelpful citations of items the pack served, unioned
+    #: per pack; an item cited both ways is helpful, as in ``analyze value``.
     helpful_citations: int = 0
     unhelpful_citations: int = 0
+    #: Distinct cited ids the pack never served, which no rate counts.
+    cited_not_served: int = 0
+    #: Helpful over helpful plus unhelpful citations, weighted by citation.
     helpful_rate: float | None = None
+    #: The bounds of :attr:`IntentFamilyReport.interval_method`, over packs.
     helpful_rate_low: float | None = None
     helpful_rate_high: float | None = None
     rated_packs: int = 0
@@ -622,13 +865,21 @@ class IntentFamilyReport(TrellisModel):
     since: datetime
     until: datetime | None = None
     min_graded_packs: int = MIN_GRADED_PACKS
+    #: How every family's rate interval was made (the resampled unit is the pack).
+    interval_method: str = INTERVAL_METHOD
+    bootstrap_resamples: int = BOOTSTRAP_RESAMPLES
     rule_set: RuleSetInfo
     #: Served packs in the window, after the holdout drop.
     packs_served: int = 0
     #: Served packs with item rows: the population every figure below uses.
     packs_analyzed: int = 0
     packs_without_item_rows: int = 0
+    #: Of those, sectioned packs from before they emitted rows (#958), as
+    #: ``analyze value`` counts them.
+    sectioned_packs_without_rows: int = 0
     packs_without_intent: int = 0
+    #: Cited ids the cited pack never served, across every analysed pack.
+    cited_not_served: int = 0
     fallback_packs: int = 0
     fallback_share: float | None = None
     #: Packs whose stored ``intent_family`` stamp differs from the legacy
@@ -644,29 +895,58 @@ class IntentFamilyReport(TrellisModel):
 @dataclass(slots=True)
 class _Cell:
     packs: int = 0
-    graded: int = 0
-    helpful: int = 0
-    unhelpful: int = 0
+    #: ``(helpful, helpful + unhelpful)`` of each graded pack: the bootstrap's unit.
+    graded: list[tuple[int, int]] = field(default_factory=list)
+    stray: int = 0
     ratings: list[float] = field(default_factory=list)
     rules: Counter[str] = field(default_factory=Counter)
 
 
 def _pack_ratings(feedback_events: Sequence[Any], served: set[str]) -> dict[str, float]:
-    """The mean rating per served pack that has one, from the typed feedback reader."""
+    """The mean rating per served pack that has one, from the typed feedback reader.
+
+    A ``feedback_id`` counts once: the same feedback recorded twice (a replay) is
+    one vote. Rows without an id (the CLI family) are each their own vote.
+    """
     by_pack: dict[str, list[float]] = {}
+    seen: set[str] = set()
     for row in iter_feedback_rows(feedback_events):
-        if row.pack_id in served and row.rating is not None:
-            by_pack.setdefault(row.pack_id, []).append(row.rating)
+        if row.pack_id not in served or row.rating is None:
+            continue
+        if row.feedback_id:
+            if row.feedback_id in seen:
+                continue
+            seen.add(row.feedback_id)
+        by_pack.setdefault(row.pack_id, []).append(row.rating)
     return {pack_id: sum(vals) / len(vals) for pack_id, vals in by_pack.items()}
 
 
+def _judged_citations(
+    payload: Mapping[str, Any], helpful: set[str], unhelpful: set[str]
+) -> tuple[int, int, int]:
+    """``(helpful, unhelpful, cited_not_served)`` as ``analyze value`` joins them.
+
+    A cited id counts only if the pack served it (the canonical reader,
+    :func:`~trellis.feedback.attribution.served_item_ids`); an item cited both
+    ways is helpful; an id the pack never served is counted apart.
+    """
+    served = served_item_ids(payload)
+    helpful_served = helpful & served
+    unhelpful_served = (unhelpful & served) - helpful_served
+    stray = (helpful | unhelpful) - served
+    return len(helpful_served), len(unhelpful_served), len(stray)
+
+
 def _family_row(family: str, cell: _Cell) -> FamilyRow:
+    helpful = sum(pair[0] for pair in cell.graded)
+    judged = sum(pair[1] for pair in cell.graded)
     row = FamilyRow(
         family=family,
         packs=cell.packs,
-        graded_packs=cell.graded,
-        helpful_citations=cell.helpful,
-        unhelpful_citations=cell.unhelpful,
+        graded_packs=len(cell.graded),
+        helpful_citations=helpful,
+        unhelpful_citations=judged - helpful,
+        cited_not_served=cell.stray,
         rated_packs=len(cell.ratings),
         top_rules=[
             RuleCount(rule_id=rule_id, packs=count)
@@ -675,22 +955,58 @@ def _family_row(family: str, cell: _Cell) -> FamilyRow:
             )[:TOP_RULES]
         ],
     )
-    if cell.graded < MIN_GRADED_PACKS:
+    if len(cell.graded) < MIN_GRADED_PACKS:
         row.withheld_reason = (
-            f"{cell.graded} graded packs, below the floor of {MIN_GRADED_PACKS}"
+            f"{len(cell.graded)} graded packs, below the floor of {MIN_GRADED_PACKS}"
         )
         return row
-    citations = cell.helpful + cell.unhelpful
-    if citations:
-        low, high = wilson_interval(cell.helpful, citations)
-        row.helpful_rate = round(cell.helpful / citations, 4)
-        row.helpful_rate_low = round(low, 4)
-        row.helpful_rate_high = round(high, 4)
+    interval = pack_bootstrap_interval(cell.graded) if judged else None
+    if interval is not None:
+        row.helpful_rate = round(helpful / judged, 4)
+        row.helpful_rate_low = round(interval[0], 4)
+        row.helpful_rate_high = round(interval[1], 4)
     else:
-        row.withheld_reason = "no helpful or unhelpful citations among the graded packs"
+        row.withheld_reason = (
+            "no helpful or unhelpful citation of a served item among the graded packs"
+        )
     if cell.ratings:
         row.mean_rating = round(sum(cell.ratings) / len(cell.ratings), 4)
     return row
+
+
+def _report_notes(
+    *, cited_not_served: int, sectioned: int, coverage: ScanCoverage
+) -> list[str]:
+    notes = [
+        (
+            "Measurement only: serving and learning still key on "
+            "normalize_intent_family, and nothing reads this report."
+        ),
+        (
+            "A pack counts as graded when feedback naming it carries a rating or "
+            "cites items; rates are over cited items the pack served, so an uncited "
+            "item is not unhelpful."
+        ),
+        (
+            "The rate interval resamples graded packs, not citations "
+            f"({INTERVAL_METHOD}, {BOOTSTRAP_RESAMPLES} resamples, fixed seed); "
+            "overlap or not, it is a hint to read the packs, not a separation."
+        ),
+        "Held-out packs and the feedback naming them are dropped before every count.",
+    ]
+    if cited_not_served:
+        notes.append(
+            f"{cited_not_served} cited id(s) were not served by the pack they were "
+            "cited against and are counted in no rate."
+        )
+    if sectioned:
+        notes.append(
+            f"{sectioned} sectioned pack(s) carry no per-item rows and are not "
+            "analysed."
+        )
+    if coverage.truncated:
+        notes.append(coverage.note)
+    return notes
 
 
 def summarize_intent_families(
@@ -719,6 +1035,11 @@ def summarize_intent_families(
         for pack_id, payload in pack_payloads.items()
         if has_served_rows(payload)
     }
+    sectioned = sum(
+        1
+        for payload in pack_payloads.values()
+        if is_sectioned_payload(payload) and not has_served_rows(payload)
+    )
     verdicts = collect_pack_verdicts(feedback_events, flat)
     helpful_by_pack = verdicts["helpful"]
     unhelpful_by_pack = verdicts["unhelpful"]
@@ -726,7 +1047,7 @@ def summarize_intent_families(
 
     cells: dict[str, _Cell] = {family: _Cell() for family in rules.families}
     cross: Counter[tuple[str, str]] = Counter()
-    without_intent = fallback = stamp_differs = 0
+    without_intent = fallback = stamp_differs = stray_total = 0
     for pack_id in sorted(flat):
         payload = flat[pack_id]
         raw_intent = payload.get("intent")
@@ -743,12 +1064,15 @@ def summarize_intent_families(
         cell = cells[match.family]
         cell.packs += 1
         cell.rules[match.rule_id] += 1
-        helpful = helpful_by_pack.get(pack_id, set())
-        unhelpful = unhelpful_by_pack.get(pack_id, set())
-        if helpful or unhelpful or pack_id in ratings:
-            cell.graded += 1
-            cell.helpful += len(helpful)
-            cell.unhelpful += len(unhelpful)
+        cited_helpful = helpful_by_pack.get(pack_id, set())
+        cited_unhelpful = unhelpful_by_pack.get(pack_id, set())
+        if cited_helpful or cited_unhelpful or pack_id in ratings:
+            helpful, unhelpful, stray = _judged_citations(
+                payload, cited_helpful, cited_unhelpful
+            )
+            cell.graded.append((helpful, helpful + unhelpful))
+            cell.stray += stray
+            stray_total += stray
             if pack_id in ratings:
                 cell.ratings.append(ratings[pack_id])
 
@@ -759,20 +1083,9 @@ def summarize_intent_families(
         empty_reason = "no served pack in the window carries item rows"
     else:
         empty_reason = ""
-    notes = [
-        (
-            "Measurement only: serving and learning still key on "
-            "normalize_intent_family, and nothing reads this report."
-        ),
-        (
-            "A pack counts as graded when feedback naming it carries a rating or "
-            "cites items; rates are over cited items, so an uncited item is not "
-            "unhelpful."
-        ),
-        "Held-out packs and the feedback naming them are dropped before every count.",
-    ]
-    if coverage.truncated:
-        notes.append(coverage.note)
+    notes = _report_notes(
+        cited_not_served=stray_total, sectioned=sectioned, coverage=coverage
+    )
     return IntentFamilyReport(
         status=STATUS_TRUNCATED if coverage.truncated else STATUS_OK,
         empty_reason=empty_reason,
@@ -788,7 +1101,9 @@ def summarize_intent_families(
         packs_served=len(pack_payloads),
         packs_analyzed=analyzed,
         packs_without_item_rows=len(pack_payloads) - analyzed,
+        sectioned_packs_without_rows=sectioned,
         packs_without_intent=without_intent,
+        cited_not_served=stray_total,
         fallback_packs=fallback,
         fallback_share=round(fallback / analyzed, 4) if analyzed else None,
         legacy_stamp_differs=stamp_differs,
@@ -845,10 +1160,10 @@ def render_markdown(report: IntentFamilyReport) -> str:
         "## Families",
         "",
         (
-            "| family | packs | graded | helpful | unhelpful | helpful rate | "
-            "95% CI | mean rating | top rules |"
+            "| family | packs | graded | helpful | unhelpful | not served | "
+            "helpful rate | 95% CI (pack bootstrap) | mean rating | top rules |"
         ),
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for row in report.families:
         if row.helpful_rate is None:
@@ -859,8 +1174,8 @@ def render_markdown(report: IntentFamilyReport) -> str:
         rules = ", ".join(f"{r.rule_id} ({r.packs})" for r in row.top_rules) or "-"
         lines.append(
             f"| {row.family} | {row.packs} | {row.graded_packs} | "
-            f"{row.helpful_citations} | {row.unhelpful_citations} | {rate} | "
-            f"{interval} | "
+            f"{row.helpful_citations} | {row.unhelpful_citations} | "
+            f"{row.cited_not_served} | {rate} | {interval} | "
             f"{'-' if row.mean_rating is None else f'{row.mean_rating:.2f}'} | "
             f"{rules} |"
         )
@@ -882,10 +1197,14 @@ def render_markdown(report: IntentFamilyReport) -> str:
 
 
 __all__ = [
+    "BOOTSTRAP_RESAMPLES",
     "CONFIG_KEY",
     "CONFIG_SETTING",
     "DEFAULT_RULES",
     "FALLBACK_RULE_ID",
+    "INTERVAL_METHOD",
+    "MAX_KEYWORDS_PER_RULE",
+    "MAX_RULES",
     "MIN_GRADED_PACKS",
     "STATUS_OK",
     "STATUS_TRUNCATED",
@@ -904,6 +1223,6 @@ __all__ = [
     "load_rule_set",
     "parse_instant",
     "render_markdown",
+    "pack_bootstrap_interval",
     "summarize_intent_families",
-    "wilson_interval",
 ]

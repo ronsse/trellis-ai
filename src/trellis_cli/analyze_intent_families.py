@@ -57,10 +57,18 @@ def _render_text(report: IntentFamilyReport) -> None:
         f"intent; {report.legacy_stamp_differs} stamped differently from the legacy "
         "family recomputed here"
     )
+    if report.cited_not_served or report.sectioned_packs_without_rows:
+        console.print(
+            f"  {report.cited_not_served} cited ids were not served by the pack "
+            f"they were cited against (counted in no rate); "
+            f"{report.sectioned_packs_without_rows} sectioned packs carry no item "
+            "rows",
+            soft_wrap=True,
+        )
     table = Table(box=None, pad_edge=False, padding=(0, 1), header_style="bold")
-    for name in ("family", "packs", "graded", "helpful", "unhelpful"):
+    for name in ("family", "packs", "graded", "helpful", "unhelpful", "not served"):
         table.add_column(name, justify="left" if name == "family" else "right")
-    for name in ("rate", "95% CI", "rating", "top rules"):
+    for name in ("rate", "95% CI (packs)", "rating", "top rules"):
         table.add_column(name, justify="left" if name == "top rules" else "right")
     for row in report.families:
         interval = (
@@ -74,6 +82,7 @@ def _render_text(report: IntentFamilyReport) -> None:
             str(row.graded_packs),
             str(row.helpful_citations),
             str(row.unhelpful_citations),
+            str(row.cited_not_served),
             _pct(row.helpful_rate),
             interval,
             "-" if row.mean_rating is None else f"{row.mean_rating:.2f}",
@@ -124,10 +133,10 @@ def intent_families_command(
     A measurement over history: for each served pack it computes the legacy
     family (``normalize_intent_family``) and the new one (the shipped rule set,
     or ``retrieval.intent_families`` in config.yaml), then reports packs, graded
-    packs, helpful and unhelpful citations, the helpful rate with a Wilson 95%
-    interval, the mean pack rating, the share in the fallback family, a
-    legacy-by-new cross-tab and the top matched rule ids. A family below 20
-    graded packs has its rates withheld with the reason stated.
+    packs, helpful and unhelpful citations of served items, the helpful rate
+    with a 95% pack-bootstrap interval, the mean pack rating, the share in the
+    fallback family, a legacy-by-new cross-tab and the top matched rule ids. A
+    family below 20 graded packs has its rates withheld with the reason stated.
 
     Nothing here changes serving or learning, both of which still use the legacy
     key. Held-out packs are dropped. No intent text is printed: families, rule
