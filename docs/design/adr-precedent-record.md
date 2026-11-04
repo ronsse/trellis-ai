@@ -22,7 +22,8 @@ must change nothing a pack serves.
 **The record.** `PrecedentRecord` (`schemas/precedent_record.py`) is a lesson in
 four parts: `situation` (`intent_family`, `domain`, `entity_ids`, `trigger`),
 `action` (`do` or `avoid`, plus text), `because`, and `evidence` (`trace_ids`,
-`step_indexes`, `feedback_ids`, `pack_ids`). It also carries `confidence`,
+`step_indexes`, `feedback_ids`, `pack_ids`, and `advisory_ids`, which the trace
+distiller leaves empty). It also carries `confidence`,
 `provenance_tier`, `distiller_version` and `lifecycle: "candidate"`. Every text
 field is length-bounded. `lifecycle` is the record's own vocabulary; it is not
 added to `LifecycleState`, whose retrieval gates withhold only `demoted` and
@@ -77,6 +78,46 @@ reports counts and ids only (no trace text); `--apply` records. It is not wired
 into any nightly script. Two quiet limits are counted rather than silent:
 over-long entity ids left out of the situation (`entity_id_overlong`) and failed
 approaches beyond the cap of `avoid` lines (`failed_approach_over_cap`).
+
+## Advisory source
+
+A second deterministic source feeds the same candidate stream: the stored
+`ANTI_PATTERN` advisories. The advisory generator measures, over graded packs, how
+the success rate of the packs that carried an item compares with the packs that
+did not. A candidate states that measurement and nothing more.
+
+- `advisory_anti_pattern`: an item whose packs succeeded less often than the packs
+  without it (negative effect) gives an `avoid` on that item.
+
+`APPROACH` advisories are not mapped: they are a retrieval-axis association (the
+generator tallies which of keyword, semantic or graph an item reached a pack
+through), not an agent lesson, and `get_context` takes no axis for an agent to act
+on. They are skipped as `category_not_lesson_shaped`, like every other category.
+
+`because` is worded as an association ("Association, not a cause: ...") with the
+counts and rates. Evidence carries the advisory id (`advisory_ids`) and the pack
+ids the advisory cites; `trace_ids` stays empty. Confidence is the evidence's own,
+capped at 0.5. The tier is `deterministic`, so the handler records it like any
+other. Suppressed and rule-retired advisories, the other categories, advisories
+without a subject, a pack pointer or a sample, and effects the rule does not
+cover are skipped with a counted reason.
+
+`advisory_ids` is hashed into the id once it names an advisory and is left out
+while empty, so every record the trace distiller already derived keeps its id
+(`OMIT_WHEN_EMPTY_EVIDENCE`, pinned by a golden id).
+
+An advisory's id is keyed on its subject and its numbers move, so the same finding
+returns every night with a new record id. The command therefore treats a finding
+(rule, distiller version, advisory id, action kind) already named by a recorded
+candidate as a duplicate: the counts of the night it was first recorded stand. The
+action kind is part of the key, though an `ANTI_PATTERN` only ever gives an `avoid`.
+
+The source only reads advisories. It changes nothing the generator produces,
+stores, suppresses or serves. `trellis worker distill-advisory-precedents` is a
+dry run by default; `trellis curate evaluate-precedent-gate` reports its would-mint
+counts under `stage1.advisory_source`. The advisory source reads every stored
+advisory: the gate's `--days` window bounds its traces, packs and feedback, not
+this source. Neither is wired into a nightly.
 
 ## Deferred: activation
 
