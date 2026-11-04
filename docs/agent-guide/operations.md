@@ -2450,7 +2450,7 @@ demoted on a partial read.
 
 Only a precedent served through a `get_context` or sectioned pack can
 accumulate evidence this way: `get_lessons` emits no per-item
-attribution (nor does a sectioned pack assembled before #958), so a precedent reachable only through those
+attribution by default (see "`get_lessons` pack event (opt-in)"; nor does a sectioned pack assembled before #958), so a precedent reachable only through those
 surfaces always refuses for want of evidence, regardless of how useful
 it actually is — `attribution_caveat` in this command's own output
 (every format) says so.
@@ -2743,7 +2743,8 @@ flag), so this is additive, not a breaking change to `describe()`'s shape.
 **`settings_live` tells you whether an override does anything yet.** The
 registry catalogs every tunable `write_config.py` knows about plus
 retrieval-side knobs resolved outside it (`graph_seeding`,
-`graph_recency_fallback`, `filter_legacy_advisories`, `class_prior_mode`);
+`graph_recency_fallback`, `filter_legacy_advisories`, `class_prior_mode`,
+`get_lessons_pack_event`);
 `graph_seeding` gates only
 seeds *inferred* from the intent, never a sectioned pack's `entity_ids` or an
 explicit `seed_ids`, which are instructions; `graph_recency_fallback`
@@ -2792,13 +2793,18 @@ both:
 surfaces** — each was tuned for its own caller independently, and this PR
 only made the existing values operator-tunable; it did not reconcile them.
 
-`get_context_max_tokens`/`get_context_max_items`/`search_max_tokens` are
-read via a private per-module int resolver in `mcp/server.py`;
-`rest_pack_max_items`/`rest_pack_max_tokens` via one in
-`trellis_api/routes/retrieve.py`; `disclosure_body_items`/
-`excerpt_max_chars` via one in `retrieve/builder_factory.py` — each mirrors
-`capture_health._resolve_int_knob`'s coerce-and-bounds-check-through-
-`validate_value` shape rather than sharing code across modules.
+All seven are resolved by public functions in `trellis/core/knobs.py`
+(`resolve_get_context_max_tokens`, `resolve_get_context_max_items`,
+`resolve_search_max_tokens`, `resolve_rest_pack_max_items`,
+`resolve_rest_pack_max_tokens`, `resolve_body_items`,
+`resolve_excerpt_max_chars`), which sit on the shared `resolve_int_knob`
+(env, then stored setting, then default, with the value coerced and
+bounds-checked through `validate_value`). The MCP server, the REST retrieve
+route, `build_pack_builder` and the settings route all import them from there,
+so a REST module never reaches into `trellis.mcp.server` for one
+(`tests/unit/test_api_mcp_private_import_rule.py`). Each keeps the warning-event
+prefix of the module it came from (`mcp_server.`, `retrieve_route.`,
+`builder_factory.`).
 
 ### Failure posture: degrades, never raises
 
@@ -3452,6 +3458,7 @@ Every `PackBuilder` build with an `event_log` configured emits one `PACK_ASSEMBL
 | `graph_axis_state` | `ran`, `failed`, `unseeded_fallback_off` (#961) or `absent` (#985): the same value as the response's `axes.graph`, on both pack shapes and on a held-out row, which carries the build's state, not the empty pack the caller received. `unseeded_fallback_off` means the graph axis ran and served nothing because no seed resolved and `TRELLIS_GRAPH_RECENCY_FALLBACK` is off, so a pack with no graph items can be told from a graph with nothing in it. `absent` means the builder had no graph strategy at all, which no shipped surface builds. Additive; the key is missing from events written before it shipped, so read it with `.get`. |
 | `meta_filtered_count` | Graph nodes dropped by the default meta-`Activity` filter — the same drops `rejected_items` records under `meta_activity_filter`. **Not a count of meta-Activities suppressed.** Since #375/#436 the recorder mints them `node_role="structural"` and `GraphSearch` drops them *inside the strategy*, before the candidate slice, so they never become candidates and this field reads `0` while suppression happens on every pack. It counts only what reached `PackBuilder`: pre-#436 `semantic` rows, and any meta-Activity reached by a non-graph axis. |
 | `holdout` / `holdout_rate` | The pack holdout (`TRELLIS_PACK_HOLDOUT_RATE`, default `0`): whether this pack was withheld from its caller, and the rate in force when it was drawn. On every build of both pack kinds, flag off included, so a served row (`false`) is told apart from one an older build wrote (key absent). Read it as `payload.get("holdout") is True`. See [the exception to stated withholding](#withholding-is-stated-not-implied-404). |
+| `variants` | `{experiment: arm}`: which arm of each running serving experiment assembled this pack, on **both** payload shapes (`pack` and `sectioned_pack`) and on a held-out row. Today the only experiment is the pack holdout, `{"pack_holdout": "held_out"}` or `{"pack_holdout": "served"}` while `TRELLIS_PACK_HOLDOUT_RATE` is above `0`; at `0` the mapping is `{}`, so a row from a build that predates the key and a row with no experiment running both read as no arm (read it with `.get("pack_holdout")`, never by the key's presence alone). It restates the draw `holdout` already records and takes none of its own, so it never changes what a pack serves. Later serving flags register in `trellis.core.variants.active_variants`. |
 | `holdout_items[]` / `holdout_sections[]` / `holdout_advisory_ids` | Only on a withheld pack: the would-be pack, its items in the `injected_items[]` row shape (sectioned: `holdout_sections[]` in the `sections[]` shape), and its advisory ids. Every other key describes the empty pack the caller received, so `injected_items`, `injected_item_ids` and `advisory_ids` are empty and no reader counts a withheld item as served. |
 
 Plus the scope keys `intent` / `domain` / `agent_id` / `session_id`, the roll-ups `items_count` / `strategies_used` / `candidates_found`, and `advisory_ids` / `reranker` / `semantic_dedup_enabled` / `semantic_dedup_rejected`, all as named.
@@ -3460,7 +3467,7 @@ Plus the scope keys `intent` / `domain` / `agent_id` / `session_id`, the roll-up
 
 `advisories_filtered_legacy` (decision-ledger D-4, option B) is how many scope-matching advisories were withheld for predating the #394 generator repair — rows with no `evidence_confidence`, dropped before ranking and the cap, so a legacy row can never occupy a slot a post-repair row would have won. `advisories_matched` is counted *after* this filter. Controlled by `TRELLIS_FILTER_LEGACY_ADVISORIES` (default on, same accepted/rejected-value vocabulary as `TRELLIS_GRAPH_SEEDING`); `0` when the knob is off. Emitted on both pack kinds.
 
-**The sectioned payload is not a superset.** It carries `section_count`, `total_items` and `sections[]` (`{name, items_count, item_ids, injected_advisory_ids}`) *instead of* `items_count`, `injected_item_ids`, `strategies_used`, `candidates_found`, `budget_max_items`, `budget_max_tokens`, `budget_trace[]` and `rejected_items[]` — none of which it emits. It does emit `injected_items[]` (#958): one row per served item across every section, each carrying `section` and a section-local `rank`, so the learning join reads a sectioned pack's items as it reads a flat pack's. Everything else above is shared. One consequence to know before reading the numbers: `trellis analyze pack-telemetry` counts a sectioned pack as a **0-item pack**: it skips the rows, because a sectioned pack carries no `rejected_items` or `budget_trace` to set them against, but still counts the pack in `total_packs`, and the report's note says how many such packs diluted the per-pack rates.
+**The sectioned payload is not a superset.** It carries `section_count`, `total_items` and `sections[]` (`{name, items_count, item_ids, injected_advisory_ids}`) *instead of* `items_count`, `injected_item_ids`, `strategies_used`, `candidates_found`, `budget_max_items`, `budget_max_tokens`, `budget_trace[]` and `rejected_items[]` — none of which it emits. It does emit `injected_items[]` (#958): one row per served item across every section, each carrying `section` and a section-local `rank`, so the learning join reads a sectioned pack's items as it reads a flat pack's. Everything else above is shared, `variants` included. One consequence to know before reading the numbers: `trellis analyze pack-telemetry` counts a sectioned pack as a **0-item pack**: it skips the rows, because a sectioned pack carries no `rejected_items` or `budget_trace` to set them against, but still counts the pack in `total_packs`, and the report's note says how many such packs diluted the per-pack rates.
 
 **Reading the served rows and the feedback rows.** Read `injected_items[]` and `FEEDBACK_RECORDED` payloads through `trellis.feedback.pack_rows`, not with a hand-written `payload.get("injected_items")` loop. `iter_served_rows(event, include_sectioned=..., include_holdout=...)` (or `served_rows_from_payload(pack_id, payload, ...)` for a payload already in hand, as the `join_pack_feedback` family returns it) yields one `ServedRow` per mapping row in payload order, with `item_id`, `item_type`, `rank`, `section`, `strategy_source` and `estimated_tokens` typed (`None` on a wrong type) and the verbatim row on `.row` for any other field. Both keyword arguments are required, because each hand-written reader used to answer them separately and some forgot one. `include_sectioned=False` yields nothing for a sectioned pack, for a reader built over one flat budget; `True` reads its rows as a flat pack's, which is right for a per-item join on `(pack_id, item_id)`. `include_holdout=False` yields nothing for a held-out pack; `True` reads `injected_items[]` as written, which is empty on a held-out pack (the would-be rows ride `holdout_items[]`, which the module never reads), so pass `True` only when the pack source has already gone through `drop_holdout`. `has_served_rows(payload)` is the "attributable" test. `feedback_row(event)` / `iter_feedback_rows(events)` normalise both feedback families into a `FeedbackRow` (`family`, `pack_id`, `rating`, `success`, `intent_family`, `target_id`, and the three attribution tuples): the governed family (`trellis curate feedback`, `POST /feedback`) carries no item attribution, so its tuples are empty and its `feedback_id` is `None`, and `FeedbackRow.pack_id` is the payload's own, never the event's `entity_id`. `tests/unit/test_injected_items_reader_rule.py` lists the few reads that stay hand-written, each with its reason.
 
@@ -5783,6 +5790,50 @@ The check is advisory telemetry and fails soft: if it raises, the pack is served
 * **The reason names possibilities, not a cause.** It reads `repeated rejection: <kind> at <loc> xN on <tool> (R% of A attempts) — cause not established: ...` and lists the schema, its docs or skill, the rejection hint, and callers sending a bad payload as candidates. The row says how often and where, not which.
 * **`recovery`: was a rejected write retried and accepted?** MCP boundary `WRITE_REJECTED` rows written by this build carry `recovery_window_s`. When the same MCP tool next returns without raising inside that window, the server emits `WRITE_RECOVERED` (`tool`, `rejected_attempts`, `window_s`, and nothing else). `recovery` reports `tracked_rejections`, `recovered_rejections`, `pending_rejections`, `recovered_share` and `by_tool`. **This is an approximation, and it can sit on either side of the truth.** The pairing is by tool within `RECOVERY_WINDOW_SECONDS` (120 s), held in process memory. Keying per tool is a choice and not a limit of the transport: a stdio server serves one process per client, and an authenticated HTTP request carries a key id (`current_principal_id`) that the pairing does not use. It overstates when another caller's accepted call of the same tool stands in for the retry. It understates when the retry arrives after the window, goes through another tool or process, or follows a server restart, which drops the pending rejections. "Accepted" means the call returned without raising: a duplicate reply that wrote nothing still emits `WRITE_RECOVERED`, and so does `record_feedback` answering "recorded" while the event log was unavailable. A rejection noted more than a window before the next one is dropped rather than carried, so a rejection from yesterday cannot be claimed by today's accepted call. `pending_rejections` counts tracked rejections whose window had not closed when the report was read and that no recovery followed; they can still be recovered, so they are left out of `recovered_share`'s denominator, and the share is `null` while only pending rows remain. The server's clock stamps the rows and the reader's clock decides what is pending, so a few seconds of skew can move a row across that line. `recovered` is capped at `tracked` per tool: that cap is the only way it can exceed it, and it applies when a recovery in the window belongs to a rejection written before the window opened. Nothing identifying is stored. Rows written before tracking lack `recovery_window_s` and stay out of the denominator, so a window of only old rows reports `recovered_share: null` ("not measured"), not 0.
 * The recovery share is reported and does not change `status`.
+
+### Retrieval adoption in `trellis analyze health`
+
+Every other serve signal in `trellis analyze health` starts from a pack that exists, so a deployment whose agents never retrieve reads as an empty window, not a failure. The `retrieval` section starts a step earlier, from the sessions the capture sweep parsed. It reads the `CAPTURE_SESSION_PACKS` events the sweep already writes (one per session, keyed on the session id; a session's latest event in the window is its join) and adds no probe.
+
+| Field | Meaning |
+|-------|---------|
+| `sessions` | Distinct sessions with a join in the window (`--days`, default 7). A sub-agent's transcript has its own join and is one session. |
+| `sessions_with_packs` | Of those, the sessions whose latest join names at least one `pack_ids` entry. A pack the holdout withheld still counts: the agent asked, and this section measures asking. |
+| `adoption` | `sessions_with_packs / sessions`, or `null` when `state` is `insufficient_data`. |
+| `state` | `ok` at or above the floor; `warn` below it; `insufficient_data` below the session minimum, whatever the ratio. |
+| `floor`, `min_sessions` | The two thresholds, echoed so a reader of the JSON does not need the source: `0.5` and `10`. |
+| `scan` | The read's coverage, merged into the report's top-level `scan` like every other section's. |
+
+`warn` adds one `reasons` entry (`retrieval adoption 25% (3/12 captured sessions received a pack in 7 day(s)) is below the 50% floor`) and turns `status` to `warn`; `insufficient_data` never does. The thresholds are constants in `trellis.ops.retrieval_adoption`, not settings: a floor an operator can retune per deployment stops being a comparable reading across deployments. The ratio is over *captured* sessions, so a deployment whose capture is not running has no sessions to count and reads `insufficient_data`; its capture state is the `capture` section's to report. A join that names no pack is also what a transcript with an unparseable retrieval result looks like, so a low ratio is a prompt to read a few joins, not proof that agents are not retrieving. Exit codes are unchanged, and the section is in `--format json` as `retrieval`.
+
+### `get_lessons` pack event (opt-in)
+
+`get_lessons` serves promoted precedents and, by default, records no `PACK_ASSEMBLED`, so
+nothing it serves can be graded. Set `TRELLIS_GET_LESSONS_PACK_EVENT` (or the
+`get_lessons_pack_event` setting; env > settings > default **off**; an unrecognised env value
+warns and reads as off) and each call that serves at least one lesson emits one
+`PACK_ASSEMBLED` and ends its reply with a footer naming the pack:
+
+```
+**pack_id:** `<ulid>`
+
+Served ids (cite in record_feedback):
+- `<precedent id>` <title>
+```
+
+Off, the reply is byte-identical to before and no event is written; the footer is appended
+only after the event is stored. The row carries `surface: "get_lessons"`, the flat pack keys
+readers use (`injected_item_ids`, `injected_items[]` with `item_type: "precedent"`, `rank`,
+`title`, `domain`), and only the lessons that fit `max_tokens`, since those are the ones
+served. It is never drawn for the pack holdout: the row carries no `holdout` or `holdout_rate`
+key and `variants` is `{}`, so `drop_holdout` keeps it and `trellis analyze holdout` reads it as
+a row written before any experiment, never as a second rate in the window. It is off by default,
+and reads as off (warning `get_lessons_pack_event_suppressed_by_holdout`) whenever
+`TRELLIS_PACK_HOLDOUT_RATE` is above zero, because a reader that counts retrievals from
+`PACK_ASSEMBLED` would see a new event stream appear mid-window. Once on, lessons rows count
+as packs wherever `PACK_ASSEMBLED` is counted (health `serve`, `analyze pack-telemetry`, the
+advisory generator's per-strategy correlation under `strategy_source: "get_lessons"`); none of
+those readers keys on `surface` yet.
 
 ### Citing Pack Elements in Feedback
 

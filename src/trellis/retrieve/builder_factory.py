@@ -29,11 +29,11 @@ from typing import TYPE_CHECKING, Any, TypedDict
 
 import structlog
 
+from trellis.core.knobs import resolve_body_items, resolve_excerpt_max_chars
 from trellis.core.write_config import WriteBehaviourConfig
 from trellis.ops import ParameterRegistry
 from trellis.retrieve.class_prior import resolve_class_prior_config
-from trellis.retrieve.disclosure import DEFAULT_BODY_ITEMS, DisclosureConfig
-from trellis.retrieve.excerpts import EXCERPT_MAX_CHARS
+from trellis.retrieve.disclosure import DisclosureConfig
 from trellis.retrieve.pack_builder import (
     PackBuilder,
     SemanticDedupConfig,
@@ -124,68 +124,28 @@ GRAPH_RECENCY_FALLBACK_ENV = "TRELLIS_GRAPH_RECENCY_FALLBACK"
 #: :mod:`trellis.core.settings_registry`.
 GRAPH_RECENCY_FALLBACK_SETTING = "graph_recency_fallback"
 
+#: Opt-in for the ``get_lessons`` pack event. Unset means **off**.
+#:
+#: ``get_lessons`` serves promoted precedents and records nothing about it, so
+#: nothing it serves can be graded. On, it emits one ``PACK_ASSEMBLED``
+#: (:mod:`trellis.retrieve.lessons_pack`) and names its ``pack_id`` in the
+#: reply. Off is the shipped default because a reader that counts retrievals
+#: from ``PACK_ASSEMBLED`` would see a new event stream appear mid-window.
+#: Read-side, so it lives here with the other serving knobs and not in
+#: :mod:`trellis.core.write_config`.
+GET_LESSONS_PACK_EVENT_ENV = "TRELLIS_GET_LESSONS_PACK_EVENT"
+
+#: Settings-store key for :data:`GET_LESSONS_PACK_EVENT_ENV` — see
+#: ``SettingSpec(name="get_lessons_pack_event")`` in
+#: :mod:`trellis.core.settings_registry`.
+GET_LESSONS_PACK_EVENT_SETTING = "get_lessons_pack_event"
+
 #: Accepted spellings, matching :mod:`trellis.stores.registry`. A value in
 #: neither set is a typo, and a typo'd kill switch that silently keeps the
 #: default is how an operator ends up believing they disabled something
 #: they did not — so it warns rather than going quiet.
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _FALSEY = frozenset({"0", "false", "no", "off"})
-
-#: Settings-registry wiring for the two pack-shaping int knobs below — env
-#: wins over a stored override, which wins over the module default. See
-#: ``trellis.core.settings_registry``'s ``disclosure_body_items`` /
-#: ``excerpt_max_chars`` entries. Read-side, so (like ``GRAPH_SEEDING_ENV``
-#: above) they stay out of :mod:`trellis.core.write_config`.
-BODY_ITEMS_ENV = "TRELLIS_DISCLOSURE_BODY_ITEMS"
-BODY_ITEMS_SETTING = "disclosure_body_items"
-EXCERPT_MAX_CHARS_ENV = "TRELLIS_EXCERPT_MAX_CHARS"
-EXCERPT_MAX_CHARS_SETTING = "excerpt_max_chars"
-
-
-def _resolve_int_knob(
-    *,
-    env_var: str,
-    setting_name: str,
-    default: int,
-    settings: Mapping[str, Any] | None,
-) -> int:
-    """Resolve one integer knob: env var, then a stored setting, then default.
-
-    Delegates to :func:`trellis.core.knobs.resolve_int_knob` (the one
-    shared implementation; see its docstring for the coercion and
-    precedence rules). ``warning_prefix="builder_factory"`` keeps this
-    caller's event names — ``builder_factory.bad_env_int`` /
-    ``builder_factory.bad_settings_int`` — exactly what they were before.
-    """
-    from trellis.core.knobs import resolve_int_knob  # noqa: PLC0415
-
-    return resolve_int_knob(
-        env_var=env_var,
-        setting_name=setting_name,
-        default=default,
-        settings=settings,
-        warning_prefix="builder_factory",
-    )
-
-
-def _resolve_body_items(settings: Mapping[str, Any] | None) -> int:
-    """Resolve the disclosure body-item cap: env > settings > default."""
-    return _resolve_int_knob(
-        env_var=BODY_ITEMS_ENV,
-        setting_name=BODY_ITEMS_SETTING,
-        default=DEFAULT_BODY_ITEMS,
-        settings=settings,
-    )
-
-
-def _resolve_excerpt_max_chars(settings: Mapping[str, Any] | None) -> int:
-    """Resolve the per-item excerpt character cap: env > settings > default."""
-    return _resolve_int_knob(
-        env_var=EXCERPT_MAX_CHARS_ENV,
-        setting_name=EXCERPT_MAX_CHARS_SETTING,
-        default=EXCERPT_MAX_CHARS,
-        settings=settings,
-    )
 
 
 class AxisReport(TypedDict):
@@ -226,7 +186,7 @@ def build_pack_builder(
     # ``load_settings_values`` degrades to ``{}`` rather than raising, so
     # no caller here needs its own try/except around this read.
     settings = load_settings_values(registry.stores_dir)
-    excerpt_max_chars = _resolve_excerpt_max_chars(settings)
+    excerpt_max_chars = resolve_excerpt_max_chars(settings)
     strategies_result = build_strategies(
         registry,
         parameter_registry=param_registry,
@@ -244,7 +204,7 @@ def build_pack_builder(
         # Same env > settings > default resolution as the knobs above, for
         # the disclosure body-item cap (DEFAULT_BODY_ITEMS) — see
         # ``SettingSpec(name="disclosure_body_items")``.
-        disclosure=DisclosureConfig(body_items=_resolve_body_items(settings)),
+        disclosure=DisclosureConfig(body_items=resolve_body_items(settings)),
         # F14 (#259): collapse near-duplicate pack items — the same fact
         # stored via save_memory AND via corpus ingestion surfaced both
         # copies in one pack. MinHash/LSH over item excerpts,
@@ -365,6 +325,48 @@ def _graph_recency_fallback_enabled(settings: Mapping[str, Any] | None = None) -
             effective=False,
         )
     return False
+
+
+def _get_lessons_pack_event_enabled(settings: Mapping[str, Any] | None = None) -> bool:
+    """Read :data:`GET_LESSONS_PACK_EVENT_ENV`, env > settings > default off.
+
+    Same shape as :func:`_graph_recency_fallback_enabled`: unset is **off**, a
+    value in neither spelling set warns and reads as off whatever the stored
+    setting says, and a non-bool stored value is ignored.
+
+    While a pack holdout runs (``TRELLIS_PACK_HOLDOUT_RATE`` above zero) the
+    knob reads as off and warns: a new ``PACK_ASSEMBLED`` stream mid-window
+    would change the population the experiment counts.
+    """
+    raw = os.environ.get(GET_LESSONS_PACK_EVENT_ENV, "").strip().lower()
+    if not raw:
+        value = (settings or {}).get(GET_LESSONS_PACK_EVENT_SETTING)
+        enabled = value if isinstance(value, bool) else False
+    elif raw in _TRUTHY:
+        enabled = True
+    else:
+        if raw not in _FALSEY:
+            logger.warning(
+                "get_lessons_pack_event_env_unrecognised",
+                var=GET_LESSONS_PACK_EVENT_ENV,
+                value=raw,
+                effective=False,
+            )
+        enabled = False
+    if not enabled:
+        return False
+    rate = WriteBehaviourConfig.from_env_and_settings(
+        settings=settings
+    ).pack_holdout_rate
+    if rate > 0:
+        logger.warning(
+            "get_lessons_pack_event_suppressed_by_holdout",
+            var=GET_LESSONS_PACK_EVENT_ENV,
+            holdout_rate=rate,
+            effective=False,
+        )
+        return False
+    return True
 
 
 def describe_axes(
@@ -510,6 +512,7 @@ SEMANTIC_AXIS_NOTES: dict[str, str] = {
 
 
 __all__ = [
+    "GET_LESSONS_PACK_EVENT_ENV",
     "GRAPH_RECENCY_FALLBACK_ENV",
     "GRAPH_SEEDING_ENV",
     "SEMANTIC_AXIS",

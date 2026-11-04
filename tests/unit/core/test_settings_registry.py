@@ -26,8 +26,8 @@ surface (``get_context_max_tokens``, ``get_context_max_items``,
 (``rest_pack_max_items``, ``rest_pack_max_tokens``), and two shared by
 every surface that builds a pack (``disclosure_body_items``,
 ``excerpt_max_chars``) — pinned by :data:`_PACK_BUDGET_KNOB_NAMES`,
-bringing the total to 42. ``graph_recency_fallback`` (#961) is the 43rd and
-``access_log`` the 44th.
+bringing the total to 42. ``graph_recency_fallback`` (#961) is the 43rd,
+``access_log`` the 44th and ``get_lessons_pack_event`` the 45th.
 """
 
 from __future__ import annotations
@@ -115,6 +115,7 @@ class TestCatalogMembership:
             | {
                 "graph_seeding",
                 "graph_recency_fallback",
+                "get_lessons_pack_event",
                 "filter_legacy_advisories",
                 "class_prior_mode",
                 "graph_max_subgraph_depth",
@@ -131,8 +132,8 @@ class TestCatalogMembership:
             | _PACK_BUDGET_KNOB_NAMES
         )
 
-    def test_fortyfour_entries_total(self) -> None:
-        assert len(SETTINGS_REGISTRY) == 44
+    def test_fortyfive_entries_total(self) -> None:
+        assert len(SETTINGS_REGISTRY) == 45
 
     def test_class_prior_mode_enum_has_no_demote_option(self) -> None:
         """A dropped mode must not linger in the registry as an allowed
