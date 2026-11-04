@@ -8,11 +8,18 @@ on:
 jobs:
   typecheck:
     runs-on: ubuntu-latest
+    # The release workflow type-checks every supported Python, and each one can
+    # resolve a different numpy whose stubs disagree; checking only 3.11 here let
+    # a 3.12-only error reach a tag.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
 
       # This job is the reference environment the #398 parity check describes:

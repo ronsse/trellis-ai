@@ -1137,7 +1137,7 @@ def _stratum_weights(
     Zero for a stratum holding one arm, and for a code no task carries. The
     estimator and the share of weight a stratum holds both read this.
     """
-    groups = int(codes.max()) + 1 if codes.size else 0
+    groups = int(np.max(codes)) + 1 if codes.size else 0
     n = np.bincount(codes, minlength=groups).astype(float)
     n1 = np.bincount(codes, weights=served.astype(float), minlength=groups)
     present = n > 0
@@ -1151,7 +1151,7 @@ def _design(
     served: npt.NDArray[np.bool_],
     codes: npt.NDArray[np.intp],
 ) -> _Design:
-    groups = int(codes.max()) + 1 if codes.size else 0
+    groups = int(np.max(codes)) + 1 if codes.size else 0
     n = np.bincount(codes, minlength=groups).astype(float)
     present = n > 0
     weights = _stratum_weights(served, codes)
@@ -1311,7 +1311,7 @@ def simulate_power(
     """
     outcomes = np.asarray(pool, dtype=float)
     codes = _codes(strata)
-    groups = [np.flatnonzero(codes == code) for code in range(int(codes.max()) + 1)]
+    groups = [np.flatnonzero(codes == code) for code in range(int(np.max(codes)) + 1)]
     sizes = np.bincount(codes).astype(float)
     shifts = np.asarray(deltas, dtype=float)
     rejections = np.zeros(shifts.size)
@@ -3002,7 +3002,7 @@ def _parent_spread(
     if n < _PAIR:
         return None, None, None
     codes = _codes(np.asarray(parents))
-    groups = int(codes.max()) + 1
+    groups = int(np.max(codes)) + 1
     means = np.bincount(codes, weights=values) / np.bincount(codes)
     ss_within = float(((values - means[codes]) ** 2).sum())
     ss_total = float(((values - values.mean()) ** 2).sum())
@@ -3942,7 +3942,7 @@ def _inference(
     interval = None
     if status == "ok":
         weights = _stratum_weights(served, _codes(strata))
-        top_weight_share = float(weights.max() / weights.sum())
+        top_weight_share = float(np.max(weights) / weights.sum())
         difference = weighted_difference(y, served, strata)
         p_value = permutation_p_value(
             y, served, strata, permutation_rng, options["permutations"]
@@ -4123,7 +4123,7 @@ def _adjustment(
     kept = [unit for unit, ok in zip(analysed, keep, strict=True) if ok]
     y_used, served_used, strata_used = y[keep], served[keep], strata[keep]
     codes = _codes(strata_used)
-    stratum_columns = np.eye(int(codes.max()) + 1)[codes]
+    stratum_columns = np.eye(int(np.max(codes)) + 1)[codes]
     columns = [stratum_columns]
     columns.append(
         np.array([math.log1p(unit.brief_chars or 0.0) for unit in kept])[:, None]
@@ -4273,7 +4273,7 @@ def _power(
         sims=options["power_sims"],
         sim_permutations=POWER_PERMUTATIONS,
     )
-    if y.size < _PAIR or np.bincount(_codes(strata)).max() < _PAIR:
+    if y.size < _PAIR or np.max(np.bincount(_codes(strata))) < _PAIR:
         result.status = "no stratum with two or more tasks"
         return result
     pool = y - estimate * served if estimate is not None else y
