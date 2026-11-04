@@ -129,11 +129,17 @@ class PostgresApiKeyStore(PostgresStoreBase, ApiKeyStore):
             params.append(expires_at)
         if not sets:
             return self.get(key_id) is not None
+        where = "key_id = %s AND revoked_at IS NULL"
+        where_params: list[Any] = [key_id]
+        if not isinstance(expires_at, Unset):
+            # An expired key's expiry is frozen: clearing or moving it would
+            # revive a key that no longer verifies.
+            where += " AND (expires_at IS NULL OR expires_at > %s)"
+            where_params.append(utc_now())
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
-                f"UPDATE trellis_api_keys SET {', '.join(sets)}"
-                " WHERE key_id = %s AND revoked_at IS NULL",
-                (*params, key_id),
+                f"UPDATE trellis_api_keys SET {', '.join(sets)} WHERE {where}",
+                (*params, *where_params),
             )
             rowcount: int = cur.rowcount
             return rowcount > 0

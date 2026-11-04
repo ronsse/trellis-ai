@@ -172,7 +172,7 @@ class ApiKeyUpdateHandler:
         self._registry = registry
 
     def handle(self, command: Command) -> tuple[str | None, str]:
-        from trellis.auth import key_default_refusal  # noqa: PLC0415
+        from trellis.auth import key_default_refusal, key_is_expired  # noqa: PLC0415
 
         key_id = command.args["key_id"]
         if not isinstance(key_id, str) or not key_id:
@@ -206,6 +206,18 @@ class ApiKeyUpdateHandler:
         if existing is None:
             msg = f"Cannot update {key_id!r}: unknown key id."
             raise ValidationError(msg, errors=[msg], code="unknown_key_id")
+        if (
+            expires_at is not UNSET
+            and existing.revoked_at is None
+            and key_is_expired(existing)
+        ):
+            msg = (
+                f"Cannot change the expiry of {key_id!r}: it expired at "
+                f"{existing.expires_at.isoformat() if existing.expires_at else ''} "
+                "and no longer verifies. An expired key is never revived; "
+                "mint a new one."
+            )
+            raise ValidationError(msg, errors=[msg], code="key_expired")
         if existing.revoked_at is not None or not store.update(
             key_id, defaults=defaults, expires_at=expires_at
         ):

@@ -69,7 +69,9 @@ def _visible(tools: dict[str, object], *scopes: str) -> set[str]:
 
 def _writing_scope_sets() -> list[tuple[str, ...]]:
     """Every combination of the grantable scopes that is not a read-only key."""
-    grantable = [s for s in KEY_SCOPES if s != "external"]
+    # Sorted: KEY_SCOPES is a frozenset, and xdist needs every worker to collect
+    # the same params in the same order whatever the hash seed.
+    grantable = sorted(s for s in KEY_SCOPES if s != "external")
     out: list[tuple[str, ...]] = []
     for size in range(1, len(grantable) + 1):
         out.extend(combinations(grantable, size))

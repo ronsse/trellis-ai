@@ -276,6 +276,7 @@ def list_api_keys_command(*, output_format: str) -> None:
         table.add_column("scopes")
         table.add_column("created_at")
         table.add_column("revoked")
+        table.add_column("expired")
         table.add_column("defaults")
         for row in rows:
             table.add_row(
@@ -284,6 +285,7 @@ def list_api_keys_command(*, output_format: str) -> None:
                 ",".join(row["scopes"]),
                 row["created_at"],
                 "yes" if row["revoked"] else "no",
+                "yes" if row["expired"] else "no",
                 escape(
                     _printable(
                         ", ".join(

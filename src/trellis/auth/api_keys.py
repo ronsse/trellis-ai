@@ -38,6 +38,7 @@ from trellis.stores.base.api_key import ApiKeyDefaults, ApiKeyRecord
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from datetime import datetime
 
     from trellis.stores.base.api_key import ApiKeyStore
 
@@ -269,11 +270,18 @@ KEY_PRESETS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+def key_is_expired(record: ApiKeyRecord, now: datetime | None = None) -> bool:
+    """Whether ``record`` carries an ``expires_at`` that has passed."""
+    return record.expires_at is not None and record.expires_at <= (now or utc_now())
+
+
 def public_listing_row(record: ApiKeyRecord) -> dict[str, Any]:
     """The listable shape of a key: never the secret hash, never any of the secret.
 
-    ``defaults`` and ``expires_at`` appear only on a key that sets them, so the
-    row of a key minted before they existed is exactly what it always was.
+    ``defaults`` and ``expires_at`` appear only on a key that sets them.
+    ``expired`` is always present, beside ``revoked``: a key whose ``expires_at``
+    has passed no longer verifies, and a listing that showed only the timestamp
+    would leave the reader to compare it with the clock.
     """
     row: dict[str, Any] = {
         "key_id": record.key_id,
@@ -282,6 +290,7 @@ def public_listing_row(record: ApiKeyRecord) -> dict[str, Any]:
         "created_at": record.created_at.isoformat(),
         "revoked": record.revoked_at is not None,
         "revoked_at": (record.revoked_at.isoformat() if record.revoked_at else None),
+        "expired": key_is_expired(record),
     }
     if record.defaults is not None:
         row["defaults"] = record.defaults.model_dump(exclude_none=True)
@@ -400,11 +409,7 @@ def hash_secret(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
-def generate_api_key(
-    name: str,
-    scopes: Iterable[str],
-    defaults: ApiKeyDefaults | None = None,
-) -> tuple[str, ApiKeyRecord]:
+def generate_api_key(name: str, scopes: Iterable[str]) -> tuple[str, ApiKeyRecord]:
     """Mint a new API key.
 
     Returns ``(token, record)``. The token is shown to the caller once
@@ -438,7 +443,6 @@ def generate_api_key(
         name=clean_name,
         scopes=scope_tuple,
         secret_hash=hash_secret(secret),
-        defaults=None if defaults is None or defaults.is_empty() else defaults,
     )
     logger.info(
         "api_key.generated",
@@ -491,7 +495,7 @@ def verify_token(token: str, store: ApiKeyStore) -> ApiKeyRecord | None:
     if not secrets.compare_digest(hash_secret(secret), record.secret_hash):
         logger.warning("api_key.verify_failed", reason="mismatch", key_id=key_id)
         return None
-    if record.expires_at is not None and record.expires_at <= utc_now():
+    if key_is_expired(record):
         # A rotated key's grace period has ended. Checked after the secret
         # matches so an unauthenticated probe learns nothing from the timing.
         logger.warning("api_key.verify_failed", reason="expired", key_id=key_id)

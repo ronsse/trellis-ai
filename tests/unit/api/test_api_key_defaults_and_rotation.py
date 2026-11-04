@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -25,9 +26,10 @@ from trellis.auth import (
     SCOPE_READ,
     TOKEN_PREFIX,
     build_key_defaults,
-    generate_api_key,
     verify_token,
 )
+from trellis.core.base import utc_now
+from trellis.mutate.api_key_commands import build_mint_command
 from trellis.mutate.commands import Command, CommandResult, CommandStatus, Operation
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
@@ -63,8 +65,11 @@ def _seed(
     name: str = "caller",
     **defaults: str,
 ) -> tuple[str, str]:
-    token, record = generate_api_key(
-        name, scopes, build_key_defaults(**defaults) if defaults else None
+    token, record, _command = build_mint_command(
+        name,
+        scopes,
+        requested_by="test:seed",
+        defaults=build_key_defaults(**defaults) if defaults else None,
     )
     registry.operational.api_key_store.create(record)
     return token, record.key_id
@@ -407,3 +412,80 @@ class TestDefaultsSeam:
         assert golden["items"], "the golden pack must serve something"
         assert golden["domain"] is None
         assert golden["agent_id"] is None
+
+
+class TestIdentityRuleOnSetDefaults:
+    """The router's scope check alone lets an anonymous caller through when auth
+    is ``off`` or ``optional``; ``_require_identified_admin`` is what refuses."""
+
+    @pytest.mark.parametrize("mode", ["off", "optional"])
+    def test_an_unidentified_caller_cannot_set_defaults(
+        self,
+        mode: str,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _, key_id = _seed(registry, [SCOPE_READ], team="core")
+        monkeypatch.setenv("TRELLIS_AUTH_MODE", mode)
+        resp = client.put(
+            f"{BASE}/{key_id}/defaults", json={"defaults": {"domain": "x"}}
+        )
+        assert resp.status_code == 403, resp.text
+        assert (
+            resp.headers[api_keys_routes.IDENTITY_REFUSAL_HEADER]
+            == api_keys_routes.IDENTITY_REFUSAL_VALUE
+        )
+        stored = registry.operational.api_key_store.get(key_id)
+        assert stored is not None
+        assert stored.defaults is not None
+        assert stored.defaults.model_dump(exclude_none=True) == {"team": "core"}
+        assert _events(registry, EventType.API_KEY_UPDATED) == []
+
+
+class TestMintWithDefaults:
+    def test_a_mint_stores_and_lists_the_defaults_it_was_given(
+        self, client: TestClient, registry: StoreRegistry, admin: tuple[str, str]
+    ) -> None:
+        resp = client.post(
+            BASE,
+            json={
+                "name": "svc",
+                "scopes": "read",
+                "defaults": {"domain": "platform", "agent_id": "agent-7"},
+            },
+            headers=_h(admin[0]),
+        )
+        assert resp.status_code == 201, resp.text
+        want = {"domain": "platform", "agent_id": "agent-7"}
+        assert resp.json()["defaults"] == want
+        stored = registry.operational.api_key_store.get(resp.json()["key_id"])
+        assert stored is not None
+        assert stored.defaults is not None
+        assert stored.defaults.model_dump(exclude_none=True) == want
+
+
+class TestRotateRefusesEndingKeys:
+    def test_an_expired_and_an_in_grace_key_are_409_and_nothing_is_minted(
+        self, client: TestClient, registry: StoreRegistry, admin: tuple[str, str]
+    ) -> None:
+        store = registry.operational.api_key_store
+        _, graced = _seed(registry, [SCOPE_READ], "graced")
+        _, expired = _seed(registry, [SCOPE_READ], "expired")
+        assert (
+            client.post(
+                f"{BASE}/{graced}/rotate", json={"grace": "1h"}, headers=_h(admin[0])
+            ).status_code
+            == 201
+        )
+        assert store.update(expired, expires_at=utc_now() - timedelta(minutes=1))
+        before = len(store.list())
+        again = client.post(
+            f"{BASE}/{graced}/rotate", json={"grace": "30d"}, headers=_h(admin[0])
+        )
+        assert again.status_code == 409
+        assert "already in a grace period" in again.json()["detail"]
+        gone = client.post(f"{BASE}/{expired}/rotate", headers=_h(admin[0]))
+        assert gone.status_code == 409
+        assert "expired" in gone.json()["detail"]
+        assert len(store.list()) == before

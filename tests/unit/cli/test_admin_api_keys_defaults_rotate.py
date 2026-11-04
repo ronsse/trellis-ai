@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from typer.testing import CliRunner
 
 from tests.cli_output import plain
 from trellis.auth import TOKEN_PREFIX, verify_token
+from trellis.core.base import utc_now
 from trellis.mutate.commands import (
     Command,
     CommandResult,
@@ -340,3 +342,65 @@ class TestRotate:
         other = "text" if fmt == "json" else "json"
         again = _invoke(["api-keys", "rotate", old["key_id"], "--format", other])
         assert again.exit_code == result.exit_code
+
+
+class TestListShowsExpiry:
+    def _expire(self, key_id: str) -> None:
+        past = utc_now() - timedelta(minutes=1)
+        assert _get_registry().operational.api_key_store.update(key_id, expires_at=past)
+
+    def test_json_rows_carry_expired_beside_revoked_and_the_exit_is_unchanged(
+        self,
+    ) -> None:
+        live = _create(name="live")["key_id"]
+        gone = _create(name="gone")["key_id"]
+        self._expire(gone)
+        for fmt in ("json", "text"):
+            result = _invoke(["api-keys", "list", "--format", fmt])
+            assert result.exit_code == EXIT_OK, _redacted(result.output)
+        listed = json.loads(_invoke(["api-keys", "list", "--format", "json"]).stdout)
+        rows = {r["key_id"]: r for r in listed["keys"]}
+        assert rows[live]["expired"] is False
+        assert rows[live]["revoked"] is False
+        assert "expires_at" not in rows[live]
+        assert rows[gone]["expired"] is True
+        assert rows[gone]["revoked"] is False
+        assert rows[gone]["expires_at"]
+
+    def test_the_text_table_has_an_expired_column(self) -> None:
+        gone = _create(name="gone")["key_id"]
+        self._expire(gone)
+        text = plain(_invoke(["api-keys", "list", "--format", "text"]).output)
+        header = next(ln for ln in text.splitlines() if "revoked" in ln)
+        assert "expired" in header
+        assert header.index("revoked") < header.index("expired")
+
+
+class TestRotateRefusesEndingKeys:
+    @pytest.mark.parametrize("fmt", ["json", "text"])
+    def test_an_expired_key_is_refused_with_nothing_minted(self, fmt: str) -> None:
+        key_id = _create(name="old")["key_id"]
+        past = utc_now() - timedelta(minutes=1)
+        store = _get_registry().operational.api_key_store
+        assert store.update(key_id, expires_at=past)
+        for grace in ([], ["--grace", "7d"]):
+            result = _invoke(["api-keys", "rotate", key_id, "--format", fmt, *grace])
+            assert result.exit_code == EXIT_VALIDATION, _redacted(result.output)
+            assert TOKEN_PREFIX not in result.output
+        assert len(store.list()) == 1
+        assert store.get(key_id).expires_at == past
+
+    def test_a_key_already_in_grace_is_refused_not_extended(self) -> None:
+        key_id = _create(name="old")["key_id"]
+        first = _invoke(
+            ["api-keys", "rotate", key_id, "--grace", "1h", "--format", "json"]
+        )
+        assert first.exit_code == EXIT_OK, _redacted(first.output)
+        store = _get_registry().operational.api_key_store
+        window = store.get(key_id).expires_at
+        again = _invoke(
+            ["api-keys", "rotate", key_id, "--grace", "7d", "--format", "json"]
+        )
+        assert again.exit_code == EXIT_VALIDATION, _redacted(again.output)
+        assert len(store.list()) == 2
+        assert store.get(key_id).expires_at == window

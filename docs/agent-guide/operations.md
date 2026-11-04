@@ -6176,9 +6176,18 @@ otherwise), then retires the old key. The new token is printed once, like a mint
   only the status code cannot lose a token it has been shown once. Revoke the old key
   by hand afterwards.
 - **Nothing is minted for a refused rotation.** An unknown key id (404, exit 2), a
-  revoked one (409, exit 2), a bad `--grace` (400, exit 2) and, over REST, the key
-  the request is authenticated with when no grace is given (409, since the retire
-  would revoke it) all write nothing. With a grace, the calling key may rotate itself.
+  revoked one (409, exit 2), an **expired** one (409, exit 2: rotation never revives
+  a key whose `expires_at` has passed, so mint a fresh key with `create`), one
+  **already in a grace period** (409, exit 2: a second rotation would mint another
+  successor and move the window, so revoke it or wait for it to close), a bad
+  `--grace` (400, exit 2) and, over REST, the key the request is authenticated with
+  when no grace is given (409, since the retire would revoke it) all write nothing.
+  With a grace, the calling key may rotate itself.
+- **An expired key's expiry is frozen.** The store's `update` refuses to clear or move
+  the `expires_at` of a key that has already expired (`set-defaults` is unaffected),
+  so no update path, rotation included, can bring one back. The key listing carries
+  `expires_at` when one is set and an `expired` flag beside `revoked`, in the JSON and
+  the text table; the exit code of `list` is unchanged.
 - **The exit code does not depend on `--format`.**
 
 ### The read tier of MCP tools
@@ -6191,6 +6200,12 @@ and refused if called: `get_graph`, `get_lessons`, `get_file_context`,
 `get_sectioned_context`. FastMCP filters `tools/list` and gates the call on the same
 check (`trellis_scope(SCOPE_READ, advanced=True)`), so the list and the call cannot
 disagree.
+
+- **The tier narrows the MCP tool list only. It is not a data boundary.** A read-only
+  key still reads through REST (`/packs`, `/search` and the explore routes stay
+  `read_auth`), and `get_items` resolves any id it is given. Hiding a tool saves a
+  small agent tokens and keeps it off the write-adjacent surface; it does not hide a
+  document, so a label policy, not this tier, is what keeps content from a key.
 
 - **Every key that can write keeps its whole list.** `tools/list` for an `ingest`,
   `mutate` or `admin` key (and for stdio, and for auth mode `off`) is unchanged and

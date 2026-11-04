@@ -20,7 +20,7 @@ from mcp.server.auth.middleware.auth_context import AuthenticatedUser, auth_cont
 
 import trellis.mcp.key_defaults as key_defaults_mod
 from tests.unit.mcp.conftest import mint
-from trellis.auth import SCOPE_READ, build_key_defaults, generate_api_key
+from trellis.auth import SCOPE_READ, build_key_defaults
 from trellis.mcp.auth import (
     DEFAULTS_CLAIM,
     TrellisApiKeyVerifier,
@@ -34,6 +34,7 @@ from trellis.mcp.key_defaults import (
     fill_arguments,
 )
 from trellis.mcp.server import mcp
+from trellis.mutate.api_key_commands import build_mint_command
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -183,8 +184,11 @@ class TestVerifierCarriesTheBlock:
     async def test_a_key_with_defaults_puts_them_on_the_token(
         self, temp_registry: StoreRegistry
     ) -> None:
-        token, record = generate_api_key(
-            "svc", [SCOPE_READ], build_key_defaults(domain="platform", team="core")
+        token, record, _command = build_mint_command(
+            "svc",
+            [SCOPE_READ],
+            requested_by="test:seed",
+            defaults=build_key_defaults(domain="platform", team="core"),
         )
         temp_registry.operational.api_key_store.create(record)
         verifier = TrellisApiKeyVerifier(

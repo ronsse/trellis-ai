@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
-from trellis.auth import generate_api_key, parse_scope_list
+from trellis.auth import generate_api_key, key_is_expired, parse_scope_list
 from trellis.core.base import utc_now
 from trellis.mutate.commands import Command, CommandResult, CommandStatus, Operation
 from trellis.stores.base.api_key import UNSET, ApiKeyDefaults, Unset
@@ -65,7 +65,9 @@ def build_mint_command(
     Raises :class:`ValueError` on an empty name, an unknown or empty scope, or
     ``external`` beside anything but ``read``; nothing has been written then.
     """
-    token, record = generate_api_key(name, parse_scope_list(scopes), defaults)
+    token, record = generate_api_key(name, parse_scope_list(scopes))
+    if defaults is not None and not defaults.is_empty():
+        record = record.model_copy(update={"defaults": defaults})
     return (
         token,
         record,
@@ -158,6 +160,51 @@ class RotationOutcome:
     refusal: tuple[str, str] | None = None
 
 
+def _preflight_refusal(
+    old: ApiKeyRecord, *, grace: timedelta | None, actor_key_id: str | None
+) -> tuple[str, str] | None:
+    """``(reason, message)`` when ``old`` must not be rotated, else ``None``.
+
+    Everything here is decided before anything is minted.
+    """
+    key_id = old.key_id
+    if old.revoked_at is not None:
+        return ("already_revoked", f"Cannot rotate {key_id!r}: it is revoked.")
+    if old.expires_at is not None:
+        # A key with an expiry is already ending: rotating it would either
+        # revive a key that no longer verifies (the retire step would write a
+        # later expiry over the past one) or silently push out a grace period
+        # somebody chose. Refuse both and say which it is.
+        when = old.expires_at.isoformat()
+        if key_is_expired(old):
+            return (
+                "already_expired",
+                (
+                    f"Cannot rotate {key_id!r}: it expired at {when} and no longer "
+                    "verifies. Mint a new key instead."
+                ),
+            )
+        return (
+            "already_in_grace",
+            (
+                f"Cannot rotate {key_id!r}: it is already in a grace period that "
+                f"ends at {when}. Rotating it again would extend that window, so "
+                "it is refused; revoke it to end the window early."
+            ),
+        )
+    if grace is None and actor_key_id == key_id:
+        return (
+            "cannot_revoke_own_key",
+            (
+                f"Cannot rotate {key_id!r} without a grace period: it is the "
+                "key this request is authenticated with, and rotating retires it. "
+                "Pass a grace period, or rotate it with another admin key or "
+                "'trellis admin api-keys rotate'."
+            ),
+        )
+    return None
+
+
 def rotate_key(
     store: ApiKeyStore,
     execute: Callable[[Command], CommandResult],
@@ -178,6 +225,9 @@ def rotate_key(
     window closes (nothing is revoked, so there is no second event to forget).
     Rotating the key a request is authenticated with is refused up front when it
     would revoke it (the revoke handler's own rule), before anything is minted.
+    A revoked key, an expired key (rotation never revives one) and a key already
+    in a grace period (a second rotation would mint another successor and move
+    the window) are refused the same way, with nothing minted.
     """
     old = store.get(old_key_id)
     if old is None:
@@ -189,29 +239,9 @@ def rotate_key(
                 f"Cannot rotate {old_key_id!r}: unknown key id.",
             ),
         )
-    if old.revoked_at is not None:
-        return RotationOutcome(
-            old_key_id=old_key_id,
-            retired="none",
-            refusal=(
-                "already_revoked",
-                f"Cannot rotate {old_key_id!r}: it is revoked.",
-            ),
-        )
-    if grace is None and actor_key_id == old_key_id:
-        return RotationOutcome(
-            old_key_id=old_key_id,
-            retired="none",
-            refusal=(
-                "cannot_revoke_own_key",
-                (
-                    f"Cannot rotate {old_key_id!r} without a grace period: it is the "
-                    "key this request is authenticated with, and rotating retires it. "
-                    "Pass a grace period, or rotate it with another admin key or "
-                    "'trellis admin api-keys rotate'."
-                ),
-            ),
-        )
+    refusal = _preflight_refusal(old, grace=grace, actor_key_id=actor_key_id)
+    if refusal is not None:
+        return RotationOutcome(old_key_id=old_key_id, retired="none", refusal=refusal)
     token, record, mint = build_mint_command(
         new_name or old.name,
         list(old.scopes),

@@ -71,9 +71,7 @@ def get_lessons(
     With ``TRELLIS_GET_LESSONS_PACK_EVENT`` on, the reply ends with a
     ``pack_id`` and the served ids so ``record_feedback`` can grade them.
     """
-    from trellis.retrieve.precedents import (
-        list_precedents as _list_prec,
-    )
+    from trellis.retrieve.precedents import list_precedents as _list_prec  # noqa: PLC0415
 
     _refuse_public_caller("get_lessons")
     registry = _get_registry()

@@ -54,10 +54,23 @@ class SQLiteApiKeyStore(SQLiteStoreBase, ApiKeyStore):
     def _init_schema(self) -> None:
         cur = self._conn.cursor()
         cur.execute(_CREATE_TABLE)
-        present = {row[1] for row in cur.execute("PRAGMA table_info(trellis_api_keys)")}
         for column, ddl in _ADDED_COLUMNS:
-            if column not in present:
+            present = {
+                row[1] for row in cur.execute("PRAGMA table_info(trellis_api_keys)")
+            }
+            if column in present:
+                continue
+            try:
                 cur.execute(f"ALTER TABLE trellis_api_keys ADD COLUMN {column} {ddl}")
+            except sqlite3.OperationalError as exc:
+                # A concurrent opener (host CLI beside a container) added the
+                # column between the check and the ALTER. Anything else, or a
+                # column that is still absent, is a real failure.
+                recheck = {
+                    row[1] for row in cur.execute("PRAGMA table_info(trellis_api_keys)")
+                }
+                if "duplicate column name" not in str(exc) or column not in recheck:
+                    raise
         for idx_sql in _CREATE_INDEXES:
             cur.execute(idx_sql)
         self._conn.commit()
@@ -133,11 +146,17 @@ class SQLiteApiKeyStore(SQLiteStoreBase, ApiKeyStore):
             params.append(expires_at.isoformat() if expires_at else None)
         if not sets:
             return self.get(key_id) is not None
+        where = "key_id = ? AND revoked_at IS NULL"
+        where_params: list[str | None] = [key_id]
+        if not isinstance(expires_at, Unset):
+            # An expired key's expiry is frozen: clearing or moving it would
+            # revive a key that no longer verifies.
+            where += " AND (expires_at IS NULL OR expires_at > ?)"
+            where_params.append(utc_now().isoformat())
         with self._conn as conn:  # commits on success, rolls back on an exception
             cur = conn.execute(
-                f"UPDATE trellis_api_keys SET {', '.join(sets)}"
-                " WHERE key_id = ? AND revoked_at IS NULL",
-                (*params, key_id),
+                f"UPDATE trellis_api_keys SET {', '.join(sets)} WHERE {where}",
+                (*params, *where_params),
             )
         return cur.rowcount > 0
 

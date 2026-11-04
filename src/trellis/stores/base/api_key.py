@@ -30,10 +30,10 @@ class ApiKeyDefaults(TrellisModel):
     Every field is optional and ``None`` means "this key sets no default for
     it". A key with no defaults (every key minted before this block existed) is
     stored with no block at all. ``agent_id`` / ``domain`` / ``session_id_prefix``
-    only ever fill a field the call left out; ``team`` is *pinned* (the key's
-    team is the team, whatever a caller claims). ``session_id_prefix`` is a
-    prefix, not a session id: one fixed id per key would put every conversation
-    the key serves into one dedup bucket.
+    only ever fill a field the call left out. ``team`` is stored, validated and
+    listed, but read by nothing yet: no surface pins or filters on it today.
+    ``session_id_prefix`` is a prefix, not a session id: one fixed id per key
+    would put every conversation the key serves into one dedup bucket.
     """
 
     agent_id: str | None = None
@@ -119,8 +119,11 @@ class ApiKeyStore(ABC):
         """Rewrite ``defaults`` and/or ``expires_at`` on a live key.
 
         A field left at :data:`UNSET` is untouched; ``None`` clears it. Returns
-        ``False`` when the key is unknown or revoked. Never touches the scopes,
-        the name or the secret hash.
+        ``False`` when the key is unknown or revoked, and when ``expires_at`` is
+        among the fields and the key has already expired: an expired key is
+        never revived by clearing or moving its expiry (a ``defaults`` rewrite
+        alone is still allowed). Never touches the scopes, the name or the
+        secret hash.
         """
 
     @abstractmethod

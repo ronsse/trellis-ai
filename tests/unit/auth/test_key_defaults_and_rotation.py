@@ -7,7 +7,7 @@ is ever printed (failure messages only ever name key ids).
 from __future__ import annotations
 
 import sqlite3
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -162,6 +162,16 @@ class TestExpiry:
         assert verify_token(token, store) is not None
         assert store.update(key_id, expires_at=utc_now() - timedelta(seconds=1))
         assert verify_token(token, store) is None
+        # An expired key is not revived by clearing its expiry; a live one is.
+        assert store.update(key_id, expires_at=None) is False
+        assert verify_token(token, store) is None
+
+    def test_a_live_keys_expiry_can_still_be_cleared(
+        self, registry: StoreRegistry
+    ) -> None:
+        token, key_id = _mint(registry)
+        store = registry.operational.api_key_store
+        assert store.update(key_id, expires_at=utc_now() + timedelta(hours=1))
         assert store.update(key_id, expires_at=None)
         assert verify_token(token, store) is not None
 
@@ -367,3 +377,284 @@ class TestRotation:
         )
         assert graced.retired == "grace"
         assert len(registry.operational.api_key_store.list()) == 2
+
+
+def _expire(registry: StoreRegistry, key_id: str) -> datetime:
+    """Move a live key's expiry into the past, as a closed grace window would."""
+    past = utc_now() - timedelta(minutes=1)
+    assert registry.operational.api_key_store.update(key_id, expires_at=past)
+    return past
+
+
+class TestAnExpiredKeyIsNeverRevived:
+    def _rotate(self, registry: StoreRegistry, key_id: str, **kwargs: object):  # type: ignore[no-untyped-def]
+        return rotate_key(
+            registry.operational.api_key_store,
+            build_api_keys_executor(registry).execute,
+            key_id,
+            requested_by=ACTOR,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    def test_rotating_an_expired_key_with_a_grace_period_is_refused(
+        self, registry: StoreRegistry
+    ) -> None:
+        old_token, old_id = _mint(registry)
+        past = _expire(registry, old_id)
+        outcome = self._rotate(registry, old_id, grace=timedelta(days=30))
+        assert outcome.refusal is not None
+        assert outcome.refusal[0] == "already_expired"
+        assert outcome.token is None
+        store = registry.operational.api_key_store
+        assert len(store.list()) == 1
+        assert store.get(old_id).expires_at == past  # type: ignore[union-attr]
+        assert verify_token(old_token, store) is None
+
+    def test_rotating_an_expired_key_without_one_is_refused_and_mints_nothing(
+        self, registry: StoreRegistry
+    ) -> None:
+        _, old_id = _mint(registry)
+        _expire(registry, old_id)
+        outcome = self._rotate(registry, old_id)
+        assert outcome.refusal is not None
+        assert outcome.refusal[0] == "already_expired"
+        assert len(registry.operational.api_key_store.list()) == 1
+        assert (
+            _events(registry, EventType.API_KEY_MINTED)[-1].payload["key_id"] == old_id
+        )  # type: ignore[attr-defined]
+
+    def test_a_key_already_in_grace_is_refused_not_extended(
+        self, registry: StoreRegistry
+    ) -> None:
+        old_token, old_id = _mint(registry)
+        first = self._rotate(registry, old_id, grace=timedelta(hours=1))
+        assert first.retired == "grace"
+        store = registry.operational.api_key_store
+        window = store.get(old_id).expires_at  # type: ignore[union-attr]
+        again = self._rotate(registry, old_id, grace=timedelta(days=60))
+        assert again.refusal is not None
+        assert again.refusal[0] == "already_in_grace"
+        assert "extend" in again.refusal[1]
+        assert len(store.list()) == 2
+        assert store.get(old_id).expires_at == window  # type: ignore[union-attr]
+        assert verify_token(old_token, store) is not None
+
+    def test_a_key_not_yet_expiring_still_rotates_with_a_grace_period(
+        self, registry: StoreRegistry
+    ) -> None:
+        _, old_id = _mint(registry)
+        outcome = self._rotate(registry, old_id, grace=timedelta(hours=1))
+        assert outcome.refusal is None
+        assert outcome.retired == "grace"
+
+    def test_the_store_will_not_clear_or_move_an_expired_keys_expiry(
+        self, registry: StoreRegistry
+    ) -> None:
+        token, key_id = _mint(registry)
+        past = _expire(registry, key_id)
+        store = registry.operational.api_key_store
+        assert store.update(key_id, expires_at=None) is False
+        assert store.update(key_id, expires_at=utc_now() + timedelta(days=9)) is False
+        assert store.get(key_id).expires_at == past  # type: ignore[union-attr]
+        assert verify_token(token, store) is None
+        # The block is not the expiry: rewriting it on an expired key still works.
+        assert store.update(key_id, defaults=build_key_defaults(domain="d"))
+
+    def test_the_update_command_says_why_an_expired_key_stays_expired(
+        self, registry: StoreRegistry
+    ) -> None:
+        _, key_id = _mint(registry)
+        _expire(registry, key_id)
+        result = build_api_keys_executor(registry).execute(
+            build_update_command(key_id, expires_at=None, requested_by=ACTOR)
+        )
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "key_expired"
+        assert "never revived" in result.message
+        assert _events(registry, EventType.API_KEY_UPDATED) == []
+
+
+class TestListingCarriesTheExpiry:
+    def test_the_row_has_expires_at_and_an_expired_flag(
+        self, registry: StoreRegistry
+    ) -> None:
+        _, key_id = _mint(registry)
+        store = registry.operational.api_key_store
+        plain_row = public_listing_row(store.get(key_id))  # type: ignore[arg-type]
+        assert plain_row["expired"] is False
+        assert "expires_at" not in plain_row
+        window = utc_now() + timedelta(hours=1)
+        assert store.update(key_id, expires_at=window)
+        live = public_listing_row(store.get(key_id))  # type: ignore[arg-type]
+        assert live["expires_at"] == window.isoformat()
+        assert live["expired"] is False
+        past = _expire(registry, key_id)
+        gone = public_listing_row(store.get(key_id))  # type: ignore[arg-type]
+        assert gone["expires_at"] == past.isoformat()
+        assert gone["expired"] is True
+
+
+class TestAuditPayloadsHoldNoSecret:
+    """Exact key sets, so a new field cannot slip a hash or token into the log."""
+
+    def test_the_update_mint_and_revoke_events_have_exactly_these_fields(
+        self, registry: StoreRegistry
+    ) -> None:
+        old_token, old_id = _mint(registry)
+        store = registry.operational.api_key_store
+        secret_hash = store.get(old_id).secret_hash  # type: ignore[union-attr]
+        executor = build_api_keys_executor(registry)
+        executor.execute(
+            build_update_command(
+                old_id, defaults=build_key_defaults(team="t"), requested_by=ACTOR
+            )
+        )
+        rotated = rotate_key(
+            store, executor.execute, old_id, requested_by=ACTOR, actor_key_id="a1"
+        )
+        assert rotated.retired == "revoked"
+        actor = {"actor_key_id", "actor_key_name"}
+        want = {
+            EventType.API_KEY_UPDATED: {
+                "key_id",
+                "name",
+                "scopes",
+                "changed",
+                "defaults",
+                "expires_at",
+                "updated_by",
+                *actor,
+            },
+            EventType.API_KEY_MINTED: {
+                "key_id",
+                "name",
+                "scopes",
+                "minted_by",
+                "rotated_from",
+                *actor,
+            },
+            EventType.API_KEY_REVOKED: {
+                "key_id",
+                "name",
+                "scopes",
+                "revoked_by",
+                *actor,
+            },
+        }
+        for kind, fields in want.items():
+            (event,) = _events(registry, kind)[-1:]
+            payload = event.payload  # type: ignore[attr-defined]
+            assert set(payload) == fields, kind
+            blob = str(payload)
+            assert secret_hash not in blob
+            assert old_token.split(".")[-1] not in blob
+
+
+class _StaleProbe:
+    """A cursor whose first ``table_info`` probe reports no columns at all.
+
+    That is what a second opener sees when the first one adds the columns
+    between its probe and its ``ALTER``.
+    """
+
+    lied = False
+
+    def __init__(self, real: sqlite3.Cursor) -> None:
+        self._real = real
+
+    def execute(self, sql: str, *args: object) -> object:
+        if sql.startswith("PRAGMA table_info") and not _StaleProbe.lied:
+            _StaleProbe.lied = True
+            return iter(())
+        return self._real.execute(sql, *args)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
+class _StaleConn:
+    def __init__(self, real: sqlite3.Connection) -> None:
+        self._real = real
+
+    def cursor(self) -> _StaleProbe:
+        return _StaleProbe(self._real.cursor())
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
+def test_a_concurrent_opener_that_added_the_columns_first_is_tolerated(
+    tmp_path: Path,
+) -> None:
+    from trellis.stores.sqlite.api_key import SQLiteApiKeyStore
+
+    db = tmp_path / "keys.db"
+    SQLiteApiKeyStore(db).close()  # the "other opener": columns now exist
+
+    class Racing(SQLiteApiKeyStore):
+        @property
+        def _conn(self) -> sqlite3.Connection:  # type: ignore[override]
+            return _StaleConn(self._get_conn())  # type: ignore[return-value]
+
+    _StaleProbe.lied = False
+    store = Racing(db)  # the ALTER hits "duplicate column name" and is swallowed
+    assert _StaleProbe.lied
+    store.close()
+    cols = {
+        r[1] for r in sqlite3.connect(db).execute("PRAGMA table_info(trellis_api_keys)")
+    }
+    assert {"defaults", "expires_at"} <= cols
+
+
+class _AlterFailsCursor:
+    def __init__(self, real: sqlite3.Cursor, message: str) -> None:
+        self._real = real
+        self._message = message
+
+    def execute(self, sql: str, *args: object) -> object:
+        if sql.startswith("ALTER TABLE"):
+            raise sqlite3.OperationalError(self._message)
+        return self._real.execute(sql, *args)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
+class _AlterFailsConn:
+    def __init__(self, real: sqlite3.Connection, message: str) -> None:
+        self._real = real
+        self._message = message
+
+    def cursor(self) -> _AlterFailsCursor:
+        return _AlterFailsCursor(self._real.cursor(), self._message)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "disk I/O error",
+        # The right words, but the column is still absent: not a lost race.
+        "duplicate column name: defaults",
+    ],
+)
+def test_a_failed_migration_that_is_not_a_lost_race_still_raises(
+    tmp_path: Path, message: str
+) -> None:
+    from trellis.stores.sqlite.api_key import SQLiteApiKeyStore
+
+    db = tmp_path / "keys.db"
+    SQLiteApiKeyStore(db).close()
+    with sqlite3.connect(db) as raw:  # an upgrade-from-before database
+        raw.execute("ALTER TABLE trellis_api_keys DROP COLUMN defaults")
+        raw.execute("ALTER TABLE trellis_api_keys DROP COLUMN expires_at")
+
+    class Failing(SQLiteApiKeyStore):
+        @property
+        def _conn(self) -> sqlite3.Connection:  # type: ignore[override]
+            return _AlterFailsConn(self._get_conn(), message)  # type: ignore[return-value]
+
+    with pytest.raises(sqlite3.OperationalError, match=message):
+        Failing(db)

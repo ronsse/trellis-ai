@@ -86,6 +86,9 @@ _REVOKE_STATUS = {
     "unknown_key_id": 404,
     "already_revoked": 409,
     "cannot_revoke_own_key": 409,
+    "already_expired": 409,
+    "already_in_grace": 409,
+    "key_expired": 409,
 }
 
 
