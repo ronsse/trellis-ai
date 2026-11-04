@@ -6,6 +6,7 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`trellis analyze trend` reports the loop week by week.** One read-only row per ISO week (`--weeks` 1 to 26, optional `--until`; the current week is marked `partial`), composed from the existing readers: pack value, serve attribution, judged outcomes, capture rejection rate and retrieval adoption, plus a follow-up retrieval rate with the `retrieval_phase` mix and the precedents served under `precedent://learning/`. `builds[]` splits the series at `write_provenance` changes (a null commit stays null) and a graph-shape row gives the semantic-edge and isolated-node shares. Held-out packs are dropped, the holdout outcome is never read, and a scan that hits its cap marks the week `truncated` and exits 5. JSON, a Rich table and `--format markdown`; also `GET /api/v1/analyze/trend`. The windowed readers gained optional `since`/`until` with unchanged defaults.
 - **`get_lessons` can emit a gradable `PACK_ASSEMBLED`, behind `TRELLIS_GET_LESSONS_PACK_EVENT`
   (default off).** With the knob on, a call that serves lessons writes one event
   (`surface: "get_lessons"`, `injected_items[]` for the served precedents) and its reply ends

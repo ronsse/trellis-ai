@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Literal, TypeVar
 
@@ -1081,6 +1081,29 @@ def _as_utc(moment: datetime) -> datetime:
     if moment.tzinfo is None:
         return moment.replace(tzinfo=UTC)
     return moment.astimezone(UTC)
+
+
+def resolve_scan_window(
+    days: int,
+    *,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    now: datetime | None = None,
+) -> tuple[datetime, datetime | None]:
+    """The ``(since, until)`` a windowed reader hands to :func:`scan_events`.
+
+    With neither bound this is the trailing-``days`` window every reader has
+    always used: ``since = now - days``, no upper bound. A caller that needs a
+    window which is not trailing (a calendar week, say) names ``since`` and/or
+    ``until``; ``until`` alone opens the window ``days`` before it. An explicit
+    ``since`` wins over ``days``, which is then only echoed by the reader.
+    ``until`` is inclusive, as it is in :meth:`EventLog.get_events`, so a
+    caller tiling adjacent windows must stop each one short of the next.
+    """
+    if since is not None:
+        return since, until
+    end = until if until is not None else (now or datetime.now(tz=UTC))
+    return end - timedelta(days=days), until
 
 
 def scan_events(

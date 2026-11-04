@@ -57,7 +57,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
@@ -74,6 +74,7 @@ from trellis.stores.base.event_log import (
     EventType,
     ScanCoverage,
     merge_coverage,
+    resolve_scan_window,
     scan_events,
 )
 
@@ -324,6 +325,8 @@ def summarize_judged_outcomes(
     *,
     days: int = 30,
     limit: int = DEFAULT_SCAN_LIMIT,
+    since: datetime | None = None,
+    until: datetime | None = None,
 ) -> JudgedOutcomesReport:
     """Join every judged row in the window to what followed it.
 
@@ -332,19 +335,28 @@ def summarize_judged_outcomes(
             ``PACK_ASSEMBLED`` and ``FEEDBACK_RECORDED``.
         days: Look-back window for all three event types.
         limit: Per-event-type scan limit.
+        since: Explicit window start; overrides ``days``. Default ``None``.
+        until: Window end (exclusive); rates are taken to it. Default
+            ``None``: open-ended and ending now, as ever.
 
     Returns:
         A :class:`JudgedOutcomesReport`. When a scan hits its cap, judged rows
         older than the latest scan's evidence start are dropped and counted,
         and every rate is taken over the window the evidence actually covers.
     """
-    now = datetime.now(tz=UTC)
-    since = now - timedelta(days=days)
+    now = until if until is not None else datetime.now(tz=UTC)
+    since, scan_until = resolve_scan_window(days, since=since, until=until, now=now)
     judged_scan = scan_events(
-        event_log, event_type=EventType.MEMORY_OP_JUDGED, since=since, limit=limit
+        event_log,
+        event_type=EventType.MEMORY_OP_JUDGED,
+        since=since,
+        until=scan_until,
+        limit=limit,
     )
     feedback_events, pack_events, pack_event_count, join_coverage = (
-        join_pack_events_with_coverage(event_log, since=since, limit=limit)
+        join_pack_events_with_coverage(
+            event_log, since=since, limit=limit, until=scan_until
+        )
     )
     scan = merge_coverage(judged_scan.coverage, join_coverage)
 
