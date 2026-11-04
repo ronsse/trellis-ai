@@ -164,7 +164,11 @@ def join_pack_feedback(
 
 
 def join_pack_feedback_with_coverage(
-    event_log: EventLog, *, since: datetime, limit: int
+    event_log: EventLog,
+    *,
+    since: datetime,
+    limit: int,
+    until: datetime | None = None,
 ) -> tuple[list[Event], dict[str, dict[str, Any]], int, ScanCoverage]:
     """:func:`join_pack_feedback` plus the coverage of the two reads.
 
@@ -174,7 +178,7 @@ def join_pack_feedback_with_coverage(
     that would carry it.
     """
     feedback_events, pack_events, pack_event_count, coverage = (
-        join_pack_events_with_coverage(event_log, since=since, limit=limit)
+        join_pack_events_with_coverage(event_log, since=since, limit=limit, until=until)
     )
     pack_payloads = {
         pack_id: event.payload or {} for pack_id, event in pack_events.items()
@@ -183,7 +187,11 @@ def join_pack_feedback_with_coverage(
 
 
 def join_pack_events_with_coverage(
-    event_log: EventLog, *, since: datetime, limit: int
+    event_log: EventLog,
+    *,
+    since: datetime,
+    limit: int,
+    until: datetime | None = None,
 ) -> tuple[list[Event], dict[str, Event], int, ScanCoverage]:
     """:func:`join_pack_feedback_with_coverage`, keeping the whole pack event.
 
@@ -196,10 +204,18 @@ def join_pack_events_with_coverage(
     wins and falsy ids are dropped.
     """
     pack_scan = scan_events(
-        event_log, event_type=EventType.PACK_ASSEMBLED, since=since, limit=limit
+        event_log,
+        event_type=EventType.PACK_ASSEMBLED,
+        since=since,
+        until=until,
+        limit=limit,
     )
     feedback_scan = scan_events(
-        event_log, event_type=EventType.FEEDBACK_RECORDED, since=since, limit=limit
+        event_log,
+        event_type=EventType.FEEDBACK_RECORDED,
+        since=since,
+        until=until,
+        limit=limit,
     )
     served, feedback_events = drop_holdout(pack_scan.events, feedback_scan.events)
     pack_events: dict[str, Event] = {}

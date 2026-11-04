@@ -91,7 +91,12 @@ from trellis_cli.exit_codes import (
     EXIT_VALIDATION,
     exit_code_for,
 )
-from trellis_cli.output import active_output_format, build_console, emit_json
+from trellis_cli.output import (
+    active_output_format,
+    build_console,
+    emit_json,
+    emit_machine_text,
+)
 from trellis_cli.stores import (
     _get_registry,
     get_document_store,
@@ -116,6 +121,7 @@ if TYPE_CHECKING:
         HoldoutSecondaryInference,
         HoldoutSettledWindow,
     )
+    from trellis.analyze.trend import TrendReport
     from trellis.ops.write_health import RecoveryReport, ToolWriteStats
 
 logger = structlog.get_logger(__name__)
@@ -4115,6 +4121,143 @@ def graph_shape(
     # same fact on both surfaces, and an exit reachable from one arm only is
     # how the machine surface ends up reporting success for a failed read.
     if report.status == "truncated":
+        raise typer.Exit(EXIT_STORE)
+
+
+def _pct(value: float | None) -> str:
+    return "-" if value is None else f"{value:.0%}"
+
+
+def _print_trend_table(report: TrendReport) -> None:
+    """The weekly series as one compact table, build changes listed under it."""
+    console.print(
+        f"[bold]Weekly trend[/bold]: {report.window.weeks} ISO weeks to "
+        f"{report.window.end:%Y-%m-%d} ({escape(report.status)}). Leading "
+        "indicators only; the holdout outcome is sealed and not read.",
+        soft_wrap=True,
+    )
+    table = Table(box=None, pad_edge=False, padding=(0, 1), header_style="bold")
+    table.add_column("week", no_wrap=True)
+    for name in (
+        "packs",
+        "adopt",
+        "follow",
+        "useful",
+        "unhelp",
+        "attrib",
+        "cited",
+        "cap rej",
+        "prec",
+    ):
+        table.add_column(name, justify="right", no_wrap=True)
+    for week in report.weeks:
+        marks = ("*" if week.partial else "") + ("!" if week.truncated else "")
+        table.add_row(
+            escape(week.week + marks),
+            str(week.packs),
+            _pct(week.retrieval_adoption.adoption),
+            _pct(week.follow_up.follow_up_rate),
+            _pct(week.pack_value.useful_token_fraction),
+            _pct(week.pack_value.unhelpful_token_fraction),
+            _pct(week.serve_attribution.pack_attribution_rate),
+            _pct(week.judged_outcomes.cited_share),
+            _pct(week.write_health.capture_rejection_rate),
+            str(week.precedents.precedent_items_served),
+        )
+    console.print(table)
+    console.print("  * partial week   ! scan hit its cap   - nothing to rate")
+    for week in report.weeks:
+        commits = ", ".join(c or "unidentified" for c in week.commits) or "-"
+        console.print(
+            f"  {escape(week.week)} commits: {escape(commits)}", soft_wrap=True
+        )
+    for build in report.builds:
+        console.print(
+            f"  build {escape(build.label)}: {build.packs} packs, first served "
+            f"{escape(build.first_seen_week)} ({build.first_seen:%Y-%m-%d})",
+            soft_wrap=True,
+        )
+    if report.graph_shape is not None:
+        graph = report.graph_shape
+        console.print(
+            f"[bold]Graph shape[/bold]: {graph.nodes} nodes, {graph.edges} edges, "
+            f"semantic edges {_pct(graph.semantic_edge_share)}, isolated nodes "
+            f"{_pct(graph.isolated_node_share)}",
+            soft_wrap=True,
+        )
+    for week in report.weeks:
+        for note in week.truncation_notes:
+            console.print(
+                f"  [red]{escape(week.week)}[/red] {escape(note)}", soft_wrap=True
+            )
+    for omission in report.omitted:
+        console.print(
+            f"  not included, {escape(omission.metric)}: {escape(omission.reason)}",
+            soft_wrap=True,
+        )
+
+
+@analyze_app.command("trend")
+def trend(
+    weeks: int = typer.Option(
+        8, "--weeks", help="ISO weeks to report, 1 to 26, oldest first."
+    ),
+    until: str | None = typer.Option(
+        None,
+        "--until",
+        help="End of the window (exclusive), an ISO date or time in UTC; default now.",
+    ),
+    limit: int = typer.Option(
+        DEFAULT_SCAN_LIMIT, "--limit", help="Per-event-type scan cap, per week."
+    ),
+    output_format: str = typer.Option(
+        "text", "--format", help="Output format: text, json or markdown."
+    ),
+) -> None:
+    """Weekly leading-indicator series, split at build boundaries.
+
+    Composes the existing readers (pack value, serve attribution, judged
+    outcomes, write health, retrieval adoption, serving builds) windowed to
+    each ISO week, adds follow-up retrieval and precedents served, and ends
+    with one graph-shape row. The pack holdout's outcome is sealed until its
+    pre-registered horizon and is not read here: no covariate, no arm split.
+
+    Read-only. Exits ``EXIT_VALIDATION`` for a bad ``--weeks`` or ``--until``
+    and ``EXIT_STORE`` when any week's scan, or the graph read, hit its cap,
+    on every ``--format``, because a truncated series is a shorter series.
+    """
+    from trellis.analyze.trend import (  # noqa: PLC0415
+        STATUS_TRUNCATED,
+        TrendError,
+        parse_until,
+        render_markdown,
+        summarize_trend,
+    )
+
+    try:
+        report = summarize_trend(
+            get_event_log(),
+            get_graph_store(),
+            weeks=weeks,
+            until=parse_until(until),
+            limit=limit,
+        )
+    except TrendError as exc:
+        if output_format == "json":
+            emit_json({"status": "error", "message": str(exc)})
+        else:
+            console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
+        raise typer.Exit(code=EXIT_VALIDATION) from exc
+
+    if output_format == "json":
+        emit_json(report.model_dump(mode="json"))
+    elif output_format == "markdown":
+        emit_machine_text(render_markdown(report))
+    else:
+        _print_trend_table(report)
+
+    # Below the format branch, deliberately (#437): one fact, one exit.
+    if report.status == STATUS_TRUNCATED:
         raise typer.Exit(EXIT_STORE)
 
 

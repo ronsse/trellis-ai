@@ -60,6 +60,14 @@ from pydantic import Field, ValidationError, field_validator
 from trellis.analyze.domains import analyze_domains
 from trellis.analyze.holdout import OUTCOMES, HoldoutAnalysisError
 from trellis.analyze.holdout_gate import analyze_holdout_gated, require_readout_open
+from trellis.analyze.trend import (
+    TREND_DEFAULT_WEEKS,
+    TREND_MAX_WEEKS,
+    TREND_MIN_WEEKS,
+    TrendError,
+    parse_until,
+    summarize_trend,
+)
 from trellis.core.base import TrellisModel
 from trellis.extract.telemetry import analyze_extractor_fallbacks
 from trellis.learning import (
@@ -179,6 +187,24 @@ class CostParams(ValueParams):
 
 class JudgedOutcomesParams(DaysLimitParams):
     days: int = Field(default=30, ge=1, le=365)
+
+
+class TrendParams(TrellisModel):
+    weeks: int = Field(
+        default=TREND_DEFAULT_WEEKS, ge=TREND_MIN_WEEKS, le=TREND_MAX_WEEKS
+    )
+    # ISO date or time, UTC; the window's exclusive end. ``None`` is now.
+    until: str | None = Field(default=None, max_length=64)
+    limit: int = Field(default=5000, ge=1, le=50_000)
+
+    @field_validator("until")
+    @classmethod
+    def _until_parses(cls, value: str | None) -> str | None:
+        try:
+            parse_until(value)
+        except TrendError as exc:
+            raise ValueError(str(exc)) from exc
+        return value
 
 
 class AdvisoryEffectivenessParams(TrellisModel):
@@ -431,6 +457,17 @@ def _run_cost(params: CostParams, registry: StoreRegistry) -> dict[str, Any]:
     return report.model_dump()
 
 
+def _run_trend(params: TrendParams, registry: StoreRegistry) -> dict[str, Any]:
+    report = summarize_trend(
+        registry.operational.event_log,
+        registry.knowledge.graph_store,
+        weeks=params.weeks,
+        until=parse_until(params.until),
+        limit=params.limit,
+    )
+    return report.model_dump(mode="json")
+
+
 @dataclass(frozen=True)
 class _ReportEntry:
     # Human-readable label for the Reports tab's picker; the dict key
@@ -610,6 +647,24 @@ _REPORTS: dict[str, _ReportEntry] = {
         ),
         params_model=CostParams,
         run=_run_cost,
+    ),
+    "trend": _ReportEntry(
+        title="Weekly trend",
+        description=(
+            "One row per ISO week, oldest first, of the leading indicators: "
+            "retrieval adoption, follow-up retrieval, pack value, attribution "
+            "and grading coverage, judged outcomes, capture rejection rate and "
+            "precedents served, with the builds that served each week so a "
+            "build change reads as a segment boundary. A good series is flat "
+            "or rising on adoption, useful-token fraction and cited share "
+            "across a build boundary; a bad one steps down at a boundary or "
+            "drifts down inside one build. The current week is marked partial, "
+            "and a week whose scan hit its cap is marked truncated. This page "
+            "shows leading indicators only: the pack holdout's outcome is "
+            "sealed and is not read here."
+        ),
+        params_model=TrendParams,
+        run=_run_trend,
     ),
 }
 
