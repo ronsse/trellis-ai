@@ -2792,13 +2792,18 @@ both:
 surfaces** — each was tuned for its own caller independently, and this PR
 only made the existing values operator-tunable; it did not reconcile them.
 
-`get_context_max_tokens`/`get_context_max_items`/`search_max_tokens` are
-read via a private per-module int resolver in `mcp/server.py`;
-`rest_pack_max_items`/`rest_pack_max_tokens` via one in
-`trellis_api/routes/retrieve.py`; `disclosure_body_items`/
-`excerpt_max_chars` via one in `retrieve/builder_factory.py` — each mirrors
-`capture_health._resolve_int_knob`'s coerce-and-bounds-check-through-
-`validate_value` shape rather than sharing code across modules.
+All seven are resolved by public functions in `trellis/core/knobs.py`
+(`resolve_get_context_max_tokens`, `resolve_get_context_max_items`,
+`resolve_search_max_tokens`, `resolve_rest_pack_max_items`,
+`resolve_rest_pack_max_tokens`, `resolve_body_items`,
+`resolve_excerpt_max_chars`), which sit on the shared `resolve_int_knob`
+(env, then stored setting, then default, with the value coerced and
+bounds-checked through `validate_value`). The MCP server, the REST retrieve
+route, `build_pack_builder` and the settings route all import them from there,
+so a REST module never reaches into `trellis.mcp.server` for one
+(`tests/unit/test_api_mcp_private_import_rule.py`). Each keeps the warning-event
+prefix of the module it came from (`mcp_server.`, `retrieve_route.`,
+`builder_factory.`).
 
 ### Failure posture: degrades, never raises
 

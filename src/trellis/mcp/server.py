@@ -37,7 +37,6 @@ import json
 import sys
 import threading
 import time
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import structlog
@@ -65,6 +64,12 @@ from trellis.core.error_sanitize import (
     describe_validation_error,
     render_exception_detail,
     sanitize_error_message,
+)
+from trellis.core.knobs import (
+    GET_CONTEXT_MAX_ITEMS_DEFAULT,
+    resolve_get_context_max_items,
+    resolve_get_context_max_tokens,
+    resolve_search_max_tokens,
 )
 from trellis.core.project import project_override, resolve_project
 from trellis.core.vector_metadata import resolve_vector_store
@@ -1272,95 +1277,23 @@ def _get_minhash_index(registry: StoreRegistry) -> Any:
 
 #: Default item ceiling for flat packs. The markdown formatter enforces the
 #: token budget; this bounds the candidate list the budget walk considers.
-_FLAT_MAX_ITEMS = 50
-
-#: Settings-registry wiring for the MCP pack-size knobs below — env wins
-#: over a stored override, which wins over the module default, same
-#: posture as ``GRAPH_SEEDING_ENV`` in
-#: :mod:`trellis.retrieve.builder_factory`. See
-#: ``trellis.core.settings_registry``'s ``get_context_max_tokens`` /
-#: ``get_context_max_items`` / ``search_max_tokens`` entries.
-#:
-#: ``get_context``'s ``sections=`` layout resolves its budget through a
-#: DIFFERENT, older mechanism (``registry.budget_config``, config.yaml's
-#: ``retrieval.budgets``, fallback 4000/30 — the same one
-#: ``get_objective_context``/``get_task_context`` use) and is deliberately
-#: NOT wired to these three settings, so the two resolution paths can
-#: never disagree about what "unset" means. See the ``sections is not
-#: None`` branch below.
-_GET_CONTEXT_MAX_TOKENS_ENV = "TRELLIS_GET_CONTEXT_MAX_TOKENS"
-_GET_CONTEXT_MAX_TOKENS_SETTING = "get_context_max_tokens"
-_GET_CONTEXT_MAX_ITEMS_ENV = "TRELLIS_GET_CONTEXT_MAX_ITEMS"
-_GET_CONTEXT_MAX_ITEMS_SETTING = "get_context_max_items"
-_SEARCH_MAX_TOKENS_ENV = "TRELLIS_SEARCH_MAX_TOKENS"
-_SEARCH_MAX_TOKENS_SETTING = "search_max_tokens"
+#: Also ``get_context``'s ``get_context_max_items`` default, so it is owned by
+#: :mod:`trellis.core.knobs`, which holds the three MCP pack-size resolvers
+#: (``resolve_get_context_max_tokens`` / ``resolve_get_context_max_items`` /
+#: ``resolve_search_max_tokens``) -- env wins over a stored override, which
+#: wins over the default, and the ``sections=`` layout is deliberately NOT
+#: wired to them (see the ``sections is not None`` branch below).
+_FLAT_MAX_ITEMS = GET_CONTEXT_MAX_ITEMS_DEFAULT
 
 #: ``get_context``'s historical literal ``max_tokens`` default (2000),
 #: frozen here for the ``sections=`` branch alone. That branch treats
 #: ``max_tokens <= 0`` as "no override, resolve via ``budget_config``" —
-#: so before this knob existed, a caller who omitted ``max_tokens``
+#: so before the flat-path knob existed, a caller who omitted ``max_tokens``
 #: (landing on the old hardcoded signature default) always fed the
 #: literal ``2000`` into that branch as an override. Kept as its own
-#: constant rather than reusing :data:`_GET_CONTEXT_MAX_TOKENS_SETTING`'s
-#: default so a settings override of the *new* flat-path knob can never
-#: change what the sections branch does.
+#: constant rather than reusing the flat-path knob's default so a settings
+#: override of that knob can never change what the sections branch does.
 _GET_CONTEXT_SECTIONS_LEGACY_MAX_TOKENS = 2000
-
-
-def _resolve_int_knob(
-    *,
-    env_var: str,
-    setting_name: str,
-    default: int,
-    settings: Mapping[str, Any] | None,
-) -> int:
-    """Resolve one integer knob: env var, then a stored setting, then default.
-
-    Delegates to :func:`trellis.core.knobs.resolve_int_knob` (the one
-    shared implementation; see its docstring for the coercion and
-    precedence rules). ``warning_prefix="mcp_server"`` keeps this
-    caller's event names — ``mcp_server.bad_env_int`` /
-    ``mcp_server.bad_settings_int`` — exactly what they were before.
-    """
-    from trellis.core.knobs import resolve_int_knob  # noqa: PLC0415
-
-    return resolve_int_knob(
-        env_var=env_var,
-        setting_name=setting_name,
-        default=default,
-        settings=settings,
-        warning_prefix="mcp_server",
-    )
-
-
-def _resolve_get_context_max_tokens(settings: Mapping[str, Any] | None) -> int:
-    """Resolve ``get_context``'s flat-path ``max_tokens`` default (2000)."""
-    return _resolve_int_knob(
-        env_var=_GET_CONTEXT_MAX_TOKENS_ENV,
-        setting_name=_GET_CONTEXT_MAX_TOKENS_SETTING,
-        default=2000,
-        settings=settings,
-    )
-
-
-def _resolve_get_context_max_items(settings: Mapping[str, Any] | None) -> int:
-    """Resolve ``get_context``'s flat-path ``max_items`` default (50)."""
-    return _resolve_int_knob(
-        env_var=_GET_CONTEXT_MAX_ITEMS_ENV,
-        setting_name=_GET_CONTEXT_MAX_ITEMS_SETTING,
-        default=_FLAT_MAX_ITEMS,
-        settings=settings,
-    )
-
-
-def _resolve_search_max_tokens(settings: Mapping[str, Any] | None) -> int:
-    """Resolve ``search``'s ``max_tokens`` default (2000)."""
-    return _resolve_int_knob(
-        env_var=_SEARCH_MAX_TOKENS_ENV,
-        setting_name=_SEARCH_MAX_TOKENS_SETTING,
-        default=2000,
-        settings=settings,
-    )
 
 
 #: Floor for the index-mode builder budget once the rendering overhead is
@@ -1915,14 +1848,14 @@ def get_context(
     resolved_max_tokens = (
         max_tokens
         if max_tokens is not None
-        else _resolve_get_context_max_tokens(settings)
+        else resolve_get_context_max_tokens(settings)
     )
     return _flat_context(
         registry,
         intent,
         domain=domain,
         max_tokens=resolved_max_tokens,
-        max_items=_resolve_get_context_max_items(settings),
+        max_items=resolve_get_context_max_items(settings),
         session_id=session_id,
         run_id=run_id,
         operation="get_context",
@@ -4450,7 +4383,7 @@ def search(
     resolved_max_tokens = (
         max_tokens
         if max_tokens is not None
-        else _resolve_search_max_tokens(load_settings_values(registry.stores_dir))
+        else resolve_search_max_tokens(load_settings_values(registry.stores_dir))
     )
     return _flat_context(
         registry,

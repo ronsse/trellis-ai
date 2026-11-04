@@ -21,6 +21,17 @@ signature, same call sites, same tests) delegating to
 :func:`resolve_int_knob` below, so no caller's observable behaviour
 changes: the warning event names, their fields, and what each caller
 does with the final value are all exactly what they were before.
+
+The seven pack-size / excerpt / disclosure knobs the settings route
+reports live here too, as public ``resolve_*`` functions with their env
+var, settings key and default beside them. They used to sit in three
+places -- ``trellis.mcp.server``, ``trellis_api.routes.retrieve`` and
+``trellis.retrieve.builder_factory`` -- and ``trellis_api.routes.settings``
+imported the first one's *private* names to report them, a layering
+inversion (a REST route reaching into the MCP server). Every call site and
+the settings route now import from this module. Each knob keeps the
+``warning_prefix`` of the module it came from, so a bad env or settings
+value logs the same event name as before.
 """
 
 from __future__ import annotations
@@ -33,7 +44,35 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
-__all__ = ["resolve_int_knob"]
+__all__ = [
+    "BODY_ITEMS_ENV",
+    "BODY_ITEMS_SETTING",
+    "EXCERPT_MAX_CHARS_ENV",
+    "EXCERPT_MAX_CHARS_SETTING",
+    "GET_CONTEXT_MAX_ITEMS_DEFAULT",
+    "GET_CONTEXT_MAX_ITEMS_ENV",
+    "GET_CONTEXT_MAX_ITEMS_SETTING",
+    "GET_CONTEXT_MAX_TOKENS_DEFAULT",
+    "GET_CONTEXT_MAX_TOKENS_ENV",
+    "GET_CONTEXT_MAX_TOKENS_SETTING",
+    "REST_PACK_MAX_ITEMS_DEFAULT",
+    "REST_PACK_MAX_ITEMS_ENV",
+    "REST_PACK_MAX_ITEMS_SETTING",
+    "REST_PACK_MAX_TOKENS_DEFAULT",
+    "REST_PACK_MAX_TOKENS_ENV",
+    "REST_PACK_MAX_TOKENS_SETTING",
+    "SEARCH_MAX_TOKENS_DEFAULT",
+    "SEARCH_MAX_TOKENS_ENV",
+    "SEARCH_MAX_TOKENS_SETTING",
+    "resolve_body_items",
+    "resolve_excerpt_max_chars",
+    "resolve_get_context_max_items",
+    "resolve_get_context_max_tokens",
+    "resolve_int_knob",
+    "resolve_rest_pack_max_items",
+    "resolve_rest_pack_max_tokens",
+    "resolve_search_max_tokens",
+]
 
 
 def resolve_int_knob(
@@ -100,3 +139,137 @@ def resolve_int_knob(
             )
             return default
     return default
+
+
+# ---------------------------------------------------------------------------
+# The seven pack-size / excerpt / disclosure knobs
+# ---------------------------------------------------------------------------
+#
+# Each is ``env > stored setting > default``, registered in
+# :mod:`trellis.core.settings_registry` under the same name, env var and
+# default (``tests/unit/core/test_knobs.py`` pins the two against each other).
+# Read-side knobs, so -- like ``graph_seeding`` -- they stay out of
+# :mod:`trellis.core.write_config`.
+
+#: MCP ``get_context``, flat (non-sectioned) layout. The ``sections=``
+#: layout resolves its budget from ``registry.budget_config`` instead and is
+#: deliberately not wired to these three.
+GET_CONTEXT_MAX_TOKENS_ENV = "TRELLIS_GET_CONTEXT_MAX_TOKENS"
+GET_CONTEXT_MAX_TOKENS_SETTING = "get_context_max_tokens"
+GET_CONTEXT_MAX_TOKENS_DEFAULT = 2000
+GET_CONTEXT_MAX_ITEMS_ENV = "TRELLIS_GET_CONTEXT_MAX_ITEMS"
+GET_CONTEXT_MAX_ITEMS_SETTING = "get_context_max_items"
+#: Item ceiling for a flat pack: bounds the candidate list the token-budget
+#: walk considers. ``trellis.mcp.server._FLAT_MAX_ITEMS`` is this value.
+GET_CONTEXT_MAX_ITEMS_DEFAULT = 50
+
+#: MCP ``search``. Same shipped default as ``get_context`` by coincidence,
+#: not unification: the two are resolved and tuned independently.
+SEARCH_MAX_TOKENS_ENV = "TRELLIS_SEARCH_MAX_TOKENS"
+SEARCH_MAX_TOKENS_SETTING = "search_max_tokens"
+SEARCH_MAX_TOKENS_DEFAULT = 2000
+
+#: ``POST /packs`` when the request body omits the field. The Pydantic
+#: field defaults on ``PackRequest`` (50 / 8000) are unchanged, so the
+#: committed OpenAPI schema is too; the route reads ``model_fields_set``
+#: to tell an omitted field from a supplied one.
+REST_PACK_MAX_ITEMS_ENV = "TRELLIS_REST_PACK_MAX_ITEMS"
+REST_PACK_MAX_ITEMS_SETTING = "rest_pack_max_items"
+REST_PACK_MAX_ITEMS_DEFAULT = 50
+REST_PACK_MAX_TOKENS_ENV = "TRELLIS_REST_PACK_MAX_TOKENS"
+REST_PACK_MAX_TOKENS_SETTING = "rest_pack_max_tokens"
+REST_PACK_MAX_TOKENS_DEFAULT = 8000
+
+#: Pack shaping, applied by every surface through
+#: :func:`trellis.retrieve.builder_factory.build_pack_builder`. Their
+#: defaults are not restated here: they are owned by the modules whose
+#: behaviour they set (``trellis.retrieve.disclosure.DEFAULT_BODY_ITEMS``
+#: and ``trellis.retrieve.excerpts.EXCERPT_MAX_CHARS``, both also used as
+#: plain function/dataclass defaults elsewhere) and read lazily, because
+#: importing ``trellis.retrieve`` at module scope from here would cycle
+#: through ``trellis.classify.demotion_gate``, which imports this module.
+BODY_ITEMS_ENV = "TRELLIS_DISCLOSURE_BODY_ITEMS"
+BODY_ITEMS_SETTING = "disclosure_body_items"
+EXCERPT_MAX_CHARS_ENV = "TRELLIS_EXCERPT_MAX_CHARS"
+EXCERPT_MAX_CHARS_SETTING = "excerpt_max_chars"
+
+
+def resolve_get_context_max_tokens(settings: Mapping[str, Any] | None) -> int:
+    """Resolve ``get_context``'s flat-path ``max_tokens`` default (2000)."""
+    return resolve_int_knob(
+        env_var=GET_CONTEXT_MAX_TOKENS_ENV,
+        setting_name=GET_CONTEXT_MAX_TOKENS_SETTING,
+        default=GET_CONTEXT_MAX_TOKENS_DEFAULT,
+        settings=settings,
+        warning_prefix="mcp_server",
+    )
+
+
+def resolve_get_context_max_items(settings: Mapping[str, Any] | None) -> int:
+    """Resolve ``get_context``'s flat-path ``max_items`` default (50)."""
+    return resolve_int_knob(
+        env_var=GET_CONTEXT_MAX_ITEMS_ENV,
+        setting_name=GET_CONTEXT_MAX_ITEMS_SETTING,
+        default=GET_CONTEXT_MAX_ITEMS_DEFAULT,
+        settings=settings,
+        warning_prefix="mcp_server",
+    )
+
+
+def resolve_search_max_tokens(settings: Mapping[str, Any] | None) -> int:
+    """Resolve ``search``'s ``max_tokens`` default (2000)."""
+    return resolve_int_knob(
+        env_var=SEARCH_MAX_TOKENS_ENV,
+        setting_name=SEARCH_MAX_TOKENS_SETTING,
+        default=SEARCH_MAX_TOKENS_DEFAULT,
+        settings=settings,
+        warning_prefix="mcp_server",
+    )
+
+
+def resolve_rest_pack_max_items(settings: Mapping[str, Any] | None) -> int:
+    """Resolve ``POST /packs``'s ``max_items`` default (50) when omitted."""
+    return resolve_int_knob(
+        env_var=REST_PACK_MAX_ITEMS_ENV,
+        setting_name=REST_PACK_MAX_ITEMS_SETTING,
+        default=REST_PACK_MAX_ITEMS_DEFAULT,
+        settings=settings,
+        warning_prefix="retrieve_route",
+    )
+
+
+def resolve_rest_pack_max_tokens(settings: Mapping[str, Any] | None) -> int:
+    """Resolve ``POST /packs``'s ``max_tokens`` default (8000) when omitted."""
+    return resolve_int_knob(
+        env_var=REST_PACK_MAX_TOKENS_ENV,
+        setting_name=REST_PACK_MAX_TOKENS_SETTING,
+        default=REST_PACK_MAX_TOKENS_DEFAULT,
+        settings=settings,
+        warning_prefix="retrieve_route",
+    )
+
+
+def resolve_body_items(settings: Mapping[str, Any] | None) -> int:
+    """Resolve the disclosure body-item cap: env > settings > default."""
+    from trellis.retrieve.disclosure import DEFAULT_BODY_ITEMS  # noqa: PLC0415
+
+    return resolve_int_knob(
+        env_var=BODY_ITEMS_ENV,
+        setting_name=BODY_ITEMS_SETTING,
+        default=DEFAULT_BODY_ITEMS,
+        settings=settings,
+        warning_prefix="builder_factory",
+    )
+
+
+def resolve_excerpt_max_chars(settings: Mapping[str, Any] | None) -> int:
+    """Resolve the per-item excerpt character cap: env > settings > default."""
+    from trellis.retrieve.excerpts import EXCERPT_MAX_CHARS  # noqa: PLC0415
+
+    return resolve_int_knob(
+        env_var=EXCERPT_MAX_CHARS_ENV,
+        setting_name=EXCERPT_MAX_CHARS_SETTING,
+        default=EXCERPT_MAX_CHARS,
+        settings=settings,
+        warning_prefix="builder_factory",
+    )

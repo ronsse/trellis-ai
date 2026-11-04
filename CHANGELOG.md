@@ -4,6 +4,18 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **The seven pack-size, excerpt and disclosure knob resolvers live in `trellis.core.knobs`.**
+  `get_context_max_tokens`, `get_context_max_items`, `search_max_tokens`,
+  `rest_pack_max_items`, `rest_pack_max_tokens`, `disclosure_body_items` and
+  `excerpt_max_chars` were resolved by private functions in the MCP server, the REST retrieve
+  route and `builder_factory`, and the settings route imported the MCP server's private ones to
+  report them. All of them are now public `resolve_*` functions in one module that every caller
+  imports, and a test fails if a `trellis_api` module reaches a private name in
+  `trellis.mcp.server`. No behaviour change: same env vars, settings keys, defaults, resolved
+  values and warning event names, and no pack serves differently.
+
 ### Fixed
 
 - **The two commonest trace-shape mistakes are repaired at the write boundary instead of

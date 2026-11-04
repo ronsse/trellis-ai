@@ -29,11 +29,11 @@ from typing import TYPE_CHECKING, Any, TypedDict
 
 import structlog
 
+from trellis.core.knobs import resolve_body_items, resolve_excerpt_max_chars
 from trellis.core.write_config import WriteBehaviourConfig
 from trellis.ops import ParameterRegistry
 from trellis.retrieve.class_prior import resolve_class_prior_config
-from trellis.retrieve.disclosure import DEFAULT_BODY_ITEMS, DisclosureConfig
-from trellis.retrieve.excerpts import EXCERPT_MAX_CHARS
+from trellis.retrieve.disclosure import DisclosureConfig
 from trellis.retrieve.pack_builder import (
     PackBuilder,
     SemanticDedupConfig,
@@ -131,62 +131,6 @@ GRAPH_RECENCY_FALLBACK_SETTING = "graph_recency_fallback"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _FALSEY = frozenset({"0", "false", "no", "off"})
 
-#: Settings-registry wiring for the two pack-shaping int knobs below — env
-#: wins over a stored override, which wins over the module default. See
-#: ``trellis.core.settings_registry``'s ``disclosure_body_items`` /
-#: ``excerpt_max_chars`` entries. Read-side, so (like ``GRAPH_SEEDING_ENV``
-#: above) they stay out of :mod:`trellis.core.write_config`.
-BODY_ITEMS_ENV = "TRELLIS_DISCLOSURE_BODY_ITEMS"
-BODY_ITEMS_SETTING = "disclosure_body_items"
-EXCERPT_MAX_CHARS_ENV = "TRELLIS_EXCERPT_MAX_CHARS"
-EXCERPT_MAX_CHARS_SETTING = "excerpt_max_chars"
-
-
-def _resolve_int_knob(
-    *,
-    env_var: str,
-    setting_name: str,
-    default: int,
-    settings: Mapping[str, Any] | None,
-) -> int:
-    """Resolve one integer knob: env var, then a stored setting, then default.
-
-    Delegates to :func:`trellis.core.knobs.resolve_int_knob` (the one
-    shared implementation; see its docstring for the coercion and
-    precedence rules). ``warning_prefix="builder_factory"`` keeps this
-    caller's event names — ``builder_factory.bad_env_int`` /
-    ``builder_factory.bad_settings_int`` — exactly what they were before.
-    """
-    from trellis.core.knobs import resolve_int_knob  # noqa: PLC0415
-
-    return resolve_int_knob(
-        env_var=env_var,
-        setting_name=setting_name,
-        default=default,
-        settings=settings,
-        warning_prefix="builder_factory",
-    )
-
-
-def _resolve_body_items(settings: Mapping[str, Any] | None) -> int:
-    """Resolve the disclosure body-item cap: env > settings > default."""
-    return _resolve_int_knob(
-        env_var=BODY_ITEMS_ENV,
-        setting_name=BODY_ITEMS_SETTING,
-        default=DEFAULT_BODY_ITEMS,
-        settings=settings,
-    )
-
-
-def _resolve_excerpt_max_chars(settings: Mapping[str, Any] | None) -> int:
-    """Resolve the per-item excerpt character cap: env > settings > default."""
-    return _resolve_int_knob(
-        env_var=EXCERPT_MAX_CHARS_ENV,
-        setting_name=EXCERPT_MAX_CHARS_SETTING,
-        default=EXCERPT_MAX_CHARS,
-        settings=settings,
-    )
-
 
 class AxisReport(TypedDict):
     """What :func:`describe_axes` returns. Serialised verbatim into JSON.
@@ -226,7 +170,7 @@ def build_pack_builder(
     # ``load_settings_values`` degrades to ``{}`` rather than raising, so
     # no caller here needs its own try/except around this read.
     settings = load_settings_values(registry.stores_dir)
-    excerpt_max_chars = _resolve_excerpt_max_chars(settings)
+    excerpt_max_chars = resolve_excerpt_max_chars(settings)
     strategies_result = build_strategies(
         registry,
         parameter_registry=param_registry,
@@ -244,7 +188,7 @@ def build_pack_builder(
         # Same env > settings > default resolution as the knobs above, for
         # the disclosure body-item cap (DEFAULT_BODY_ITEMS) — see
         # ``SettingSpec(name="disclosure_body_items")``.
-        disclosure=DisclosureConfig(body_items=_resolve_body_items(settings)),
+        disclosure=DisclosureConfig(body_items=resolve_body_items(settings)),
         # F14 (#259): collapse near-duplicate pack items — the same fact
         # stored via save_memory AND via corpus ingestion surfaced both
         # copies in one pack. MinHash/LSH over item excerpts,

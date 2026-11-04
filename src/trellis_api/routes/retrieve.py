@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -11,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import ValidationError
 
 from trellis.core.error_sanitize import describe_validation_error
+from trellis.core.knobs import resolve_rest_pack_max_items, resolve_rest_pack_max_tokens
 from trellis.retrieve.builder_factory import build_pack_builder, describe_axes
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.precedents import is_miner_candidate_event, is_withheld_precedent
@@ -66,73 +66,22 @@ def _build_pack_builder(registry: Any) -> PackBuilder:
     return build_pack_builder(registry, surface="api.retrieve")
 
 
-#: Settings-registry wiring for ``POST /packs``'s budget defaults — env
-#: wins over a stored override, which wins over :class:`PackRequest`'s own
-#: field default. See ``trellis.core.settings_registry``'s
-#: ``rest_pack_max_items`` / ``rest_pack_max_tokens`` entries.
-#:
-#: Deliberately does NOT touch ``PackRequest.max_items`` /
-#: ``.max_tokens`` — those Pydantic field defaults (50 / 8000) stay
-#: exactly as they are, so the committed OpenAPI schema (``default: 50`` /
-#: ``default: 8000``, plain ``integer``, no ``anyOf``/nullable) does not
-#: change. Whether a caller supplied the field at all is read from
-#: ``req.model_fields_set`` (Pydantic v2) instead: a field *present* in
-#: the request body always wins, matching the explicit-caller-wins rule
-#: every other knob in this PR follows; a field *absent* resolves through
-#: this knob rather than silently taking the DTO's literal default. The
-#: SDK (``trellis_sdk.client``/``async_client``) always sends both keys
-#: explicitly on every call, so it is unaffected either way (and is out
-#: of scope for this change).
-_REST_PACK_MAX_ITEMS_ENV = "TRELLIS_REST_PACK_MAX_ITEMS"
-_REST_PACK_MAX_ITEMS_SETTING = "rest_pack_max_items"
-_REST_PACK_MAX_TOKENS_ENV = "TRELLIS_REST_PACK_MAX_TOKENS"
-_REST_PACK_MAX_TOKENS_SETTING = "rest_pack_max_tokens"
-
-
-def _resolve_int_knob(
-    *,
-    env_var: str,
-    setting_name: str,
-    default: int,
-    settings: Mapping[str, Any] | None,
-) -> int:
-    """Resolve one integer knob: env var, then a stored setting, then default.
-
-    Delegates to :func:`trellis.core.knobs.resolve_int_knob` (the one
-    shared implementation; see its docstring for the coercion and
-    precedence rules). ``warning_prefix="retrieve_route"`` keeps this
-    caller's event names — ``retrieve_route.bad_env_int`` /
-    ``retrieve_route.bad_settings_int`` — exactly what they were before.
-    """
-    from trellis.core.knobs import resolve_int_knob  # noqa: PLC0415
-
-    return resolve_int_knob(
-        env_var=env_var,
-        setting_name=setting_name,
-        default=default,
-        settings=settings,
-        warning_prefix="retrieve_route",
-    )
-
-
-def _resolve_rest_pack_max_items(settings: Mapping[str, Any] | None) -> int:
-    """Resolve ``POST /packs``'s ``max_items`` default (50) when omitted."""
-    return _resolve_int_knob(
-        env_var=_REST_PACK_MAX_ITEMS_ENV,
-        setting_name=_REST_PACK_MAX_ITEMS_SETTING,
-        default=50,
-        settings=settings,
-    )
-
-
-def _resolve_rest_pack_max_tokens(settings: Mapping[str, Any] | None) -> int:
-    """Resolve ``POST /packs``'s ``max_tokens`` default (8000) when omitted."""
-    return _resolve_int_knob(
-        env_var=_REST_PACK_MAX_TOKENS_ENV,
-        setting_name=_REST_PACK_MAX_TOKENS_SETTING,
-        default=8000,
-        settings=settings,
-    )
+# ``POST /packs``'s budget defaults when the body omits the field are the
+# ``rest_pack_max_items`` / ``rest_pack_max_tokens`` settings, resolved by
+# :func:`trellis.core.knobs.resolve_rest_pack_max_items` /
+# :func:`~trellis.core.knobs.resolve_rest_pack_max_tokens` (env, then a stored
+# override, then the shipped default).
+#
+# Deliberately does NOT touch ``PackRequest.max_items`` / ``.max_tokens`` --
+# those Pydantic field defaults (50 / 8000) stay exactly as they are, so the
+# committed OpenAPI schema (``default: 50`` / ``default: 8000``, plain
+# ``integer``, no ``anyOf``/nullable) does not change. Whether a caller
+# supplied the field at all is read from ``req.model_fields_set`` (Pydantic
+# v2) instead: a field *present* in the request body always wins, matching the
+# explicit-caller-wins rule every other knob follows; a field *absent*
+# resolves through the knob rather than silently taking the DTO's literal
+# default. The SDK (``trellis_sdk.client``/``async_client``) always sends both
+# keys explicitly on every call, so it is unaffected either way.
 
 
 # Chunk rows are excluded from this route by default (#396) — the sibling
@@ -252,12 +201,12 @@ def assemble_pack(
     max_items = (
         req.max_items
         if "max_items" in fields_set
-        else _resolve_rest_pack_max_items(settings)
+        else resolve_rest_pack_max_items(settings)
     )
     max_tokens = (
         req.max_tokens
         if "max_tokens" in fields_set
-        else _resolve_rest_pack_max_tokens(settings)
+        else resolve_rest_pack_max_tokens(settings)
     )
     budget = PackBudget(max_items=max_items, max_tokens=max_tokens)
     # Pass domain as a filter so strategies can use it for scoping

@@ -28,6 +28,15 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 from trellis.core.error_sanitize import sanitize_error_message
+from trellis.core.knobs import (
+    resolve_body_items,
+    resolve_excerpt_max_chars,
+    resolve_get_context_max_items,
+    resolve_get_context_max_tokens,
+    resolve_rest_pack_max_items,
+    resolve_rest_pack_max_tokens,
+    resolve_search_max_tokens,
+)
 from trellis.core.settings_registry import (
     GROUP_LABELS,
     SETTINGS_REGISTRY,
@@ -51,8 +60,6 @@ from trellis.ops.capture_health import resolve_capture_thresholds
 from trellis.retrieve.builder_factory import (
     _graph_recency_fallback_enabled,
     _graph_seeding_enabled,
-    _resolve_body_items,
-    _resolve_excerpt_max_chars,
 )
 from trellis.retrieve.pack_builder import _filter_legacy_advisories_enabled
 from trellis.schemas.settings import SettingRow
@@ -134,12 +141,11 @@ def _effective_values(
     ``disclosure_body_items``, ``excerpt_max_chars``) are the same shape
     as those two in being non-:class:`WriteBehaviourConfig` fields, but
     plain ints with no asymmetric environment semantics -- each is
-    resolved by calling its real call site's own resolver directly
-    (:func:`trellis.mcp.server._resolve_get_context_max_tokens` and
-    siblings, :func:`trellis_api.routes.retrieve._resolve_rest_pack_max_items`
-    and its sibling, :func:`trellis.retrieve.builder_factory._resolve_body_items`
-    / :func:`~trellis.retrieve.builder_factory._resolve_excerpt_max_chars`),
-    for the same drift-avoidance reason.
+    resolved by calling its real call site's own resolver directly, for
+    the same drift-avoidance reason. All seven are the public
+    ``resolve_*`` functions in :mod:`trellis.core.knobs`, the one module
+    the MCP server, the REST retrieve route and ``build_pack_builder``
+    import them from too.
 
     Returns ``(effective, parse_errors)``. ``WriteBehaviourConfig``'s own
     twelve fields can't land in ``parse_errors``: every one of its
@@ -201,34 +207,22 @@ def _effective_values(
     ):
         effective[name] = resolve_env_pinned_bool_setting(name, env_fn, settings_values)
 
-    # The seven pack-size/excerpt knobs (pack-budget-knobs PR): none are
-    # ``WriteBehaviourConfig`` fields, same reason ``graph_seeding`` /
-    # ``filter_legacy_advisories`` above are not, so each needs its own
-    # entry here too or ``_entry``'s ``effective[spec.name]`` lookup
-    # raises ``KeyError`` for it. Each resolver below is the exact one its
-    # real call site uses (``mcp/server.py``, ``trellis_api/routes/
-    # retrieve.py``, ``retrieve/builder_factory.py``) -- imported locally
-    # for the same reason ``strict_mode`` is below: this route has no
-    # other reason to load the MCP package at import time.
-    from trellis.mcp.server import (  # noqa: PLC0415
-        _resolve_get_context_max_items,
-        _resolve_get_context_max_tokens,
-        _resolve_search_max_tokens,
-    )
-    from trellis_api.routes.retrieve import (  # noqa: PLC0415
-        _resolve_rest_pack_max_items,
-        _resolve_rest_pack_max_tokens,
-    )
-
-    effective["get_context_max_tokens"] = _resolve_get_context_max_tokens(
+    # The seven pack-size/excerpt knobs: none are ``WriteBehaviourConfig``
+    # fields, same reason ``graph_seeding`` / ``filter_legacy_advisories``
+    # above are not, so each needs its own entry here too or ``_entry``'s
+    # ``effective[spec.name]`` lookup raises ``KeyError`` for it. Each
+    # resolver is the exact one its real call site uses, and all seven live
+    # in :mod:`trellis.core.knobs` -- this route no longer reaches into the
+    # MCP server or the retrieve route for them.
+    effective["get_context_max_tokens"] = resolve_get_context_max_tokens(
         settings_values
     )
-    effective["get_context_max_items"] = _resolve_get_context_max_items(settings_values)
-    effective["search_max_tokens"] = _resolve_search_max_tokens(settings_values)
-    effective["rest_pack_max_items"] = _resolve_rest_pack_max_items(settings_values)
-    effective["rest_pack_max_tokens"] = _resolve_rest_pack_max_tokens(settings_values)
-    effective["disclosure_body_items"] = _resolve_body_items(settings_values)
-    effective["excerpt_max_chars"] = _resolve_excerpt_max_chars(settings_values)
+    effective["get_context_max_items"] = resolve_get_context_max_items(settings_values)
+    effective["search_max_tokens"] = resolve_search_max_tokens(settings_values)
+    effective["rest_pack_max_items"] = resolve_rest_pack_max_items(settings_values)
+    effective["rest_pack_max_tokens"] = resolve_rest_pack_max_tokens(settings_values)
+    effective["disclosure_body_items"] = resolve_body_items(settings_values)
+    effective["excerpt_max_chars"] = resolve_excerpt_max_chars(settings_values)
 
     from trellis.classify.demotion_gate import (  # noqa: PLC0415
         resolve_demotion_thresholds,
