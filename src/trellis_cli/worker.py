@@ -19,6 +19,8 @@ surfaces from ``docs/design/adr-autonomy-ladder.md``:
   unenriched / low-confidence-tagged documents.
 * :func:`mine_precedents_cmd` (``trellis worker mine-precedents``) — wraps
   :meth:`PrecedentMiner.mine`.
+* ``trellis worker distill-precedents`` — deterministic candidate precedents
+  from traces, dry-run first; lives in :mod:`trellis_cli.worker_distill_precedents`.
 * :func:`capture_sessions_cmd` (``trellis worker capture-sessions``) — one
   Claude Code session-capture sweep, delegating to the same
   :func:`~trellis_workers.session_capture.sweep.run_sweep` the
@@ -2850,3 +2852,8 @@ def _render_embed_traces_text(payload: dict[str, Any]) -> None:
             f"{escape(str(failure['error']))}[/red]",
             soft_wrap=True,
         )
+
+
+from trellis_cli import worker_distill_precedents  # noqa: E402
+
+worker_distill_precedents.register(worker_app)

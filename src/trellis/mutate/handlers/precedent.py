@@ -1,4 +1,4 @@
-"""Precedent promote, demote and reinstate handlers."""
+"""Precedent promote, demote, reinstate and candidate handlers."""
 
 from __future__ import annotations
 
@@ -6,14 +6,16 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 import structlog
+from pydantic import ValidationError as PydanticValidationError
 
 from trellis.core.document_write import is_redaction_tombstone, put_document
+from trellis.core.error_sanitize import describe_validation_error
 from trellis.core.precedent_document import (
     PRECEDENT_ENTITY_ID_PREFIX,
     is_promoted_precedent_document,
 )
 from trellis.core.vector_metadata import resolve_vector_store
-from trellis.errors import ValidationError
+from trellis.errors import IdempotencyError, ValidationError
 from trellis.learning.candidate_auto_promote import AUTO_PROMOTE_REQUESTED_BY
 from trellis.mutate.commands import Command, Operation
 from trellis.mutate.handlers._common import (
@@ -28,6 +30,7 @@ from trellis.schemas.classification import (
     LIFECYCLE_KEY,
     Lifecycle,
 )
+from trellis.schemas.precedent_record import PrecedentRecord
 from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -795,3 +798,70 @@ class PrecedentReinstateHandler:
             payload=event_payload,
         )
         return target_id, f"Precedent reinstated: {target_id}"
+
+
+#: ``source`` stamped on a governed candidate event. It is the executor's own,
+#: so a candidate is told apart from the miner's rows by event type, not source.
+CANDIDATE_EVENT_SOURCE = "mutation_executor"
+CANDIDATE_RECORDED_ACTION = "precedent_candidate_recorded"
+
+
+def precedent_candidate_recorded(event_log: EventLog, candidate_id: str) -> bool:
+    """Whether ``candidate_id`` already has a recorded candidate event or key."""
+    if event_log.has_idempotency_key(candidate_id):
+        return True
+    return bool(
+        event_log.get_events(
+            event_type=EventType.PRECEDENT_CANDIDATE_MINED,
+            entity_id=candidate_id,
+            limit=1,
+        )
+    )
+
+
+class PrecedentCandidateHandler:
+    """Record one candidate precedent as a single ``PRECEDENT_CANDIDATE_MINED`` event.
+
+    Wires :data:`Operation.PRECEDENT_CANDIDATE`. Event-only by design: no
+    document, graph or vector row is written, so no retrieval surface can serve
+    a candidate. ``args["record"]`` must validate as a
+    :class:`~trellis.schemas.precedent_record.PrecedentRecord` whose
+    ``candidate_id`` is the id its own content derives; the event carries the
+    whole record. A candidate already recorded is a duplicate, whether or not
+    the caller named an idempotency key.
+    """
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        try:
+            record = PrecedentRecord.model_validate(command.args["record"])
+        except PydanticValidationError as exc:
+            msg = (
+                "precedent.candidate record is not a valid PrecedentRecord: "
+                f"{describe_validation_error(exc)}"
+            )
+            raise ValidationError(
+                msg, errors=[msg], code="precedent_record_invalid"
+            ) from exc
+        if record.candidate_id != record.expected_candidate_id():
+            msg = "precedent.candidate candidate_id does not match the record's content"
+            raise ValidationError(msg, errors=[msg], code="candidate_id_mismatch")
+
+        event_log = self._registry.operational.event_log
+        if precedent_candidate_recorded(event_log, record.candidate_id):
+            raise IdempotencyError(idempotency_key=record.candidate_id)
+
+        event_log.emit(
+            EventType.PRECEDENT_CANDIDATE_MINED,
+            source=CANDIDATE_EVENT_SOURCE,
+            entity_id=record.candidate_id,
+            entity_type="precedent_candidate",
+            payload={
+                "action": CANDIDATE_RECORDED_ACTION,
+                "candidate_id": record.candidate_id,
+                "record": record.model_dump(mode="json"),
+            },
+        )
+        return record.candidate_id, "precedent_candidate"

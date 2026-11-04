@@ -5028,6 +5028,43 @@ Candidates are **surfaced** as `PRECEDENT_CANDIDATE_MINED` events (one per candi
 
 **A rerun over unchanged failures mints nothing.** Each candidate event records `source_digest`, a digest of the (at most 20) newest failure traces the model was shown plus the `--domain` scope, and `mining_run_id` and `run_candidate_count`, which say which run wrote it and how many events that run meant to write. The events are written only after every item in the model's reply has validated. A run whose digest matches a *complete* earlier run (some one `mining_run_id` with all `run_candidate_count` events present) skips: no model call, no event, `outcome: skipped_unchanged`, and that run's ids in `already_mined_candidate_ids`. A run cut off part-way by a failed write is not complete, so the next run retries. The lookup reads the newest 200 events for the digest; a run that minted more than 200 candidates cannot be shown complete and mines again every time. A new failure among the newest 20 changes the digest, so the next run mines again. A new success does not, unless it pushes a failure out of the read window, which can only happen when the read stopped at `--scan-cap`: the failures the window holds are the input, so a shrunken set is a different input and mines again (there is no subset check). Failures beyond the newest 20 are not paged. The key is the input, not the output: it does not judge whether two candidates mean the same thing, and it cannot skip against a run that wrote nothing (a malformed reply, `no_candidates`, `llm_error`) or against candidates minted before the digest was recorded, which carry no key. There is no flag to force a re-mine of unchanged failures.
 
+### `trellis worker distill-precedents`
+
+Distill **candidate precedents** from traces with a deterministic, LLM-free
+distiller. Dry run by default: it reads traces and reports counts, and writes
+nothing.
+
+```bash
+trellis worker distill-precedents [--since ISO] [--until ISO] [--limit N] \
+  [--domain D] [--apply] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--since` / `--until` | (none) | Read traces created in this ISO-8601 window (inclusive). |
+| `--limit` | 500 | Most traces to read, newest first. A window with more behind it reports `truncated: true`. |
+| `--domain` | (all) | Restrict the read to one trace domain. |
+| `--apply` | off | Record the new candidates through the governed `precedent.candidate` operation. |
+
+Rules (see `trellis.learning.precedent_distill`): a step with an `error`
+followed later by a step of the same `step_type`/`name` without one gives an
+`avoid` and a `do` (`failed_step_avoid`, `failed_step_do`); a `failure` or
+`partial` outcome with a summary gives an `avoid` (`failed_outcome`); a smooth run
+gives nothing. A candidate that would only restate the intent is skipped.
+
+The JSON report carries `mode`, `traces_read`, `truncated`, `candidates`,
+`by_rule`, `skipped` (by reason), `duplicates` (already recorded), `would_record`
+(dry run) or `recorded` (`--apply`), `rejected`, `failed` and `candidate_ids`. It
+carries no trace text. The exit code does not depend on `--format`.
+
+**Candidates are never served.** `precedent.candidate` (args: `record`, a
+`PrecedentRecord`) emits one `PRECEDENT_CANDIDATE_MINED` event and writes to no
+document, graph or vector store, so `get_lessons`, `GET /precedents`, the domain
+list and every pack skip them. The idempotency key is the candidate id: a rerun
+records nothing new and counts the repeats as `duplicates`. Activation (minting a
+servable precedent from a candidate) is deferred; see
+[`adr-precedent-record.md`](../design/adr-precedent-record.md).
+
 ### `trellis worker capture-sessions`
 
 Run one Claude Code session-capture sweep — the `trellis worker` front door for the same code path as the `trellis-session-capture` console script and `python -m trellis_workers.session_capture`.

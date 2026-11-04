@@ -590,6 +590,26 @@ Reference linking evidence to a target object.
 
 ---
 
+## PrecedentRecord
+
+A structured candidate lesson: situation, action, because, evidence. It exists
+only as the payload of a `PRECEDENT_CANDIDATE_MINED` event recorded by the
+governed `precedent.candidate` operation and is never served. All text fields are
+length-bounded; unknown fields are rejected.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `candidate_id` | `string` | Derived from (trace ids, rule, step indexes, `distiller_version`); must equal what the record's content derives |
+| `rule` | `string` | The distiller rule that produced it (`failed_step_avoid`, `failed_step_do`, `failed_outcome`) |
+| `situation` | object | `intent_family`, `domain`, `entity_ids`, `trigger` (the error or situation that makes the lesson apply) |
+| `action` | object | `kind` (`do` or `avoid`) and `text` |
+| `because` | `string` | Why, from the trace |
+| `evidence` | object | `trace_ids`, `step_indexes`, `feedback_ids`, `pack_ids` (the last two stay empty from the deterministic tier) |
+| `confidence` | `float` | 0.0 to 1.0 |
+| `provenance_tier` | `string` | `deterministic` (default), `local_model` or `human` |
+| `distiller_version` | `string` | Version of the rules that produced it |
+| `lifecycle` | `string` | Always `candidate`; not a `LifecycleState` value |
+
 ## Precedent
 
 Reusable institutional knowledge distilled from one or more traces.

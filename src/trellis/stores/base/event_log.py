@@ -68,6 +68,9 @@ class EventType(StrEnum):
     #: tells readers to skip them. Payload: ``{action, title, confidence}``
     #: for an LLM-mined candidate, ``{action, trace_id, outcome_status}`` for
     #: a deterministic one; ``entity_id`` is the candidate's precedent id.
+    #: The governed ``precedent.candidate`` operation also writes this type,
+    #: under the executor's source, with ``{action, candidate_id, record}``
+    #: (a ``PrecedentRecord``). Candidates live only here and are never served.
     PRECEDENT_CANDIDATE_MINED = "precedent.candidate_mined"
 
     # Policy

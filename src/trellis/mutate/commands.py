@@ -28,6 +28,7 @@ class Operation(StrEnum):
     PRECEDENT_PROMOTE = "precedent.promote"
     PRECEDENT_DEMOTE = "precedent.demote"
     PRECEDENT_REINSTATE = "precedent.reinstate"
+    PRECEDENT_CANDIDATE = "precedent.candidate"
     ENTITY_CREATE = "entity.create"
     ENTITY_UPDATE = "entity.update"
     ENTITY_MERGE = "entity.merge"
@@ -334,6 +335,10 @@ class OperationRegistry:
         # ``reason`` is written verbatim into the audit trail, same shape
         # as ``precedent.demote``'s own schema.
         self._schemas[Operation.PRECEDENT_REINSTATE] = {"target_id", "reason"}
+        # ``record`` is a ``PrecedentRecord`` payload. The handler emits one
+        # ``PRECEDENT_CANDIDATE_MINED`` event and writes to no content store;
+        # a candidate is never served.
+        self._schemas[Operation.PRECEDENT_CANDIDATE] = {"record"}
         self._schemas[Operation.ENTITY_CREATE] = {"entity_type", "name"}
         self._schemas[Operation.ENTITY_UPDATE] = {"entity_id"}
         self._schemas[Operation.ENTITY_MERGE] = {"source_id", "target_id"}

@@ -27,6 +27,7 @@ from trellis.mutate.handlers.graph import (
 )
 from trellis.mutate.handlers.labels import LabelAddHandler, LabelRemoveHandler
 from trellis.mutate.handlers.precedent import (
+    PrecedentCandidateHandler,
     PrecedentDemoteHandler,
     PrecedentPromoteHandler,
     PrecedentReinstateHandler,
@@ -72,6 +73,7 @@ def create_curate_handlers(
         Operation.PRECEDENT_PROMOTE: PrecedentPromoteHandler(registry),
         Operation.PRECEDENT_DEMOTE: PrecedentDemoteHandler(registry),
         Operation.PRECEDENT_REINSTATE: PrecedentReinstateHandler(registry),
+        Operation.PRECEDENT_CANDIDATE: PrecedentCandidateHandler(registry),
         Operation.LABEL_ADD: LabelAddHandler(registry),
         Operation.LABEL_REMOVE: LabelRemoveHandler(registry),
         Operation.FEEDBACK_RECORD: FeedbackRecordHandler(registry),
