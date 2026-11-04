@@ -6201,6 +6201,18 @@ trellis admin api-keys list --format json
 
 # Revoke (exits non-zero if unknown or already revoked)
 trellis admin api-keys revoke <KEY_ID> --format json
+
+# Mint with server-side defaults (see "Per-key defaults")
+trellis admin api-keys create --name ci-reader --scopes read \
+  --default-domain platform --default-session-id-prefix ci
+
+# Replace a key's defaults block, or remove it
+trellis admin api-keys set-defaults <KEY_ID> --domain platform --team core
+trellis admin api-keys set-defaults <KEY_ID> --clear
+
+# Rotate: mint a successor with the same scopes and defaults, then retire the old key
+trellis admin api-keys rotate <KEY_ID> --format json
+trellis admin api-keys rotate <KEY_ID> --grace 24h --name ci-reader-2
 ```
 
 ### API key management
@@ -6213,19 +6225,19 @@ valid: `external` is accepted only as `read,external`, and
 `trellis admin api-keys create`, `POST /api-keys` and the UI refuse
 `read,admin,external` with the same message.
 
-| Surface | List | Mint | Revoke |
-|---|---|---|---|
-| REST (admin scope) | `GET /api/v1/api-keys` | `POST /api/v1/api-keys` `{"name", "scopes"}` (201) | `DELETE /api/v1/api-keys/{key_id}` |
-| CLI | `trellis admin api-keys list` | `trellis admin api-keys create` | `trellis admin api-keys revoke <KEY_ID>` |
-| MCP (admin scope) | `list_api_keys` | none, by design | `revoke_api_key` |
-| UI | Keys tab | Keys tab, with scope presets | Keys tab, typed confirmation |
+| Surface | List | Mint | Revoke | Set defaults | Rotate |
+|---|---|---|---|---|---|
+| REST (admin scope) | `GET /api/v1/api-keys` | `POST /api/v1/api-keys` `{"name", "scopes", "defaults"?}` (201) | `DELETE /api/v1/api-keys/{key_id}` | `PUT /api/v1/api-keys/{key_id}/defaults` `{"defaults"}` | `POST /api/v1/api-keys/{key_id}/rotate` `{"grace"?, "name"?}` (201) |
+| CLI | `trellis admin api-keys list` | `trellis admin api-keys create` | `trellis admin api-keys revoke <KEY_ID>` | `trellis admin api-keys set-defaults <KEY_ID>` | `trellis admin api-keys rotate <KEY_ID>` |
+| MCP (admin scope) | `list_api_keys` | none, by design | `revoke_api_key` | none yet | none yet |
+| UI | Keys tab | Keys tab, with scope presets | Keys tab, typed confirmation | none yet | none yet |
 
 - **The token is returned once**, in the mint response (`token`, with a
   `Cache-Control: no-store` header). Only a hash is stored, so a lost token is
   revoked and replaced, never recovered. `GET /api-keys` and `list_api_keys`
-  return `key_id`, `name`, `scopes`, `created_at`, `revoked` and `revoked_at`,
-  never a hash or any part of a secret. The list also carries the scope
-  `presets` the UI offers.
+  return `key_id`, `name`, `scopes`, `created_at`, `revoked` and `revoked_at`
+  (plus `defaults` and `expires_at` on a key that has them), never a hash or any
+  part of a secret. The list also carries the scope `presets` the UI offers.
 - **An `external` key is refused on every route and tool above.** They need the
   `admin` scope, which an `external` key does not hold.
 - **No MCP tool mints a key.** A token is a credential, and a mint tool would
@@ -6271,10 +6283,13 @@ valid: `external` is accepted only as `read,external`, and
   corrupt `policies.json` fails Stage 2 closed (CLI exit 5, REST 409, the message
   names the file), and until that file is fixed or removed no surface, the CLI
   included, can mint or revoke.
-- **Audit events.** A mint emits `api_key.minted` and a revoke emits `api_key.revoked`,
-  from whichever surface did the work, the CLI included. The payload is `key_id`,
-  `name`, `scopes`, `minted_by` / `revoked_by` and, when the caller was an API key,
-  `actor_key_id` and `actor_key_name`. It never holds the token, the secret or its hash.
+- **Audit events.** A mint emits `api_key.minted`, a revoke emits `api_key.revoked`
+  and a defaults or expiry change emits `api_key.updated`, from whichever surface did
+  the work, the CLI included. The payload is `key_id`,
+  `name`, `scopes`, `minted_by` / `revoked_by` / `updated_by` and, when the caller was
+  an API key, `actor_key_id` and `actor_key_name`; an update adds `changed`, the new
+  `defaults` block and `expires_at`, and a rotation's mint adds `rotated_from`. It
+  never holds the token, the secret or its hash.
   A refusal by the executor (unknown key, policy denial and the like) emits
   `mutation.rejected` instead; the REST identity 403 and the MCP `unidentified_caller`
   refusal never reach the executor, so they leave a warning log line
@@ -6302,8 +6317,93 @@ valid: `external` is accepted only as `read,external`, and
   or CLI `store_error` although the key store write has committed. A mint then
   returns no token and leaves a live key nobody holds; a revoke has taken effect.
   Run `trellis admin api-keys list`, then revoke the orphan.
-- Not covered: expiry, a last-used stamp, editing a key's scopes, per-key domain
-  limits.
+- Not covered: a last-used stamp, editing a key's scopes, a per-key domain
+  *limit* (a default fills an omitted domain, it does not restrict one), and an
+  expiry set directly (only a rotation's `--grace` sets one).
+
+### Per-key defaults
+
+A key may carry a `defaults` block that the server fills into a call that omitted
+the field, so a client holding one key need not repeat itself on every request.
+Four fields, each optional and at most 120 characters with no control character:
+
+| Field | Fills |
+|---|---|
+| `domain` | an omitted `domain` on `POST /packs`, `POST /packs/sectioned` and `GET /search`; an omitted `domain` on the MCP tools `get_context`, `get_objective_context`, `get_task_context`, `get_sectioned_context` and `get_lessons` |
+| `agent_id` | an omitted `agent_id` on `POST /packs` and `POST /packs/sectioned`; no MCP tool takes an `agent_id` (the server derives the caller from the key), so it has no MCP consumer yet |
+| `session_id_prefix` | the shape of an omitted `session_id` on the MCP context tools: `<prefix>-<12 random hex>`, fresh on every such call. A fixed key-wide session would make unrelated conversations share a dedup window and withhold items from each other, and a fresh id per call dedups nothing, which is what an omitted `session_id` already means. Pass your own `session_id` to dedup across calls. |
+| `team` | nothing yet. It is stored, validated, listed and carried on the authenticated principal, and it is **pinned**: no later change may let a request override it. It is an attribution, not a convenience, and it is reserved for the team access floor; no read or write consumes it today. |
+
+- **A default fills, it never overrides.** A field the request set (non-blank)
+  is used as sent. A blank string counts as omitted, the reading every tool already
+  gave it. A value that is not a string is left for validation to report.
+- **A key without defaults is served exactly as before.** Every key minted before
+  this feature, the shared `TRELLIS_API_KEY` secret and auth mode `off` take an early
+  return that touches nothing; `tests/unit/api/golden/pack_no_defaults.json` pins the
+  pack such a key is served, captured before the feature existed.
+- **`set-defaults` replaces the block.** A field not named is cleared, so the
+  command line is the whole truth afterwards; `--clear` removes the block, and passing
+  both `--clear` and a value, or neither, exits 2 with nothing written. It acts on a
+  live key only (an unknown id is 404 on REST and exit 2 on the CLI, a revoked one 409
+  and exit 2), through `Operation.API_KEY_UPDATE` like every other key change.
+- **Serving is unchanged by the key's scopes.** A default feeds the same argument a
+  caller could have sent, so it changes what a pack contains only as that argument
+  does; it never adds a candidate or changes a ranking rule.
+
+### Rotating a key
+
+`trellis admin api-keys rotate <KEY_ID>` (and `POST /api-keys/{key_id}/rotate`) mints
+a successor with the old key's scopes and defaults (and its name, unless `--name` says
+otherwise), then retires the old key. The new token is printed once, like a mint.
+
+- **Two audited operations, never one.** The mint runs first and the retire second
+  (a revoke, or with `--grace 30m|24h|7d|2w`, at most 90 days, an `expires_at` on the
+  old key so it keeps verifying until the window closes and is rejected as `expired`
+  after). A crash or a refusal between them leaves **both keys valid**, never zero:
+  the CLI exits non-zero, JSON `status` reads `partial` with `retired: "still_valid"`,
+  and the new token is still shown, because it belongs to a key that exists. REST
+  answers 201 with the same `partial` body rather than an error, so a client that reads
+  only the status code cannot lose a token it has been shown once. Revoke the old key
+  by hand afterwards.
+- **Nothing is minted for a refused rotation.** An unknown key id (404, exit 2), a
+  revoked one (409, exit 2), an **expired** one (409, exit 2: rotation never revives
+  a key whose `expires_at` has passed, so mint a fresh key with `create`), one
+  **already in a grace period** (409, exit 2: a second rotation would mint another
+  successor and move the window, so revoke it or wait for it to close), a bad
+  `--grace` (400, exit 2) and, over REST, the key the request is authenticated with
+  when no grace is given (409, since the retire would revoke it) all write nothing.
+  With a grace, the calling key may rotate itself.
+- **An expired key's expiry is frozen.** The store's `update` refuses to clear or move
+  the `expires_at` of a key that has already expired (`set-defaults` is unaffected),
+  so no update path, rotation included, can bring one back. The key listing carries
+  `expires_at` when one is set and an `expired` flag beside `revoked`, in the JSON and
+  the text table; the exit code of `list` is unchanged.
+- **The exit code does not depend on `--format`.**
+
+### The read tier of MCP tools
+
+A key that holds `read` and none of `ingest`, `mutate` or `admin` (a read-only key,
+`confidential`, `restricted` and `external` included) is shown three tools:
+`get_context`, `get_items` and `search`. Seven read-scoped tools are hidden from it,
+and refused if called: `get_graph`, `get_lessons`, `get_file_context`,
+`query_observations`, `get_objective_context`, `get_task_context` and
+`get_sectioned_context`. FastMCP filters `tools/list` and gates the call on the same
+check (`trellis_scope(SCOPE_READ, advanced=True)`), so the list and the call cannot
+disagree.
+
+- **The tier narrows the MCP tool list only. It is not a data boundary.** A read-only
+  key still reads through REST (`/packs`, `/search` and the explore routes stay
+  `read_auth`), and `get_items` resolves any id it is given. Hiding a tool saves a
+  small agent tokens and keeps it off the write-adjacent surface; it does not hide a
+  document, so a label policy, not this tier, is what keeps content from a key.
+
+- **Every key that can write keeps its whole list.** `tools/list` for an `ingest`,
+  `mutate` or `admin` key (and for stdio, and for auth mode `off`) is unchanged and
+  pinned against the scope rule that existed before the tier.
+- **`record_feedback` is not in the read tier.** It requires `mutate`, so a read-only
+  key cannot grade a pack. Moving it to a lower scope is a separate decision.
+- **Nothing is hidden from everyone.** `get_file_context` and the deprecated
+  context trio stay listed for any key that can write.
 
 ### Production exposure
 

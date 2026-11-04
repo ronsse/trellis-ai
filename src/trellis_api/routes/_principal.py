@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import Depends, HTTPException
 
-from trellis.auth import clearance_of
+from trellis.auth import clearance_of, fill_omitted
 from trellis.core.elision import elide_text
 from trellis.core.text_safety import replace_nul_and_lone_surrogates
 from trellis.retrieve.sensitivity import (
@@ -102,6 +102,24 @@ def resolve_requested_by(
     if not claim_was_set:
         return f"api:{principal}", None
     return f"api:{principal}", _scrub_claim(claimed)
+
+
+def apply_key_defaults(
+    ctx: AuthContext, *, domain: str | None, agent_id: str | None
+) -> tuple[str | None, str | None]:
+    """``(domain, agent_id)`` with the caller's key defaults filling omitted ones.
+
+    A value the request set is never replaced. A caller whose key sets no
+    defaults (every anonymous, shared-secret and defaults-free key) gets its
+    arguments back untouched, so its request is served exactly as before.
+    """
+    defaults = ctx.defaults
+    if defaults is None:
+        return domain, agent_id
+    return (
+        fill_omitted(domain, defaults.domain),
+        fill_omitted(agent_id, defaults.agent_id),
+    )
 
 
 def request_clearance(ctx: AuthContext) -> Sensitivity:

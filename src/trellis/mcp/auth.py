@@ -55,7 +55,7 @@ import anyio.to_thread
 import structlog
 from fastmcp.server.auth import AccessToken, TokenVerifier
 
-from trellis.auth import ALL_SCOPES, clearance_of, scopes_satisfy
+from trellis.auth import ALL_SCOPES, clearance_of, is_read_only_key, scopes_satisfy
 from trellis.auth import verify_token as verify_api_key
 from trellis.errors import ConfigError
 
@@ -280,12 +280,20 @@ def _warn_anonymous_once() -> None:
     )
 
 
-def trellis_scope(required: str) -> Callable[[AuthContext], bool]:
+def trellis_scope(
+    required: str, *, advanced: bool = False
+) -> Callable[[AuthContext], bool]:
     """Build a FastMCP ``AuthCheck`` requiring the ``required`` scope.
 
     Raises :class:`ValueError` at decoration time on an unknown scope, so
     a typo at a tool's call site crashes import rather than silently
     denying (or allowing) every request to that tool.
+
+    ``advanced=True`` marks a tool outside the read tier: a credential that
+    holds no ingest, mutate or admin scope (a read-only key) is neither shown
+    the tool nor allowed to call it, because FastMCP filters ``tools/list`` and
+    gates calls on this one check. Every key that can write keeps the tool, so
+    the tier narrows only what a read-only key sees.
 
     Under stdio this check is never invoked — FastMCP short-circuits with
     ``skip_auth=True``.
@@ -301,7 +309,9 @@ def trellis_scope(required: str) -> Callable[[AuthContext], bool]:
         if token is None:
             _warn_anonymous_once()
             return False
-        return scopes_satisfy(frozenset(token.scopes), required)
+        if not scopes_satisfy(frozenset(token.scopes), required):
+            return False
+        return not (advanced and is_read_only_key(token.scopes))
 
     check.__name__ = f"require_scope_{required}"
     return check
@@ -414,6 +424,32 @@ def current_principal_id() -> str | None:
     return token.client_id if token is not None else None
 
 
+#: Claim on the :class:`AccessToken` carrying the key's defaults block.
+DEFAULTS_CLAIM = "trellis_defaults"
+
+
+def current_key_defaults() -> dict[str, str]:
+    """The current MCP caller's key defaults, empty when it has none.
+
+    Same transport detection as :func:`current_principal_id`: **stdio** and
+    **enforcement disabled** have no credential, so no defaults; a key that set
+    none yields ``{}`` as well, which is what keeps every existing caller's
+    request exactly as it was.
+    """
+    from fastmcp.server.context import _current_transport  # noqa: PLC0415
+
+    if _current_transport.get() == TRANSPORT_STDIO or not _auth_state.enforced:
+        return {}
+
+    from fastmcp.server.dependencies import get_access_token  # noqa: PLC0415
+
+    token = get_access_token()
+    if token is None:
+        return {}
+    claimed = (token.claims or {}).get(DEFAULTS_CLAIM)
+    return dict(claimed) if isinstance(claimed, dict) else {}
+
+
 class TrellisApiKeyVerifier(TokenVerifier):
     """Verify ``Authorization: Bearer trellis_ak_…`` against the key store.
 
@@ -468,4 +504,9 @@ class TrellisApiKeyVerifier(TokenVerifier):
             client_id=record.key_id,
             scopes=list(record.scopes),
             expires_at=None,
+            claims=(
+                {DEFAULTS_CLAIM: record.defaults.model_dump(exclude_none=True)}
+                if record.defaults is not None
+                else {}
+            ),
         )

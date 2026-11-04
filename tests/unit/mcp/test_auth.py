@@ -322,6 +322,12 @@ EXPECTED_TOOL_SCOPES = {
 }
 
 
+#: What a key holding ``read`` and nothing that writes is shown: the three
+#: tools a retrieval-only client needs. The other seven read-scoped tools stay
+#: for every key that can write (``tests/unit/mcp/test_read_tier.py``).
+READ_TIER = {"get_context", "get_items", "search"}
+
+
 class TestToolScopeMap:
     async def _tools(self) -> dict[str, object]:
         # list_tools() is itself scope-filtered, so an anonymous listing
@@ -360,9 +366,7 @@ class TestToolScopeMap:
             for name, t in tools.items()
             if t.auth(_ctx(_token(SCOPE_READ)))  # type: ignore[attr-defined]
         }
-        assert read_only == {
-            n for n, s in EXPECTED_TOOL_SCOPES.items() if s == SCOPE_READ
-        }
+        assert read_only == READ_TIER
 
     async def test_admin_key_sees_every_tool(self) -> None:
         tools = await self._tools()

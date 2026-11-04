@@ -687,6 +687,12 @@ class EventType(StrEnum):
     #: revoked. Payload: ``{key_id, name, scopes, revoked_by, actor_key_id,
     #: actor_key_name}``. ``entity_id`` is the revoked key id.
     API_KEY_REVOKED = "api_key.revoked"
+    #: Emitted by the update handler (``Operation.API_KEY_UPDATE``) when a key's
+    #: defaults block or expiry is rewritten, which is also how a rotation with a
+    #: grace period retires the old key. Payload: ``{key_id, name, scopes,
+    #: changed, defaults, expires_at, updated_by, actor_key_id, actor_key_name}``
+    #: (``changed`` lists the columns written). ``entity_id`` is the key id.
+    API_KEY_UPDATED = "api_key.updated"
 
     #: Emitted by ``trellis admin record-job-run`` at the start and end of
     #: one dispatcher-driven job execution (see

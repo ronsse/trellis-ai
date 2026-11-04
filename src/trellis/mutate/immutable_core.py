@@ -208,6 +208,9 @@ DESTRUCTIVE_OPERATIONS: frozenset[Operation] = frozenset(
         # closes one, neither of which a later read can undo.
         Operation.API_KEY_MINT,
         Operation.API_KEY_REVOKE,
+        # Changing a key's defaults changes which domain and attribution its
+        # calls carry, and an expiry ends a credential on a clock.
+        Operation.API_KEY_UPDATE,
     }
 )
 

@@ -41,6 +41,7 @@ from trellis.mutate.handlers._common import (
 from trellis.mutate.handlers.api_keys import (
     ApiKeyMintHandler,
     ApiKeyRevokeHandler,
+    ApiKeyUpdateHandler,
     _api_key_actor,
 )
 from trellis.mutate.handlers.classification import (
@@ -144,6 +145,7 @@ __all__ = [
     "AliasUpsertHandler",
     "ApiKeyMintHandler",
     "ApiKeyRevokeHandler",
+    "ApiKeyUpdateHandler",
     "ClassificationSetHandler",
     "ClassificationTagRegulatoryHandler",
     "ClassifyRuleApplyHandler",

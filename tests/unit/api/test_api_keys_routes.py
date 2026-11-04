@@ -142,8 +142,10 @@ class TestList:
             "created_at",
             "revoked",
             "revoked_at",
+            "expired",
         }
         assert rows[record.key_id]["revoked"] is False
+        assert rows[record.key_id]["expired"] is False
 
     def test_carries_presets_the_ui_offers(
         self, client: TestClient, admin: tuple[str, str]

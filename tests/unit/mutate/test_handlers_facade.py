@@ -28,6 +28,7 @@ FACADE_SURFACE: dict[str, str] = {
     "AliasUpsertHandler": "trellis.mutate.handlers.graph",
     "ApiKeyMintHandler": "trellis.mutate.handlers.api_keys",
     "ApiKeyRevokeHandler": "trellis.mutate.handlers.api_keys",
+    "ApiKeyUpdateHandler": "trellis.mutate.handlers.api_keys",
     "ClassificationSetHandler": "trellis.mutate.handlers.classification",
     "ClassificationTagRegulatoryHandler": "trellis.mutate.handlers.classification",
     "ClassifyRuleApplyHandler": "trellis.mutate.handlers.classify_rules",
@@ -129,6 +130,7 @@ def test_every_facade_name_is_in_all() -> None:
 
 
 def test_facade_surface_has_the_expected_size() -> None:
-    # 92 = 86 top-level definitions of the pre-split module (``logger`` stays
-    # private to each submodule) + 6 re-exported imports.
-    assert len(FACADE_SURFACE) == 92
+    # 93 = 87 top-level definitions of the pre-split module (``logger`` stays
+    # private to each submodule, ``ApiKeyUpdateHandler`` joined later) + 6
+    # re-exported imports.
+    assert len(FACADE_SURFACE) == 93

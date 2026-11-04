@@ -104,7 +104,12 @@ def test_an_unsuitable_name_is_refused_by_the_cli(name: str) -> None:
     assert _get_registry().operational.api_key_store.list() == []
 
 
-def test_a_stored_name_with_control_characters_prints_safely() -> None:
+def test_a_stored_name_with_control_characters_prints_safely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The table gained an ``expired`` column; at 80 columns Rich would elide the
+    # name this test reads back, so give it room.
+    monkeypatch.setenv("COLUMNS", "120")
     _get_registry().operational.api_key_store.create(
         ApiKeyRecord(
             key_id="aabbccddeeff",

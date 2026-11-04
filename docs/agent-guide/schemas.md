@@ -872,6 +872,47 @@ A single rule within a policy.
 
 ---
 
+## ApiKeyRecord
+
+One scoped REST/MCP credential as the operational-plane `ApiKeyStore` persists it
+(`trellis.stores.base.api_key`). Minted, retired and rewritten only through the governed
+`api_key.*` operations; see [operations.md](operations.md#api-key-management).
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `key_id` | `string` | **Yes** | -- | 12 hex characters; the public half of the token `trellis_ak_<key_id>.<secret>` |
+| `name` | `string` | **Yes** | -- | Operator-chosen label, echoed in listings and audit events |
+| `scopes` | `tuple[string]` | **Yes** | -- | `read`, `ingest`, `mutate`, `admin`, plus `confidential` / `restricted` / `external` (`external` only as `read,external`) |
+| `secret_hash` | `string` | **Yes** | -- | SHA-256 hex of the secret half. The token is shown once at mint and cannot be recovered; never listed |
+| `created_at` | `datetime` | No | UTC now | Mint time |
+| `revoked_at` | `datetime` or `null` | No | `null` | Set by revoke; a key with a stamp never verifies |
+| `defaults` | `ApiKeyDefaults` or `null` | No | `null` | Server-side defaults block; `null` for a key that sets none (every key minted before the block existed) |
+| `expires_at` | `datetime` or `null` | No | `null` | A key whose `expires_at` has passed no longer verifies; set only by `rotate --grace`, `null` never expires |
+
+The credential (`name`, `scopes`, `secret_hash`) is never rewritten and no row is deleted. The
+only columns that change after a mint are `revoked_at`, `defaults` and `expires_at`. `defaults`
+and `expires_at` are nullable columns added in place: an existing database gains them, empty, the
+first time its API-key store is opened by a build that has them.
+
+### ApiKeyDefaults
+
+Fills a call that omitted the field; it never overrides one the request set. Every field is
+optional (`null` means the key sets no default for it), at most 120 characters, with no control
+or non-printing character. An all-empty block is stored as no block.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `agent_id` | `string` or `null` | Fills an omitted `agent_id` on `POST /packs` and `POST /packs/sectioned` |
+| `domain` | `string` or `null` | Fills an omitted `domain` on the pack and search routes and the MCP context tools; stored stripped, not case-folded |
+| `team` | `string` or `null` | **Pinned** (no request may override it) and reserved for the team access floor; stored, listed and carried on the principal, consumed by nothing yet |
+| `session_id_prefix` | `string` or `null` | Shape of an omitted MCP `session_id`: `<prefix>-<12 random hex>`, fresh per call (a fixed id would put every conversation the key serves into one dedup bucket) |
+
+```json
+{"agent_id": "ci-bot", "domain": "platform", "team": "core", "session_id_prefix": "ci"}
+```
+
+---
+
 ## Command
 
 A mutation command submitted to the governed write pipeline.
@@ -1064,6 +1105,9 @@ Examples of domain-specific edge types: `reads_from`, `writes_to`, `materializes
 | `redaction.apply` | Maintain | Hard-purge a graph entity (all versions, edges, aliases, vector entry) |
 | `retention.prune` | Maintain | Archive low-value derived items (governed; dry-run by default) |
 | `retention.restore` | Maintain | Un-archive items by explicit id (governed inverse of `retention.prune`) |
+| `api_key.mint` | Maintain | Persist a freshly generated API key (the token is returned to the caller, never carried by the command) |
+| `api_key.revoke` | Maintain | Revoke a live API key |
+| `api_key.update` | Maintain | Rewrite a live key's `defaults` block and/or `expires_at`; never its scopes, name or secret |
 
 ### CommandStatus
 

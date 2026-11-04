@@ -218,7 +218,11 @@ def _tool_scope(fn: ast.AST) -> str | None:
     for dec in getattr(fn, "decorator_list", []):
         text = ast.unparse(dec)
         if "mcp.tool" in text and "trellis_scope(" in text:
-            return text.split("trellis_scope(", 1)[1].split(")", 1)[0]
+            # Only the scope: a trailing ``advanced=True`` hides the tool from
+            # every read-only key, external ones included, on top of the stance
+            # the tool's own body takes, so it does not change the claim here.
+            inner = text.split("trellis_scope(", 1)[1].split(")", 1)[0]
+            return inner.split(",", 1)[0].strip()
     return None
 
 

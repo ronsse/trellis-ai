@@ -893,6 +893,12 @@ def test_the_must_exit_helper_set_is_exactly_the_must_exit_helpers() -> None:
         # format branch, and its Typer wrapper only delegates to it. Admitted
         # deliberately, per this docstring.
         "admin_access_log": {"access_log_command", "access_log"},
+        # ``trellis admin api-keys rotate``: the command body decides one exit
+        # code per outcome above the format branch, renders, then raises
+        # ``typer.Exit`` as its last statement; it defines no ``return`` and
+        # its Typer wrapper only delegates to it. Admitted deliberately, per
+        # this docstring.
+        "admin_api_keys": {"rotate_api_key_command", "rotate"},
         # ``trellis analyze pack-judge``: each phase renders on the caller's
         # surface, then raises ``typer.Exit`` as its last statement with the
         # code derived above the format branch; both are typed ``NoReturn``

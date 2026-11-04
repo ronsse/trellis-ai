@@ -35,6 +35,7 @@ from trellis_api.auth import AuthContext, authenticate
 from trellis_api.routes._principal import (
     NOT_FOR_PUBLIC_CALLERS,
     PUBLIC_READ_BUSY_RESPONSE,
+    apply_key_defaults,
     request_clearance,
 )
 from trellis_wire.dtos import (
@@ -153,6 +154,7 @@ def search(
     and its rows carry only the allowlisted metadata.
     """
     registry = get_registry()
+    domain, _ = apply_key_defaults(ctx, domain=domain, agent_id=None)
     filters: dict[str, Any] = {}
     if domain:
         filters["domain"] = domain
@@ -209,16 +211,17 @@ def assemble_pack(
         else resolve_rest_pack_max_tokens(settings)
     )
     budget = PackBudget(max_items=max_items, max_tokens=max_tokens)
+    domain, agent_id = apply_key_defaults(ctx, domain=req.domain, agent_id=req.agent_id)
     # Pass domain as a filter so strategies can use it for scoping
     filters: dict[str, Any] | None = None
-    if req.domain:
-        filters = {"domain": req.domain}
+    if domain:
+        filters = {"domain": domain}
     clearance = request_clearance(ctx)
     pack = builder.build(
         intent=req.intent,
         clearance=clearance,
-        domain=req.domain,
-        agent_id=req.agent_id,
+        domain=domain,
+        agent_id=agent_id,
         run_id=req.run_id,
         intent_family=req.intent_family,
         budget=budget,
@@ -310,16 +313,17 @@ def assemble_sectioned_pack(
         ) from exc
 
     builder = _build_pack_builder(registry)
+    domain, agent_id = apply_key_defaults(ctx, domain=req.domain, agent_id=req.agent_id)
     filters: dict[str, Any] | None = None
-    if req.domain:
-        filters = {"domain": req.domain}
+    if domain:
+        filters = {"domain": domain}
     clearance = request_clearance(ctx)
     pack = builder.build_sectioned(
         req.intent,
         clearance=clearance,
         sections=sections,
-        domain=req.domain,
-        agent_id=req.agent_id,
+        domain=domain,
+        agent_id=agent_id,
         run_id=req.run_id,
         intent_family=req.intent_family,
         filters=filters,

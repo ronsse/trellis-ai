@@ -1,4 +1,4 @@
-"""API-key management routes: list, mint and revoke.
+"""API-key management routes: list, mint, revoke, set defaults and rotate.
 
 Mounted with the admin scope only (see ``trellis_api/app.py``), so an
 ``external`` key, which satisfies ``read`` and nothing else, is refused on
@@ -11,6 +11,14 @@ alike and each write emits an ``api_key.minted`` / ``api_key.revoked`` event.
 The token is generated outside the pipeline: only the hashed record enters a
 command, so no event or result can carry the secret. The full token appears
 in the mint response and nowhere else; the list never returns a hash.
+
+``PUT /api-keys/{key_id}/defaults`` replaces a live key's server-side defaults
+block (``Operation.API_KEY_UPDATE``). ``POST /api-keys/{key_id}/rotate`` mints a
+successor with the key's scopes and defaults and then retires the old one
+(revoked, or left valid for ``grace``): two audited operations, mint first, so a
+failure between them leaves both keys valid. In that case the response is 200
+with ``status: "partial"`` and the new token, because the token belongs to a key
+that exists and must not be lost to an error body.
 
 A stored key cannot revoke itself. That is the whole last-admin guard: the shared
 secret has no key id, so it can revoke the only stored admin, and the CLI can
@@ -43,17 +51,29 @@ from trellis.auth import (
     KEY_PRESETS,
     SCOPE_ADMIN,
     SHOWN_ONCE_WARNING,
+    build_key_defaults,
+    parse_grace,
     public_listing_row,
     scopes_satisfy,
 )
 from trellis.core.error_sanitize import sanitize_error_message
 from trellis.mutate import CommandResult, CommandStatus, build_api_keys_executor
-from trellis.mutate.api_key_commands import build_mint_command, build_revoke_command
+from trellis.mutate.api_key_commands import (
+    build_mint_command,
+    build_revoke_command,
+    build_update_command,
+    rotate_key,
+)
 from trellis.mutate.commands import STORE_REFUSAL_REASONS
 from trellis_api.app import get_registry
 from trellis_api.auth import AuthContext, authenticate
 from trellis_api.routes._principal import resolve_requested_by
-from trellis_wire.dtos import ApiKeyMintRequest
+from trellis_wire.dtos import (
+    ApiKeyDefaultsBody,
+    ApiKeyMintRequest,
+    ApiKeyRotateRequest,
+    ApiKeySetDefaultsRequest,
+)
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
@@ -66,7 +86,27 @@ _REVOKE_STATUS = {
     "unknown_key_id": 404,
     "already_revoked": 409,
     "cannot_revoke_own_key": 409,
+    "already_expired": 409,
+    "already_in_grace": 409,
+    "key_expired": 409,
 }
+
+
+def _defaults_from_body(body: ApiKeyDefaultsBody | None) -> Any:
+    """The validated core defaults block for a request body (400 on a bad value)."""
+    if body is None:
+        return None
+    try:
+        return build_key_defaults(
+            agent_id=body.agent_id,
+            domain=body.domain,
+            team=body.team,
+            session_id_prefix=body.session_id_prefix,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail=sanitize_error_message(str(exc))
+        ) from exc
 
 
 def _actor(ctx: AuthContext) -> str:
@@ -172,6 +212,7 @@ async def mint_api_key(
 ) -> dict[str, Any]:
     """Mint a key. The full token is in this response and never again."""
     _require_identified_admin(ctx, "Minting an API key")
+    defaults = _defaults_from_body(req.defaults)
     try:
         token, record, command = build_mint_command(
             req.name,
@@ -179,6 +220,7 @@ async def mint_api_key(
             requested_by=_actor(ctx),
             actor_key_id=ctx.key_id,
             actor_key_name=ctx.name,
+            defaults=defaults,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -217,3 +259,97 @@ async def revoke_api_key(
         "key_id": key_id,
         **({"warnings": list(result.warnings)} if result.warnings else {}),
     }
+
+
+@router.put("/api-keys/{key_id}/defaults")
+async def set_api_key_defaults(
+    key_id: str,
+    req: ApiKeySetDefaultsRequest,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 -- FastAPI DI idiom
+) -> dict[str, Any]:
+    """Replace a live key's defaults block; ``null`` or an empty body clears it."""
+    _require_identified_admin(ctx, "Updating an API key")
+    defaults = _defaults_from_body(req.defaults)
+    command = build_update_command(
+        key_id,
+        defaults=defaults,
+        requested_by=_actor(ctx),
+        actor_key_id=ctx.key_id,
+        actor_key_name=ctx.name,
+    )
+    result = build_api_keys_executor(get_registry()).execute(command)
+    if result.status != CommandStatus.SUCCESS:
+        raise _refuse(result, _REVOKE_STATUS)
+    return {
+        "status": "updated",
+        "key_id": key_id,
+        "defaults": (
+            defaults.model_dump(exclude_none=True) if defaults is not None else None
+        ),
+        **({"warnings": list(result.warnings)} if result.warnings else {}),
+    }
+
+
+@router.post("/api-keys/{key_id}/rotate", status_code=201)
+async def rotate_api_key(
+    key_id: str,
+    response: Response,
+    req: ApiKeyRotateRequest | None = None,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 -- FastAPI DI idiom
+) -> dict[str, Any]:
+    """Mint a successor with the key's scopes and defaults, then retire the old key."""
+    _require_identified_admin(ctx, "Rotating an API key")
+    req = req or ApiKeyRotateRequest()
+    try:
+        grace = parse_grace(req.grace) if req.grace is not None else None
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail=sanitize_error_message(str(exc))
+        ) from exc
+    executor = build_api_keys_executor(get_registry())
+    outcome = rotate_key(
+        get_registry().operational.api_key_store,
+        executor.execute,
+        key_id,
+        grace=grace,
+        new_name=req.name,
+        requested_by=_actor(ctx),
+        actor_key_id=ctx.key_id,
+        actor_key_name=ctx.name,
+    )
+    if outcome.refusal is not None:
+        reason, message = outcome.refusal
+        raise HTTPException(
+            status_code=_REVOKE_STATUS.get(reason, 400),
+            detail=sanitize_error_message(message),
+        )
+    if outcome.token is None or outcome.record is None:
+        # Nothing was minted: the mint itself was refused or failed.
+        assert outcome.failure is not None
+        raise _refuse(outcome.failure, _REVOKE_STATUS)
+    response.headers["Cache-Control"] = "no-store"
+    failure = outcome.failure
+    payload: dict[str, Any] = {
+        "status": "rotated" if failure is None else "partial",
+        "token": outcome.token,
+        "warning": SHOWN_ONCE_WARNING,
+        "old_key_id": key_id,
+        "retired": outcome.retired,
+        "old_expires_at": (
+            outcome.old_expires_at.isoformat() if outcome.old_expires_at else None
+        ),
+        **public_listing_row(outcome.record),
+        **({"warnings": list(outcome.warnings)} if outcome.warnings else {}),
+    }
+    if failure is not None:
+        # The new key exists, so this is not an error status: a client reading
+        # only the code must not lose a token it has been shown once.
+        payload["error"] = str(
+            failure.metadata.get("rejection_reason") or failure.status.value
+        )
+        payload["message"] = (
+            _SERVER_FAULT
+            if failure.status == CommandStatus.FAILED
+            else sanitize_error_message(failure.message)
+        )
+    return payload

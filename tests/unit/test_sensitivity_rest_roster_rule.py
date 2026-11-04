@@ -173,6 +173,8 @@ ROSTER: dict[str, str] = {
     "api_keys:list_api_keys": ADMIN,  # GET /api-keys
     "api_keys:mint_api_key": ADMIN,  # POST /api-keys
     "api_keys:revoke_api_key": ADMIN,  # DELETE /api-keys/{key_id}
+    "api_keys:set_api_key_defaults": ADMIN,  # PUT /api-keys/{key_id}/defaults
+    "api_keys:rotate_api_key": ADMIN,  # POST /api-keys/{key_id}/rotate
     "version:api_version": FREE,  # GET /api/version
 }
 
@@ -473,11 +475,11 @@ def _sources() -> dict[str, str]:
 
 def test_every_rest_route_is_rostered_and_its_claim_holds() -> None:
     sources = _sources()
-    # Hand read: 77 ``@router.<verb>`` decorators across the modules, on 76
+    # Hand read: 84 ``@router.<verb>`` decorators across the modules, on 83
     # handler functions (one handler carries two routes).
     assert_hand_read_floor(
         len(route_names(sources)),
-        79,
+        83,
         subject="REST route handlers",
         hint="a route module was skipped, or the decorator spelling changed",
     )

@@ -53,7 +53,7 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(auth=trellis_scope(SCOPE_READ))
+@mcp.tool(auth=trellis_scope(SCOPE_READ, advanced=True))
 def get_lessons(
     domain: str | None = None,
     limit: int = 10,
@@ -118,7 +118,7 @@ def get_lessons(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(auth=trellis_scope(SCOPE_READ))
+@mcp.tool(auth=trellis_scope(SCOPE_READ, advanced=True))
 def get_graph(
     entity_id: str,
     depth: int = 1,
@@ -343,7 +343,7 @@ def get_items(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(auth=trellis_scope(SCOPE_READ))
+@mcp.tool(auth=trellis_scope(SCOPE_READ, advanced=True))
 def get_file_context(
     paths: list[str],
     include_unconfirmed: bool = False,
