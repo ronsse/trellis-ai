@@ -367,13 +367,26 @@ class TestListShowsExpiry:
         assert rows[gone]["revoked"] is False
         assert rows[gone]["expires_at"]
 
-    def test_the_text_table_has_an_expired_column(self) -> None:
+    def test_the_text_table_has_an_expired_column(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("COLUMNS", "160")
+        live = _create(name="live")["key_id"]
         gone = _create(name="gone")["key_id"]
         self._expire(gone)
-        text = plain(_invoke(["api-keys", "list", "--format", "text"]).output)
-        header = next(ln for ln in text.splitlines() if "revoked" in ln)
-        assert "expired" in header
-        assert header.index("revoked") < header.index("expired")
+        lines = plain(_invoke(["api-keys", "list", "--format", "text"]).output)
+        lines = lines.splitlines()
+        header = next(ln for ln in lines if "revoked" in ln)
+        cols = [c.strip() for c in re.split("[│┃]", header)]
+        assert cols.index("expired") == cols.index("revoked") + 1
+
+        def cell(key_id: str, column: str) -> str:
+            row = next(ln for ln in lines if key_id in ln)
+            return [c.strip() for c in re.split("[│┃]", row)][cols.index(column)]
+
+        assert cell(gone, "expired") == "yes"
+        assert cell(gone, "revoked") == "no"
+        assert cell(live, "expired") == "no"
 
 
 class TestRotateRefusesEndingKeys:
