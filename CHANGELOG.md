@@ -22,6 +22,28 @@ All notable changes to Trellis will be documented in this file.
   [decision matrix](docs/design/holdout-decision-matrix.md) says what each result commits the
   project to.
 
+### Fixed
+
+- **The two commonest trace-shape mistakes are repaired at the write boundary instead of
+  rejecting the whole trace.** A step `result` sent as a bare string becomes
+  `{"summary": <the string>}`, and a `context.repo` key moves to top-level `metadata["repo"]`.
+  Nothing else is repaired: any other non-object `result` still rejects, as does a
+  `context.repo` that would overwrite a different `metadata["repo"]` or land in a `metadata`
+  that is not an object, and a trace with one repairable and one unrepairable mistake rejects
+  for the unrepairable one only, with the same paths as before. `Trace`, `TraceStep` and
+  `TraceContext` gain no field and `extra="forbid"` is unchanged, so the stored trace is
+  canonical. MCP `save_experience`, `POST /api/v1/traces` and `trellis ingest trace` share
+  one repair (`trellis.schemas.trace_repair`), run before the command is built, so the
+  executor and its policy gate see the repaired trace. The repair is visible, not silent:
+  `save_experience` and `trellis ingest trace` say in one line how many fields were repaired
+  and how to send them next time (the CLI's `--format json` output gains a `repairs` list of
+  `{path, rule}` items), and each accepted repaired write emits one `write.coerced` event
+  carrying the surface, that list and the trace id, with no content. `trellis analyze health`
+  counts coerced calls per rule beside rejections (`coerced`, `coerced_by_rule` and
+  `coercion_rate` in `--format json`); a coerced call is an accepted call, never a
+  rejection. `POST /api/v1/traces` keeps its response shape, so its only trace of a repair is
+  the event. `execute_mutation` and `POST /commands` with `trace.ingest` are not repaired.
+
 ## [0.10.1] - 2026-11-04
 
 0.10.0 was tagged but never published: its release build failed type-checking on

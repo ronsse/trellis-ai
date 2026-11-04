@@ -555,6 +555,18 @@ class EventType(StrEnum):
     #: Consumed by :func:`trellis.ops.write_health.summarize_write_health`.
     WRITE_NOOP = "write.noop"
 
+    #: A write surface accepted a trace after repairing a known shape
+    #: mistake in it (a bare-string ``steps[].result``, a ``context.repo``;
+    #: see :mod:`trellis.schemas.trace_repair`). The trace was stored in its
+    #: canonical shape, so a ``MUTATION_EXECUTED`` accompanies this row and the
+    #: call is an accepted one, never a rejection. Payload: ``tool`` (the
+    #: surface label the executor stores in ``requested_by``), ``repairs``
+    #: (``[{path, rule}]``, ``rule`` from ``trace_repair.REPAIR_RULES``) and
+    #: ``trace_id``. Carries no content: paths are schema locations, never
+    #: values. One event per accepted call, however many repairs it needed.
+    #: Consumed by :func:`trellis.ops.write_health.summarize_write_health`.
+    WRITE_COERCED = "write.coerced"
+
     #: Emitted by the API Review-queue endpoints (WP10) whenever a human
     #: operator acts on a governance surface from the UI inbox — approving
     #: or rejecting a tuner proposal, promoting learning candidates, or
