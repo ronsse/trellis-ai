@@ -2081,3 +2081,9 @@ def evaluate_precedent_demotion(
     for outcome in report.outcomes:
         detail = outcome.reason or outcome.disposition
         console.print(f"  - {escape(outcome.entity_id)}: {escape(detail)}")
+
+
+# Mounted last: the module reads this one's helpers at call time, not import time.
+from trellis_cli import curate_precedent_gate  # noqa: E402
+
+curate_precedent_gate.register(curate_app)
