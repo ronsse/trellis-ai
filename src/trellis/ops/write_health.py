@@ -60,6 +60,7 @@ from trellis.feedback.attribution import (
     payload_pack_id,
     served_item_ids,
 )
+from trellis.feedback.pack_rows import has_served_rows
 from trellis.ops.capture_coverage import (
     CaptureCoverageReport,
     summarize_capture_coverage,
@@ -2004,7 +2005,7 @@ def summarize_serve_attribution(
     )
     for event in pack_events:
         packs += 1
-        if event.payload.get("injected_items"):
+        if has_served_rows(event.payload):
             packs_with_items += 1
         # ``entity_id`` is the pack id at both emit sites in
         # ``PackBuilder`` — the same key ``join_pack_feedback`` uses, and

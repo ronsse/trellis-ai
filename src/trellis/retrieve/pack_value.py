@@ -127,9 +127,13 @@ from trellis.feedback.attribution import (
     STRAY_PREFIX_DROPPED,
     is_sectioned_payload,
     item_namespace,
-    payload_pack_id,
     served_item_ids,
     stray_shape,
+)
+from trellis.feedback.pack_rows import (
+    has_served_rows,
+    iter_feedback_rows,
+    served_rows_from_payload,
 )
 from trellis.learning.pack_observations import join_pack_feedback_with_coverage
 from trellis.retrieve.strategies import (
@@ -531,12 +535,12 @@ def summarize_pack_value(
     flat_packs = {
         pack_id: payload
         for pack_id, payload in pack_payloads.items()
-        if payload.get("injected_items")
+        if has_served_rows(payload)
     }
     sectioned = sum(
         1
         for payload in pack_payloads.values()
-        if is_sectioned_payload(payload) and not payload.get("injected_items")
+        if is_sectioned_payload(payload) and not has_served_rows(payload)
     )
 
     verdicts = collect_pack_verdicts(feedback_events, flat_packs)
@@ -694,14 +698,13 @@ def collect_pack_verdicts(
     families_by_pack: dict[str, str] = {}
     targeted = targeted_attributed = targeted_unjoined = 0
 
-    for event in feedback_events:
-        payload = event.payload or {}
-        pack_id = payload_pack_id(payload)
+    for feedback in iter_feedback_rows(feedback_events):
+        pack_id = feedback.pack_id
         if not pack_id:
             continue
         targeted += 1
-        helpful = _clean_ids(payload.get("helpful_item_ids"))
-        unhelpful = _clean_ids(payload.get("unhelpful_item_ids"))
+        helpful = set(feedback.helpful_item_ids)
+        unhelpful = set(feedback.unhelpful_item_ids)
         if helpful or unhelpful:
             targeted_attributed += 1
         if pack_id not in flat_packs:
@@ -714,7 +717,7 @@ def collect_pack_verdicts(
         helpful_by_pack[pack_id] |= helpful
         unhelpful_by_pack[pack_id] |= unhelpful
         family = (
-            payload.get("intent_family")
+            feedback.intent_family
             or flat_packs[pack_id].get("intent_family")
             or "(none)"
         )
@@ -861,14 +864,22 @@ def _accumulate(
         # — this is a guard against drift, not a live fix.
         served = served_item_ids(flat_packs[pack_id])
         charged = _charged_tokens(flat_packs[pack_id])
-        for raw in flat_packs[pack_id].get("injected_items") or []:
-            if not isinstance(raw, Mapping):
+        # ``flat_packs`` is every attributable pack (sectioned ones included,
+        # since their rows carry the same ``(pack, item)`` serving identity);
+        # withheld packs were dropped by the join that built it, so no holdout
+        # policy here.
+        for served_row in served_rows_from_payload(
+            pack_id,
+            flat_packs[pack_id],
+            include_sectioned=True,
+            include_holdout=True,
+        ):
+            raw = served_row.row
+            item_id = served_row.item_id
+            if not item_id:
                 continue
-            item_id = raw.get("item_id")
-            if not isinstance(item_id, str) or not item_id:
-                continue
-            raw_tokens = raw.get("estimated_tokens")
-            fallback = int(raw_tokens) if isinstance(raw_tokens, int | float) else 0
+            raw_tokens = served_row.estimated_tokens
+            fallback = int(raw_tokens) if raw_tokens is not None else 0
             tokens = charged.get(item_id, fallback)
 
             # An item cannot be both; helpful wins, so a contradictory
@@ -943,12 +954,6 @@ def _charged_tokens(payload: Mapping[str, Any]) -> dict[str, int]:
         if isinstance(item_id, str) and item_id and isinstance(tokens, int | float):
             out[item_id] = int(tokens)
     return out
-
-
-def _clean_ids(raw: Any) -> set[str]:
-    if not isinstance(raw, list):
-        return set()
-    return {entry for entry in raw if isinstance(entry, str) and entry}
 
 
 def _response_token_join(

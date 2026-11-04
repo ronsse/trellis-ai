@@ -22,6 +22,25 @@ All notable changes to Trellis will be documented in this file.
   [decision matrix](docs/design/holdout-decision-matrix.md) says what each result commits the
   project to.
 
+### Changed
+
+- **One typed reader for a pack's served rows and for a feedback row.**
+  `trellis.feedback.pack_rows` reads `PACK_ASSEMBLED.injected_items[]`
+  (`iter_served_rows`, `served_rows_from_payload`, `has_served_rows`, yielding
+  `ServedRow`) and both `FEEDBACK_RECORDED` families (`feedback_row`,
+  `iter_feedback_rows`, yielding `FeedbackRow`; the governed family's attribution
+  fields are empty, never invented). The two policies every hand-written reader had
+  to decide, whether to skip a sectioned pack and whether to drop a held-out one, are
+  required keyword arguments with no default. Pack telemetry, the learning join, the
+  precedent evidence gate, the judged-outcome serving index, pack-value, pack replay,
+  write-health and the explore route's attributable test now read through it. Reader
+  side only: every migrated caller states the policy it already had, so no output
+  changes for a payload the writers emit, and serving is untouched. A payload from
+  outside the writers can differ in one narrow way: a value of the wrong type in a
+  typed field (a non-string `strategy_source`, say) reads as absent rather than being
+  passed through. `tests/unit/test_injected_items_reader_rule.py` fails on a new
+  hand-written read of `injected_items` outside a short allowlist.
+
 ### Fixed
 
 - **The two commonest trace-shape mistakes are repaired at the write boundary instead of
