@@ -421,7 +421,7 @@ Authoritative source for Databricks-platform table shape. Treat it as a *snapsho
 |---|---|
 | `uc_catalog` | One per catalog. |
 | `uc_schema` | One per schema. |
-| `dataset` | One per table, view, materialized view or streaming table. The type OpenLineage uses, so a UC table and an OpenLineage dataset naming it are one node (below). |
+| `dataset` | One per table, view, materialized view or streaming table. The type OpenLineage uses, so a UC table and an OpenLineage dataset naming it can be one node, when the spellings agree byte for byte (see Stable identity, below). |
 | `uc_column` | One per column, as a **structural leaf** (`node_role="structural"` with `allow_structural_leaf=True`, the two-signal opt-in of `adr-source-modeling-discipline.md` §2.5). Structural nodes stay out of default retrieval. `include_columns=False` drops them and the column lineage; the table keeps a `column_count`. |
 
 This deliberately differs from the earlier "no node per column" advice: column lineage needs something to attach to. The column list is not also stored as a JSON blob on the table.
@@ -429,10 +429,10 @@ This deliberately differs from the earlier "no node per column" advice: column l
 ### Edges
 
 - `contains`: catalog to schema, schema to table, table to column.
-- `depends_on`: downstream to upstream, between tables and between columns, from `system.access.table_lineage` / `column_lineage` rows or a lineage-tracking response. The kind dbt uses. The edge carries `last_event_time` (the latest `event_time` seen for the pair) and `allow_dangling=True`, because lineage and metadata arrive as separate runs.
+- `depends_on`: downstream to upstream, between tables and between columns, from `system.access.table_lineage` / `column_lineage` rows or a lineage-tracking response. The kind dbt uses. The edge carries `last_event_time` (the latest `event_time` seen for the pair) and `allow_dangling=True`, because lineage and metadata arrive as separate runs. The edge lands on the same id whichever run comes first.
 - Not emitted: `owned_by` (the owner is a property), `governed_by`, `described_by`.
 
-A lineage row naming a table the metadata export lacks mints a **stub** table (`stub: true`, plus the schema and catalog it hangs from), as OpenLineage does for a dataset it only saw named in an event. A row with a path or volume on either side, or no column name on a column row, is skipped and counted in the `unity_catalog_rows_skipped` log line.
+**Lineage never mints an entity.** A lineage row naming a table or column the export's metadata does not hold produces the `depends_on` edge and no draft for that endpoint, nor for the schema and catalog it would hang from. A draft is an `entity.create`, which replaces the node's properties, so a placeholder from a lineage-only run would overwrite the description, owner and columns an earlier metadata run wrote. Run a lineage-only export before or after the metadata one: the real node is never replaced, and the edge reaches it either way. Until the metadata run arrives the store holds the edge with a dangling endpoint and no node for it (it does not create one). A row with a path or volume on either side, or no column name on a column row, is skipped and counted in the `unity_catalog_rows_skipped` log line.
 
 ### Input
 
@@ -442,7 +442,7 @@ A JSON export; the extractor never calls Databricks. One file, or a directory (e
 - rows of `system.access.table_lineage` and `system.access.column_lineage` (`source_table_full_name`, `target_table_full_name`, `source_column_name`, `target_column_name`, `event_time`) as a JSON array or one object per line;
 - a `GET /api/2.0/lineage-tracking/table-lineage` response (`upstreams[]`, `downstreams[]`, each with `tableInfo`). That response does not name the table it was requested for, so add `"table_name": "<catalog>.<schema>.<table>"` beside the two lists.
 
-Add `"namespace": "unitycatalog://<workspace-host>"` to any wrapper (or pass `UnityCatalogExtractor(namespace=...)`). Unreadable input is a typed refusal that names a position, never the content. The `system` and `__databricks_internal` catalogs, and lineage touching them, are left out unless `include_system=True`.
+Add `"namespace": "unitycatalog://<workspace-host>"` to any wrapper (or pass `UnityCatalogExtractor(namespace=...)`); a trailing `/` is dropped, and two namespaces in one export are refused. Unreadable input is a typed refusal that names a position, never the content: malformed JSON, the wrong shape, input nested too deeply to read, and a bare record that carries a table or column field (`type_text`, `position`, `table_type`, `columns` and the like) instead of the catalog list shape, which is refused as an unrecognised record rather than minted as a catalog. A record inside an explicit `catalogs` list is taken as a catalog. The `system` and `__databricks_internal` catalogs, and lineage touching them, are left out unless `include_system=True`.
 
 ### Content placement
 
@@ -457,9 +457,18 @@ Add `"namespace": "unitycatalog://<workspace-host>"` to any wrapper (or pass `Un
 
 ### Stable identity
 
-`dataset:{namespace}:{catalog}.{schema}.{table}`, with the three-part name case-folded and unquoted by `normalize_alias_raw_id` (so `Main.Sales.Orders` and `` `main`.`sales`.`orders` `` are one table). With a namespace this is the id `OpenLineageExtractor` gives the dataset, and the table's aliases are `unity_catalog` = `catalog.schema.table` plus `openlineage_dataset` = `namespace/catalog.schema.table`, bound when `TRELLIS_KNOWLEDGE_LINK_OR_MINT` is on. Without one the scope is the fixed string `unity_catalog`.
+`dataset:{namespace}:{catalog}.{schema}.{table}`, with the three-part name case-folded and unquoted by `normalize_alias_raw_id` (so `Main.Sales.Orders` and `` `main`.`sales`.`orders` `` are one table to this extractor). The table's aliases are `unity_catalog` = `catalog.schema.table` plus, with a namespace, `openlineage_dataset` = `namespace/catalog.schema.table`, bound when `TRELLIS_KNOWLEDGE_LINK_OR_MINT` is on. Without a namespace the scope is the fixed string `unity_catalog`.
 
-Both extractors write the same node, and an `entity.create` on an existing id replaces the properties, so the writer that ran last owns them.
+**The namespace is part of the id. Choose it before the first run.** Adding one later does not rename the existing nodes: the next run writes a second node per table under the new id, every command reports success, and `resolve_alias("unity_catalog", ...)` keeps returning the first. Pick the namespace once and keep it.
+
+**Agreement with `OpenLineageExtractor` is byte for byte, not semantic.** The two write one node only when both hold:
+
+- the OpenLineage dataset `name` is already lowercase and unquoted `catalog.schema.table` (OpenLineage keeps `name` verbatim, so `Main.Sales.Orders` or `` `main`.`sales`.`orders` `` is a second node), and
+- the OpenLineage `namespace` string is identical to this extractor's: scheme, host and port. The OpenLineage naming spec gives Unity Catalog as `unitycatalog://{host}[:{port}]`, and `unitycatalog://host` and `unitycatalog://host:443` are different strings, hence different nodes. A trailing `/` on this side is dropped, but a trailing `/` on the OpenLineage side is not.
+
+Not verified: whether a Databricks Spark OpenLineage integration emits that `unitycatalog://` namespace for Unity Catalog tables, or a storage path (`abfss://`, `s3://`, `dbfs://`) with a symlink facet. Check what your events carry before relying on the two extractors to meet; re-keying OpenLineage ids to fold case is a separate change.
+
+Where they do meet, an `entity.create` on an existing id replaces the properties, so the writer that ran last owns them.
 
 ### Curated derivations
 

@@ -22,10 +22,22 @@ Accepted input, parsed (a dict, or a list of any mix of these):
   not name the table it was requested for, so the export must add
   ``"table_name": "<catalog>.<schema>.<table>"`` beside the two lists.
 
+Lineage never mints an entity.  A table or column that only a lineage row names
+gets no draft: the ``depends_on`` edge to it is emitted with ``allow_dangling``
+and lands on the same id when the metadata run that holds the object arrives,
+in either order.  A draft is an ``entity.create`` that replaces the node's
+properties, so a placeholder from a lineage-only run would overwrite real
+metadata written by an earlier run.
+
 A wrapper may also carry ``"namespace"``, the OpenLineage dataset namespace for
-the workspace (``unitycatalog://<host>``).  With a namespace a table's entity id
-is the id :class:`~trellis_workers.extract.openlineage.OpenLineageExtractor`
-gives the same dataset, so the two extractors write one node.
+the workspace (``unitycatalog://<host>``, a trailing ``/`` is dropped).  The
+namespace is part of every entity id, so choose it before the first run.  With
+a namespace a table's entity id is the id
+:class:`~trellis_workers.extract.openlineage.OpenLineageExtractor` gives the
+same dataset *when* that extractor's dataset name is the lowercase, unquoted
+``catalog.schema.table`` and its namespace string is identical: OpenLineage
+keeps both verbatim, so a name differing in case or quoting, or a namespace
+differing in port or trailing ``/``, is a second node.
 
 Unrecognised or malformed input raises a typed
 :class:`~trellis.errors.ValidationError` (code ``unity_catalog_input``) that
@@ -85,6 +97,22 @@ SYSTEM_CATALOGS: Final[frozenset[str]] = frozenset({"system", "__databricks_inte
 _DEFAULT_SCOPE: Final = "unity_catalog"
 
 _WRAPPER_KEYS: Final = ("catalogs", "schemas", "tables", "upstreams", "downstreams")
+
+#: Fields a table or a column record carries and a catalog record does not.  A
+#: bare record holding one of them is not a catalog, whatever else it has.
+_NOT_A_CATALOG_KEYS: Final = frozenset(
+    {
+        "catalog_name",
+        "schema_name",
+        "table_type",
+        "data_source_format",
+        "columns",
+        "type_text",
+        "type_name",
+        "position",
+        "nullable",
+    }
+)
 _IGNORED_DOCUMENT_KEYS: Final = frozenset(
     {"next_page_token", "namespace", "table_name"}
 )
@@ -129,6 +157,13 @@ def _split_full_name(full_name: str, expected: int) -> tuple[str, ...] | None:
 
 def _fold(value: Any) -> str:
     return str(value).strip().lower()
+
+
+def _clean_namespace(value: Any) -> str | None:
+    """A namespace as a string without surrounding space or a trailing ``/``."""
+    if not isinstance(value, str):
+        return None
+    return value.strip().rstrip("/").strip() or None
 
 
 def _host(namespace: str | None) -> str | None:
@@ -222,10 +257,9 @@ class _Collected:
     table_lineage: dict[tuple[_TableParts, _TableParts], str | None] = field(
         default_factory=dict
     )
-    #: ``((table, column), (table, column))`` -> (latest event time, shown names)
+    #: ``((table, column), (table, column))`` -> latest event time
     column_lineage: dict[
-        tuple[tuple[_TableParts, str], tuple[_TableParts, str]],
-        tuple[str | None, tuple[str, str]],
+        tuple[tuple[_TableParts, str], tuple[_TableParts, str]], str | None
     ] = field(default_factory=dict)
     namespaces: set[str] = field(default_factory=set)
     skipped: Counter[str] = field(default_factory=Counter)
@@ -240,15 +274,10 @@ class _Collected:
         self,
         source: tuple[_TableParts, str],
         target: tuple[_TableParts, str],
-        names: tuple[str, str],
         when: str | None,
     ) -> None:
         key = (source, target)
-        previous = self.column_lineage.get(key)
-        if previous is None:
-            self.column_lineage[key] = (when, names)
-        else:
-            self.column_lineage[key] = (_latest(previous[0], when), previous[1])
+        self.column_lineage[key] = _latest(self.column_lineage.get(key), when)
 
 
 def _record_list(value: Any, where: str) -> list[Any]:
@@ -337,10 +366,7 @@ def _add_lineage_row(row: dict[str, Any], state: _Collected) -> None:
         state.skipped["column_lineage_without_two_columns"] += 1
         return
     state.add_column_edge(
-        (source, _fold(source_col)),
-        (target, _fold(target_col)),
-        (str(source_col).strip(), str(target_col).strip()),
-        when,
+        (source, _fold(source_col)), (target, _fold(target_col)), when
     )
 
 
@@ -381,9 +407,9 @@ def _walk(node: Any, where: str, state: _Collected) -> None:  # noqa: PLR0912 - 
     if any(key in node for key in _WRAPPER_KEYS) or (
         node.keys() <= _IGNORED_DOCUMENT_KEYS
     ):
-        namespace = node.get("namespace")
-        if isinstance(namespace, str) and namespace.strip():
-            state.namespaces.add(namespace.strip())
+        namespace = _clean_namespace(node.get("namespace"))
+        if namespace:
+            state.namespaces.add(namespace)
         for key, add in (
             ("catalogs", _add_catalog),
             ("schemas", _add_schema),
@@ -402,10 +428,23 @@ def _walk(node: Any, where: str, state: _Collected) -> None:  # noqa: PLR0912 - 
         _add_table(node, where, state)
     elif "catalog_name" in node:
         _add_schema(node, where, state)
-    elif "name" in node:
+    elif "name" in node and node.keys().isdisjoint(_NOT_A_CATALOG_KEYS):
         _add_catalog(node, where, state)
     else:
         _refuse(f"{where}: not a catalog, schema, table or lineage record or response")
+
+
+def _collect(raw_input: Any) -> _Collected:
+    """Read ``raw_input`` into records, or raise the typed refusal."""
+    state = _Collected()
+    try:
+        _walk(raw_input, "input", state)
+    except RecursionError:
+        # Lists nest without bound in JSON; a real export is a few levels deep.
+        _refuse("input: nested too deeply to read")
+    if len(state.namespaces) > 1:
+        _refuse("input: the documents name more than one namespace")
+    return state
 
 
 def check_input(raw_input: Any) -> None:
@@ -414,10 +453,7 @@ def check_input(raw_input: Any) -> None:
     The CLI calls this before it opens a store, so a malformed export is
     refused up front instead of surfacing from inside the extraction pipeline.
     """
-    state = _Collected()
-    _walk(raw_input, "input", state)
-    if len(state.namespaces) > 1:
-        _refuse("input: the documents name more than one namespace")
+    _collect(raw_input)
 
 
 # ---------------------------------------------------------------------------
@@ -434,14 +470,18 @@ class UnityCatalogExtractor:
 
     Args:
         namespace: The OpenLineage dataset namespace of the workspace
-            (``unitycatalog://<host>``).  When known it makes a table's entity id
-            the one OpenLineage gives that dataset, and binds the dataset's
-            OpenLineage alias to it.  Overrides a ``namespace`` in the input.
+            (``unitycatalog://<host>``, a trailing ``/`` is dropped).  When
+            known it makes a table's entity id the one OpenLineage gives that
+            dataset, if its name and namespace are spelled the same, and binds
+            the dataset's OpenLineage alias to it.  Overrides a ``namespace`` in
+            the input.  It is part of every id: choose it before the first run.
         include_system: Keep the ``system`` and ``__databricks_internal``
             catalogs (default: leave them out, along with lineage that touches them).
         include_columns: Emit a ``uc_column`` entity per column and column
             lineage (default).  Off, columns are counted (``column_count``)
             and column lineage is skipped.
+
+    An object named only by lineage gets no entity (see the module docstring).
 
     A column entity is a structural leaf by the two-signal opt-in of
     ``adr-source-modeling-discipline.md`` §2.5: ``node_role="structural"``
@@ -460,7 +500,7 @@ class UnityCatalogExtractor:
         include_system: bool = False,
         include_columns: bool = True,
     ) -> None:
-        self._namespace = (namespace or "").strip() or None
+        self._namespace = _clean_namespace(namespace)
         self._include_system = include_system
         self._include_columns = include_columns
 
@@ -473,10 +513,7 @@ class UnityCatalogExtractor:
     ) -> ExtractionResult:
         del context  # deterministic — no cost budget
 
-        state = _Collected()
-        _walk(raw_input, "input", state)
-        if len(state.namespaces) > 1:
-            _refuse("input: the documents name more than one namespace")
+        state = _collect(raw_input)
         namespace = self._namespace or next(iter(state.namespaces), None)
 
         builder = _Builder(
@@ -630,11 +667,11 @@ class _Builder:
         if tid in self._entities:
             return tid
         catalog, schema, table = parts
-        rec = self._state.tables.get(parts)
+        rec = self._state.tables[parts]
         key = _identity_key(*parts)
-        columns = rec.get("columns") if rec else None
+        columns = rec.get("columns")
         props: dict[str, Any] = {
-            "name": (_text(rec.get("name")) if rec else None) or table,
+            "name": _text(rec.get("name")) or table,
             "full_name": key,
             "database_name": catalog,
             "schema_name": schema,
@@ -645,27 +682,20 @@ class _Builder:
             props[wk.DATASET_PROP_PHYSICAL_URI] = (
                 f"databricks://{host}/{catalog}/{schema}/{table}"
             )
-        if rec is None:
-            # Named by a lineage row, absent from the metadata export: a stub,
-            # as OpenLineage mints a dataset it only saw named in an event.
-            props["stub"] = True
-        else:
-            props.update(
-                _drop_none(
-                    {
-                        "table_type": _text(rec.get("table_type")),
-                        "data_source_format": _text(rec.get("data_source_format")),
-                        "owner": _text(rec.get("owner")),
-                        "description": _text(rec.get("comment"), _MAX_DESCRIPTION),
-                        "storage_location": _text(rec.get("storage_location")),
-                        "source_created_at": _iso(rec.get("created_at")),
-                        "source_updated_at": _iso(rec.get("updated_at")),
-                        "column_count": len(columns)
-                        if isinstance(columns, list)
-                        else None,
-                    }
-                )
+        props.update(
+            _drop_none(
+                {
+                    "table_type": _text(rec.get("table_type")),
+                    "data_source_format": _text(rec.get("data_source_format")),
+                    "owner": _text(rec.get("owner")),
+                    "description": _text(rec.get("comment"), _MAX_DESCRIPTION),
+                    "storage_location": _text(rec.get("storage_location")),
+                    "source_created_at": _iso(rec.get("created_at")),
+                    "source_updated_at": _iso(rec.get("updated_at")),
+                    "column_count": len(columns) if isinstance(columns, list) else None,
+                }
             )
+        )
         aliases = [
             AliasDraft(
                 source_system=wk.UNITY_CATALOG_SOURCE_SYSTEM,
@@ -692,39 +722,31 @@ class _Builder:
         return tid
 
     def _ensure_column(
-        self, parts: _TableParts, column: str, shown: str, rec: dict[str, Any] | None
+        self, parts: _TableParts, column: str, shown: str, rec: dict[str, Any]
     ) -> str:
         cid = self._column_id(parts, column)
         if cid in self._entities:
             return cid
-        props: dict[str, Any] = {
-            "name": _text(rec.get("name")) if rec else None,
-            "table_full_name": _identity_key(*parts),
-            "source_system": "databricks",
-        }
-        props["name"] = props["name"] or shown
-        if rec is None:
-            props["stub"] = True
-        else:
-            position = rec.get("position")
-            nullable = rec.get("nullable")
-            props.update(
-                _drop_none(
-                    {
-                        "type_text": _text(rec.get("type_text")),
-                        "type_name": _text(rec.get("type_name")),
-                        "position": position
-                        if isinstance(position, int) and not isinstance(position, bool)
-                        else None,
-                        "nullable": nullable if isinstance(nullable, bool) else None,
-                        "description": _text(rec.get("comment"), _MAX_DESCRIPTION),
-                    }
-                )
-            )
+        position = rec.get("position")
+        nullable = rec.get("nullable")
+        props: dict[str, Any] = _drop_none(
+            {
+                "name": shown,
+                "table_full_name": _identity_key(*parts),
+                "source_system": "databricks",
+                "type_text": _text(rec.get("type_text")),
+                "type_name": _text(rec.get("type_name")),
+                "position": position
+                if isinstance(position, int) and not isinstance(position, bool)
+                else None,
+                "nullable": nullable if isinstance(nullable, bool) else None,
+                "description": _text(rec.get("comment"), _MAX_DESCRIPTION),
+            }
+        )
         self._entities[cid] = EntityDraft(
             entity_id=cid,
             entity_type=UC_COLUMN_ENTITY_TYPE,
-            name=props["name"],
+            name=shown,
             properties=props,
             node_role=NodeRole.STRUCTURAL,
             allow_structural_leaf=True,
@@ -755,32 +777,19 @@ class _Builder:
 
         for (source, target), when in sorted(state.table_lineage.items()):
             if self._kept(source[0]) and self._kept(target[0]):
-                self._depends_on(
-                    self._ensure_table(target), self._ensure_table(source), when
-                )
+                # Ids only: a table the export does not hold gets no entity.
+                self._depends_on(self._table_id(target), self._table_id(source), when)
 
         if self._include_columns:
-            known = {
-                parts: {
-                    _fold(name): rec
-                    for rec in self._table_columns(parts)
-                    if (name := _text(rec.get("name")))
-                }
-                for parts in state.tables
-            }
-            for (src_col, tgt_col), (moment, names) in sorted(
+            for ((s_tab, s_name), (t_tab, t_name)), moment in sorted(
                 state.column_lineage.items()
             ):
-                (s_tab, s_name), (t_tab, t_name) = src_col, tgt_col
-                if not (self._kept(s_tab[0]) and self._kept(t_tab[0])):
-                    continue
-                src_id = self._ensure_column(
-                    s_tab, s_name, names[0], known.get(s_tab, {}).get(s_name)
-                )
-                tgt_id = self._ensure_column(
-                    t_tab, t_name, names[1], known.get(t_tab, {}).get(t_name)
-                )
-                self._depends_on(tgt_id, src_id, moment)
+                if self._kept(s_tab[0]) and self._kept(t_tab[0]):
+                    self._depends_on(
+                        self._column_id(t_tab, t_name),
+                        self._column_id(s_tab, s_name),
+                        moment,
+                    )
         elif state.column_lineage:
             state.skipped["column_lineage_with_columns_off"] += len(
                 state.column_lineage
@@ -813,6 +822,7 @@ class _Builder:
             edge_kind=EDGE_DEPENDS_ON,
             properties=_drop_none({"last_event_time": when}),
             # Lineage may name an object the metadata export does not hold, and
-            # exports arrive in separate runs, as in the dbt and OpenLineage extractors.
+            # exports arrive in separate runs: the edge lands on the same id
+            # when the run that holds the object does.
             allow_dangling=True,
         )

@@ -3,6 +3,8 @@
 Every name is invented.  The fixture is the smallest export that exercises each
 rule: one managed table, one view, a lineage row naming a table the metadata
 export lacks, a system catalog that must stay out, and one column-level fact.
+A table or column that only lineage names gets no entity, so a lineage-only run
+can never overwrite what a metadata run wrote.
 """
 
 from __future__ import annotations
@@ -193,8 +195,8 @@ class TestInputShapes:
             (TABLES["tables"][:1], 5),  # catalog, schema, table, two columns
             (TABLES["tables"][1], 4),  # one bare record, not in a list
             (TABLES, 7),
-            (TABLE_LINEAGE[:1], 4),  # two stub tables, their schema and catalog
-            (LINEAGE_API, 6),  # three stub tables, schemas sales and bi, catalog main
+            (TABLE_LINEAGE[:1], 0),  # lineage alone names objects, mints none
+            (LINEAGE_API, 0),
         ],
     )
     async def test_shape_parses(self, raw: Any, entity_count: int) -> None:
@@ -251,6 +253,11 @@ class TestRefusals:
             {"unrelated": 1},
             {"upstreams": []},  # lineage response with no table_name
             [{"namespace": "a://x"}, {"namespace": "b://y"}],
+            # A column record is not a catalog because it has a `name`.
+            {"name": "amount", "type_text": "int", "position": 0},
+            [{"name": "orders", "table_type": "MANAGED"}],
+            [{"name": "orders", "columns": []}],
+            [{"name": "amount", "nullable": True}],
         ],
     )
     async def test_unreadable_input_is_a_typed_refusal(self, raw: Any) -> None:
@@ -259,6 +266,41 @@ class TestRefusals:
         assert excinfo.value.code == INPUT_REFUSAL_CODE
         with pytest.raises(ValidationError):
             check_input(raw)
+
+    async def test_a_bare_catalog_record_still_parses_with_real_fields(self) -> None:
+        # The catalogs list response carries these beside `name`.
+        record = {
+            "name": "main",
+            "owner": "data-eng",
+            "comment": "Primary",
+            "catalog_type": "MANAGED_CATALOG",
+            "storage_root": "s3://example-bucket/main",
+            "metastore_id": "00000000-0000-0000-0000-000000000000",
+            "created_at": 1690000000000,
+            "created_by": "someone",
+            "updated_at": 1700000000000,
+            "securable_type": "CATALOG",
+            "browse_only": False,
+        }
+        entities = by_id(await extract(record))
+        assert list(entities) == [f"uc_catalog:{NS}:main"]
+
+    async def test_a_column_record_inside_a_catalogs_list_is_not_filtered(self) -> None:
+        # Under an explicit `catalogs` key the caller said what the records are.
+        result = await extract({"catalogs": [{"name": "main", "type_text": "x"}]})
+        assert list(by_id(result)) == [f"uc_catalog:{NS}:main"]
+
+    @pytest.mark.parametrize("depth", [2000, 100_000])
+    async def test_input_nested_too_deep_is_a_typed_refusal(self, depth: int) -> None:
+        deep: Any = []
+        for _ in range(depth):
+            deep = [deep]
+        with pytest.raises(ValidationError) as excinfo:
+            await extract(deep)
+        assert excinfo.value.code == INPUT_REFUSAL_CODE
+        assert str(excinfo.value) == "input: nested too deeply to read"
+        with pytest.raises(ValidationError):
+            check_input(deep)
 
     async def test_refusal_names_a_position_not_the_content(self) -> None:
         marker = "do-not-echo-this-value"
@@ -276,26 +318,24 @@ class TestRefusals:
 class TestGraphShape:
     async def test_hierarchy_and_lineage_counts(self) -> None:
         result = await extract(EVERYTHING)
-        assert len(result.entities) == 9
-        assert len(result.edges) == 11
+        assert len(result.entities) == 7
+        assert len(result.edges) == 9
 
     async def test_contains_edges_run_parent_to_child(self) -> None:
         result = await extract(EVERYTHING)
-        main, sales, raw = (
-            f"uc_catalog:{NS}:main",
-            f"uc_schema:{NS}:main.sales",
-            f"uc_schema:{NS}:main.raw",
-        )
+        main, sales = f"uc_catalog:{NS}:main", f"uc_schema:{NS}:main.sales"
         orders = tid("main.sales.orders")
-        assert edge_set(result, "contains") >= {
+        assert edge_set(result, "contains") == {
             (main, sales),
-            (main, raw),
             (sales, orders),
             (sales, tid("main.sales.daily_revenue")),
-            (raw, tid("main.raw.events")),
             (orders, f"uc_column:{NS}:main.sales.orders/order_id"),
+            (orders, f"uc_column:{NS}:main.sales.orders/customer_id"),
+            (
+                tid("main.sales.daily_revenue"),
+                f"uc_column:{NS}:main.sales.daily_revenue/revenue",
+            ),
         }
-        assert len(edge_set(result, "contains")) == 8
 
     async def test_table_lineage_points_downstream_to_upstream(self) -> None:
         result = await extract(EVERYTHING)
@@ -329,12 +369,34 @@ class TestGraphShape:
             e.allow_dangling for e in result.edges if e.edge_kind == "depends_on"
         )
 
-    async def test_lineage_naming_an_unknown_table_mints_a_stub(self) -> None:
-        # OpenLineage mints a dataset it only saw named in an event; so does this.
-        entities = by_id(await extract(EVERYTHING))
-        stub = entities[tid("main.raw.events")]
-        assert stub.properties["stub"] is True
-        assert "stub" not in entities[tid("main.sales.orders")].properties
+    async def test_lineage_naming_an_unknown_table_mints_no_entity(self) -> None:
+        # The edge is emitted and dangles; no draft would be an `entity.create`
+        # that replaces whatever an earlier run wrote for that id.
+        result = await extract(EVERYTHING)
+        events = tid("main.raw.events")
+        assert events not in by_id(result)
+        assert not [e for e in result.entities if "main.raw" in e.entity_id]
+        assert (tid("main.sales.orders"), events) in edge_set(result, "depends_on")
+        assert not [e for e in result.entities if e.properties.get("stub")]
+
+    async def test_column_lineage_naming_an_unknown_column_mints_no_entity(
+        self,
+    ) -> None:
+        rows = [
+            {
+                "source_table_full_name": "main.sales.orders",
+                "target_table_full_name": "main.sales.daily_revenue",
+                "source_column_name": "Amount",
+                "target_column_name": "revenue_total",
+            }
+        ]
+        result = await extract([TABLES, rows])
+        src = f"uc_column:{NS}:main.sales.orders/amount"
+        tgt = f"uc_column:{NS}:main.sales.daily_revenue/revenue_total"
+        assert src not in by_id(result)
+        assert tgt not in by_id(result)
+        assert edge_set(result, "depends_on") == {(tgt, src)}
+        assert len(edge_set(result, "contains")) == 6  # unchanged by the lineage row
 
     async def test_columns_are_structural_leaves(self) -> None:
         entities = by_id(await extract(EVERYTHING))
@@ -351,7 +413,7 @@ class TestGraphShape:
     async def test_columns_off_drops_column_entities_and_column_lineage(self) -> None:
         result = await extract(EVERYTHING, include_columns=False)
         assert not [e for e in result.entities if e.entity_type == "uc_column"]
-        assert len(result.entities) == 6
+        assert len(result.entities) == 4
         assert by_id(result)[tid("main.sales.orders")].properties["column_count"] == 2
         assert len(edge_set(result, "depends_on")) == 2
 
@@ -437,8 +499,8 @@ class TestSystemCatalogs:
 
     async def test_option_keeps_them(self) -> None:
         result = await extract(EVERYTHING, include_system=True)
-        assert len(result.entities) == 12
-        assert len(result.edges) == 14
+        assert len(result.entities) == 10
+        assert len(result.edges) == 12
         assert (tid("main.sales.orders"), tid("system.access.audit")) in edge_set(
             result, "depends_on"
         )
@@ -478,6 +540,30 @@ class TestIdentity:
             ("unity_catalog", "main.sales.orders"),
             ("openlineage_dataset", f"{NS}/main.sales.orders"),
         }
+
+    @pytest.mark.parametrize("suffix", ["/", "//", " /"])
+    async def test_a_trailing_slash_on_the_namespace_is_dropped(
+        self, suffix: str
+    ) -> None:
+        by_option = await UnityCatalogExtractor(namespace=NS + suffix).extract(TABLES)
+        in_document = await UnityCatalogExtractor().extract(
+            {**TABLES, "namespace": NS + suffix}
+        )
+        plain = await extract(TABLES)
+        assert drafts(by_option) == drafts(plain) == drafts(in_document)
+
+    async def test_namespaces_differing_only_in_a_trailing_slash_are_one(self) -> None:
+        raw = [{"namespace": NS, **CATALOGS}, {"namespace": NS + "/", **TABLES}]
+        check_input(raw)
+        result = await UnityCatalogExtractor().extract(raw)
+        assert tid("main.sales.orders") in by_id(result)
+
+    async def test_a_port_is_part_of_the_namespace_and_so_of_the_id(self) -> None:
+        # OpenLineage's spec allows `unitycatalog://{host}[:{port}]`; the two
+        # spellings are two namespaces, hence two ids, for one workspace.
+        with_port = await UnityCatalogExtractor(namespace=NS + ":443").extract(TABLES)
+        assert tid("main.sales.orders", NS + ":443") in by_id(with_port)
+        assert tid("main.sales.orders") not in by_id(with_port)
 
     async def test_agrees_with_openlineage_on_one_table(self) -> None:
         event = {
@@ -559,7 +645,102 @@ class TestIdentity:
                 )
             )
         assert counts[0] == counts[1]
-        assert counts[0][0] == 9
+        assert counts[0][0] == 7
+
+
+# ---------------------------------------------------------------------------
+# Separate runs against one store
+# ---------------------------------------------------------------------------
+
+#: Table lineage plus one column fact, naming only objects `TABLES` holds.
+LINEAGE_ONLY = [*TABLE_LINEAGE[:1], *COLUMN_LINEAGE]
+
+
+def _store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> StoreRegistry:
+    monkeypatch.setenv("TRELLIS_KNOWLEDGE_LINK_OR_MINT", "1")
+    stores = tmp_path / "stores"
+    stores.mkdir()
+    return StoreRegistry(stores_dir=stores)
+
+
+def _write(registry: StoreRegistry, result: ExtractionResult) -> None:
+    batch = result_to_batch(result, requested_by="test", bind_identity=True)
+    outcomes = build_curate_executor(registry, clearance="restricted").execute_batch(
+        batch
+    )
+    assert all(r.status is CommandStatus.SUCCESS for r in outcomes)
+
+
+def _props(registry: StoreRegistry, node_id: str) -> dict[str, Any]:
+    node = registry.knowledge.graph_store.get_node(node_id)
+    assert node is not None, node_id
+    return dict(node["properties"])
+
+
+class TestSeparateRuns:
+    @pytest.mark.parametrize("metadata_first", [True, False])
+    async def test_a_lineage_only_run_does_not_overwrite_metadata(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, metadata_first: bool
+    ) -> None:
+        registry = _store(tmp_path, monkeypatch)
+        metadata, lineage = await extract(TABLES), await extract(LINEAGE_ONLY)
+        for result in (metadata, lineage) if metadata_first else (lineage, metadata):
+            _write(registry, result)
+
+        orders = _props(registry, tid("main.sales.orders"))
+        assert orders["description"] == "One row per order"
+        assert orders["owner"] == "data-eng"
+        assert orders["table_type"] == "MANAGED"
+        assert "stub" not in orders
+        column = _props(registry, f"uc_column:{NS}:main.sales.orders/order_id")
+        assert column["type_text"] == "bigint"
+        assert column["description"] == "Primary key"
+        assert "stub" not in column
+
+        graph = registry.knowledge.graph_store
+        revenue = tid("main.sales.daily_revenue")
+        for node_id, upstream in (
+            (revenue, tid("main.sales.orders")),
+            (
+                f"uc_column:{NS}:main.sales.daily_revenue/revenue",
+                f"uc_column:{NS}:main.sales.orders/order_id",
+            ),
+        ):
+            edges = graph.get_edges(
+                node_id, direction="outgoing", edge_type="depends_on"
+            )
+            assert [e["target_id"] for e in edges] == [upstream]
+
+    async def test_a_lineage_only_run_alone_writes_edges_and_no_nodes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        registry = _store(tmp_path, monkeypatch)
+        result = await extract(LINEAGE_ONLY)
+        assert result.entities == []
+        _write(registry, result)
+
+        graph = registry.knowledge.graph_store
+        # The store accepts a dangling endpoint and creates no node for it.
+        assert graph.count_nodes() == 0
+        assert graph.count_edges() == 2
+        edges = graph.get_edges(
+            tid("main.sales.daily_revenue"),
+            direction="outgoing",
+            edge_type="depends_on",
+        )
+        assert [e["target_id"] for e in edges] == [tid("main.sales.orders")]
+
+    async def test_a_rerun_of_each_leaves_the_graph_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        registry = _store(tmp_path, monkeypatch)
+        graph = registry.knowledge.graph_store
+        counts = []
+        for _ in range(2):
+            for raw in (TABLES, LINEAGE_ONLY):
+                _write(registry, await extract(raw))
+            counts.append((graph.count_nodes(), graph.count_edges()))
+        assert counts[0] == counts[1]
 
 
 # ---------------------------------------------------------------------------

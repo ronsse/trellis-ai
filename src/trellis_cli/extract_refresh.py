@@ -128,10 +128,13 @@ def _read_unity_catalog_json(path: Path) -> Any:
     if not text:
         msg = f"Input file is empty: {path}"
         raise typer.BadParameter(msg)
+    too_deep = f"{path} is nested too deeply to read"
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
+    except RecursionError:
+        raise typer.BadParameter(too_deep) from None
     rows: list[Any] = []
     for number, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
@@ -140,6 +143,9 @@ def _read_unity_catalog_json(path: Path) -> Any:
             rows.append(json.loads(line))
         except json.JSONDecodeError:
             msg = f"{path} is not valid JSON (line {number} does not parse)"
+            raise typer.BadParameter(msg) from None
+        except RecursionError:
+            msg = f"{too_deep} (line {number})"
             raise typer.BadParameter(msg) from None
     return rows
 

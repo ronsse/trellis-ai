@@ -70,14 +70,31 @@ class TestRefresh:
         assert first.exit_code == 0, first.stdout
         data = json.loads(first.stdout.strip())
         assert data["status"] == "refreshed"
-        # catalog, two schemas, two tables, one column
-        assert data["entities_scanned"] == data["new_entities"] == 6
+        # catalog, schema, table, one column; `main.raw.events` is named by
+        # lineage only, so it gets no entity.
+        assert data["entities_scanned"] == data["new_entities"] == 4
 
         second = json.loads(_refresh(export).stdout.strip())
         assert second["new_entities"] == 0
         assert second["changed_entities"] == 0
-        assert second["unchanged_entities"] == 6
+        assert second["unchanged_entities"] == 4
         assert second["diffs"] == []
+
+    def test_a_lineage_only_refresh_changes_no_entity(self, tmp_path: Path) -> None:
+        metadata = tmp_path / "tables.json"
+        metadata.write_text(json.dumps(_TABLES))
+        lineage = tmp_path / "lineage.json"
+        lineage.write_text(json.dumps(_LINEAGE))
+        assert _refresh(metadata).exit_code == 0
+        after = json.loads(_refresh(lineage).stdout.strip())
+        assert after["status"] == "refreshed"
+        assert after["entities_scanned"] == 0
+        assert after["new_entities"] == after["changed_entities"] == 0
+        assert after["edges_emitted"] == 1
+        # The metadata run still reads back unchanged: nothing was overwritten.
+        again = json.loads(_refresh(metadata).stdout.strip())
+        assert again["changed_entities"] == again["new_entities"] == 0
+        assert again["unchanged_entities"] == 4
 
     def test_single_file_in_either_layout(self, tmp_path: Path) -> None:
         wrapped = tmp_path / "wrapped.json"
@@ -104,7 +121,7 @@ class TestRefresh:
             ],
         )
         assert result.exit_code == 0, result.stdout
-        assert json.loads(result.stdout.strip())["new_entities"] == 6
+        assert json.loads(result.stdout.strip())["new_entities"] == 4
 
 
 class TestRefusals:
@@ -133,6 +150,23 @@ class TestRefusals:
     def test_wrong_shape(self, tmp_path: Path, fmt: str) -> None:
         bad = tmp_path / "shape.json"
         bad.write_text(json.dumps({"tables": [{"name": "do-not-echo"}]}))
+        self._assert_refused(_refresh(bad, fmt), fmt, "do-not-echo")
+
+    @pytest.mark.parametrize("layout", ["document", "line"])
+    def test_input_nested_too_deep(self, tmp_path: Path, fmt: str, layout: str) -> None:
+        # Past the parser's recursion limit; the refusal names the file, not content.
+        nested = "[" * 5000 + "]" * 5000
+        bad = tmp_path / "deep.json"
+        bad.write_text(nested if layout == "document" else f"{{}}\n{nested}\n")
+        result = _refresh(bad, fmt)
+        self._assert_refused(result, fmt)
+        out = result.stdout + result.stderr
+        assert "nested too deeply" in out
+        assert "RecursionError" not in out
+
+    def test_a_column_record_is_not_an_export(self, tmp_path: Path, fmt: str) -> None:
+        bad = tmp_path / "column.json"
+        bad.write_text(json.dumps({"name": "do-not-echo", "type_text": "int"}))
         self._assert_refused(_refresh(bad, fmt), fmt, "do-not-echo")
 
     def test_not_an_export_at_all(self, tmp_path: Path, fmt: str) -> None:
