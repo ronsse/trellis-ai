@@ -85,7 +85,7 @@ def search(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(auth=trellis_scope(SCOPE_READ))
+@mcp.tool(auth=trellis_scope(SCOPE_READ, advanced=True))
 def get_objective_context(
     intent: str,
     domain: str = "",
@@ -163,7 +163,7 @@ def get_objective_context(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(auth=trellis_scope(SCOPE_READ))
+@mcp.tool(auth=trellis_scope(SCOPE_READ, advanced=True))
 def get_task_context(
     intent: str,
     entity_ids: list[str] | None = None,
@@ -247,7 +247,7 @@ def get_task_context(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(auth=trellis_scope(SCOPE_READ))
+@mcp.tool(auth=trellis_scope(SCOPE_READ, advanced=True))
 def get_sectioned_context(
     intent: str,
     sections: list[dict[str, Any]],

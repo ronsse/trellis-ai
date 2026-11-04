@@ -404,7 +404,11 @@ def _read_scoped_tools() -> dict[str, ast.FunctionDef]:
                 and ast.unparse(deco.func) == "mcp.tool"
                 and any(
                     kw.arg == "auth"
-                    and ast.unparse(kw.value) == "trellis_scope(SCOPE_READ)"
+                    and ast.unparse(kw.value)
+                    in {
+                        "trellis_scope(SCOPE_READ)",
+                        "trellis_scope(SCOPE_READ, advanced=True)",
+                    }
                     for kw in deco.keywords
                 )
             ):

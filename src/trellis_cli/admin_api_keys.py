@@ -1,4 +1,4 @@
-"""``trellis admin api-keys create`` / ``list`` / ``revoke``.
+"""``trellis admin api-keys``: create, list, revoke, set-defaults and rotate.
 
 Operator surface for the scoped REST credentials introduced by
 roadmap item E.5 (issue #191):
@@ -11,6 +11,13 @@ roadmap item E.5 (issue #191):
   state for every key. The secret hash is never printed.
 * ``revoke`` — close a live key. Unknown or already-revoked key ids
   exit non-zero (loud), per the POC loud-on-misuse directive.
+* ``set-defaults`` — replace (or ``--clear``) a live key's server-side defaults
+  block: ``agent_id``, ``domain``, ``team`` and a ``session_id`` prefix filled
+  into a call that omits them. A governed ``api_key.update``.
+* ``rotate`` — mint a successor with the key's scopes and defaults, then retire
+  the old key (revoked at once, or with ``--grace`` left valid for that long).
+  Two audited operations, mint first: a failure between them leaves both keys
+  valid, and the new token is still printed.
 
 Exit codes follow :mod:`trellis_cli.exit_codes`:
 
@@ -30,6 +37,7 @@ or written the key operation still runs, exits 0, and prints (text) or carries
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import structlog
 import typer
@@ -39,6 +47,8 @@ from rich.table import Table
 from trellis.auth import (
     SCOPE_EXTERNAL,
     SHOWN_ONCE_WARNING,
+    build_key_defaults,
+    parse_grace,
     public_listing_row,
 )
 from trellis.core.error_sanitize import sanitize_error_message
@@ -48,7 +58,13 @@ from trellis.mutate import (
     CommandStatus,
     build_api_keys_executor,
 )
-from trellis.mutate.api_key_commands import build_mint_command, build_revoke_command
+from trellis.mutate.api_key_commands import (
+    RotationOutcome,
+    build_mint_command,
+    build_revoke_command,
+    build_update_command,
+    rotate_key,
+)
 from trellis_cli.exit_codes import (
     EXIT_OK,
     EXIT_STORE,
@@ -139,16 +155,48 @@ def _render_refusal(result: CommandResult, key_id: str, output_format: str) -> N
 # ---------------------------------------------------------------------------
 
 
+def _validation_exit(message: str, output_format: str) -> None:
+    """Print an operator-input problem (the caller raises ``EXIT_VALIDATION``)."""
+    if output_format == "json":
+        print(
+            json.dumps(
+                {
+                    "error": "validation_error",
+                    "message": sanitize_error_message(message),
+                }
+            )
+        )
+    else:
+        console.print(f"[red]{escape(message)}[/red]", soft_wrap=True)
+
+
+def _defaults_lines(defaults: dict[str, str] | None) -> list[str]:
+    """Text lines naming a defaults block, empty when there is none."""
+    if not defaults:
+        return []
+    return [f"  default {field}: {escape(value)}" for field, value in defaults.items()]
+
+
 def create_api_key_command(
     *,
     name: str,
     scopes: str,
     output_format: str,
+    default_agent_id: str | None = None,
+    default_domain: str | None = None,
+    default_team: str | None = None,
+    default_session_id_prefix: str | None = None,
 ) -> None:
     """CLI body for ``api-keys create``."""
     try:
+        defaults = build_key_defaults(
+            agent_id=default_agent_id,
+            domain=default_domain,
+            team=default_team,
+            session_id_prefix=default_session_id_prefix,
+        )
         token, record, command = build_mint_command(
-            name, scopes, requested_by=_CLI_ACTOR
+            name, scopes, requested_by=_CLI_ACTOR, defaults=defaults
         )
     except ValueError as exc:
         if output_format == "json":
@@ -191,6 +239,8 @@ def create_api_key_command(
             f"({escape(_printable(record.name))})"
         )
         console.print(f"  scopes: {', '.join(record.scopes)}")
+        for line in _defaults_lines(public_listing_row(record).get("defaults")):
+            console.print(line, soft_wrap=True)
         if SCOPE_EXTERNAL in record.scopes:
             console.print(
                 "  [dim]external: reads only documents someone labelled public; "
@@ -226,6 +276,7 @@ def list_api_keys_command(*, output_format: str) -> None:
         table.add_column("scopes")
         table.add_column("created_at")
         table.add_column("revoked")
+        table.add_column("defaults")
         for row in rows:
             table.add_row(
                 escape(_printable(row["key_id"])),
@@ -233,6 +284,13 @@ def list_api_keys_command(*, output_format: str) -> None:
                 ",".join(row["scopes"]),
                 row["created_at"],
                 "yes" if row["revoked"] else "no",
+                escape(
+                    _printable(
+                        ", ".join(
+                            f"{k}={v}" for k, v in row.get("defaults", {}).items()
+                        )
+                    )
+                ),
             )
         console.print(table)
     raise typer.Exit(code=EXIT_OK)
@@ -259,6 +317,191 @@ def revoke_api_key_command(*, key_id: str, output_format: str) -> None:
     raise typer.Exit(code=EXIT_OK)
 
 
+def set_defaults_command(
+    *,
+    key_id: str,
+    agent_id: str | None,
+    domain: str | None,
+    team: str | None,
+    session_id_prefix: str | None,
+    clear: bool,
+    output_format: str,
+) -> None:
+    """CLI body for ``api-keys set-defaults``.
+
+    The block is replaced, not merged: a field not named is cleared, so the
+    command line is the whole truth about the key's defaults afterwards.
+    """
+    try:
+        defaults = build_key_defaults(
+            agent_id=agent_id,
+            domain=domain,
+            team=team,
+            session_id_prefix=session_id_prefix,
+        )
+        if clear and defaults is not None:
+            msg = "--clear cannot be combined with a default; pass one or the other"
+            raise ValueError(msg)  # noqa: TRY301
+        if not clear and defaults is None:
+            msg = (
+                "Nothing to set. Pass at least one of --agent-id, --domain, --team, "
+                "--session-id-prefix, or --clear to remove the key's defaults."
+            )
+            raise ValueError(msg)  # noqa: TRY301
+    except ValueError as exc:
+        _validation_exit(str(exc), output_format)
+        raise typer.Exit(code=EXIT_VALIDATION) from exc
+
+    try:
+        result = _execute(
+            build_update_command(key_id, defaults=defaults, requested_by=_CLI_ACTOR)
+        )
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        raise _store_error(exc, output_format) from exc
+    if result.status != CommandStatus.SUCCESS:
+        _render_refusal(result, key_id, output_format)
+        raise typer.Exit(code=refusal_exit_code(result))
+
+    shown = defaults.model_dump(exclude_none=True) if defaults is not None else {}
+    if output_format == "json":
+        print(
+            json.dumps(
+                {
+                    "status": "updated",
+                    "key_id": key_id,
+                    "defaults": shown or None,
+                    **_warnings(result),
+                }
+            )
+        )
+    else:
+        if shown:
+            console.print(f"[green]Set defaults on API key {escape(key_id)}.[/green]")
+            for line in _defaults_lines(shown):
+                console.print(line, soft_wrap=True)
+        else:
+            console.print(
+                f"[green]Cleared defaults on API key {escape(key_id)}.[/green]"
+            )
+        _print_warnings(result, output_format)
+    raise typer.Exit(code=EXIT_OK)
+
+
+def _rotation_payload(outcome: RotationOutcome, key_id: str) -> dict[str, Any]:
+    """The JSON a rotation that minted a key prints."""
+    assert outcome.token is not None
+    assert outcome.record is not None
+    failure = outcome.failure
+    payload: dict[str, Any] = {
+        "status": "rotated" if failure is None else "partial",
+        "token": outcome.token,
+        "warning": SHOWN_ONCE_WARNING,
+        "old_key_id": key_id,
+        "retired": outcome.retired,
+        "old_expires_at": (
+            outcome.old_expires_at.isoformat() if outcome.old_expires_at else None
+        ),
+        **public_listing_row(outcome.record),
+        **({"warnings": list(outcome.warnings)} if outcome.warnings else {}),
+    }
+    if failure is not None:
+        payload["error"] = str(
+            failure.metadata.get("rejection_reason") or failure.status.value
+        )
+        payload["message"] = sanitize_error_message(failure.message)
+    return payload
+
+
+def _print_rotation_text(outcome: RotationOutcome, key_id: str) -> None:
+    """Text output for a rotation that minted a key."""
+    assert outcome.token is not None
+    assert outcome.record is not None
+    record = outcome.record
+    console.print(
+        f"[bold]Created API key[/bold] {escape(record.key_id)} "
+        f"({escape(_printable(record.name))}), replacing {escape(key_id)}"
+    )
+    console.print(f"  scopes: {', '.join(record.scopes)}")
+    for line in _defaults_lines(public_listing_row(record).get("defaults")):
+        console.print(line, soft_wrap=True)
+    console.print(f"  token:  [bold green]{outcome.token}[/bold green]")
+    console.print(f"[yellow]{SHOWN_ONCE_WARNING}[/yellow]")
+    if outcome.failure is not None:
+        console.print(
+            f"[red]The old key {escape(key_id)} was NOT retired and is still "
+            f"valid: {escape(sanitize_error_message(outcome.failure.message))} "
+            "Revoke it with 'trellis admin api-keys revoke'.[/red]",
+            soft_wrap=True,
+        )
+    elif outcome.old_expires_at is not None:
+        console.print(
+            f"  old key {escape(key_id)} stays valid until "
+            f"{outcome.old_expires_at.isoformat()}"
+        )
+    else:
+        console.print(f"  old key {escape(key_id)} revoked")
+    for warning in outcome.warnings:
+        console.print(f"[yellow]warning: {escape(warning)}[/yellow]", soft_wrap=True)
+
+
+def _render_rotation(outcome: RotationOutcome, key_id: str, output_format: str) -> None:
+    """Print a rotation's outcome (the exit code is the caller's)."""
+    if outcome.refusal is not None:
+        reason, message = outcome.refusal
+        if output_format == "json":
+            print(json.dumps({"error": reason, "key_id": key_id, "message": message}))
+        else:
+            console.print(f"[red]{escape(message)}[/red]", soft_wrap=True)
+    elif outcome.token is None:
+        # Nothing was minted: the mint itself was refused or failed.
+        assert outcome.failure is not None
+        _render_refusal(outcome.failure, key_id, output_format)
+    elif output_format == "json":
+        print(json.dumps(_rotation_payload(outcome, key_id)))
+    else:
+        _print_rotation_text(outcome, key_id)
+
+
+def rotate_api_key_command(
+    *,
+    key_id: str,
+    grace: str | None,
+    name: str | None,
+    output_format: str,
+) -> None:
+    """CLI body for ``api-keys rotate``."""
+    try:
+        grace_delta = parse_grace(grace) if grace is not None else None
+    except ValueError as exc:
+        _validation_exit(str(exc), output_format)
+        raise typer.Exit(code=EXIT_VALIDATION) from exc
+
+    try:
+        outcome = rotate_key(
+            get_api_key_store(),
+            _execute,
+            key_id,
+            grace=grace_delta,
+            new_name=name,
+            requested_by=_CLI_ACTOR,
+        )
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        raise _store_error(exc, output_format) from exc
+
+    # One exit code per outcome, decided before the format branch.
+    code = EXIT_OK
+    if outcome.refusal is not None:
+        code = EXIT_VALIDATION
+    elif outcome.failure is not None:
+        code = refusal_exit_code(outcome.failure)
+    _render_rotation(outcome, key_id, output_format)
+    raise typer.Exit(code=code)
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -282,6 +525,26 @@ def create(  # pragma: no cover — Typer wrapper only
             "labelled public."
         ),
     ),
+    default_agent_id: str | None = typer.Option(
+        None,
+        "--default-agent-id",
+        help="Server-side default for agent_id on a call that omits it.",
+    ),
+    default_domain: str | None = typer.Option(
+        None,
+        "--default-domain",
+        help="Server-side default for domain on a call that omits it.",
+    ),
+    default_team: str | None = typer.Option(
+        None,
+        "--default-team",
+        help="Server-side team the key's writes are attributed to (pinned).",
+    ),
+    default_session_id_prefix: str | None = typer.Option(
+        None,
+        "--default-session-id-prefix",
+        help="Prefix of the session_id minted for a call that omits one.",
+    ),
     output_format: str = typer.Option(
         "text",
         "--format",
@@ -289,7 +552,15 @@ def create(  # pragma: no cover — Typer wrapper only
     ),
 ) -> None:
     """Mint a new scoped API key. The token is printed exactly once."""
-    create_api_key_command(name=name, scopes=scopes, output_format=output_format)
+    create_api_key_command(
+        name=name,
+        scopes=scopes,
+        output_format=output_format,
+        default_agent_id=default_agent_id,
+        default_domain=default_domain,
+        default_team=default_team,
+        default_session_id_prefix=default_session_id_prefix,
+    )
 
 
 @api_keys_app.command("list")
@@ -320,6 +591,64 @@ def revoke(  # pragma: no cover — Typer wrapper only
     revoke_api_key_command(key_id=key_id, output_format=output_format)
 
 
+@api_keys_app.command("set-defaults")
+def set_defaults(  # pragma: no cover — Typer wrapper only
+    key_id: str = typer.Argument(
+        ..., help="The key_id to update (see 'api-keys list')."
+    ),
+    agent_id: str | None = typer.Option(None, "--agent-id", help="Default agent_id."),
+    domain: str | None = typer.Option(None, "--domain", help="Default domain."),
+    team: str | None = typer.Option(None, "--team", help="Pinned team."),
+    session_id_prefix: str | None = typer.Option(
+        None, "--session-id-prefix", help="Prefix of a minted session_id."
+    ),
+    clear: bool = typer.Option(
+        False, "--clear", help="Remove every default from the key."
+    ),
+    output_format: str = typer.Option(
+        "text",
+        "--format",
+        help="Output format: text or json.",
+    ),
+) -> None:
+    """Replace a live key's server-side defaults (fields not named are cleared)."""
+    set_defaults_command(
+        key_id=key_id,
+        agent_id=agent_id,
+        domain=domain,
+        team=team,
+        session_id_prefix=session_id_prefix,
+        clear=clear,
+        output_format=output_format,
+    )
+
+
+@api_keys_app.command("rotate")
+def rotate(  # pragma: no cover — Typer wrapper only
+    key_id: str = typer.Argument(..., help="The key_id to rotate."),
+    grace: str | None = typer.Option(
+        None,
+        "--grace",
+        help=(
+            "Keep the old key valid for this long (30m, 24h, 7d; at most 90d). "
+            "Omit to revoke it at once."
+        ),
+    ),
+    name: str | None = typer.Option(
+        None, "--name", help="Name for the new key (default: the old key's name)."
+    ),
+    output_format: str = typer.Option(
+        "text",
+        "--format",
+        help="Output format: text or json.",
+    ),
+) -> None:
+    """Mint a successor with the same scopes and defaults, then retire the old key."""
+    rotate_api_key_command(
+        key_id=key_id, grace=grace, name=name, output_format=output_format
+    )
+
+
 def register(admin_app: typer.Typer) -> None:
     """Mount the ``api-keys`` sub-app onto the ``admin`` Typer app.
 
@@ -334,4 +663,6 @@ __all__ = [
     "list_api_keys_command",
     "register",
     "revoke_api_key_command",
+    "rotate_api_key_command",
+    "set_defaults_command",
 ]

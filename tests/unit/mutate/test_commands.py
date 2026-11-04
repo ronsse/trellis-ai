@@ -103,11 +103,11 @@ class TestOperation:
         # + CLASSIFICATION_TAG_REGULATORY (governed write of
         # DataClassification.regulatory_tags; refuses any document whose
         # serving it could change)
-        # + API_KEY_MINT + API_KEY_REVOKE (credential writes; handled only
-        # by trellis.mutate.build_api_keys_executor, never
+        # + API_KEY_MINT + API_KEY_REVOKE + API_KEY_UPDATE (credential writes;
+        # handled only by trellis.mutate.build_api_keys_executor, never
         # create_curate_handlers, so execute_mutation and POST
         # /commands/batch cannot mint or revoke a key)
-        assert len(Operation) == 32
+        assert len(Operation) == 33
 
 
 class TestCommand:

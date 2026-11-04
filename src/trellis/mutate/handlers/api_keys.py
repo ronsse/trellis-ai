@@ -1,12 +1,14 @@
-"""The ``api_key.mint`` and ``api_key.revoke`` handlers."""
+"""The ``api_key.mint``, ``api_key.revoke`` and ``api_key.update`` handlers."""
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from trellis.errors import ValidationError
 from trellis.mutate.commands import Command
 from trellis.mutate.executor import guarded_audit_emit
+from trellis.stores.base.api_key import UNSET, ApiKeyDefaults
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -82,6 +84,13 @@ class ApiKeyMintHandler:
                     "scopes": list(record.scopes),
                     "minted_by": command.requested_by,
                     **_api_key_actor(command),
+                    # Present only on a rotation, linking the new key to the
+                    # one it replaces.
+                    **(
+                        {"rotated_from": command.metadata["rotated_from"]}
+                        if command.metadata.get("rotated_from")
+                        else {}
+                    ),
                 },
             ),
         )
@@ -144,3 +153,89 @@ class ApiKeyRevokeHandler:
             ),
         )
         return key_id, f"API key {key_id} revoked"
+
+
+class ApiKeyUpdateHandler:
+    """Rewrite a live key's ``defaults`` and/or ``expires_at`` (``api_key.updated``).
+
+    ``args["defaults"]`` (an :class:`~trellis.stores.base.api_key.ApiKeyDefaults`
+    or ``None`` to clear) and ``args["expires_at"]`` (a ``datetime`` or ``None``
+    to clear) are each optional, and an absent one is left alone; at least one
+    must be present. The credential (scopes, name, secret) cannot be reached
+    through this handler. An unknown or revoked key is a
+    :class:`ValidationError`, like revoke. The values are checked here with the
+    same function a mint uses, so a hand-built command cannot store a default
+    the CLI would refuse.
+    """
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        from trellis.auth import key_default_refusal  # noqa: PLC0415
+
+        key_id = command.args["key_id"]
+        if not isinstance(key_id, str) or not key_id:
+            msg = "api_key.update requires a non-empty string 'key_id'"
+            raise ValidationError(msg, errors=[msg], code="invalid_key_id")
+        changed = [name for name in ("defaults", "expires_at") if name in command.args]
+        if not changed:
+            msg = "api_key.update needs 'defaults' and/or 'expires_at'"
+            raise ValidationError(msg, errors=[msg], code="nothing_to_update")
+        defaults = command.args.get("defaults", UNSET)
+        if defaults is not UNSET and defaults is not None:
+            if not isinstance(defaults, ApiKeyDefaults):
+                msg = "api_key.update requires args['defaults'] to be an ApiKeyDefaults"
+                raise ValidationError(msg, errors=[msg], code="invalid_defaults")
+            for field, value in defaults.model_dump(exclude_none=True).items():
+                refusal = key_default_refusal(field, value)
+                if refusal is not None:
+                    raise ValidationError(
+                        refusal, errors=[refusal], code="invalid_defaults"
+                    )
+        expires_at = command.args.get("expires_at", UNSET)
+        if (
+            expires_at is not UNSET
+            and expires_at is not None
+            and not isinstance(expires_at, datetime)
+        ):
+            msg = "api_key.update requires args['expires_at'] to be a datetime"
+            raise ValidationError(msg, errors=[msg], code="invalid_expiry")
+        store = self._registry.operational.api_key_store
+        existing = store.get(key_id)
+        if existing is None:
+            msg = f"Cannot update {key_id!r}: unknown key id."
+            raise ValidationError(msg, errors=[msg], code="unknown_key_id")
+        if existing.revoked_at is not None or not store.update(
+            key_id, defaults=defaults, expires_at=expires_at
+        ):
+            msg = f"Cannot update {key_id!r}: it is revoked."
+            raise ValidationError(msg, errors=[msg], code="already_revoked")
+        stored = store.get(key_id) or existing
+        guarded_audit_emit(
+            command,
+            EventType.API_KEY_UPDATED,
+            lambda: self._registry.operational.event_log.emit(
+                EventType.API_KEY_UPDATED,
+                source="mutation_executor",
+                entity_id=key_id,
+                entity_type="api_key",
+                payload={
+                    "key_id": key_id,
+                    "name": existing.name,
+                    "scopes": list(existing.scopes),
+                    "changed": changed,
+                    "defaults": (
+                        stored.defaults.model_dump(exclude_none=True)
+                        if stored.defaults is not None
+                        else None
+                    ),
+                    "expires_at": (
+                        stored.expires_at.isoformat() if stored.expires_at else None
+                    ),
+                    "updated_by": command.requested_by,
+                    **_api_key_actor(command),
+                },
+            ),
+        )
+        return key_id, f"API key {key_id} updated"

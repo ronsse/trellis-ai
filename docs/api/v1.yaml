@@ -315,6 +315,41 @@ components:
       - timeout_seconds
       title: AdminJobSummary
       type: object
+    ApiKeyDefaultsBody:
+      additionalProperties: false
+      description: 'A key''s server-side defaults: filled into a call that omits the field.
+
+
+        A default fills an omitted field and never overrides one the call set
+
+        (``team`` is the exception: it is pinned, since it is an attribution).
+
+        ``session_id_prefix`` is the prefix of a ``session_id`` minted for a call
+
+        that sends none. Every field is optional; an empty body stores nothing.'
+      properties:
+        agent_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Agent Id
+        domain:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Domain
+        session_id_prefix:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Session Id Prefix
+        team:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Team
+      title: ApiKeyDefaultsBody
+      type: object
     ApiKeyMintRequest:
       additionalProperties: false
       description: 'Body for ``POST /api/v1/api-keys``.
@@ -326,6 +361,10 @@ components:
 
         only as ``read,external`` on both surfaces.'
       properties:
+        defaults:
+          anyOf:
+          - $ref: '#/components/schemas/ApiKeyDefaultsBody'
+          - type: 'null'
         name:
           title: Name
           type: string
@@ -340,6 +379,44 @@ components:
       - name
       - scopes
       title: ApiKeyMintRequest
+      type: object
+    ApiKeyRotateRequest:
+      additionalProperties: false
+      description: 'Body for ``POST /api/v1/api-keys/{key_id}/rotate``.
+
+
+        ``grace`` (``30m`` / ``24h`` / ``7d``, at most ``90d``) keeps the old key
+
+        valid for that long; omitted, the old key is revoked at once. ``name``
+
+        labels the new key and defaults to the old key''s name.'
+      properties:
+        grace:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Grace
+        name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Name
+      title: ApiKeyRotateRequest
+      type: object
+    ApiKeySetDefaultsRequest:
+      additionalProperties: false
+      description: 'Body for ``PUT /api/v1/api-keys/{key_id}/defaults``.
+
+
+        Replaces the whole block: a field not named is cleared, and ``null`` (or an
+
+        empty body) removes every default.'
+      properties:
+        defaults:
+          anyOf:
+          - $ref: '#/components/schemas/ApiKeyDefaultsBody'
+          - type: 'null'
+      title: ApiKeySetDefaultsRequest
       type: object
     AxisReportResponse:
       additionalProperties: false
@@ -4033,6 +4110,82 @@ paths:
       security:
       - APIKeyHeader: []
       summary: Revoke Api Key
+      tags:
+      - api-keys
+  /api/v1/api-keys/{key_id}/defaults:
+    put:
+      description: Replace a live key's defaults block; ``null`` or an empty body clears it.
+      operationId: set_api_key_defaults_api_v1_api_keys__key_id__defaults_put
+      parameters:
+      - in: path
+        name: key_id
+        required: true
+        schema:
+          title: Key Id
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiKeySetDefaultsRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response Set Api Key Defaults Api V1 Api Keys  Key Id  Defaults Put
+                type: object
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Set Api Key Defaults
+      tags:
+      - api-keys
+  /api/v1/api-keys/{key_id}/rotate:
+    post:
+      description: Mint a successor with the key's scopes and defaults, then retire the old key.
+      operationId: rotate_api_key_api_v1_api_keys__key_id__rotate_post
+      parameters:
+      - in: path
+        name: key_id
+        required: true
+        schema:
+          title: Key Id
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              anyOf:
+              - $ref: '#/components/schemas/ApiKeyRotateRequest'
+              - type: 'null'
+              title: Req
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                title: Response Rotate Api Key Api V1 Api Keys  Key Id  Rotate Post
+                type: object
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Rotate Api Key
       tags:
       - api-keys
   /api/v1/classify/candidates:

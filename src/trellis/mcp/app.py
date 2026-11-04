@@ -8,6 +8,7 @@ from __future__ import annotations
 from fastmcp import FastMCP
 
 from trellis.mcp.access_log import AccessLogMiddleware
+from trellis.mcp.key_defaults import KeyDefaultsMiddleware
 from trellis.mcp.rejections import (
     _ExplainArgumentRejections,
     _SanitizeUncaughtToolErrors,
@@ -73,3 +74,4 @@ mcp.add_middleware(_ExplainArgumentRejections(mcp))
 # The lambda defers the lookup to call time, so a test that replaces the
 # registry on ``wiring`` is seen by the access log as well.
 mcp.add_middleware(AccessLogMiddleware(lambda: _get_registry()))  # noqa: PLW0108
+mcp.add_middleware(KeyDefaultsMiddleware())

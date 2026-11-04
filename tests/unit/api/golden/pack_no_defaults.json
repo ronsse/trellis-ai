@@ -1,0 +1,141 @@
+{
+  "advisories": [],
+  "agent_id": null,
+  "axes": {
+    "available": [
+      "keyword",
+      "graph"
+    ],
+    "embedder_error_type": null,
+    "embedder_setting": null,
+    "failed": [],
+    "graph": "unseeded_fallback_off",
+    "ran": [
+      "keyword",
+      "graph"
+    ],
+    "semantic": "not_configured"
+  },
+  "count": 3,
+  "domain": null,
+  "intent": "deployment runbook for the alpha service",
+  "items": [
+    {
+      "estimated_tokens": 29,
+      "excerpt": "Alpha service deployment runbook: drain the queue, roll the pods, verify health checks before reopening traffic.",
+      "included": true,
+      "injected_advisory_ids": [],
+      "item_id": "doc-alpha-runbook",
+      "item_type": "document",
+      "metadata": {
+        "domain": "platform",
+        "recency_clock": "row",
+        "source_strategy": "keyword"
+      },
+      "rank": 1,
+      "relevance_score": 0.01639,
+      "schema_version": "0.1.0",
+      "score_breakdown": {
+        "original_score": 1.084,
+        "rrf_keyword": 0.01639,
+        "rrf_total": 0.01639
+      },
+      "selection_reason": "selected_by_relevance",
+      "strategy_source": "keyword"
+    },
+    {
+      "estimated_tokens": 26,
+      "excerpt": "Alpha service rollback procedure: redeploy the previous image and replay the queue from the checkpoint.",
+      "included": true,
+      "injected_advisory_ids": [],
+      "item_id": "doc-alpha-rollback",
+      "item_type": "document",
+      "metadata": {
+        "domain": "platform",
+        "recency_clock": "row",
+        "source_strategy": "keyword"
+      },
+      "rank": 2,
+      "relevance_score": 0.01613,
+      "schema_version": "0.1.0",
+      "score_breakdown": {
+        "original_score": 3.733e-06,
+        "rrf_keyword": 0.01613,
+        "rrf_total": 0.01613
+      },
+      "selection_reason": "selected_by_relevance",
+      "strategy_source": "keyword"
+    },
+    {
+      "estimated_tokens": 16,
+      "excerpt": "Beta service notes on deployment cadence and review ownership.",
+      "included": true,
+      "injected_advisory_ids": [],
+      "item_id": "doc-beta-notes",
+      "item_type": "document",
+      "metadata": {
+        "domain": "data",
+        "recency_clock": "row",
+        "source_strategy": "keyword"
+      },
+      "rank": 3,
+      "relevance_score": 0.01587,
+      "schema_version": "0.1.0",
+      "score_breakdown": {
+        "original_score": 2.178e-06,
+        "rrf_keyword": 0.01587,
+        "rrf_total": 0.01587
+      },
+      "selection_reason": "selected_by_relevance",
+      "strategy_source": "keyword"
+    }
+  ],
+  "retrieval_report": {
+    "budget_trace": [
+      {
+        "included": true,
+        "item_id": "doc-alpha-runbook",
+        "item_tokens": 29,
+        "running_total": 29,
+        "schema_version": "0.1.0",
+        "walk_tokens": null
+      },
+      {
+        "included": true,
+        "item_id": "doc-alpha-rollback",
+        "item_tokens": 26,
+        "running_total": 55,
+        "schema_version": "0.1.0",
+        "walk_tokens": null
+      },
+      {
+        "included": true,
+        "item_id": "doc-beta-notes",
+        "item_tokens": 16,
+        "running_total": 71,
+        "schema_version": "0.1.0",
+        "walk_tokens": null
+      }
+    ],
+    "candidates_found": 3,
+    "graph_axis": "unseeded_fallback_off",
+    "items_selected": 3,
+    "queries_run": 2,
+    "rejected_items": [],
+    "schema_version": "0.1.0",
+    "strategies_used": [
+      "keyword",
+      "graph"
+    ]
+  },
+  "status": "ok",
+  "withholding": {
+    "by_reason": {},
+    "class_prior_detail": [],
+    "non_absence_reasons": [],
+    "section_filtered": 0,
+    "served_count": 3,
+    "total": 0,
+    "withheld_item_ids": []
+  }
+}

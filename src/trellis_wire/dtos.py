@@ -794,6 +794,43 @@ class RuntimeResponse(WireModel):
 # -- Settings (PR 3, governed settings write) --
 
 
+class ApiKeyDefaultsBody(WireRequestModel):
+    """A key's server-side defaults: filled into a call that omits the field.
+
+    A default fills an omitted field and never overrides one the call set
+    (``team`` is the exception: it is pinned, since it is an attribution).
+    ``session_id_prefix`` is the prefix of a ``session_id`` minted for a call
+    that sends none. Every field is optional; an empty body stores nothing.
+    """
+
+    agent_id: str | None = None
+    domain: str | None = None
+    team: str | None = None
+    session_id_prefix: str | None = None
+
+
+class ApiKeySetDefaultsRequest(WireRequestModel):
+    """Body for ``PUT /api/v1/api-keys/{key_id}/defaults``.
+
+    Replaces the whole block: a field not named is cleared, and ``null`` (or an
+    empty body) removes every default.
+    """
+
+    defaults: ApiKeyDefaultsBody | None = None
+
+
+class ApiKeyRotateRequest(WireRequestModel):
+    """Body for ``POST /api/v1/api-keys/{key_id}/rotate``.
+
+    ``grace`` (``30m`` / ``24h`` / ``7d``, at most ``90d``) keeps the old key
+    valid for that long; omitted, the old key is revoked at once. ``name``
+    labels the new key and defaults to the old key's name.
+    """
+
+    grace: str | None = None
+    name: str | None = None
+
+
 class ApiKeyMintRequest(WireRequestModel):
     """Body for ``POST /api/v1/api-keys``.
 
@@ -804,6 +841,8 @@ class ApiKeyMintRequest(WireRequestModel):
 
     name: str
     scopes: str | list[str]
+    #: Optional per-key server-side defaults (see :class:`ApiKeyDefaultsBody`).
+    defaults: ApiKeyDefaultsBody | None = None
 
 
 class SettingUpdateRequest(WireRequestModel):

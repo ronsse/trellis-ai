@@ -127,7 +127,7 @@ def record_observation(
     )
 
 
-@mcp.tool(auth=trellis_scope(SCOPE_READ))
+@mcp.tool(auth=trellis_scope(SCOPE_READ, advanced=True))
 def query_observations(
     subject_entity_id: str = "",
     observer_agent_id: str = "",

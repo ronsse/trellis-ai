@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 import structlog
 
 from trellis.core.base import utc_now
 from trellis.errors import StoreError
-from trellis.stores.base.api_key import ApiKeyRecord, ApiKeyStore
+from trellis.stores.base.api_key import (
+    UNSET,
+    ApiKeyDefaults,
+    ApiKeyRecord,
+    ApiKeyStore,
+    Unset,
+)
 from trellis.stores.postgres.base import PostgresStoreBase
 
 logger = structlog.get_logger(__name__)
@@ -21,8 +28,20 @@ CREATE TABLE IF NOT EXISTS trellis_api_keys (
     scopes JSONB NOT NULL DEFAULT '[]',
     secret_hash TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL,
-    revoked_at TIMESTAMPTZ
+    revoked_at TIMESTAMPTZ,
+    defaults JSONB,
+    expires_at TIMESTAMPTZ
 )"""
+
+#: Columns added after the first release; an existing table gets them on open.
+_ADDED_COLUMNS = (
+    "ALTER TABLE trellis_api_keys ADD COLUMN IF NOT EXISTS defaults JSONB",
+    "ALTER TABLE trellis_api_keys ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ",
+)
+
+_COLUMNS = (
+    "key_id, name, scopes, secret_hash, created_at, revoked_at, defaults, expires_at"
+)
 
 _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_api_keys_created ON trellis_api_keys(created_at)",
@@ -35,6 +54,8 @@ class PostgresApiKeyStore(PostgresStoreBase, ApiKeyStore):
     def _init_schema(self) -> None:
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(_CREATE_TABLE)
+            for alter_sql in _ADDED_COLUMNS:
+                cur.execute(alter_sql)
             for idx_sql in _CREATE_INDEXES:
                 cur.execute(idx_sql)
 
@@ -47,8 +68,9 @@ class PostgresApiKeyStore(PostgresStoreBase, ApiKeyStore):
             with self._conn() as conn, conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO trellis_api_keys ("
-                    "key_id, name, scopes, secret_hash, created_at, revoked_at"
-                    ") VALUES (%s, %s, %s, %s, %s, %s)",
+                    "key_id, name, scopes, secret_hash, created_at, revoked_at,"
+                    " defaults, expires_at"
+                    ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
                     (
                         record.key_id,
                         record.name,
@@ -56,6 +78,8 @@ class PostgresApiKeyStore(PostgresStoreBase, ApiKeyStore):
                         record.secret_hash,
                         record.created_at,
                         record.revoked_at,
+                        _dump_defaults(record.defaults),
+                        record.expires_at,
                     ),
                 )
         except psycopg.errors.UniqueViolation as exc:
@@ -88,13 +112,38 @@ class PostgresApiKeyStore(PostgresStoreBase, ApiKeyStore):
         logger.info("api_key.revoked", key_id=key_id)
         return True
 
+    def update(
+        self,
+        key_id: str,
+        *,
+        defaults: ApiKeyDefaults | Unset | None = UNSET,
+        expires_at: datetime | Unset | None = UNSET,
+    ) -> bool:
+        sets: list[str] = []
+        params: list[Any] = []
+        if not isinstance(defaults, Unset):
+            sets.append("defaults = %s")
+            params.append(_dump_defaults(defaults))
+        if not isinstance(expires_at, Unset):
+            sets.append("expires_at = %s")
+            params.append(expires_at)
+        if not sets:
+            return self.get(key_id) is not None
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE trellis_api_keys SET {', '.join(sets)}"
+                " WHERE key_id = %s AND revoked_at IS NULL",
+                (*params, key_id),
+            )
+            rowcount: int = cur.rowcount
+            return rowcount > 0
+
     # -- queries -------------------------------------------------------------
 
     def get(self, key_id: str) -> ApiKeyRecord | None:
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT key_id, name, scopes, secret_hash, created_at, revoked_at"
-                " FROM trellis_api_keys WHERE key_id = %s",
+                f"SELECT {_COLUMNS} FROM trellis_api_keys WHERE key_id = %s",
                 (key_id,),
             )
             row = cur.fetchone()
@@ -103,8 +152,8 @@ class PostgresApiKeyStore(PostgresStoreBase, ApiKeyStore):
     def list(self) -> list[ApiKeyRecord]:
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT key_id, name, scopes, secret_hash, created_at, revoked_at"
-                " FROM trellis_api_keys ORDER BY created_at DESC, key_id"
+                f"SELECT {_COLUMNS} FROM trellis_api_keys"
+                " ORDER BY created_at DESC, key_id"
             )
             rows = cur.fetchall()
         return [self._row_to_record(row) for row in rows]
@@ -113,7 +162,16 @@ class PostgresApiKeyStore(PostgresStoreBase, ApiKeyStore):
 
     @staticmethod
     def _row_to_record(row: tuple[Any, ...]) -> ApiKeyRecord:
-        key_id, name, scopes, secret_hash, created_at, revoked_at = row
+        (
+            key_id,
+            name,
+            scopes,
+            secret_hash,
+            created_at,
+            revoked_at,
+            defaults,
+            expires_at,
+        ) = row
         # psycopg decodes JSONB to a Python list already; tolerate the
         # raw-string shape for drivers configured without JSON loaders.
         if isinstance(scopes, str):
@@ -125,4 +183,22 @@ class PostgresApiKeyStore(PostgresStoreBase, ApiKeyStore):
             secret_hash=secret_hash,
             created_at=created_at,
             revoked_at=revoked_at,
+            defaults=_load_defaults(defaults),
+            expires_at=expires_at,
         )
+
+
+def _dump_defaults(defaults: ApiKeyDefaults | None) -> str | None:
+    """The stored (JSONB) form of a defaults block: ``None`` for no block."""
+    if defaults is None or defaults.is_empty():
+        return None
+    return defaults.model_dump_json(exclude_none=True)
+
+
+def _load_defaults(raw: Any) -> ApiKeyDefaults | None:
+    if raw is None:
+        return None
+    # psycopg decodes JSONB to a dict; tolerate the raw-string shape.
+    return ApiKeyDefaults.model_validate(
+        json.loads(raw) if isinstance(raw, str) else raw
+    )

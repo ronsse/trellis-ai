@@ -250,9 +250,11 @@ NON_CAPTURE_SURFACES: frozenset[str] = frozenset(
 #: ``requested_by`` per key (``api:<key>``) and the same label also ingests; the
 #: filter is on the event's ``operation`` instead. The literals are spelled out
 #: (``ops`` does not import ``trellis.mutate``) and pinned equal to
-#: ``Operation.API_KEY_MINT`` / ``API_KEY_REVOKE`` by
+#: ``Operation.API_KEY_MINT`` / ``API_KEY_REVOKE`` / ``API_KEY_UPDATE`` by
 #: ``tests/unit/ops/test_capture_health_key_operations.py``.
-NON_CAPTURE_OPERATIONS: frozenset[str] = frozenset({"api_key.mint", "api_key.revoke"})
+NON_CAPTURE_OPERATIONS: frozenset[str] = frozenset(
+    {"api_key.mint", "api_key.revoke", "api_key.update"}
+)
 
 
 def _is_key_operation(operation: object) -> bool:

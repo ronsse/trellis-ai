@@ -45,9 +45,11 @@ def _mint(registry: StoreRegistry) -> None:
 
 
 def test_the_literals_match_the_operations() -> None:
-    assert {Operation.API_KEY_MINT.value, Operation.API_KEY_REVOKE.value} == (
-        NON_CAPTURE_OPERATIONS
-    )
+    assert {
+        Operation.API_KEY_MINT.value,
+        Operation.API_KEY_REVOKE.value,
+        Operation.API_KEY_UPDATE.value,
+    } == NON_CAPTURE_OPERATIONS
 
 
 def test_three_refused_key_operations_raise_no_banner(registry: StoreRegistry) -> None:

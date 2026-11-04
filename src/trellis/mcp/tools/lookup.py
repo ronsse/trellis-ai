@@ -52,7 +52,7 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(auth=trellis_scope(SCOPE_READ))
+@mcp.tool(auth=trellis_scope(SCOPE_READ, advanced=True))
 def get_lessons(
     domain: str | None = None,
     limit: int = 10,
@@ -71,7 +71,9 @@ def get_lessons(
     With ``TRELLIS_GET_LESSONS_PACK_EVENT`` on, the reply ends with a
     ``pack_id`` and the served ids so ``record_feedback`` can grade them.
     """
-    from trellis.retrieve.precedents import list_precedents as _list_prec  # noqa: PLC0415
+    from trellis.retrieve.precedents import (
+        list_precedents as _list_prec,
+    )
 
     _refuse_public_caller("get_lessons")
     registry = _get_registry()
@@ -117,7 +119,7 @@ def get_lessons(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(auth=trellis_scope(SCOPE_READ))
+@mcp.tool(auth=trellis_scope(SCOPE_READ, advanced=True))
 def get_graph(
     entity_id: str,
     depth: int = 1,
@@ -341,7 +343,7 @@ def get_items(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(auth=trellis_scope(SCOPE_READ))
+@mcp.tool(auth=trellis_scope(SCOPE_READ, advanced=True))
 def get_file_context(
     paths: list[str],
     include_unconfirmed: bool = False,

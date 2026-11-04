@@ -60,7 +60,7 @@ import os
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import NoReturn
+from typing import TYPE_CHECKING, NoReturn
 
 import structlog
 from fastapi import Depends, HTTPException, Request, Security, status
@@ -68,6 +68,9 @@ from fastapi.security import APIKeyHeader
 
 from trellis.auth import ALL_SCOPES, scopes_satisfy, verify_token
 from trellis.errors import ConfigError
+
+if TYPE_CHECKING:
+    from trellis.stores.base.api_key import ApiKeyDefaults
 
 logger = structlog.get_logger(__name__)
 
@@ -111,6 +114,9 @@ class AuthContext:
     name: str | None
     scopes: frozenset[str]
     mode: str
+    #: The stored key's server-side defaults block; ``None`` for a key that
+    #: set none and for every anonymous or shared-secret caller.
+    defaults: ApiKeyDefaults | None = None
 
 
 def resolve_auth_mode() -> str:
@@ -285,6 +291,7 @@ def authenticate(
         name=record.name,
         scopes=frozenset(record.scopes),
         mode=mode,
+        defaults=record.defaults,
     )
 
 

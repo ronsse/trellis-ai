@@ -6,7 +6,11 @@ from typing import TYPE_CHECKING, Any
 
 from trellis.mutate.commands import Operation
 from trellis.mutate.evidence_ingest import EvidenceEmbedMode
-from trellis.mutate.handlers.api_keys import ApiKeyMintHandler, ApiKeyRevokeHandler
+from trellis.mutate.handlers.api_keys import (
+    ApiKeyMintHandler,
+    ApiKeyRevokeHandler,
+    ApiKeyUpdateHandler,
+)
 from trellis.mutate.handlers.classification import (
     ClassificationSetHandler,
     ClassificationTagRegulatoryHandler,
@@ -102,6 +106,7 @@ def create_api_key_handlers(registry: StoreRegistry) -> dict[str, Any]:
     return {
         Operation.API_KEY_MINT: ApiKeyMintHandler(registry),
         Operation.API_KEY_REVOKE: ApiKeyRevokeHandler(registry),
+        Operation.API_KEY_UPDATE: ApiKeyUpdateHandler(registry),
     }
 
 

@@ -19,7 +19,7 @@ from mcp.shared.exceptions import McpError
 import trellis.mcp.server as server_mod
 import trellis.mcp.tools.context as context_tools_mod
 from tests.unit.mcp.conftest import mint, unwrap_tool
-from tests.unit.mcp.test_auth import EXPECTED_TOOL_SCOPES
+from tests.unit.mcp.test_auth import EXPECTED_TOOL_SCOPES, READ_TIER
 from tests.unit.mcp.test_sensitivity_surfaces import as_http, as_stdio
 from tests.unit.retrieve.test_sensitivity import label
 from trellis.auth import SCOPE_INGEST, SCOPE_MUTATE, SCOPE_READ, clearance_of
@@ -103,9 +103,7 @@ class TestToolVisibility:
         finally:
             set_auth_enforced(enforced=True)
         visible = {n for n, t in tools.items() if t.auth(ctx)}  # type: ignore[attr-defined]
-        assert visible == {
-            n for n, s in EXPECTED_TOOL_SCOPES.items() if s == SCOPE_READ
-        }
+        assert visible == READ_TIER
 
 
 def _auth_context(scopes: list[str]) -> AuthContext:

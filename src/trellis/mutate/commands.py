@@ -66,6 +66,9 @@ class Operation(StrEnum):
     # ``create_curate_handlers``, so ``execute_mutation`` cannot mint a key.
     API_KEY_MINT = "api_key.mint"
     API_KEY_REVOKE = "api_key.revoke"
+    # Rewrites the two non-credential columns of a live key: its defaults block
+    # and its expiry (the grace period of a rotation). Never scopes or secret.
+    API_KEY_UPDATE = "api_key.update"
 
 
 class CommandStatus(StrEnum):
@@ -389,6 +392,7 @@ class OperationRegistry:
         self._schemas[Operation.SETTINGS_UPDATE] = {"name", "value"}
         self._schemas[Operation.API_KEY_MINT] = {"record"}
         self._schemas[Operation.API_KEY_REVOKE] = {"key_id"}
+        self._schemas[Operation.API_KEY_UPDATE] = {"key_id"}
         self._schemas[Operation.CLASSIFY_RULE_APPLY] = {
             "kind",
             "key",

@@ -25,14 +25,16 @@ from __future__ import annotations
 import hashlib
 import secrets
 import unicodedata
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.core.base import utc_now
 from trellis.schemas.classification import (
     Sensitivity,
 )
-from trellis.stores.base.api_key import ApiKeyRecord
+from trellis.stores.base.api_key import ApiKeyDefaults, ApiKeyRecord
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -102,6 +104,26 @@ def holds_external(granted: Iterable[str]) -> bool:
         isinstance(scope, str) and scope.strip().lower() == SCOPE_EXTERNAL
         for scope in granted
     )
+
+
+#: Scopes that grant a surface beyond reading. A credential holding none of them
+#: is a *read-only key* (``external`` and the clearance scopes only narrow or
+#: widen what a read sees), which is the key shape the narrow MCP tool tier
+#: applies to (:func:`is_read_only_key`).
+WRITE_CAPABLE_SCOPES: frozenset[str] = frozenset(
+    {SCOPE_INGEST, SCOPE_MUTATE, SCOPE_ADMIN}
+)
+
+
+def is_read_only_key(granted: Iterable[str]) -> bool:
+    """Whether ``granted`` reads but holds no ingest, mutate or admin scope.
+
+    The one test the read tool tier keys on: a credential that can write
+    anything keeps the full tool list it always had, so the tier changes nothing
+    for the keys agents write through.
+    """
+    held = frozenset(granted)
+    return not (held & WRITE_CAPABLE_SCOPES)
 
 
 def scopes_satisfy(granted: frozenset[str], required: str) -> bool:
@@ -248,8 +270,12 @@ KEY_PRESETS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 
 def public_listing_row(record: ApiKeyRecord) -> dict[str, Any]:
-    """The listable shape of a key: never the secret hash, never any of the secret."""
-    return {
+    """The listable shape of a key: never the secret hash, never any of the secret.
+
+    ``defaults`` and ``expires_at`` appear only on a key that sets them, so the
+    row of a key minted before they existed is exactly what it always was.
+    """
+    row: dict[str, Any] = {
         "key_id": record.key_id,
         "name": record.name,
         "scopes": list(record.scopes),
@@ -257,6 +283,116 @@ def public_listing_row(record: ApiKeyRecord) -> dict[str, Any]:
         "revoked": record.revoked_at is not None,
         "revoked_at": (record.revoked_at.isoformat() if record.revoked_at else None),
     }
+    if record.defaults is not None:
+        row["defaults"] = record.defaults.model_dump(exclude_none=True)
+    if record.expires_at is not None:
+        row["expires_at"] = record.expires_at.isoformat()
+    return row
+
+
+#: The longest default value any surface accepts, after stripping.
+KEY_DEFAULT_MAX_CHARS = 120
+
+
+def key_default_refusal(field: str, value: str) -> str | None:
+    """Why ``value`` cannot be the key's default ``field``, or ``None``.
+
+    Values are echoed in listings and stamped on telemetry, so they follow the
+    key-name rule: non-empty, bounded, no control, format or separator-line
+    character. ``domain`` has no separate normaliser at the call boundary (a
+    call's ``domain`` is stripped and otherwise passed as typed), so the stored
+    default is stripped the same way and not case-folded.
+    """
+    if not value or not value.strip():
+        return f"default {field} must be a non-empty string"
+    if len(value) > KEY_DEFAULT_MAX_CHARS:
+        return (
+            f"default {field} is {len(value)} characters; "
+            f"the limit is {KEY_DEFAULT_MAX_CHARS}"
+        )
+    if any(
+        unicodedata.category(c)[0] == "C" or unicodedata.category(c) in ("Zl", "Zp")
+        for c in value
+    ):
+        return f"default {field} must not contain control or non-printing characters"
+    return None
+
+
+def build_key_defaults(
+    *,
+    agent_id: str | None = None,
+    domain: str | None = None,
+    team: str | None = None,
+    session_id_prefix: str | None = None,
+) -> ApiKeyDefaults | None:
+    """A validated defaults block, or ``None`` when no field is given.
+
+    The one build every surface (CLI flags, the REST body, rotation) calls.
+    Raises :class:`ValueError` on a value :func:`key_default_refusal` refuses;
+    nothing has been written then.
+    """
+    given = {
+        "agent_id": agent_id,
+        "domain": domain,
+        "team": team,
+        "session_id_prefix": session_id_prefix,
+    }
+    clean: dict[str, str] = {}
+    for field, value in given.items():
+        if value is None:
+            continue
+        refusal = key_default_refusal(field, value)
+        if refusal is not None:
+            raise ValueError(refusal)
+        clean[field] = value.strip()
+    return ApiKeyDefaults(**clean) if clean else None
+
+
+_GRACE_UNITS = {
+    "s": timedelta(seconds=1),
+    "m": timedelta(minutes=1),
+    "h": timedelta(hours=1),
+    "d": timedelta(days=1),
+    "w": timedelta(weeks=1),
+}
+#: A grace period is a hand-over window, not a second lifetime.
+GRACE_MAX = timedelta(days=90)
+
+
+def parse_grace(text: str) -> timedelta:
+    """``30m`` / ``24h`` / ``7d`` / ``2w`` as a :class:`~datetime.timedelta`.
+
+    Raises :class:`ValueError` on any other shape, on zero, and on more than
+    :data:`GRACE_MAX`. Rotating with no grace at all is spelled by leaving the
+    option out, never by ``0``.
+    """
+    raw = text.strip().lower()
+    unit = _GRACE_UNITS.get(raw[-1:]) if raw else None
+    if unit is None or not raw[:-1].isdecimal():
+        msg = (
+            f"Invalid grace period {text!r}; "
+            "expected a number and a unit, e.g. 30m, 24h, 7d"
+        )
+        raise ValueError(msg)
+    grace = int(raw[:-1]) * unit
+    if grace <= timedelta(0):
+        msg = "Grace period must be positive; omit it to retire the old key at once"
+        raise ValueError(msg)
+    if grace > GRACE_MAX:
+        msg = f"Grace period {text!r} is over the {GRACE_MAX.days}-day limit"
+        raise ValueError(msg)
+    return grace
+
+
+def fill_omitted(value: str | None, default: str | None) -> str | None:
+    """``value`` when the call set it, else the key's ``default``.
+
+    A field the call set is never overridden; a ``None`` or blank value is an
+    omitted field (every tool already reads an empty string as unset).
+    """
+    if value is not None and value.strip():
+        return value
+    return default
 
 
 def hash_secret(secret: str) -> str:
@@ -264,7 +400,11 @@ def hash_secret(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
-def generate_api_key(name: str, scopes: Iterable[str]) -> tuple[str, ApiKeyRecord]:
+def generate_api_key(
+    name: str,
+    scopes: Iterable[str],
+    defaults: ApiKeyDefaults | None = None,
+) -> tuple[str, ApiKeyRecord]:
     """Mint a new API key.
 
     Returns ``(token, record)``. The token is shown to the caller once
@@ -298,6 +438,7 @@ def generate_api_key(name: str, scopes: Iterable[str]) -> tuple[str, ApiKeyRecor
         name=clean_name,
         scopes=scope_tuple,
         secret_hash=hash_secret(secret),
+        defaults=None if defaults is None or defaults.is_empty() else defaults,
     )
     logger.info(
         "api_key.generated",
@@ -349,5 +490,10 @@ def verify_token(token: str, store: ApiKeyStore) -> ApiKeyRecord | None:
         return None
     if not secrets.compare_digest(hash_secret(secret), record.secret_hash):
         logger.warning("api_key.verify_failed", reason="mismatch", key_id=key_id)
+        return None
+    if record.expires_at is not None and record.expires_at <= utc_now():
+        # A rotated key's grace period has ended. Checked after the secret
+        # matches so an unauthenticated probe learns nothing from the timing.
+        logger.warning("api_key.verify_failed", reason="expired", key_id=key_id)
         return None
     return record
