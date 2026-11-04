@@ -3724,6 +3724,12 @@ already exist on the server's local disk, with no shipped default set —
 there is no bounded query-param shape for "a path on the server's
 filesystem," so it is a premise refutation rather than unfinished work.
 
+**A sealed report.** `holdout` is the one report that reads a per-arm outcome.
+While `TRELLIS_HOLDOUT_READOUT_AFTER` is set and in the future, `GET
+/api/v1/analyze/holdout` answers `409` (`code: "holdout_readout_sealed"`, the
+horizon in `message`) before the cache lookup and before any event is read, and
+the other ten reports are unaffected. See [the readout seal](#readout-seal).
+
 **Finite JSON, always.** Every response passes through a recursive
 non-finite-float sanitizer before `JSONResponse`, which also sets
 `allow_nan=False`: a latent `inf`/`nan` becomes `null` rather than
@@ -3904,6 +3910,38 @@ trellis analyze holdout [--days N] [--until ISO] [--rate R] [--outcome NAME] [--
 | `--settle-hours` | `3` | Hours a completed capture sweep must follow a task's latest join before the task counts as finished |
 | `--seed` | `20261004` | Seed for every random draw, so a report reproduces |
 | `--limit` | `5000` | Max events scanned per event type; with `--operational` it is refused (exit `2`), since that mode pages to completion |
+
+<a id="readout-seal"></a>
+**The readout seal.** The experiment is blind only while nobody reads an
+outcome, so the outcome is sealed by code. `TRELLIS_HOLDOUT_READOUT_AFTER` is an
+ISO-8601 date or timestamp (naive is UTC). Unset or blank, nothing is sealed
+and the command behaves as it always has. Set, every surface that computes an
+outcome-derived figure (the per-arm means, the estimate, the interval and
+p-value, and `--by-commit`'s per-build means) refuses until that instant, and
+answers normally from it on; a read at exactly the horizon is open. The gate
+is `require_readout_open()` in `trellis.analyze.holdout_gate`, called before
+any event is read for a figure, so the refusal carries the horizon and the fact
+that the outcome is sealed, and nothing about the arms, their sizes or the
+window. It writes no event.
+
+| Surface | Before the horizon | Malformed value |
+|---------|--------------------|-----------------|
+| `trellis analyze holdout` (with or without `--by-commit`) | exit `3`; `--format json` prints `{"status": "refused", "reason": "outcome_sealed", "horizon": ..., "message": ..., "hint": "trellis analyze holdout --operational"}`; text prints the message. The exit is the same in both formats | exit `5`; the outcome is not read |
+| `GET /api/v1/analyze/holdout` | `409`, `code: "holdout_readout_sealed"`, the message naming the horizon; checked before the response cache, so a warm entry cannot answer | `409`, `code: "config_error"` |
+| Reports tab (Reports picker, holdout report) | the refusal reads "Failed to run report: ..." with the horizon; the rest of the picker works | the same, with the setting named |
+| MCP | no tool reports the outcome | n/a |
+
+A value that is not a date fails closed: the gate raises `ConfigError` rather
+than treating it as unset, so a typo withholds the outcome rather than opening
+it. REST answers `409`, not `403`, because the Reports tab reads a `403` as an
+under-scoped key and would hide the refusal text behind a key banner.
+`--operational` is never sealed: it reads no outcome value, and it is the way to
+confirm the experiment is running before the horizon. It is a CLI mode; the REST
+route and the Reports tab have no operational variant. A new surface that
+reports the outcome calls `analyze_holdout_gated`, never `analyze_holdout`, and
+`tests/unit/analyze/test_holdout_gate_rule.py` fails until it does. What each
+result commits the project to is in the
+[decision matrix](../design/holdout-decision-matrix.md).
 
 A unit is a finished sub-agent task (its join names a parent session) whose
 first pack is non-empty in its own arm's terms: a withheld row's

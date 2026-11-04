@@ -848,6 +848,7 @@ def test_the_must_exit_helper_set_is_exactly_the_must_exit_helpers() -> None:
     ``admin._refuse_option``, ``ingest._fail``,
     ``policy._exit_on_refused_write``,
     ``analyze._exit_on_refused_advisory_write``,
+    ``analyze._refuse_sealed_holdout``,
     ``classify.effective_rules`` and ``main``'s two
     boundary renderers are the shape: render on the caller's surface, then
     exit below the branch. If this set silently
@@ -892,7 +893,11 @@ def test_the_must_exit_helper_set_is_exactly_the_must_exit_helpers() -> None:
         # format branch, and its Typer wrapper only delegates to it. Admitted
         # deliberately, per this docstring.
         "admin_access_log": {"access_log_command", "access_log"},
-        "analyze": {"_exit_on_refused_advisory_write"},
+        # ``analyze._refuse_sealed_holdout``: a sealed holdout outcome read
+        # renders the horizon on the caller's surface, then raises
+        # ``typer.Exit`` below the format branch with no ``return``, and is
+        # typed ``NoReturn``. Admitted deliberately, per this docstring.
+        "analyze": {"_exit_on_refused_advisory_write", "_refuse_sealed_holdout"},
         # ``trellis classify effective-rules``: every arm of its own
         # format branch raises ``typer.Exit`` and the function defines no
         # ``return``, so it has the must-exit shape in its own right (it is

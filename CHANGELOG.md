@@ -4,6 +4,24 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **The pack-holdout outcome can be sealed until a pre-registered horizon, by code.**
+  `TRELLIS_HOLDOUT_READOUT_AFTER` (an ISO-8601 date or timestamp, UTC when naive; unset
+  means no gate) makes every surface that computes an outcome-derived holdout figure refuse
+  until that instant: `trellis analyze holdout` (`--by-commit` included) exits `3` with
+  `status: "refused"`, the horizon and a pointer to `--operational` (the same exit in text and
+  json), and `GET /api/v1/analyze/holdout` answers `409` `holdout_readout_sealed`, which the
+  Reports tab shows as its failure text. The gate, `require_readout_open()`, sits in
+  `trellis.analyze.holdout_gate` and runs before any event is read, so the refusal carries the
+  horizon and nothing about the arms, and it writes no event. A malformed value fails closed
+  (`ConfigError`: exit `5`, REST `409` `config_error`). `trellis analyze holdout --operational`
+  is never sealed. Surfaces call `analyze_holdout_gated`;
+  `tests/unit/analyze/test_holdout_gate_rule.py` fails when a surface reaches the outcome
+  around it. No computed figure changes. A new
+  [decision matrix](docs/design/holdout-decision-matrix.md) says what each result commits the
+  project to.
+
 ### Changed
 
 - **One typed reader for a pack's served rows and for a feedback row.**
