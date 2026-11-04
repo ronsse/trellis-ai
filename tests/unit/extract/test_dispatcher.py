@@ -21,6 +21,7 @@ from trellis.extract.validators import (
 from trellis.schemas.entity import GenerationSpec
 from trellis.schemas.enums import NodeRole
 from trellis.schemas.extraction import (
+    AliasDraft,
     EdgeDraft,
     EntityDraft,
     ExtractionProvenance,
@@ -396,6 +397,50 @@ class TestExtractionValidatorEnforcement:
         assert rejected["edges"][0]["target_id"] == "ent_missing"
         assert len(rejected["findings"]) >= 1
         assert any(f["code"] == "orphan_edge" for f in rejected["findings"])
+
+    async def test_residue_never_carries_aliases(
+        self, event_log: SQLiteEventLog
+    ) -> None:
+        """Knob off, a draft with an alias leaves the same residue as one
+        without: ``aliases`` exists for the opt-in bind, not for forensics."""
+        reg = ExtractorRegistry()
+        reg.register(
+            _custom_extractor(
+                "det",
+                ExtractorTier.DETERMINISTIC,
+                ["s"],
+                entities=[
+                    EntityDraft(
+                        entity_id="ent_a",
+                        entity_type="x",
+                        name="a",
+                        aliases=[AliasDraft(source_system="dbt", raw_id="model.a")],
+                    )
+                ],
+                edges=[
+                    EdgeDraft(
+                        source_id="ent_a",
+                        target_id="ent_missing",
+                        edge_kind="related_to",
+                    )
+                ],
+            )
+        )
+        d = ExtractionDispatcher(
+            reg,
+            event_log=event_log,
+            validators=[DraftLocalReferenceValidator()],
+        )
+        result = await d.dispatch({}, source_hint="s")
+
+        assert isinstance(result.unparsed_residue, dict)
+        rejected = result.unparsed_residue["rejected_by_validators"]
+        assert "aliases" not in rejected["entities"][0]
+        with_alias = rejected["entities"][0]
+        without_alias = EntityDraft(
+            entity_id="ent_a", entity_type="x", name="a"
+        ).model_dump(mode="json", exclude={"aliases"})
+        assert with_alias == without_alias
 
     async def test_emits_extraction_rejected_event(
         self, event_log: SQLiteEventLog

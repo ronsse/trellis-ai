@@ -268,6 +268,62 @@ class TestUnityCatalogShape:
         assert row is not None
         assert row["entity_id"] == "main.sales.orders"
 
+    @pytest.mark.parametrize(
+        "full_name",
+        ["Main.Sales.Orders", "`main`.`sales`.`orders`", "MAIN.sales.`Orders`"],
+    )
+    async def test_the_bound_key_is_case_folded_and_unquoted(
+        self, registry: StoreRegistry, full_name: str
+    ) -> None:
+        extractor = JSONRulesExtractor(
+            "uc",
+            ExtractionRuleBundle(
+                entity_rules=[
+                    EntityRule(
+                        name="table",
+                        path=["tables", "*"],
+                        entity_type="table",
+                        id_field="full_name",
+                        name_field="name",
+                        alias_source_system="unity_catalog",
+                    )
+                ]
+            ),
+            supported_sources=["uc"],
+        )
+        raw = {"tables": [{"full_name": full_name, "name": "orders"}]}
+        result = await extractor.extract(raw, source_hint="uc")
+        assert [a.raw_id for a in result.entities[0].aliases] == ["main.sales.orders"]
+        _run(registry, result, bind=True)
+        graph = registry.knowledge.graph_store
+        assert graph.resolve_alias("unity_catalog", "main.sales.orders") is not None
+        assert graph.resolve_alias("unity_catalog", full_name) is None or (
+            full_name == "main.sales.orders"
+        )
+
+    async def test_another_system_binds_the_id_as_given(
+        self, registry: StoreRegistry
+    ) -> None:
+        extractor = JSONRulesExtractor(
+            "x",
+            ExtractionRuleBundle(
+                entity_rules=[
+                    EntityRule(
+                        name="table",
+                        path=["tables", "*"],
+                        entity_type="table",
+                        id_field="full_name",
+                        alias_source_system="warehouse",
+                    )
+                ]
+            ),
+            supported_sources=["x"],
+        )
+        result = await extractor.extract(
+            {"tables": [{"full_name": "Main.Sales.Orders"}]}, source_hint="x"
+        )
+        assert [a.raw_id for a in result.entities[0].aliases] == ["Main.Sales.Orders"]
+
     def test_a_rule_without_a_system_binds_nothing(self) -> None:
         rules = ExtractionRuleBundle(
             entity_rules=[

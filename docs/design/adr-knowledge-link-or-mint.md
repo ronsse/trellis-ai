@@ -32,16 +32,28 @@ a bound `(source_system, raw_id)` is a no-op. `require_entity=True` refuses an a
 whose own create did not land.
 
 **Attach.** A note whose normalised name resolves to a current, semantic, non-namespaced node of the
-same type is not duplicated. The only write is one `entity.update`: properties the node lacks (never
-an overwrite) and the new evidence document id appended to `document_ids`. No node and no alias is
-written. `supersedes=` always creates, because it names its target.
+same type is not duplicated. An attach writes **no caller properties**: a caller who only names a note
+must not be able to archive it (`lifecycle`), noise-tag it (`content_tags`, `content_tags_shadow`) or
+change what it is (`node_role`), and copying "whatever the node lacks" allowed all of those. The only
+write is one `entity.update`: the new evidence document id appended to `document_ids`, plus
+`evidence_ref` when the node has none. No node and no alias is written. `supersedes=` always creates,
+because it names its target.
 
 **Unresolved.** One reply line, `Unresolved: N of M references (positions ...)`, with no caller text.
 
 **Extractors.** Drafts carry `AliasDraft`s and stay pure; `result_to_batch(bind_identity=True)`
 turns them into alias commands and passes the result's tier on every edge as `extractor_tier`
 (upper-case stored spelling). A three-part Unity Catalog id binds under `unity_catalog` with no
-special case.
+special case beyond one key function, `normalize_alias_raw_id`: Unity Catalog identifiers are
+case-insensitive and may be backtick-quoted per part, so the key is lower-cased and unquoted, on the
+bind side (`EntityRule`) and on the `relates_to` lookup alike. Every other system's ids stay verbatim.
+`AliasDraft`s stay out of the validator-rejection residue, so a knob-off ingest records what it did
+before aliases existed.
+
+**Domain mint.** The value is split with `referents.split_namespace`, the rule
+`namespace_candidates` uses: a `domain:` prefix is stripped before the slug is taken, and any other
+known namespace prefix mints nothing. `ENTITY_CREATE` on an existing id replaces its properties, so
+the mint re-reads the id immediately before writing and carries an idempotency key derived from it.
 
 ## 3. Why the default stays off
 

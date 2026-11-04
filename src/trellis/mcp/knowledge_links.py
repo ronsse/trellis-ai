@@ -48,6 +48,7 @@ from trellis.extract.referents import (
     ReferentStatus,
     resolve_referent,
     resolve_referents,
+    split_namespace,
 )
 from trellis.extract.trace import normalize_slug
 from trellis.mutate import Command, CommandResult, CommandStatus, Operation
@@ -57,6 +58,7 @@ from trellis.schemas.well_known import (
     APPLIES_TO,
     CONCEPT,
     canonicalize_entity_type,
+    normalize_alias_raw_id,
     normalize_entity_name,
     schema_alignment_for_edge_kind,
 )
@@ -330,6 +332,9 @@ EXTERNAL_ALIAS_SYSTEMS: Final = (
     "unity_catalog",
 )
 
+#: The note property pointing at its evidence document.
+EVIDENCE_REF_KEY: Final = "evidence_ref"
+
 #: Property stamped on a ``domain:<slug>`` node this module minted, so a
 #: minted node can be told apart from one trace extraction wrote.
 MINTED_BY_KEY: Final = "minted_by"
@@ -371,25 +376,28 @@ def attach_to_note(
     executor: MutationExecutor,
     node: Mapping[str, Any],
     *,
-    properties: Mapping[str, Any],
-    document_ids: list[str] | None,
+    evidence_ref: str | None,
     requested_by: str = SAVE_KNOWLEDGE_REQUESTER,
 ) -> list[str]:
     """Attach a new save to the note ``node`` instead of creating a duplicate.
 
     Writes at most one ``ENTITY_UPDATE`` and nothing else: no node, no alias.
-    The update carries only the properties the node does not already have
-    (an existing value is never overwritten) and the node's ``document_ids``
-    plus any new evidence document, deduplicated. When there is nothing to
-    add, nothing is written. Returns warning lines (empty on success).
+    An attach writes **no caller properties**: the note belongs to whoever
+    wrote it, and a caller who only names the same note must not be able to
+    archive it (``lifecycle``), noise-tag it (``content_tags``) or change
+    what it is. The update appends the new evidence document id to the
+    node's ``document_ids`` (deduplicated) and sets ``evidence_ref`` only
+    when the node has none. When there is nothing to add, nothing is
+    written. Returns warning lines (empty on success).
     """
     existing = node.get("properties") or {}
-    new_props = {k: v for k, v in properties.items() if k not in existing}
     old_docs = [str(d) for d in node.get("document_ids") or []]
-    merged_docs = list(dict.fromkeys([*old_docs, *(document_ids or [])]))
+    merged_docs = list(
+        dict.fromkeys([*old_docs, *([evidence_ref] if evidence_ref else [])])
+    )
     args: dict[str, Any] = {"entity_id": str(node["node_id"])}
-    if new_props:
-        args["properties"] = new_props
+    if evidence_ref and not existing.get(EVIDENCE_REF_KEY):
+        args["properties"] = {EVIDENCE_REF_KEY: evidence_ref}
     if merged_docs != old_docs:
         args["document_ids"] = merged_docs
     if len(args) == 1:
@@ -466,7 +474,11 @@ def _resolve_external_alias(
     probes.extend((s, raw) for s in EXTERNAL_ALIAS_SYSTEMS)
     found: dict[str, str] = {}
     for source_system, raw_id in probes:
-        row = graph_store.resolve_alias(source_system, raw_id)
+        # The same key function the bind side uses, so a spelling that binds
+        # is a spelling that looks up.
+        row = graph_store.resolve_alias(
+            source_system, normalize_alias_raw_id(source_system, raw_id)
+        )
         if row is None:
             continue
         entity_id = str(row["entity_id"])
@@ -523,8 +535,10 @@ def _lom_relates_to(
 
     lines: list[str] = []
     if resolution.status is ReferentStatus.RESOLVED:
+        # Position, not the caller's text: with the knob on a reply never
+        # echoes a value the caller typed.
         lines.append(
-            f"Resolved relates_to {relates_to!r} -> {match.node_id} "
+            f"Resolved relates_to (position 1) -> {match.node_id} "
             f"({match.node_type}, via {match.via})"
         )
     result = executor.execute(
@@ -548,6 +562,28 @@ def _lom_relates_to(
     return lines, False
 
 
+def _domain_mint_spec(value: str) -> tuple[str, str] | None:
+    """``(slug, name)`` a ``domain`` value mints, or ``None`` if it mints nothing.
+
+    A ``domain:`` prefix is stripped the way
+    :func:`~trellis.extract.referents.namespace_candidates` strips it, so
+    ``"domain:finance"`` mints ``domain:finance``, not ``domain:domain-finance``.
+    A value carrying any other namespace prefix (``"tool:x"``) names a node
+    that is not a domain and mints nothing, as does a value with no slug.
+    """
+    namespace, name = split_namespace(value)
+    if namespace not in (None, "domain"):
+        return None
+    name = name.strip()
+    slug = normalize_slug(name)
+    return (slug, name) if slug else None
+
+
+def _mint_idempotency_key(domain_id: str) -> str:
+    """Deterministic key for minting ``domain_id``, so a replay is a no-op."""
+    return f"{SAVE_KNOWLEDGE_REQUESTER}:mint:{domain_id}"
+
+
 def _mint_domain(
     executor: MutationExecutor,
     graph_store: GraphStore,
@@ -563,10 +599,18 @@ def _mint_domain(
     forking it.  An id that already exists is never minted over: the
     resolver passed it by, so it is not a current domain, and recreating it
     would resurrect it.
+
+    ``ENTITY_CREATE`` on an existing id replaces that node's properties, so
+    the existence check runs immediately before the write and the command
+    carries a key derived from the id: a second mint of the same domain
+    (a retry, or another save racing this one) is answered DUPLICATE
+    instead of overwriting what the first one, or a trace, has since put on
+    the node.
     """
-    slug = normalize_slug(value)
-    if not slug:
+    spec = _domain_mint_spec(value)
+    if spec is None:
         return None, []
+    slug, name = spec
     domain_id = f"domain:{slug}"
     if graph_store.get_node(domain_id) is not None:
         return None, []
@@ -576,15 +620,22 @@ def _mint_domain(
             args={
                 "entity_id": domain_id,
                 "entity_type": CONCEPT,
-                "name": value,
+                "name": name,
                 "properties": {MINTED_BY_KEY: requested_by},
             },
             target_type=CONCEPT,
             requested_by=requested_by,
+            idempotency_key=_mint_idempotency_key(domain_id),
         )
     )
     if result.status == CommandStatus.SUCCESS:
         return domain_id, [f"Domain minted: {domain_id}"]
+    if (
+        result.status == CommandStatus.DUPLICATE
+        and graph_store.get_node(domain_id) is not None
+    ):
+        # Another mint of this id already landed; link to it, claim nothing.
+        return domain_id, []
     return None, [f"Warning: domain node not minted: {_describe_unsuccessful(result)}"]
 
 
@@ -628,7 +679,8 @@ def _lom_domains(
         match = resolution.match
         target = match.node_id if match is not None else None
         if target is None:
-            slug = normalize_slug(resolution.value)
+            spec = _domain_mint_spec(resolution.value)
+            slug = spec[0] if spec is not None else ""
             target = minted.get(slug)
             if target is None:
                 target, mint_lines = _mint_domain(

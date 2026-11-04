@@ -586,9 +586,9 @@ def save_knowledge(
             result += f"\nEvidence document: {evidence_ref}"
         if content_ignored:
             result += "\nWarning: content ignored \u2014 evidence_ref takes precedence"
-        attach_lines = attach_to_note(
-            executor, attach_node, properties=props, document_ids=document_ids
-        )
+        # An attach writes no caller properties (see ``attach_to_note``), so
+        # only the resolved evidence pointer is passed, never ``props``.
+        attach_lines = attach_to_note(executor, attach_node, evidence_ref=evidence_ref)
         link_lines = link_knowledge_node(
             executor,
             registry.knowledge.graph_store,

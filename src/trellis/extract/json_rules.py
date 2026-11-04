@@ -63,6 +63,7 @@ from trellis.schemas.extraction import (
 from trellis.schemas.well_known import (
     canonicalize_edge_kind,
     canonicalize_entity_type,
+    normalize_alias_raw_id,
     schema_alignment_for_edge_kind,
     schema_alignment_for_entity_type,
     validate_entity_type_not_anti_pattern,
@@ -367,17 +368,20 @@ def _rule_aliases(rule: EntityRule, id_value: Any, name_value: Any) -> list[Alia
     """The external-identity alias a rule asks for, as a draft.
 
     ``alias_source_system`` names the system the matched id is native to
-    (``"unity_catalog"`` for a three-part ``catalog.schema.table`` id, say);
-    the id is kept verbatim as ``raw_id``, so nothing here knows what shape
-    it has.  Empty when the rule names no system, which is every rule that
-    predates the field.
+    (``"unity_catalog"`` for a three-part ``catalog.schema.table`` id, say).
+    The id becomes ``raw_id`` through
+    :func:`~trellis.schemas.well_known.normalize_alias_raw_id`, which keeps
+    every system's ids verbatim except Unity Catalog's (case-insensitive,
+    backtick-quotable); the lookup side calls the same function.  Empty
+    when the rule names no system, which is every rule that predates the
+    field.
     """
     if rule.alias_source_system is None:
         return []
     return [
         AliasDraft(
             source_system=rule.alias_source_system,
-            raw_id=str(id_value),
+            raw_id=normalize_alias_raw_id(rule.alias_source_system, str(id_value)),
             raw_name=str(name_value) if name_value is not None else None,
         )
     ]

@@ -26,6 +26,9 @@ from typing import Any
 import pytest
 
 from trellis.extract.commands import result_to_batch
+from trellis.extract.dispatcher import ExtractionDispatcher
+from trellis.extract.registry import ExtractorRegistry
+from trellis.extract.validators import ValidationFinding
 from trellis.mcp.server import save_knowledge
 from trellis.mutate import build_curate_executor
 from trellis.schemas.well_known import CONCEPT, SOFTWARE_APPLICATION
@@ -235,3 +238,55 @@ def test_save_knowledge_knob_off_spellings_match_main(
 ) -> None:
     monkeypatch.setenv("TRELLIS_KNOWLEDGE_LINK_OR_MINT", spelling)
     _check("save_knowledge", _run_saves(temp_registry))
+
+
+#: The keys of a rejected entity draft in ``unparsed_residue`` on ``main``
+#: (eca22318), before ``aliases`` existed.
+_MAIN_ENTITY_DRAFT_KEYS = frozenset(
+    {
+        "entity_id",
+        "entity_type",
+        "name",
+        "properties",
+        "node_role",
+        "generation_spec",
+        "confidence",
+        "document_ids",
+        "allow_structural_leaf",
+    }
+)
+
+
+class _RejectEverything:
+    name = "reject_everything"
+
+    def validate(self, result: Any, *, source_hint: str | None = None) -> list[Any]:
+        return [ValidationFinding(self.name, "always", "rejected for the pin")]
+
+
+@pytest.mark.parametrize(
+    ("extractor", "raw", "hint"),
+    [
+        (DbtManifestExtractor(), MANIFEST, "dbt-manifest"),
+        (OpenLineageExtractor(), LINEAGE_EVENTS, "openlineage"),
+    ],
+    ids=["dbt", "openlineage"],
+)
+def test_validator_rejection_residue_knob_off_matches_main(
+    temp_registry: StoreRegistry, extractor: Any, raw: Any, hint: str
+) -> None:
+    """The extractors now put ``aliases`` on their drafts; the quarantine
+    record of a rejected extraction must keep the shape it had on ``main``."""
+    registry = ExtractorRegistry()
+    registry.register(extractor)
+    dispatcher = ExtractionDispatcher(
+        registry,
+        event_log=temp_registry.operational.event_log,
+        validators=[_RejectEverything()],
+    )
+    result = asyncio.run(dispatcher.dispatch(raw, source_hint=hint))
+
+    rejected = result.unparsed_residue["rejected_by_validators"]
+    assert rejected["entities"], "the pin needs drafts to look at"
+    for entity in rejected["entities"]:
+        assert set(entity) == _MAIN_ENTITY_DRAFT_KEYS

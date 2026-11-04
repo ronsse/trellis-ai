@@ -47,10 +47,13 @@ EPISTEMIC_STATUS_MENTIONED = "mentioned"
 class AliasDraft(TrellisModel):
     """An external identity an extracted entity is known by.
 
-    ``(source_system, raw_id)`` is stored verbatim, with no case folding or
-    splitting, so a dbt ``unique_id``, an OpenLineage ``namespace/name`` or
-    a three-part Unity Catalog ``catalog.schema.table`` all take the same
-    shape.  The draft only *names* the identity: ``result_to_batch`` turns
+    ``(source_system, raw_id)`` is stored as given, with no splitting, so a
+    dbt ``unique_id``, an OpenLineage ``namespace/name`` or a three-part
+    Unity Catalog ``catalog.schema.table`` all take the same shape.  The
+    producer chooses the key: Unity Catalog's is case-folded and unquoted
+    by :func:`~trellis.schemas.well_known.normalize_alias_raw_id`, the same
+    function ``save_knowledge`` looks it up with; every other system's is
+    verbatim.  The draft only *names* the identity: ``result_to_batch`` turns
     it into a bind-if-absent ``alias.upsert`` command when the
     ``knowledge_link_or_mint`` write-behaviour knob is on, and the draft
     never touches a store.

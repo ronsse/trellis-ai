@@ -17,14 +17,17 @@ import pytest
 
 from trellis.core.write_config import KNOWLEDGE_LINK_OR_MINT_ENV
 from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
+from trellis.mcp.knowledge_links import _mint_domain, find_attach_target
 from trellis.mcp.server import save_knowledge
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Command, Operation
 from trellis.mutate.policy_source import POLICY_FILENAME
+from trellis.mutate.retention import CURRENT_STATE
 from trellis.retrieve.strategies import NamespaceSeedExtractor
+from trellis.schemas.classification import lifecycle_state_of
 from trellis.schemas.enums import Enforcement, PolicyType
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
-from trellis.schemas.well_known import CONCEPT
+from trellis.schemas.well_known import CONCEPT, normalize_alias_raw_id
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -222,7 +225,7 @@ class TestAttach:
         assert [n["node_id"] for n in notes] == [first_id]
         node = graph.get_node(first_id)
         assert node["properties"]["owner"] == "a"  # never overwritten
-        assert node["properties"]["extra"] == "x"  # only what was missing
+        assert "extra" not in node["properties"]  # an attach writes no caller property
         assert len(node["document_ids"]) == 2  # both evidence documents
         assert graph.get_aliases(first_id) == aliases_before  # no new alias
         after = _event_counts(temp_registry)
@@ -280,6 +283,259 @@ class TestAttach:
         assert again.startswith("Entity created:")
 
 
+class TestAttachWritesNoCallerProperties:
+    """An attach appends evidence and nothing else of the caller's."""
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("lifecycle", {"state": "archived"}),
+            ("content_tags", {"signal_quality": "noise", "domain": ["x"]}),
+            ("content_tags_shadow", {"signal_quality": "noise"}),
+            ("node_role", "structural"),
+            ("a_new_key", "x"),
+        ],
+    )
+    def test_the_stored_node_is_unchanged(
+        self,
+        knob_on: None,
+        temp_registry: StoreRegistry,
+        key: str,
+        value: Any,
+    ) -> None:
+        first_id = _id_of(save_knowledge(name="Alpha", properties={"owner": "a"}))
+        graph = _graph(temp_registry)
+        before = graph.get_node(first_id)
+
+        reply = save_knowledge(name="Alpha", properties={key: value})
+
+        assert "attached, not created" in reply
+        after = graph.get_node(first_id)
+        assert after["properties"] == before["properties"]
+        assert after["node_role"] == before["node_role"]
+        assert after["node_type"] == before["node_type"]
+        # Nothing to append, so no write at all.
+        assert after.get("valid_from") == before.get("valid_from")
+        # The note is still the current note the next save attaches to.
+        assert lifecycle_state_of(after["properties"]) == CURRENT_STATE
+        assert (
+            find_attach_target(graph, name="Alpha", entity_type="concept") is not None
+        )
+
+    def test_a_lifecycle_in_the_call_does_not_archive_the_note(
+        self, knob_on: None, temp_registry: StoreRegistry
+    ) -> None:
+        first_id = _id_of(save_knowledge(name="Alpha"))
+        save_knowledge(name="Alpha", properties={"lifecycle": {"state": "archived"}})
+        node = _graph(temp_registry).get_node(first_id)
+        assert "lifecycle" not in node["properties"]
+        assert lifecycle_state_of(node["properties"]) == CURRENT_STATE
+
+    def test_the_only_additions_are_the_evidence_link_and_pointer(
+        self, knob_on: None, temp_registry: StoreRegistry
+    ) -> None:
+        first_id = _id_of(save_knowledge(name="Alpha", properties={"owner": "a"}))
+        graph = _graph(temp_registry)
+        before = graph.get_node(first_id)
+        assert "evidence_ref" not in before["properties"]
+
+        save_knowledge(
+            name="Alpha",
+            properties={"owner": "b", "lifecycle": {"state": "archived"}},
+            content="Second body.",
+        )
+
+        after = graph.get_node(first_id)
+        evidence = after["properties"].pop("evidence_ref")
+        assert after["properties"] == before["properties"]
+        assert after["document_ids"] == [evidence]
+
+    def test_an_existing_evidence_ref_is_kept_and_the_new_document_appended(
+        self, knob_on: None, temp_registry: StoreRegistry
+    ) -> None:
+        first_id = _id_of(save_knowledge(name="Alpha", content="First body."))
+        graph = _graph(temp_registry)
+        before = graph.get_node(first_id)
+        first_evidence = before["properties"]["evidence_ref"]
+
+        save_knowledge(name="Alpha", content="Second body.")
+
+        after = graph.get_node(first_id)
+        assert after["properties"] == before["properties"]
+        assert after["document_ids"][0] == first_evidence
+        assert len(after["document_ids"]) == 2
+
+
+class TestDomainPrefix:
+    def test_a_domain_prefix_is_stripped_before_the_slug(
+        self, knob_on: None, temp_registry: StoreRegistry
+    ) -> None:
+        reply = save_knowledge(name="Note", properties={"domain": "domain:finance"})
+        assert "Domain minted: domain:finance" in reply
+        assert [n["node_id"] for n in _domain_nodes(temp_registry)] == [
+            "domain:finance"
+        ]
+        node = _graph(temp_registry).get_node("domain:finance")
+        assert node["properties"]["name"] == "finance"
+
+    def test_the_prefix_is_case_insensitive_and_keeps_the_callers_name(
+        self, knob_on: None, temp_registry: StoreRegistry
+    ) -> None:
+        save_knowledge(name="Note", properties={"domain": "Domain:Data Science"})
+        node = _graph(temp_registry).get_node("domain:data-science")
+        assert node is not None
+        assert node["properties"]["name"] == "Data Science"
+
+    def test_prefixed_and_bare_spellings_mint_once(
+        self, knob_on: None, temp_registry: StoreRegistry
+    ) -> None:
+        reply = save_knowledge(
+            name="Both", properties={"domain": ["Finance", "domain:finance"]}
+        )
+        assert reply.count("Domain minted") == 1
+        assert "Unresolved" not in reply
+        assert [n["node_id"] for n in _domain_nodes(temp_registry)] == [
+            "domain:finance"
+        ]
+
+    def test_another_namespace_mints_nothing_and_is_unresolved(
+        self, knob_on: None, temp_registry: StoreRegistry
+    ) -> None:
+        reply = save_knowledge(name="Note", properties={"domain": "tool:x"})
+        assert _domain_nodes(temp_registry) == []
+        assert [
+            n["node_id"]
+            for n in _graph(temp_registry).query(limit=1000)
+            if str(n["node_id"]).startswith(("tool:", "domain:"))
+        ] == []
+        assert "Unresolved: 1 of 1 references (positions 1)" in reply
+        assert "tool:x" not in reply
+
+    def test_an_unknown_prefix_is_just_part_of_the_name(
+        self, knob_on: None, temp_registry: StoreRegistry
+    ) -> None:
+        save_knowledge(name="Note", properties={"domain": "foo:bar"})
+        assert [n["node_id"] for n in _domain_nodes(temp_registry)] == [
+            "domain:foo-bar"
+        ]
+
+
+class TestMintNeverReplacesAnExistingNode:
+    class _RacingGraph:
+        """A graph whose first ``get_node`` answers absent: the window between
+        the check and the write, in which another writer lands the node."""
+
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+            self._calls = 0
+
+        def get_node(self, *args: Any, **kwargs: Any) -> Any:
+            self._calls += 1
+            if self._calls == 1:
+                return None
+            return self._inner.get_node(*args, **kwargs)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+    def _executor(self, registry: StoreRegistry) -> Any:
+        return build_curate_executor(registry, clearance="restricted")
+
+    def test_an_existing_trace_node_keeps_its_properties(
+        self, knob_on: None, temp_registry: StoreRegistry
+    ) -> None:
+        graph = _graph(temp_registry)
+        graph.upsert_node(
+            "domain:finance", CONCEPT, {"name": "finance", "from_trace": "t-1"}
+        )
+        before = graph.get_node("domain:finance")
+
+        target, lines = _mint_domain(
+            self._executor(temp_registry),
+            graph,
+            "Finance",
+            requested_by="mcp:save_knowledge",
+        )
+
+        assert (target, lines) == (None, [])
+        assert graph.get_node("domain:finance") == before
+
+    def test_a_second_mint_that_passes_the_check_is_a_duplicate_not_an_overwrite(
+        self, knob_on: None, temp_registry: StoreRegistry
+    ) -> None:
+        graph = _graph(temp_registry)
+        executor = self._executor(temp_registry)
+        first, _ = _mint_domain(
+            executor, graph, "Finance", requested_by="mcp:save_knowledge"
+        )
+        assert first == "domain:finance"
+        # A trace then adds to the node the first mint wrote.
+        node = graph.get_node("domain:finance")
+        graph.upsert_node(
+            "domain:finance", CONCEPT, {**node["properties"], "from_trace": "t-1"}
+        )
+        before = graph.get_node("domain:finance")
+
+        target, lines = _mint_domain(
+            executor,
+            self._RacingGraph(graph),
+            "Finance",
+            requested_by="mcp:save_knowledge",
+        )
+
+        assert target == "domain:finance"  # linked to, not claimed as minted
+        assert lines == []
+        assert graph.get_node("domain:finance") == before
+        created = [
+            e
+            for e in temp_registry.operational.event_log.get_events(limit=1000)
+            if e.event_type == EventType.ENTITY_CREATED
+            and e.entity_id == "domain:finance"
+        ]
+        assert len(created) == 1
+
+
+class TestUnityCatalogLookup:
+    @pytest.fixture
+    def uc_node(self, temp_registry: StoreRegistry) -> None:
+        graph = _graph(temp_registry)
+        graph.upsert_node("t:orders", "table", {"name": "orders"})
+        graph.bind_alias_if_absent(
+            "t:orders",
+            "unity_catalog",
+            normalize_alias_raw_id("unity_catalog", "main.sales.orders"),
+        )
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "main.sales.orders",
+            "Main.Sales.Orders",
+            "`main`.`sales`.`orders`",
+            "unity_catalog:Main.Sales.Orders",
+            "unity_catalog:`Main`.`Sales`.`Orders`",
+        ],
+    )
+    def test_every_spelling_resolves_to_the_same_entity(
+        self, knob_on: None, temp_registry: StoreRegistry, uc_node: None, value: str
+    ) -> None:
+        reply = save_knowledge(name="Eps", relates_to=value)
+        assert "-> t:orders" in reply
+        assert "via alias:unity_catalog" in reply
+        assert "Unresolved" not in reply
+
+    def test_other_systems_stay_verbatim(
+        self, knob_on: None, temp_registry: StoreRegistry
+    ) -> None:
+        graph = _graph(temp_registry)
+        graph.upsert_node("m:orders", "table", {"name": "orders"})
+        graph.bind_alias_if_absent("m:orders", "dbt", "model.Shop.Orders")
+        miss = save_knowledge(name="Eps", relates_to="model.shop.orders")
+        assert "Unresolved: 1 of 1 references" in miss
+        hit = save_knowledge(name="Zeta", relates_to="model.Shop.Orders")
+        assert "-> m:orders" in hit
+
+
 class TestRelatesTo:
     def _seed_dbt_node(self, registry: StoreRegistry) -> None:
         graph = _graph(registry)
@@ -291,8 +547,9 @@ class TestRelatesTo:
     ) -> None:
         self._seed_dbt_node(temp_registry)
         reply = save_knowledge(name="Eps", relates_to="model.shop.orders")
-        assert "Resolved relates_to 'model.shop.orders' -> 01SEEDNOTE" in reply
+        assert "Resolved relates_to (position 1) -> 01SEEDNOTE" in reply
         assert "via alias:dbt" in reply
+        assert "model.shop.orders" not in reply  # the caller's text is not echoed
         assert "Unresolved" not in reply
         edges = _graph(temp_registry).get_edges(_id_of(reply), direction="outgoing")
         assert [e["target_id"] for e in edges] == ["01SEEDNOTE"]
