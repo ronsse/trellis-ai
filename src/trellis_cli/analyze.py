@@ -731,6 +731,21 @@ def _print_tool_table(by_tool: dict[str, ToolWriteStats]) -> None:
                 "success without writing (duplicates), counted as attempts but "
                 "not as accepted[/dim]"
             )
+        if stats.coerced:
+            by_rule = ", ".join(
+                f"{escape(rule)}={count}"
+                for rule, count in sorted(stats.coerced_by_rule.items())
+            )
+            rate = (
+                f", {stats.coercion_rate:.0%} of attempts"
+                if stats.coercion_rate
+                else ""
+            )
+            console.print(
+                f"    [dim]{escape(surface)}: {stats.coerced} accepted call(s) "
+                f"were repaired at the boundary ({by_rule}){rate}; counted as "
+                "accepted, not as rejections[/dim]"
+            )
 
 
 def _print_serving_builds(builds: ServingBuildsReport) -> None:
@@ -861,10 +876,16 @@ def health(
         console.print(f"  [yellow]window[/yellow] {report.scan.note}")
     write = report.write
     noop_clause = f", {write.noop} answered without writing" if write.noop else ""
+    coerced_clause = (
+        f", {write.coerced} of the accepted repaired at the boundary"
+        if write.coerced
+        else ""
+    )
     console.print(
         f"  Writes: {write.accepted} accepted, "
         f"{write.boundary_rejected} rejected at boundary, "
-        f"{write.executor_rejected} rejected in executor{noop_clause} "
+        f"{write.executor_rejected} rejected in executor{noop_clause}"
+        f"{coerced_clause} "
         f"({write.rejection_rate:.0%} of {write.attempts} attempts)"
     )
     if write.by_tool:
