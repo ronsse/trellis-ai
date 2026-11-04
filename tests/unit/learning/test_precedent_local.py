@@ -529,6 +529,19 @@ async def test_only_a_same_verdict_merges(reply, verdict, event_log) -> None:
     assert [p["decision"] for p in _judged(event_log)] == [verdict]
 
 
+def test_a_merge_unions_the_parents_advisory_ids() -> None:
+    a, b = _pair()
+    a = a.model_copy(
+        update={"evidence": a.evidence.model_copy(update={"advisory_ids": ["adv-2"]})}
+    )
+    b = b.model_copy(
+        update={"evidence": b.evidence.model_copy(update={"advisory_ids": ["adv-1"]})}
+    )
+    merged = pl.merge_records(a, b)
+    assert merged is not None
+    assert merged.evidence.advisory_ids == ["adv-1", "adv-2"]
+
+
 async def test_a_union_over_the_list_cap_is_skipped_not_truncated() -> None:
     def many(suffix: str) -> PrecedentRecord:
         base = _record(suffix, entity_ids=["doc-1"])

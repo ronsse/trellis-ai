@@ -15,8 +15,10 @@ meaning minting a servable precedent from a candidate, is a separate step that
 this module does not take.
 
 ``provenance_tier`` says who or what filled the record. ``evidence.feedback_ids``
-and ``evidence.pack_ids`` stay empty from the deterministic tier and exist so a
-later tier can fill them.
+stays empty from the deterministic tier and exists so a later tier can fill it.
+``evidence.pack_ids`` and ``evidence.advisory_ids`` are filled only by the
+advisory source (:mod:`trellis.learning.advisory_candidates`); the trace
+distiller leaves both empty.
 """
 
 from __future__ import annotations
@@ -78,9 +80,14 @@ class PrecedentEvidence(TrellisModel):
         default_factory=list, max_length=MAX_LIST_ITEMS
     )
     pack_ids: list[BoundedId] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
+    #: The advisories the record was read from (the advisory source only).
+    #: Left out of the id while empty (see :data:`OMIT_WHEN_EMPTY_EVIDENCE`).
+    advisory_ids: list[BoundedId] = Field(
+        default_factory=list, max_length=MAX_LIST_ITEMS
+    )
     #: Candidate ids a merge combined (``precedent.merge``). Empty for every
-    #: other record, and then left out of the id's input so records recorded
-    #: before this field existed keep the ids they were recorded under.
+    #: other record, and then left out of the id (see
+    #: :data:`OMIT_WHEN_EMPTY_EVIDENCE`).
     merged_from: list[BoundedId] = Field(
         default_factory=list, max_length=MAX_LIST_ITEMS
     )
@@ -123,6 +130,12 @@ class PrecedentRecord(TrellisModel):
 #: a hand-kept list (``tests/unit/schemas/test_precedent_record_id.py``).
 ID_EXCLUDED_FIELDS: Final = frozenset({"candidate_id", "lifecycle"})
 
+#: Evidence lists the id leaves out while they are empty. A list added to the
+#: evidence after records were already recorded goes here, so that the ids of
+#: those records, which cannot name it, do not change. A non-empty list is hashed
+#: like any other, so a record that does cite one is told apart by it.
+OMIT_WHEN_EMPTY_EVIDENCE: Final = frozenset({"advisory_ids", "merged_from"})
+
 _PENDING_ID: Final = "pcand_pending"
 
 
@@ -148,7 +161,11 @@ def derive_candidate_id(record: Mapping[str, Any]) -> str:
         canonical["evidence"] = {
             key: sorted(value) if isinstance(value, list) else value
             for key, value in evidence.items()
-            if not (key == "merged_from" and value == [])
+            if not (
+                key in OMIT_WHEN_EMPTY_EVIDENCE
+                and isinstance(value, list)
+                and not value
+            )
         }
     encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(encoded.encode("ascii")).hexdigest()
@@ -163,6 +180,7 @@ __all__ = [
     "MAX_LIST_ITEMS",
     "MAX_TRIGGER_CHARS",
     "ID_EXCLUDED_FIELDS",
+    "OMIT_WHEN_EMPTY_EVIDENCE",
     "RECORD_LIFECYCLE_CANDIDATE",
     "PrecedentAction",
     "PrecedentEvidence",

@@ -608,6 +608,9 @@ def merge_records(a: PrecedentRecord, b: PrecedentRecord) -> PrecedentRecord | N
             first.evidence.feedback_ids, second.evidence.feedback_ids
         ),
         "pack_ids": union(first.evidence.pack_ids, second.evidence.pack_ids),
+        "advisory_ids": union(
+            first.evidence.advisory_ids, second.evidence.advisory_ids
+        ),
     }
     step_indexes = sorted({*first.evidence.step_indexes, *second.evidence.step_indexes})
     entity_ids = union(first.situation.entity_ids, second.situation.entity_ids)

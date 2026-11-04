@@ -24,6 +24,9 @@ surfaces from ``docs/design/adr-autonomy-ladder.md``:
 * ``trellis worker distill-precedents-local`` — the local-model tier of the same
   (distill and merge, both refused on any route not declared ``local: true``);
   lives in :mod:`trellis_cli.worker_distill_precedents_local`.
+* ``trellis worker distill-advisory-precedents`` — candidate precedents from stored
+  ANTI_PATTERN advisories, dry-run first; lives in
+  :mod:`trellis_cli.worker_distill_advisory_precedents`.
 * :func:`capture_sessions_cmd` (``trellis worker capture-sessions``) — one
   Claude Code session-capture sweep, delegating to the same
   :func:`~trellis_workers.session_capture.sweep.run_sweep` the
@@ -2856,6 +2859,10 @@ def _render_embed_traces_text(payload: dict[str, Any]) -> None:
             soft_wrap=True,
         )
 
+
+from trellis_cli import worker_distill_advisory_precedents  # noqa: E402
+
+worker_distill_advisory_precedents.register(worker_app)
 
 from trellis_cli import (  # noqa: E402
     worker_distill_precedents,

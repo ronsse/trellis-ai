@@ -22,9 +22,9 @@ from trellis.schemas.precedent_record import (
 )
 
 #: The leaf fields a hand count of the schema finds: rule, situation (4),
-#: action (2), because, evidence (5), confidence, provenance_tier,
+#: action (2), because, evidence (6), confidence, provenance_tier,
 #: distiller_version. Fewer means the walk below lost a branch.
-HAND_READ_LEAF_FLOOR = 16
+HAND_READ_LEAF_FLOOR = 17
 
 
 def _real() -> PrecedentRecord:
