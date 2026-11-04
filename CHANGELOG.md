@@ -4,6 +4,8 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-04
+
 ### Added
 
 - **A document's regulatory tags can be set without changing which documents a key can read.**
@@ -1608,8 +1610,6 @@ All notable changes to Trellis will be documented in this file.
   renders undecodable bytes with `backslashreplace` instead of raising. A body
   sent with a JSON content type was already unaffected: FastAPI's own routing
   turns that decode failure into a 422 or 400 before this handler runs.
-
-## [0.10.0] - 2026-10-31
 
 ### Added
 
