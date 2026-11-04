@@ -20,13 +20,11 @@ from __future__ import annotations
 
 import ast
 import inspect
-from pathlib import Path
 from typing import ClassVar
 
 from tests.ast_rules import assert_hand_read_floor
+from tests.mcp_server_modules import server_source
 from trellis.retrieve.pack_builder import PackBuilder
-
-SERVER = Path(__file__).resolve().parents[2] / "src" / "trellis" / "mcp" / "server.py"
 
 GATED = "gated"
 FREE = "no-document-content"
@@ -118,12 +116,12 @@ def violations(source: str, roster: dict[str, str]) -> list[str]:
 
 
 def test_every_mcp_tool_is_rostered_and_its_claim_holds() -> None:
-    source = SERVER.read_text()
+    source = server_source()
     tools, _ = _tools_and_functions(source)
     assert_hand_read_floor(
         len(tools),
         18,
-        subject="MCP tools in server.py",
+        subject="MCP tools in the server modules",
         hint="the tool list a person read off the file",
     )
     assert violations(source, ROSTER) == []
@@ -274,7 +272,7 @@ def external_violations(
 
 
 def test_no_mcp_tool_defaults_open_to_an_external_key() -> None:
-    source = SERVER.read_text()
+    source = server_source()
     # Hand read: of the 18 tools, 6 answer, 4 are refused and 8 need a scope above read.
     assert_hand_read_floor(
         sum(1 for v in EXTERNAL_STANCE.values() if v == REFUSED),

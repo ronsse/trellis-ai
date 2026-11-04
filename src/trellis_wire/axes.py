@@ -102,7 +102,7 @@ def axis_note_from_payload(axes: dict[str, Any] | None) -> str:
     "ran"}`` — or ``None`` (a server older than the field). A failed
     axis and a misconfigured semantic axis are independent states one
     build can hit together, so both lines render when both apply — the
-    same join :func:`trellis.mcp.server._axis_note` does from a live
+    same join :func:`trellis.mcp.tools.context._axis_note` does from a live
     ``AxisReport``.
 
     Parses defensively because this dict crossed the wire: a missing or

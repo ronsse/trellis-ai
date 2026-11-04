@@ -13,6 +13,8 @@ import structlog
 from structlog.testing import capture_logs
 
 import trellis.mcp.server as server_mod
+import trellis.mcp.tools.admin as admin_tools_mod
+import trellis.mcp.wiring as wiring_mod
 from trellis.auth import SCOPE_ADMIN, SCOPE_READ, generate_api_key
 from trellis.mcp.auth import set_auth_enforced
 from trellis.mcp.server import mcp
@@ -126,7 +128,9 @@ class TestRevokeApiKey:
     def test_revokes_and_emits_an_event(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(server_mod, "current_principal_id", lambda: "aaaaaaaaaaaa")
+        monkeypatch.setattr(
+            admin_tools_mod, "current_principal_id", lambda: "aaaaaaaaaaaa"
+        )
         key_id = _seed(temp_registry, [SCOPE_READ], "victim")
         payload = json.loads(revoke_api_key(key_id=key_id))
         assert payload == {"status": "ok", "key_id": key_id}
@@ -139,7 +143,9 @@ class TestRevokeApiKey:
     def test_unknown_and_already_revoked_are_refused(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(server_mod, "current_principal_id", lambda: "aaaaaaaaaaaa")
+        monkeypatch.setattr(
+            admin_tools_mod, "current_principal_id", lambda: "aaaaaaaaaaaa"
+        )
         unknown = json.loads(revoke_api_key(key_id="ffffffffffff"))
         assert unknown["status"] == "rejected"
         assert unknown["reason"] == "unknown_key_id"
@@ -152,7 +158,7 @@ class TestRevokeApiKey:
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         key_id = _seed(temp_registry, [SCOPE_ADMIN], "me")
-        monkeypatch.setattr(server_mod, "current_principal_id", lambda: key_id)
+        monkeypatch.setattr(admin_tools_mod, "current_principal_id", lambda: key_id)
         payload = json.loads(revoke_api_key(key_id=key_id))
         assert payload["status"] == "rejected"
         assert payload["reason"] == "cannot_revoke_own_key"
@@ -177,7 +183,9 @@ class TestRevokeApiKey:
     ) -> None:
         import sqlite3
 
-        monkeypatch.setattr(server_mod, "current_principal_id", lambda: "aaaaaaaaaaaa")
+        monkeypatch.setattr(
+            admin_tools_mod, "current_principal_id", lambda: "aaaaaaaaaaaa"
+        )
         key_id = _seed(temp_registry, [SCOPE_READ], "victim")
 
         def boom(*_a: object, **_k: object) -> None:
@@ -200,7 +208,9 @@ class TestRevokeApiKeyOutcomeHonesty:
         from trellis.mutate import CommandResult, CommandStatus
         from trellis.mutate.executor import MutationExecutor
 
-        monkeypatch.setattr(server_mod, "current_principal_id", lambda: "aaaaaaaaaaaa")
+        monkeypatch.setattr(
+            admin_tools_mod, "current_principal_id", lambda: "aaaaaaaaaaaa"
+        )
         key_id = _seed(temp_registry, [SCOPE_READ], "victim")
 
         def duplicate(self: MutationExecutor, command: object) -> CommandResult:
@@ -219,10 +229,12 @@ class TestRevokeApiKeyOutcomeHonesty:
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Only the CLI tolerates a failed open; this tool must refuse instead."""
-        monkeypatch.setattr(server_mod, "current_principal_id", lambda: "aaaaaaaaaaaa")
+        monkeypatch.setattr(
+            admin_tools_mod, "current_principal_id", lambda: "aaaaaaaaaaaa"
+        )
         key_id = _seed(temp_registry, [SCOPE_READ], "victim")
         monkeypatch.setattr(
-            server_mod, "_registry", FlakyRegistry(temp_registry, fail_first=10**6)
+            wiring_mod, "_registry", FlakyRegistry(temp_registry, fail_first=10**6)
         )
         payload = json.loads(revoke_api_key(key_id=key_id))
         assert payload["status"] == "error"
@@ -241,10 +253,12 @@ class TestRevokeApiKeyOutcomeHonesty:
         error: type[Exception],
     ) -> None:
         """The caller never reads a store's text; the operator's log has the class."""
-        monkeypatch.setattr(server_mod, "current_principal_id", lambda: "aaaaaaaaaaaa")
+        monkeypatch.setattr(
+            admin_tools_mod, "current_principal_id", lambda: "aaaaaaaaaaaa"
+        )
         key_id = _seed(temp_registry, [SCOPE_READ], "victim")
         monkeypatch.setattr(
-            server_mod,
+            wiring_mod,
             "_registry",
             FlakyRegistry(temp_registry, fail_first=10**6, error=error),
         )

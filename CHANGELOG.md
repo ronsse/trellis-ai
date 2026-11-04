@@ -67,6 +67,8 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **`trellis.mcp.server` is split by tool family, behind a façade.** The 5,500-line `server.py` became `mcp/boundary.py`, `rejections.py`, `app.py`, `wiring.py` and `mcp/tools/` (ten modules, none over about 1,030 lines); `server.py` keeps `main`, signal handling and the re-exports, so nearly every name still imports from it (the registry and extractor state, which a function rebinds, and the two `_build_llm_client*` builders now live on `wiring` only), and the 18 tools list in the same order with the same schemas. A move only; a test that patches a server name now patches the module that reads it, and moved code logs under its new module's name.
+
 - **`trellis.mutate.handlers` is a package, one submodule per handler family.** The 5,400-line
   `handlers.py` became `mutate/handlers/` (`precedent`, `classify_rules`, `graph`, `redaction`,
   `retention_handlers`, `factories` and seven smaller modules, plus `_common` for the helpers

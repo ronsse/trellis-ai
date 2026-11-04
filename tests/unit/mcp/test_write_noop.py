@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 from mcp.shared.exceptions import McpError
 
+import trellis.mcp.rejections as rejections_mod
 import trellis.mcp.server as server_mod
 import trellis.ops.write_health as write_health_mod
 from tests.unit.mcp.conftest import unwrap_tool
@@ -261,7 +262,7 @@ class TestAFailingEventLogDoesNotChangeTheCall:
         def unavailable() -> StoreRegistry:
             raise RuntimeError(_STORE_DOWN)
 
-        monkeypatch.setattr(server_mod, "_get_registry", unavailable)
+        monkeypatch.setattr(rejections_mod, "_get_registry", unavailable)
 
         assert server_mod._note_noop_call("save_memory", "exact_duplicate") is None
 

@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 import trellis.mcp.server as server_mod
+import trellis.mcp.tools.experience_knowledge as experience_tools_mod
+import trellis.mcp.tools.memory as memory_tools_mod
 from tests.unit.mcp.conftest import unwrap_tool
 from tests.unit.mcp.test_sensitivity_surfaces import as_http, as_stdio
 from tests.unit.retrieve.test_sensitivity import label
@@ -435,7 +437,7 @@ class TestStampLayersHoldWhenThePreCheckIsBypassed:
     ) -> None:
         temp_registry.knowledge.document_store.put("secret", BODY, label("restricted"))
         monkeypatch.setattr(
-            server_mod, "_check_memory_supersedes", lambda *a, **k: None
+            memory_tools_mod, "_check_memory_supersedes", lambda *a, **k: None
         )
         with as_http(["ingest"]):
             reply = save_memory(content=OPEN, supersedes="secret")
@@ -451,7 +453,7 @@ class TestStampLayersHoldWhenThePreCheckIsBypassed:
         with as_http(["ingest"]):
             save_memory(content=OPEN)
         monkeypatch.setattr(
-            server_mod, "_check_memory_supersedes", lambda *a, **k: None
+            memory_tools_mod, "_check_memory_supersedes", lambda *a, **k: None
         )
         with as_http(["ingest"]), pytest.raises(Exception, match="failed to supersede"):
             save_memory(content=OPEN, supersedes="secret")
@@ -471,7 +473,7 @@ class TestStampLayersHoldWhenThePreCheckIsBypassed:
         node_id = created.split("Entity created: ")[1].split(" ")[0]
         evidence_id = created.split("Evidence document: ")[1].split("\n")[0].strip()
         monkeypatch.setattr(
-            server_mod,
+            experience_tools_mod,
             "_plan_knowledge_supersedes",
             lambda *a, **k: supersession.EntityPlan(t_doc=evidence_id, t_doc_skip=None),
         )

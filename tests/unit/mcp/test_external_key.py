@@ -17,6 +17,7 @@ from fastmcp.server.auth import AccessToken, AuthContext
 from mcp.shared.exceptions import McpError
 
 import trellis.mcp.server as server_mod
+import trellis.mcp.tools.context as context_tools_mod
 from tests.unit.mcp.conftest import mint, unwrap_tool
 from tests.unit.mcp.test_auth import EXPECTED_TOOL_SCOPES
 from tests.unit.mcp.test_sensitivity_surfaces import as_http, as_stdio
@@ -189,7 +190,7 @@ class TestAnsweringTools:
         self, seeded: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            server_mod, "_capture_warning_banner", lambda _r: "BANNER-SENTINEL\n"
+            context_tools_mod, "_capture_warning_banner", lambda _r: "BANNER-SENTINEL\n"
         )
         scopes = await _external_scopes(seeded)
         with as_http(scopes):

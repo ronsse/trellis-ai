@@ -30,6 +30,8 @@ from fastmcp import Client
 
 import tests.unit.mcp.test_pack_holdout_surface as holdout_surface
 import trellis.mcp.server as server_mod
+import trellis.mcp.tools.feedback as feedback_tools_mod
+import trellis.mcp.wiring as wiring_mod
 from tests.unit.mcp.conftest import unwrap_tool
 from tests.unit.mcp.test_sensitivity_surfaces import (
     OPEN_TEXT,
@@ -574,7 +576,7 @@ class TestUnservedCitationNote:
         def _boom(*args: Any, **kwargs: Any) -> None:
             raise RuntimeError(_DOWN)
 
-        monkeypatch.setattr(server_mod, "lookup_pack_membership", _boom)
+        monkeypatch.setattr(feedback_tools_mod, "lookup_pack_membership", _boom)
 
         result = await _call(
             {"pack_id": "pack_a", "rating": 0.9, "helpful_item_ids": ["zzz"]}
@@ -990,11 +992,11 @@ class TestRecordingIsUnchanged:
         async def run(*, note: bool) -> tuple[str | None, dict[str, Any]]:
             stores = tmp_path_factory.mktemp("stores")
             registry = StoreRegistry(stores_dir=stores)
-            server_mod._registry = registry
+            wiring_mod._registry = registry
             _serve(registry, "pack_a", ["doc-a", "doc-b"])
             if not note:
                 monkeypatch.setattr(
-                    server_mod, "_unserved_citation_note", lambda *a, **k: None
+                    feedback_tools_mod, "_unserved_citation_note", lambda *a, **k: None
                 )
             try:
                 result = await _call({"pack_id": pack, "rating": 0.9, **args})

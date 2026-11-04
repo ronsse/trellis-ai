@@ -26,7 +26,7 @@ Four invariants, all over ``src/`` only:
 
 A. Every ``build_llm_client(...)`` names an ``LLMConsumer`` member, either
    directly or through a parameter of an enclosing function that its own
-   callers name (a *forwarder* — ``mcp/server._build_llm_client`` and
+   callers name (a *forwarder* — ``mcp/wiring._build_llm_client`` and
    ``worker._require_llm_client_or_exit`` are the two that exist).
 B. Every member of ``LLMConsumer`` is named by at least one site. A member
    nothing builds for is a route an operator can declare and never reach —
@@ -115,26 +115,26 @@ _ENUM = "LLMConsumer"
 _SANCTIONED: dict[str, set[tuple[str, str]]] = {
     "OpenAIClient": {
         ("trellis/stores/registry.py", "_build_llm_client_from_route"),
-        ("trellis/mcp/server.py", "_build_llm_client_from_env"),
+        ("trellis/mcp/wiring.py", "_build_llm_client_from_env"),
     },
     "AnthropicClient": {
         ("trellis/stores/registry.py", "_build_llm_client_from_route"),
-        ("trellis/mcp/server.py", "_build_llm_client_from_env"),
+        ("trellis/mcp/wiring.py", "_build_llm_client_from_env"),
     },
     "_build_llm_client_from_route": {
         ("trellis/stores/registry.py", "build_llm_client"),
     },
     "_build_llm_client_from_env": {
-        ("trellis/mcp/server.py", "_build_llm_client"),
+        ("trellis/mcp/wiring.py", "_build_llm_client"),
     },
 }
 
-#: Hand-read off ``src/`` on 2026-09-14: memory_ingest_hook, mcp/server,
+#: Hand-read off ``src/`` on 2026-09-14: memory_ingest_hook, mcp/wiring,
 #: session_capture/sweep, classify, worker, admin.
 _BUILD_FLOOR = 6
 #: Those six, plus the four calls into the two forwarders.
 _NAMED_CONSUMER_FLOOR = 8
-#: ``server._build_llm_client`` and ``worker._require_llm_client_or_exit``.
+#: ``wiring._build_llm_client`` and ``worker._require_llm_client_or_exit``.
 _FORWARDER_FLOOR = 2
 #: Hand-read off ``src/`` on 2026-09-14, per subject. A renamed private
 #: builder fails loudly here rather than quietly emptying invariant D.
@@ -648,7 +648,7 @@ def test_every_build_names_its_consumer() -> None:
         _BUILD_FLOOR,
         subject=f"{_SUBJECT}() call sites in src/",
         hint=(
-            "memory_ingest_hook, mcp/server, session_capture/sweep, classify, "
+            "memory_ingest_hook, mcp/wiring, session_capture/sweep, classify, "
             "worker, admin"
         ),
     )
@@ -656,7 +656,7 @@ def test_every_build_names_its_consumer() -> None:
         len(scan.forwarders),
         _FORWARDER_FLOOR,
         subject="functions that forward a consumer to the builder",
-        hint="server._build_llm_client and worker._require_llm_client_or_exit",
+        hint="wiring._build_llm_client and worker._require_llm_client_or_exit",
     )
     violations = consumer_violations()
     assert not violations, (

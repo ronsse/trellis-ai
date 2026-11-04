@@ -160,7 +160,7 @@ GET_CONTEXT_MAX_TOKENS_DEFAULT = 2000
 GET_CONTEXT_MAX_ITEMS_ENV = "TRELLIS_GET_CONTEXT_MAX_ITEMS"
 GET_CONTEXT_MAX_ITEMS_SETTING = "get_context_max_items"
 #: Item ceiling for a flat pack: bounds the candidate list the token-budget
-#: walk considers. ``trellis.mcp.server._FLAT_MAX_ITEMS`` is this value.
+#: walk considers. ``trellis.mcp.tools.context._FLAT_MAX_ITEMS`` is this value.
 GET_CONTEXT_MAX_ITEMS_DEFAULT = 50
 
 #: MCP ``search``. Same shipped default as ``get_context`` by coincidence,

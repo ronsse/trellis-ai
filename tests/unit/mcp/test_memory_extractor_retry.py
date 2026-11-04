@@ -16,6 +16,8 @@ import pytest
 import structlog
 from structlog.testing import capture_logs
 
+import trellis.mcp.tools.memory as memory_tools_mod
+import trellis.mcp.wiring as wiring_mod
 from tests.structlog_isolation import clear_cached_logger_proxies
 from trellis.mcp import server as server_mod
 from trellis.mcp.server import save_memory
@@ -50,11 +52,11 @@ class _Clock:
 
 
 def _reset() -> None:
-    server_mod._memory_extractor = None
-    server_mod._memory_extractor_attempted = False
-    server_mod._memory_extractor_retry_at = None
-    server_mod._memory_extractor_reported = None
-    server_mod._memory_extractor_reported_at = 0.0
+    wiring_mod._memory_extractor = None
+    wiring_mod._memory_extractor_attempted = False
+    wiring_mod._memory_extractor_retry_at = None
+    wiring_mod._memory_extractor_reported = None
+    wiring_mod._memory_extractor_reported_at = 0.0
 
 
 @pytest.fixture(autouse=True)
@@ -67,7 +69,7 @@ def _fresh_cache() -> Any:
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
     clock = _Clock()
-    monkeypatch.setattr(server_mod.time, "monotonic", clock)
+    monkeypatch.setattr(wiring_mod.time, "monotonic", clock)
     return clock
 
 
@@ -82,7 +84,7 @@ class _Client:
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.client: Any = None
         self.builds = 0
-        monkeypatch.setattr(server_mod, "_build_llm_client", self._build)
+        monkeypatch.setattr(wiring_mod, "_build_llm_client", self._build)
 
     def _build(self, _registry: Any, _consumer: Any) -> Any:
         self.builds += 1
@@ -321,7 +323,7 @@ class TestStateEvents:
             msg = "unexpected"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr(server_mod, "emit_memory_extraction_state", explode)
+        monkeypatch.setattr(wiring_mod, "emit_memory_extraction_state", explode)
 
         assert server_mod._get_memory_extractor(temp_registry) is None
         assert save_memory("saved although the report raised").startswith(
@@ -379,7 +381,7 @@ class TestStateEvents:
                 "provider construction failed", data={"provider": "synthetic"}
             )
 
-        monkeypatch.setattr(server_mod, "_build_llm_client", provider_down)
+        monkeypatch.setattr(wiring_mod, "_build_llm_client", provider_down)
 
         assert server_mod._get_memory_extractor(temp_registry) is None
         assert _states(temp_registry) == [
@@ -404,7 +406,7 @@ class TestStateEvents:
             raise RuntimeError(msg)
 
         llm.client = _FakeLLM()
-        monkeypatch.setattr(server_mod, "_build_alias_resolver", broken_resolver)
+        monkeypatch.setattr(wiring_mod, "_build_alias_resolver", broken_resolver)
 
         prior = structlog.get_config()
         structlog.configure(
@@ -453,8 +455,8 @@ class TestStateEvents:
         def record_embed(_registry: Any, doc_id: str, *_args: Any, **_kw: Any) -> None:
             embedded.append(doc_id)
 
-        monkeypatch.setattr(server_mod, "_build_alias_resolver", flaky_resolver)
-        monkeypatch.setattr(server_mod, "run_embed_on_ingest", record_embed)
+        monkeypatch.setattr(wiring_mod, "_build_alias_resolver", flaky_resolver)
+        monkeypatch.setattr(memory_tools_mod, "run_embed_on_ingest", record_embed)
         documents = temp_registry.knowledge.document_store
 
         # 1. No client: saves proceed without extraction.
@@ -480,7 +482,7 @@ class TestStateEvents:
         resolver_down["on"] = False
         clock.offset = 2 * interval + 2
         assert save_memory("third note, resolver back").startswith("Memory saved:")
-        assert server_mod._memory_extractor is not None
+        assert wiring_mod._memory_extractor is not None
         assert [(row["state"], row["reason"]) for row in _states(temp_registry)] == [
             ("unavailable", "no_llm_client"),
             ("unavailable", "build_failed"),

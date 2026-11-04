@@ -81,7 +81,7 @@ knob's real enforcement today, not merely what ``trellis admin
 write-config`` / ``GET /api/version`` report about it. Every real
 enforcement call site (``trace_ingest_hook.py``, ``memory_ingest_hook.py``,
 ``embed_ingest_hook.py``, ``classify/ingest.py``, ``mcp/reconcile.py``,
-``mcp/server.py``, ``builder_factory.py``, ``pack_builder.py``,
+``mcp/wiring.py``, ``builder_factory.py``, ``pack_builder.py``,
 ``class_prior.py``, ``demotion_gate.py``, ``advisory_generator.py``,
 ``capture_health.py``, ``session_capture/sweep.py``,
 ``trellis_cli.worker._build_auto_promote_policy``,
