@@ -18,6 +18,7 @@ from structlog.testing import capture_logs
 import trellis_api.app as app_module
 from tests.duplicate_trace import graph_state, synthetic_trace
 from tests.mined_precedents import emit_historical_miner_row, promote_through_executor
+from tests.precedent_candidates import SENTINEL, record_candidates, recovering_trace
 from trellis.core import knobs
 from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.errors import StaleStoreWriteError, StoreError
@@ -1519,6 +1520,22 @@ def test_precedents_does_not_serve_a_mined_candidate(client):
     data = resp.json()
     assert [p["title"] for p in data["precedents"]] == ["Approved lesson"]
     assert data["count"] == 1
+
+
+def test_precedent_routes_do_not_serve_a_recorded_candidate(client):
+    """A governed candidate is event-only: neither route lists or counts it."""
+    registry = app_module._registry
+    record_candidates(registry, recovering_trace(domain="data"))
+    promote_through_executor(
+        registry, trace_id="trace-1", title="Approved lesson", domain="data"
+    )
+
+    listing = client.get("/api/v1/precedents")
+    domains = client.get("/api/v1/precedents/domains")
+
+    assert [p["title"] for p in listing.json()["precedents"]] == ["Approved lesson"]
+    assert domains.json()["total"] == 1
+    assert SENTINEL not in listing.text + domains.text
 
 
 def test_list_precedent_domains_does_not_count_a_mined_candidate(client):
