@@ -3465,7 +3465,9 @@ Plus the scope keys `intent` / `domain` / `agent_id` / `session_id`, the roll-up
 
 `advisories_filtered_legacy` (decision-ledger D-4, option B) is how many scope-matching advisories were withheld for predating the #394 generator repair — rows with no `evidence_confidence`, dropped before ranking and the cap, so a legacy row can never occupy a slot a post-repair row would have won. `advisories_matched` is counted *after* this filter. Controlled by `TRELLIS_FILTER_LEGACY_ADVISORIES` (default on, same accepted/rejected-value vocabulary as `TRELLIS_GRAPH_SEEDING`); `0` when the knob is off. Emitted on both pack kinds.
 
-**The sectioned payload is not a superset.** It carries `section_count`, `total_items` and `sections[]` (`{name, items_count, item_ids, injected_advisory_ids}`) *instead of* `items_count`, `injected_item_ids`, `injected_items[]`, `strategies_used`, `candidates_found`, `budget_max_items`, `budget_max_tokens`, `budget_trace[]` and `rejected_items[]` — none of which it emits. Everything else above is shared. Two consequences to know before reading the numbers: `trellis analyze pack-telemetry` counts a sectioned pack as a **0-item pack**, because it reads `injected_item_ids`; and since the learning join reads `injected_items[]`, a sectioned pack yields **zero per-item rows** — `run_id` and `intent_family` are emitted there for symmetry but stay inert until that gap is closed.
+**The sectioned payload is not a superset.** It carries `section_count`, `total_items` and `sections[]` (`{name, items_count, item_ids, injected_advisory_ids}`) *instead of* `items_count`, `injected_item_ids`, `strategies_used`, `candidates_found`, `budget_max_items`, `budget_max_tokens`, `budget_trace[]` and `rejected_items[]` — none of which it emits. It does emit `injected_items[]` (#958): one row per served item across every section, each carrying `section` and a section-local `rank`, so the learning join reads a sectioned pack's items as it reads a flat pack's. Everything else above is shared. One consequence to know before reading the numbers: `trellis analyze pack-telemetry` counts a sectioned pack as a **0-item pack**: it skips the rows, because a sectioned pack carries no `rejected_items` or `budget_trace` to set them against, but still counts the pack in `total_packs`, and the report's note says how many such packs diluted the per-pack rates.
+
+**Reading the served rows and the feedback rows.** Read `injected_items[]` and `FEEDBACK_RECORDED` payloads through `trellis.feedback.pack_rows`, not with a hand-written `payload.get("injected_items")` loop. `iter_served_rows(event, include_sectioned=..., include_holdout=...)` (or `served_rows_from_payload(pack_id, payload, ...)` for a payload already in hand, as the `join_pack_feedback` family returns it) yields one `ServedRow` per mapping row in payload order, with `item_id`, `item_type`, `rank`, `section`, `strategy_source` and `estimated_tokens` typed (`None` on a wrong type) and the verbatim row on `.row` for any other field. Both keyword arguments are required, because each hand-written reader used to answer them separately and some forgot one. `include_sectioned=False` yields nothing for a sectioned pack, for a reader built over one flat budget; `True` reads its rows as a flat pack's, which is right for a per-item join on `(pack_id, item_id)`. `include_holdout=False` yields nothing for a held-out pack; `True` reads `injected_items[]` as written, which is empty on a held-out pack (the would-be rows ride `holdout_items[]`, which the module never reads), so pass `True` only when the pack source has already gone through `drop_holdout`. `has_served_rows(payload)` is the "attributable" test. `feedback_row(event)` / `iter_feedback_rows(events)` normalise both feedback families into a `FeedbackRow` (`family`, `pack_id`, `rating`, `success`, `intent_family`, `target_id`, and the three attribution tuples): the governed family (`trellis curate feedback`, `POST /feedback`) carries no item attribution, so its tuples are empty and its `feedback_id` is `None`, and `FeedbackRow.pack_id` is the payload's own, never the event's `entity_id`. `tests/unit/test_injected_items_reader_rule.py` lists the few reads that stay hand-written, each with its reason.
 
 **Attribution fields (`title` / `category` / `domain_system`).** Added in #285 because the promotion candidates written to `intent_learning_candidates.json` previously carried only opaque `item_id`s. All three are derived from metadata the strategies already attach — nothing new is computed. `title` reads `title`, then `capture_title` (what the session-capture ingest writes), then `name`. `category` is the `ContentTags.content_type` facet and **only** that: a flat `metadata["content_type"]` is deliberately not read as a fallback, because ingest handlers stamp their own vocabulary there (`"conversation"`, `"entity_summary"`), and mixing the taxonomies would make the column ambiguous. An empty value is omitted rather than emitted as `null`, so thin items keep the pre-existing payload shape.
 
@@ -3727,6 +3729,12 @@ already exist on the server's local disk, with no shipped default set —
 there is no bounded query-param shape for "a path on the server's
 filesystem," so it is a premise refutation rather than unfinished work.
 
+**A sealed report.** `holdout` is the one report that reads a per-arm outcome.
+While `TRELLIS_HOLDOUT_READOUT_AFTER` is set and in the future, `GET
+/api/v1/analyze/holdout` answers `409` (`code: "holdout_readout_sealed"`, the
+horizon in `message`) before the cache lookup and before any event is read, and
+the other ten reports are unaffected. See [the readout seal](#readout-seal).
+
 **Finite JSON, always.** Every response passes through a recursive
 non-finite-float sanitizer before `JSONResponse`, which also sets
 `allow_nan=False`: a latent `inf`/`nan` becomes `null` rather than
@@ -3907,6 +3915,38 @@ trellis analyze holdout [--days N] [--until ISO] [--rate R] [--outcome NAME] [--
 | `--settle-hours` | `3` | Hours a completed capture sweep must follow a task's latest join before the task counts as finished |
 | `--seed` | `20261004` | Seed for every random draw, so a report reproduces |
 | `--limit` | `5000` | Max events scanned per event type; with `--operational` it is refused (exit `2`), since that mode pages to completion |
+
+<a id="readout-seal"></a>
+**The readout seal.** The experiment is blind only while nobody reads an
+outcome, so the outcome is sealed by code. `TRELLIS_HOLDOUT_READOUT_AFTER` is an
+ISO-8601 date or timestamp (naive is UTC). Unset or blank, nothing is sealed
+and the command behaves as it always has. Set, every surface that computes an
+outcome-derived figure (the per-arm means, the estimate, the interval and
+p-value, and `--by-commit`'s per-build means) refuses until that instant, and
+answers normally from it on; a read at exactly the horizon is open. The gate
+is `require_readout_open()` in `trellis.analyze.holdout_gate`, called before
+any event is read for a figure, so the refusal carries the horizon and the fact
+that the outcome is sealed, and nothing about the arms, their sizes or the
+window. It writes no event.
+
+| Surface | Before the horizon | Malformed value |
+|---------|--------------------|-----------------|
+| `trellis analyze holdout` (with or without `--by-commit`) | exit `3`; `--format json` prints `{"status": "refused", "reason": "outcome_sealed", "horizon": ..., "message": ..., "hint": "trellis analyze holdout --operational"}`; text prints the message. The exit is the same in both formats | exit `5`; the outcome is not read |
+| `GET /api/v1/analyze/holdout` | `409`, `code: "holdout_readout_sealed"`, the message naming the horizon; checked before the response cache, so a warm entry cannot answer | `409`, `code: "config_error"` |
+| Reports tab (Reports picker, holdout report) | the refusal reads "Failed to run report: ..." with the horizon; the rest of the picker works | the same, with the setting named |
+| MCP | no tool reports the outcome | n/a |
+
+A value that is not a date fails closed: the gate raises `ConfigError` rather
+than treating it as unset, so a typo withholds the outcome rather than opening
+it. REST answers `409`, not `403`, because the Reports tab reads a `403` as an
+under-scoped key and would hide the refusal text behind a key banner.
+`--operational` is never sealed: it reads no outcome value, and it is the way to
+confirm the experiment is running before the horizon. It is a CLI mode; the REST
+route and the Reports tab have no operational variant. A new surface that
+reports the outcome calls `analyze_holdout_gated`, never `analyze_holdout`, and
+`tests/unit/analyze/test_holdout_gate_rule.py` fails until it does. What each
+result commits the project to is in the
+[decision matrix](../design/holdout-decision-matrix.md).
 
 A unit is a finished sub-agent task (its join names a parent session) whose
 first pack is non-empty in its own arm's terms: a withheld row's

@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from datetime import datetime
+
 
 class TrellisError(Exception):
     """Base exception for all Trellis errors."""
@@ -231,6 +236,29 @@ class PolicyViolationError(MutationError):
         self.policy_id = policy_id
         super().__init__(message)
         self.code = "POLICY_VIOLATION"
+
+
+class HoldoutReadoutSealedError(PolicyViolationError):
+    """The pack-holdout outcome readout was asked for before its horizon.
+
+    ``TRELLIS_HOLDOUT_READOUT_AFTER`` seals the experiment's outcome figures
+    (means, estimate, interval, p-value, the per-build table) until that
+    instant, so the pre-registered analysis cannot be read early by accident.
+    ``horizon`` is the instant the seal lifts, the one fact the refusal
+    carries: nothing about the arms or their sizes rides it. Reads that show
+    the experiment is running (``trellis analyze holdout --operational``) are
+    not sealed.
+
+    A :class:`PolicyViolationError`, so the CLI boundary exits
+    ``EXIT_POLICY`` for it; the REST boundary answers HTTP 409
+    (:func:`trellis_api.middleware._error_status`), not 403, because the
+    refusal depends on the clock and not on the caller's credential.
+    """
+
+    def __init__(self, message: str, *, horizon: datetime) -> None:
+        self.horizon = horizon
+        super().__init__(message, policy_id="holdout_readout_horizon")
+        self.code = "HOLDOUT_READOUT_SEALED"
 
 
 class ApprovalRequiredError(MutationError):

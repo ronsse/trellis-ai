@@ -67,6 +67,7 @@ from pydantic import Field
 
 from trellis.core.base import TrellisModel
 from trellis.feedback.attribution import is_sectioned_payload
+from trellis.feedback.pack_rows import has_served_rows, served_rows_from_payload
 from trellis.learning.pack_observations import join_pack_feedback
 from trellis.retrieve.class_prior import (
     DEFAULT_SCOPE,
@@ -309,10 +310,14 @@ def _candidates(
         return "no_budget_trace"
     helpful, unhelpful = verdicts
     pointer_ids = _served_pointer_ids(payload)
+    # The caller passes a flat pack it already screened for sectioned and
+    # withheld packs, so this read applies neither policy again.
     meta = {
-        raw["item_id"]: raw
-        for raw in (payload.get("injected_items") or [])
-        if isinstance(raw, Mapping) and raw.get("item_id")
+        served.item_id: served.row
+        for served in served_rows_from_payload(
+            "", payload, include_sectioned=True, include_holdout=True
+        )
+        if served.item_id
     }
     out: list[_Candidate] = []
     for step in trace:
@@ -481,7 +486,7 @@ def replay_pack_value(
     flat_packs = {
         pack_id: payload
         for pack_id, payload in pack_payloads.items()
-        if payload.get("injected_items") and not is_sectioned_payload(payload)
+        if has_served_rows(payload) and not is_sectioned_payload(payload)
     }
     verdicts = collect_pack_verdicts(feedback_events, flat_packs)
     helpful_by_pack = verdicts["helpful"]
@@ -1039,7 +1044,7 @@ def replay_class_prior(
     flat_packs = {
         pack_id: payload
         for pack_id, payload in pack_payloads.items()
-        if payload.get("injected_items") and not is_sectioned_payload(payload)
+        if has_served_rows(payload) and not is_sectioned_payload(payload)
     }
     verdicts = collect_pack_verdicts(feedback_events, flat_packs)
     helpful_by_pack = verdicts["helpful"]
@@ -1051,9 +1056,11 @@ def replay_class_prior(
         for pack_id in attributed:
             payload = flat_packs[pack_id]
             rows = [
-                row
-                for row in (payload.get("injected_items") or [])
-                if isinstance(row, Mapping) and isinstance(row.get("item_id"), str)
+                served.row
+                for served in served_rows_from_payload(
+                    pack_id, payload, include_sectioned=False, include_holdout=True
+                )
+                if served.item_id is not None
             ]
             if not rows:
                 continue
@@ -1664,7 +1671,7 @@ def replay_graph_selection(
     flat_packs = {
         pack_id: payload
         for pack_id, payload in pack_payloads.items()
-        if payload.get("injected_items") and not is_sectioned_payload(payload)
+        if has_served_rows(payload) and not is_sectioned_payload(payload)
     }
     verdicts = collect_pack_verdicts(feedback_events, flat_packs)
     helpful_by_pack = verdicts["helpful"]
@@ -1677,9 +1684,11 @@ def replay_graph_selection(
         helpful = helpful_by_pack.get(pack_id, set())
         unhelpful = unhelpful_by_pack.get(pack_id, set())
         rows = [
-            row
-            for row in (payload.get("injected_items") or [])
-            if isinstance(row, Mapping) and isinstance(row.get("item_id"), str)
+            served.row
+            for served in served_rows_from_payload(
+                pack_id, payload, include_sectioned=False, include_holdout=True
+            )
+            if served.item_id is not None
         ]
         rejected_rows = [
             r for r in (payload.get("rejected_items") or []) if isinstance(r, Mapping)

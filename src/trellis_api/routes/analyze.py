@@ -58,7 +58,8 @@ from fastapi.responses import JSONResponse
 from pydantic import Field, ValidationError, field_validator
 
 from trellis.analyze.domains import analyze_domains
-from trellis.analyze.holdout import OUTCOMES, HoldoutAnalysisError, analyze_holdout
+from trellis.analyze.holdout import OUTCOMES, HoldoutAnalysisError
+from trellis.analyze.holdout_gate import analyze_holdout_gated, require_readout_open
 from trellis.core.base import TrellisModel
 from trellis.extract.telemetry import analyze_extractor_fallbacks
 from trellis.learning import (
@@ -260,7 +261,7 @@ def _parse_window_end(value: str | None) -> datetime | None:
 def _run_holdout(params: HoldoutParams, registry: StoreRegistry) -> dict[str, Any]:
     event_log = registry.operational.event_log
     try:
-        report = analyze_holdout(
+        report = analyze_holdout_gated(
             event_log,
             days=params.days,
             until=_parse_window_end(params.until),
@@ -440,6 +441,11 @@ class _ReportEntry:
     description: str
     params_model: type[TrellisModel]
     run: Callable[[Any, StoreRegistry], dict[str, Any]]
+    # A report that computes the pack holdout's outcome figures. The route
+    # checks the readout seal before it looks in the cache, so a cached
+    # figure is never served ahead of the horizon either; the report's own
+    # ``run`` goes through the same gate for any other caller.
+    readout_gated: bool = False
 
 
 _REPORTS: dict[str, _ReportEntry] = {
@@ -465,10 +471,14 @@ _REPORTS: dict[str, _ReportEntry] = {
             "the window end, or whose event scan was truncated, returns a "
             "refusal instead of a report: it names what is missing and "
             "carries no figure, and its note points to the operational "
-            "report for whether the experiment is running."
+            "report for whether the experiment is running. While "
+            "TRELLIS_HOLDOUT_READOUT_AFTER is set and its date has not "
+            "arrived, the report is sealed: the route answers 409 naming "
+            "the horizon and computes nothing."
         ),
         params_model=HoldoutParams,
         run=_run_holdout,
+        readout_gated=True,
     ),
     "judged-outcomes": _ReportEntry(
         title="Judged outcomes",
@@ -660,6 +670,9 @@ def get_analyze_report(report: str, request: Request) -> JSONResponse:
         params = entry.params_model(**raw_params)
     except ValidationError as exc:
         raise RequestValidationError(exc.errors()) from exc
+
+    if entry.readout_gated:
+        require_readout_open()
 
     registry = get_registry()
     params_key = params.model_dump_json()
