@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-import trellis
+from tests.integration._live_server import repo_src_pythonpath
 from tests.unit.analyze import _trend_seed as seed_mod
 from trellis.analyze import trend as trend_module
 from trellis.analyze.trend import (
@@ -491,7 +491,6 @@ class TestSealedOutcome:
         assert "join_pack_events_with_coverage" in called
 
     def test_importing_it_does_not_load_the_holdout_analysis(self) -> None:
-        src = Path(trellis.__file__).resolve().parents[1]
         probe = (
             "import sys, trellis.analyze.trend; "
             "print(sorted(m for m in sys.modules "
@@ -502,7 +501,7 @@ class TestSealedOutcome:
             capture_output=True,
             text=True,
             check=True,
-            env={"PYTHONPATH": str(src), "PATH": ""},
+            env={"PYTHONPATH": repo_src_pythonpath(), "PATH": ""},
         )
 
         assert done.stdout.strip() == "[]"
