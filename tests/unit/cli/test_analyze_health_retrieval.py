@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import plain
 from trellis.ops.retrieval_adoption import RETRIEVAL_ADOPTION_MIN_SESSIONS
 from trellis.stores.base.event_log import Event, EventType
 from trellis.stores.registry import StoreRegistry
@@ -65,7 +66,7 @@ def test_text_prints_the_rate_and_the_warn(temp_stores: StoreRegistry) -> None:
     result = runner.invoke(app, ["analyze", "health"])
 
     assert result.exit_code == 0, result.output
-    line = next(ln for ln in result.stdout.splitlines() if "Retrieval:" in ln)
+    line = next(ln for ln in plain(result.stdout).splitlines() if "Retrieval:" in ln)
     assert "2/12" in line
     assert "17%" in line
 
@@ -79,7 +80,7 @@ def test_below_the_minimum_prints_a_state_not_a_rate(
     as_json = runner.invoke(app, ["analyze", "health", "--format", "json"])
 
     assert text.exit_code == as_json.exit_code == 0
-    line = next(ln for ln in text.stdout.splitlines() if "Retrieval:" in ln)
+    line = next(ln for ln in plain(text.stdout).splitlines() if "Retrieval:" in ln)
     assert "insufficient_data" in line
     assert "%" not in line
     data = json.loads(as_json.stdout)
