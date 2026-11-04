@@ -43,7 +43,7 @@ from mcp.server.auth.middleware.auth_context import AuthenticatedUser, auth_cont
 from mcp.shared.exceptions import McpError
 
 import trellis.mcp.auth as mcp_auth_mod
-import trellis.mcp.server as mcp_server_mod
+import trellis.mcp.wiring as wiring_mod
 import trellis_api.app as rest_app_mod
 from tests.ast_rules import assert_hand_read_floor
 from tests.unit.mcp.conftest import unwrap_tool
@@ -193,16 +193,16 @@ def mcp_registry(tmp_path: Path) -> Iterator[Any]:
     stores_dir = tmp_path / "mcp_stores"
     stores_dir.mkdir(parents=True)
     reg = StoreRegistry(stores_dir=stores_dir)
-    prior_registry = mcp_server_mod._registry
-    prior_minhash = mcp_server_mod._minhash_index
-    mcp_server_mod._registry = reg
-    mcp_server_mod._minhash_index = None
+    prior_registry = wiring_mod._registry
+    prior_minhash = wiring_mod._minhash_index
+    wiring_mod._registry = reg
+    wiring_mod._minhash_index = None
     mcp_auth_mod.set_auth_enforced(enforced=True)
     try:
         yield reg
     finally:
-        mcp_server_mod._registry = prior_registry
-        mcp_server_mod._minhash_index = prior_minhash
+        wiring_mod._registry = prior_registry
+        wiring_mod._minhash_index = prior_minhash
         mcp_auth_mod.set_auth_enforced(enforced=True)
         reg.close()
 

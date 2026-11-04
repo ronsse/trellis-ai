@@ -126,7 +126,7 @@ Request/response schemas in `src/trellis_api/models.py` (Pydantic `TrellisModel`
 
 ### 2.4 MCP Server — agent-facing macro tools
 
-**Location:** `src/trellis/mcp/server.py`
+**Location:** `src/trellis/mcp/server.py` (entry point; the tools are under `src/trellis/mcp/tools/`)
 **Entry point:** `trellis-mcp` (register in Claude Desktop or any MCP client)
 **Audience:** Claude, other MCP-compatible LLMs
 **Design:** all tools return markdown strings (LLM-friendly), track token usage via `track_token_usage()` → event log, share a `StoreRegistry` singleton.
@@ -199,7 +199,7 @@ Agent (Python/MCP/CLI/HTTP)
           (markdown formatted if MCP/skills return path)
 ```
 
-**Files:** `src/trellis_sdk/client.py:assemble_pack()`, `src/trellis/retrieve/pack_builder.py`, `src/trellis_api/routes/retrieve.py:assemble_pack()`, `src/trellis/mcp/server.py:get_context()`
+**Files:** `src/trellis_sdk/client.py:assemble_pack()`, `src/trellis/retrieve/pack_builder.py`, `src/trellis_api/routes/retrieve.py:assemble_pack()`, `src/trellis/mcp/tools/context.py:get_context()`
 
 ### 3.3 Promote a trace to a precedent
 

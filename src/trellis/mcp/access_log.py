@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from trellis.stores.registry import StoreRegistry
 
 #: Every tool registered with ``trellis_scope(SCOPE_READ)``
-#: (``tests/unit/mcp/test_access_log.py`` pins this against ``server.py``).
+#: (``tests/unit/mcp/test_access_log.py`` pins this against the server modules).
 READ_TOOLS = frozenset(
     {
         "get_context",
@@ -62,7 +62,7 @@ READ_TOOLS = frozenset(
     }
 )
 #: Tools that name the items they served (``note_printed_items`` or
-#: ``note_served_items`` in ``server.py``); the rest record ``item_count: null``.
+#: ``note_served_items`` in the tool modules); the rest record ``item_count: null``.
 #: Pinned by a test.
 NAMING_TOOLS = frozenset(
     {

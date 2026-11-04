@@ -23,7 +23,7 @@ Agents forget: every session re-derives context that a prior session already ear
 
 Agent consumers are first-class users:
 
-- As **Claude Code / Hermes / any MCP client**, I pull a token-budgeted context pack before a task and record a trace + feedback after, so the next run starts smarter (skills: `skills/`, MCP tools: `src/trellis/mcp/server.py`).
+- As **Claude Code / Hermes / any MCP client**, I pull a token-budgeted context pack before a task and record a trace + feedback after, so the next run starts smarter (skills: `skills/`, MCP tools: `src/trellis/mcp/tools/`).
 - As **the operator (nronsse)**, I ingest my corpus and claude.ai conversations, audit the memory via the Memory Explorer, and meter what the memory costs me (`trellis analyze cost`).
 
 Adopter profiles beyond the author (it's public, on PyPI — who else deploys this?):
@@ -40,7 +40,7 @@ Honesty note: verified deployments today = the author's dogfood + that paused pi
 - **v0.9.0** tagged (`git tag`), published on PyPI as `trellis-ai`; Python ≥3.11, MIT (`pyproject.toml`).
 - **Six shipped packages** — `trellis`, `trellis_cli`, `trellis_api`, `trellis_sdk`, `trellis_workers`, `trellis_wire` (`pyproject.toml [tool.hatch.build.targets.wheel]`); entry points `trellis` / `trellis-mcp` / `trellis-api` / `trellis-session-capture`.
 - **Six store ABCs, multi-backend**: graph = SQLite/Postgres/ArcadeDB/Neo4j, vector = SQLite/pgvector/ArcadeDB/Neo4j, blob = local/S3 (`src/trellis/stores/`, table in `CLAUDE.md`). Backends pass shared contract suites (`tests/unit/stores/contracts/` — 106 graph + 38 vector tests per backend, `grep -c 'def test_' tests/unit/stores/contracts/{graph,vector}_store_contract.py`, 2026-09-20).
-- **16 MCP tools** (`grep -c '@mcp.tool' src/trellis/mcp/server.py` → 16), markdown output, opt-in HTTP transport with scoped API keys (#252, `docs/design/adr-mcp-http-transport.md`).
+- **18 MCP tools** (`grep -rh '@mcp.tool' src/trellis/mcp/tools | wc -l` → 18), markdown output, opt-in HTTP transport with scoped API keys (#252, `docs/design/adr-mcp-http-transport.md`).
 - **REST API with scoped auth** (`TRELLIS_AUTH_MODE`, PR #242) + Memory Explorer UI (`src/trellis_api/`); HTTP-only Python SDK (`src/trellis_sdk/`).
 - **Governed mutation pipeline** — validate → policy → idempotency → execute → emit event (`src/trellis/mutate/executor.py`); traces immutable.
 - **Tests/CI**: 7534 unit tests collected by default of 7846, and 7719 of 8085 across `tests/`, on `1ef5c9c` 2026-09-20 (`python -m pytest tests/unit/ -q --co`). Six workflows gate every PR (`.github/workflows/`); `main` itself has **no required status checks**, so a green run is a convention the agent enforces, not a control (`docs/design/autonomous-backlog.md` §"Repo-level gap").

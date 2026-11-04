@@ -15,7 +15,7 @@ caller has to decide different things with each.
 
 * **Checks** return a :class:`Refusal` (or ``None``) instead of raising one,
   and emit nothing. The tool records the ``WRITE_REJECTED`` event and raises,
-  so every rejection site stays in ``server.py`` with a literal ``tool=`` —
+  so every rejection site stays in a tool module with a literal ``tool=`` —
   the form the capture-surface roster scans for.
 * **Stamps** return an error string, or ``None`` on success, and never
   raise. Whether a failed stamp is an error or a warning depends on what the

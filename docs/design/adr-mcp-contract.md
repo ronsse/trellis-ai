@@ -196,7 +196,7 @@ and enforces a per-tool scope map.
   source of truth for all four version numbers.
 - [src/trellis_api/routes/version.py](../../src/trellis_api/routes/version.py) —
   handshake endpoint.
-- [src/trellis/mcp/server.py](../../src/trellis/mcp/server.py) —
+- [src/trellis/mcp/tools/](../../src/trellis/mcp/tools/__init__.py) —
   MCP tool definitions (11 tools as of `MCP_TOOLS_VERSION=1`).
 - [docs/design/adr-plugin-contract.md](adr-plugin-contract.md) —
   runtime extension contract (Step 5).

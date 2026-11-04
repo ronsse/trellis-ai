@@ -23,6 +23,7 @@ import structlog
 
 import trellis.mcp.auth as auth_mod
 import trellis.mcp.server as server_mod
+import trellis.mcp.wiring as wiring_mod
 from trellis.auth import generate_api_key
 from trellis.core.write_config import ENV_VAR_BY_FIELD
 from trellis.stores.registry import StoreRegistry
@@ -111,23 +112,23 @@ def _suppress_structlog() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def temp_registry(tmp_path: Path) -> Iterator[StoreRegistry]:
-    """Create a tmp ``StoreRegistry`` and patch it into the MCP server module.
+    """Create a tmp ``StoreRegistry`` and patch it into the MCP wiring module.
 
     Autouse so tests that don't take the fixture explicitly still get
-    the global ``server_mod._registry`` patched — several MCP tests
+    the global ``wiring_mod._registry`` patched — several MCP tests
     exercise the implicit-registry path.
     """
     stores_dir = tmp_path / "stores"
     stores_dir.mkdir(parents=True)
     registry = StoreRegistry(stores_dir=stores_dir)
-    server_mod._registry = registry
+    wiring_mod._registry = registry
     # The MinHash fuzzy-dedup index is a separate module-level cache built
     # from whichever registry was live when it was first used — left in
     # place it dedups memories against a *previous test's* stores. Reset
     # alongside the registry on both sides of the test.
-    server_mod._minhash_index = None
+    wiring_mod._minhash_index = None
     try:
         yield registry
     finally:
-        server_mod._registry = None
-        server_mod._minhash_index = None
+        wiring_mod._registry = None
+        wiring_mod._minhash_index = None

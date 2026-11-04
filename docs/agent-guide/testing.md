@@ -134,6 +134,31 @@ This means:
   `-m` on the command line replaces the filter wholesale, so the default
   exclusions no longer apply to the explicitly-requested marker.
 
+## Patching a name in the MCP server
+
+`src/trellis/mcp/server.py` is the entry point and a façade; the code is in `boundary.py`,
+`rejections.py`, `app.py`, `wiring.py` and `tools/<family>.py`. Assigning to a name on the
+façade (`monkeypatch.setattr(server_mod, "x", ...)`) changes the façade's copy and nothing
+else, so **patch a name on the module that reads it at call time**:
+
+- Module state a function rebinds (`_registry`, `_minhash_index`, the `_memory_extractor*`
+  flags) is not re-exported at all. Patch it on `trellis.mcp.wiring`, where
+  `tests/unit/mcp/conftest.py` already does it for the registry.
+- A function imported by name into a tool module is looked up in that module's globals.
+  `_build_pack_builder` is read by `tools/context.py`, `current_principal_id` by
+  `tools/admin.py`, `run_embed_on_ingest` and `mark_document_superseded` by `tools/memory.py`.
+  Patch the one the test exercises, or each of them if it exercises several.
+- `monkeypatch.setattr(..., raising=True)` on the façade fails loudly for a name that was
+  left off it; a plain assignment does not, so prefer `monkeypatch.setattr`.
+
+A green run does not show a patch still bites. Point it back at the façade and confirm the
+test fails, as the split's mutant table did. Four tests pin the shape: `test_server_facade.py`
+(the re-exported surface), `test_tool_roster.py` (names, order and input schemas against a
+recording from before the split), `test_server_import_cycles.py` (a fresh interpreter per
+module) and `tests/mcp_server_modules.py` (the helper the path-keyed AST rules use to read
+the split modules as one). Code that moved logs under its new module's name
+(`trellis.mcp.wiring`, `trellis.mcp.tools.memory`, ...), not `trellis.mcp.server`.
+
 ## Fields copied everywhere and asserted nowhere
 
 `scripts/audit_replicated_field_copies.py` ranks `Class.field` pairs by

@@ -36,6 +36,9 @@ import pytest
 from mcp.shared.exceptions import McpError
 
 import trellis.mcp.server as server_mod
+import trellis.mcp.tools.experience_knowledge as experience_tools_mod
+import trellis.mcp.tools.mutation as mutation_tools_mod
+import trellis.mcp.tools.observation as observation_tools_mod
 import trellis.mutate as mutate_mod
 from trellis.core.error_sanitize import SUPPRESSED_MARKER
 from trellis.mcp.knowledge_links import _describe_unsuccessful, link_knowledge_node
@@ -177,7 +180,7 @@ class TestResultMessage:
             CommandStatus.REJECTED, f"policy violation: api_key={HOSTILE}"
         )
         monkeypatch.setattr(
-            server_mod,
+            observation_tools_mod,
             "build_curate_executor",
             lambda *args, **kwargs: _StubExecutor(hostile_result),
         )
@@ -203,7 +206,7 @@ class TestResultMessage:
         pre-flight validation cases above."""
         hostile_result = _result(status, f"policy violation: api_key={HOSTILE}")
         monkeypatch.setattr(
-            server_mod,
+            mutation_tools_mod,
             "build_curate_executor",
             lambda *args, **kwargs: _StubExecutor(hostile_result),
         )
@@ -231,7 +234,7 @@ class TestResultMessage:
             message=f"constraint violated: api_key={HOSTILE}",
         )
         monkeypatch.setattr(
-            server_mod,
+            experience_tools_mod,
             "build_curate_executor",
             lambda *args, **kwargs: _StubExecutor(hostile_result),
         )

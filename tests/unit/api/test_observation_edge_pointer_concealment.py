@@ -24,6 +24,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import trellis.mcp.server as server_mod
+import trellis.mcp.wiring as wiring_mod
 import trellis_api.app as app_module
 from tests.unit.mcp.conftest import unwrap_tool
 from tests.unit.mcp.test_sensitivity_surfaces import (
@@ -132,12 +133,12 @@ def registry(tmp_path, monkeypatch, level):
     monkeypatch.setenv("TRELLIS_AUTH_MODE", "required")
     reg = StoreRegistry(stores_dir=tmp_path / "stores")
     app_module._registry = reg
-    server_mod._registry = reg
+    wiring_mod._registry = reg
     _seed(reg, level)
     yield reg
     reg.close()
     app_module._registry = None
-    server_mod._registry = None
+    wiring_mod._registry = None
 
 
 @pytest.fixture

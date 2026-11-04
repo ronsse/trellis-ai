@@ -111,7 +111,7 @@ authenticated read by an API key:
 - **REST:** any `GET` under `/api/v1/` and `POST /api/v1/packs` and `/api/v1/packs/sectioned`,
   when the answer is 200. A 403, 404 or 422 returned nothing and records nothing.
 - **MCP:** each tool registered at the `read` scope (`tests/unit/mcp/test_access_log.py`
-  pins the list against `server.py`). A tool that raises records nothing.
+  pins the list against the server modules). A tool that raises records nothing.
 
 Payload: `{key_id, surface, route, item_count, item_ids, item_ids_truncated}`. `route` is the
 matched route template (`GET /api/v1/documents/{doc_id:path}`) or the MCP tool name, never
@@ -2756,7 +2756,7 @@ that this one does. Every registered knob now resolves env > settings >
 default at its real enforcement site — each per-knob reader
 (`classify/ingest.py`, `extract/memory_ingest_hook.py`,
 `extract/trace_ingest_hook.py`, `retrieve/embed_ingest_hook.py`,
-`mcp/reconcile.py`, `mcp/server.py`) delegates to
+`mcp/reconcile.py`, `mcp/wiring.py`) delegates to
 `write_config.resolve_write_behaviour()`, `graph_seeding` /
 `graph_recency_fallback` / `filter_legacy_advisories` each carry their own settings-aware read in
 `builder_factory.py` / `pack_builder.py`, and `class_prior_mode`
@@ -5674,7 +5674,7 @@ day-window selector drive all charts.
 
 ## MCP Macro Tools
 
-Start with `trellis-mcp`. 16 tools: 10 core tools and 3 sectioned-context tools for richer pack assembly return markdown, and 3 structured tools (observations + the mutation escape hatch) return JSON.
+Start with `trellis-mcp`. The server is a package: `mcp/server.py` is the entry point and re-exports the old module's names, and the tools live in `mcp/tools/<family>.py` (see [testing.md § Patching a name in the MCP server](testing.md#patching-a-name-in-the-mcp-server)). 16 tools: 10 core tools and 3 sectioned-context tools for richer pack assembly return markdown, and 3 structured tools (observations + the mutation escape hatch) return JSON.
 
 **Core tools**
 
@@ -5760,7 +5760,7 @@ Executor rejections with `reason="idempotency_replay"` are excluded — a replay
 | `config:policy_file` | yes | any accepted **governed** write (`MUTATION_EXECUTED`, any `requested_by`) newer than the last rejection (see [Policy Commands](#policy-commands)). `MEMORY_STORED` does **not** clear it — widening the accept set for `save_memory` did not widen this rule |
 | `(unknown)` | yes | nothing — deliberately unclearable |
 
-Two labels used to be structurally unclearable. `mcp:save_memory`'s only `MUTATION_EXECUTED` then came from memory extraction (a stored memory now carries its own, from the `evidence.ingest` command it submits, so the premise no longer holds, but `MEMORY_STORED` stays the executor-independent signal), which is gated on `TRELLIS_ENABLE_MEMORY_EXTRACTION` (**off** by default) and emits nothing when extraction yields no drafts — so on a default deployment a perfectly healthy `save_memory` cleared nothing and three rejections pinned the banner for a full window. `MEMORY_STORED` is its unconditional success signal and now clears it. And `mcp:record_feedback` captures no experience at all: its success path is `FEEDBACK_RECORDED`, which no `MUTATION_EXECUTED` accompanies, so the headline *"New experience from this session is NOT being saved"* was false in both halves. It is out of the banner and unchanged in `trellis analyze health`. Exclusion is a deny-list — a surface is watched unless explicitly named — and `tests/unit/mcp/test_capture_surface_roster.py` enumerates every boundary-rejection site, fails if its tool cannot demonstrate an accept by actually making a successful call, and separately sweeps all of `src/` — both call spellings — so no module outside `mcp/server.py` can raise a banner no roster has classified, while inside `mcp/server.py` every emitter call must route through the wrapper the roster scans for. The hand-written success recipes are asserted against the scan too: every other guard divides by the scan's own output, so only a hand count catches the scan silently shrinking.
+Two labels used to be structurally unclearable. `mcp:save_memory`'s only `MUTATION_EXECUTED` then came from memory extraction (a stored memory now carries its own, from the `evidence.ingest` command it submits, so the premise no longer holds, but `MEMORY_STORED` stays the executor-independent signal), which is gated on `TRELLIS_ENABLE_MEMORY_EXTRACTION` (**off** by default) and emits nothing when extraction yields no drafts — so on a default deployment a perfectly healthy `save_memory` cleared nothing and three rejections pinned the banner for a full window. `MEMORY_STORED` is its unconditional success signal and now clears it. And `mcp:record_feedback` captures no experience at all: its success path is `FEEDBACK_RECORDED`, which no `MUTATION_EXECUTED` accompanies, so the headline *"New experience from this session is NOT being saved"* was false in both halves. It is out of the banner and unchanged in `trellis analyze health`. Exclusion is a deny-list — a surface is watched unless explicitly named — and `tests/unit/mcp/test_capture_surface_roster.py` enumerates every boundary-rejection site, fails if its tool cannot demonstrate an accept by actually making a successful call, and separately sweeps all of `src/` — both call spellings — so no module outside the MCP server modules (`mcp/server.py`, `mcp/app.py`, `mcp/boundary.py`, `mcp/rejections.py`, `mcp/wiring.py`, `mcp/tools/`) can raise a banner no roster has classified, while inside them every emitter call must route through the wrapper the roster scans for. The hand-written success recipes are asserted against the scan too: every other guard divides by the scan's own output, so only a hand count catches the scan silently shrinking.
 
 One residue, named rather than hidden: `save_memory` emits nothing on a *dedup* hit, so a surface whose every successful call is a duplicate has no accept to clear with. It also produces no rejections, so it cannot raise the banner on its own.
 

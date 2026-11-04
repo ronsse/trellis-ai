@@ -26,6 +26,7 @@ from typing import Any
 import pytest
 
 import trellis.mcp.server as server_mod
+import trellis.mcp.tools.memory as memory_tools_mod
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.core.hashing import content_hash
 from trellis.llm.routing import LLMConsumer
@@ -103,7 +104,7 @@ def _enable(monkeypatch: pytest.MonkeyPatch, client: Any | None) -> None:
     """Turn the verdict tier on and pin the client boundary to *client*."""
     monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
     monkeypatch.setattr(
-        server_mod, "_build_llm_client", lambda _registry, _consumer: client
+        memory_tools_mod, "_build_llm_client", lambda _registry, _consumer: client
     )
 
 
@@ -215,7 +216,7 @@ class TestVerdictMatrix:
             seen.append(consumer)
             return FakeLLMClient(content=_verdict_json("add"))
 
-        monkeypatch.setattr(server_mod, "_build_llm_client", _record)
+        monkeypatch.setattr(memory_tools_mod, "_build_llm_client", _record)
         save_memory(_NEAR)
         assert seen == [LLMConsumer.RECONCILE]
 
@@ -586,7 +587,7 @@ class TestFallbacks:
             msg = "provider misconfigured"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr(server_mod, "_build_llm_client", _boom)
+        monkeypatch.setattr(memory_tools_mod, "_build_llm_client", _boom)
         self._assert_skipped_add(
             temp_registry,
             base_id,
@@ -922,7 +923,7 @@ class TestPhaseBGuard:
             msg = "unexpected judge-path crash"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr(server_mod, "_compute_reconcile_outcome", _crash)
+        monkeypatch.setattr(memory_tools_mod, "_compute_reconcile_outcome", _crash)
 
         result = save_memory(_NEAR)
         new_id = _doc_id(result)
@@ -1451,7 +1452,7 @@ class TestSupersedeTargetVanished:
             calls.append({"old_doc_id": old_doc_id, "new_doc_id": new_doc_id})
             return reason
 
-        monkeypatch.setattr(server_mod, "mark_document_superseded", _fake)
+        monkeypatch.setattr(memory_tools_mod, "mark_document_superseded", _fake)
         return calls
 
     def test_no_supersession_is_claimed_anywhere(

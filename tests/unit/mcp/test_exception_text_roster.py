@@ -72,7 +72,12 @@ EXCEPTION_TEXT_EXEMPTIONS: dict[str, str] = {
 #: in server.py does. A key naming a module the scan does not visit, one
 #: renamed or deleted, fails the build too.
 _MODULE_EXEMPTIONS: dict[str, dict[str, str]] = {
-    "server.py": EXCEPTION_TEXT_EXEMPTIONS,
+    "server.py": {"main": EXCEPTION_TEXT_EXEMPTIONS["main"]},
+    "rejections.py": {
+        key: reason
+        for key, reason in EXCEPTION_TEXT_EXEMPTIONS.items()
+        if key.startswith("_SanitizeUncaughtToolErrors.")
+    },
 }
 
 # Hand count (trellis-ai#748, shrunk by the MCP/CLI describe-dont-quote

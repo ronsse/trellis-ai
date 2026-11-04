@@ -289,7 +289,7 @@ _ACCEPT_MAX_PAGES = 5
 #: possible.
 #:
 #: The label is spelled out here rather than imported from
-#: ``trellis.mcp.server.SAVE_MEMORY_SURFACE``: ``ops`` must not depend on
+#: ``trellis.mcp.tools.memory.SAVE_MEMORY_SURFACE``: ``ops`` must not depend on
 #: the MCP layer, and an ops module importing a tool server to learn a
 #: string is a worse coupling than a duplicated literal. The duplication is
 #: pinned by *execution* rather than by eye —

@@ -104,12 +104,14 @@ class Entry:
         return (self.via,) if isinstance(self.via, str) else self.via
 
 
-_SERVER_EXTRACTION = Entry("trellis/mcp/server.py", "_emit_memory_stored_and_enrich")
+_SERVER_EXTRACTION = Entry(
+    "trellis/mcp/tools/memory.py", "_emit_memory_stored_and_enrich"
+)
 _SYNC_EXTRACTION = Entry("trellis/ingest_corpus/sync.py", "_apply_record")
 _ENRICH_BATCH = Entry("trellis_cli/worker.py", "_run_batch_enrichment")
 _SHADOW_ITEM = Entry("trellis/classify/shadow.py", "shadow_classify_item")
 _SERVER_RECONCILE = Entry(
-    "trellis/mcp/server.py",
+    "trellis/mcp/tools/memory.py",
     "_compute_reconcile_outcome",
     via="_reconcile_egress_permits",
 )
