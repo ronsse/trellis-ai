@@ -1,0 +1,1021 @@
+{
+ "extractors": {
+  "aliases": [
+   {
+    "entity_id": "dataset:postgres://db:5432:mart.orders",
+    "raw_id": "mart.orders",
+    "raw_name": "mart.orders",
+    "source_system": "name"
+   },
+   {
+    "entity_id": "dataset:postgres://db:5432:raw.orders",
+    "raw_id": "raw.orders",
+    "raw_name": "raw.orders",
+    "source_system": "name"
+   },
+   {
+    "entity_id": "job:airflow:load_orders",
+    "raw_id": "load_orders",
+    "raw_name": "load_orders",
+    "source_system": "name"
+   },
+   {
+    "entity_id": "model.shop.orders",
+    "raw_id": "orders",
+    "raw_name": "orders",
+    "source_system": "name"
+   }
+  ],
+  "commands": [
+   {
+    "args": {
+     "entity_id": "model.shop.orders",
+     "entity_type": "dbt_model",
+     "name": "orders",
+     "node_role": "semantic",
+     "properties": {
+      "database": "warehouse",
+      "database_name": "warehouse",
+      "extraction_confidence": 1.0,
+      "name": "orders",
+      "physical_uri": "postgres://warehouse/analytics/orders",
+      "schema": "analytics",
+      "schema_name": "analytics",
+      "source_system": "postgres",
+      "unique_id": "model.shop.orders"
+     }
+    },
+    "operation": "entity.create",
+    "requested_by": "cli:dbt-manifest"
+   },
+   {
+    "args": {
+     "entity_id": "source.shop.raw.orders",
+     "entity_type": "dbt_source",
+     "name": "orders",
+     "node_role": "semantic",
+     "properties": {
+      "database": "warehouse",
+      "database_name": "warehouse",
+      "extraction_confidence": 1.0,
+      "name": "orders",
+      "physical_uri": "postgres://warehouse/raw/orders",
+      "schema": "raw",
+      "schema_name": "raw",
+      "source_name": "raw",
+      "source_system": "postgres",
+      "unique_id": "source.shop.raw.orders"
+     }
+    },
+    "operation": "entity.create",
+    "requested_by": "cli:dbt-manifest"
+   },
+   {
+    "args": {
+     "allow_dangling": true,
+     "edge_kind": "depends_on",
+     "properties": {
+      "extraction_confidence": 1.0
+     },
+     "source_id": "model.shop.orders",
+     "target_id": "source.shop.raw.orders"
+    },
+    "operation": "link.create",
+    "requested_by": "cli:dbt-manifest"
+   },
+   {
+    "args": {
+     "entity_id": "job:airflow:load_orders",
+     "entity_type": "job",
+     "name": "load_orders",
+     "node_role": "semantic",
+     "properties": {
+      "extraction_confidence": 1.0,
+      "name": "load_orders",
+      "namespace": "airflow"
+     }
+    },
+    "operation": "entity.create",
+    "requested_by": "cli:openlineage"
+   },
+   {
+    "args": {
+     "entity_id": "dataset:postgres://db:5432:raw.orders",
+     "entity_type": "dataset",
+     "name": "raw.orders",
+     "node_role": "semantic",
+     "properties": {
+      "extraction_confidence": 1.0,
+      "name": "raw.orders",
+      "namespace": "postgres://db:5432",
+      "physical_uri": "postgres://db:5432/raw.orders",
+      "source_system": "postgres"
+     }
+    },
+    "operation": "entity.create",
+    "requested_by": "cli:openlineage"
+   },
+   {
+    "args": {
+     "entity_id": "dataset:postgres://db:5432:mart.orders",
+     "entity_type": "dataset",
+     "name": "mart.orders",
+     "node_role": "semantic",
+     "properties": {
+      "extraction_confidence": 1.0,
+      "name": "mart.orders",
+      "namespace": "postgres://db:5432",
+      "physical_uri": "postgres://db:5432/mart.orders",
+      "source_system": "postgres"
+     }
+    },
+    "operation": "entity.create",
+    "requested_by": "cli:openlineage"
+   },
+   {
+    "args": {
+     "allow_dangling": true,
+     "edge_kind": "reads_from",
+     "properties": {
+      "extraction_confidence": 1.0
+     },
+     "source_id": "job:airflow:load_orders",
+     "target_id": "dataset:postgres://db:5432:raw.orders"
+    },
+    "operation": "link.create",
+    "requested_by": "cli:openlineage"
+   },
+   {
+    "args": {
+     "allow_dangling": true,
+     "edge_kind": "writes_to",
+     "properties": {
+      "extraction_confidence": 1.0
+     },
+     "source_id": "job:airflow:load_orders",
+     "target_id": "dataset:postgres://db:5432:mart.orders"
+    },
+    "operation": "link.create",
+    "requested_by": "cli:openlineage"
+   }
+  ],
+  "documents": [],
+  "edges": [
+   {
+    "edge_type": "depends_on",
+    "properties": {
+     "extraction_confidence": 1.0
+    },
+    "source_id": "model.shop.orders",
+    "target_id": "source.shop.raw.orders"
+   },
+   {
+    "edge_type": "reads_from",
+    "properties": {
+     "extraction_confidence": 1.0
+    },
+    "source_id": "job:airflow:load_orders",
+    "target_id": "dataset:postgres://db:5432:raw.orders"
+   },
+   {
+    "edge_type": "writes_to",
+    "properties": {
+     "extraction_confidence": 1.0
+    },
+    "source_id": "job:airflow:load_orders",
+    "target_id": "dataset:postgres://db:5432:mart.orders"
+   }
+  ],
+  "events": [
+   {
+    "entity_id": "model.shop.orders",
+    "entity_type": "dbt_model",
+    "event_type": "entity.created",
+    "payload": {
+     "document_ids": [],
+     "name": "orders",
+     "node_role": "semantic"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": null,
+    "entity_type": "entity",
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id1>",
+     "idempotency_key": null,
+     "message": "Entity created: orders",
+     "operation": "entity.create",
+     "requested_by": "cli:dbt-manifest",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "source.shop.raw.orders",
+    "entity_type": "dbt_source",
+    "event_type": "entity.created",
+    "payload": {
+     "document_ids": [],
+     "name": "orders",
+     "node_role": "semantic"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": null,
+    "entity_type": "entity",
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id2>",
+     "idempotency_key": null,
+     "message": "Entity created: orders",
+     "operation": "entity.create",
+     "requested_by": "cli:dbt-manifest",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "<id3>",
+    "entity_type": null,
+    "event_type": "link.created",
+    "payload": {
+     "edge_kind": "depends_on",
+     "source_id": "model.shop.orders",
+     "target_id": "source.shop.raw.orders"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "model.shop.orders",
+    "entity_type": "entity",
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id4>",
+     "idempotency_key": null,
+     "message": "Link created: model.shop.orders --[depends_on]--> source.shop.raw.orders",
+     "operation": "link.create",
+     "requested_by": "cli:dbt-manifest",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "job:airflow:load_orders",
+    "entity_type": "job",
+    "event_type": "entity.created",
+    "payload": {
+     "document_ids": [],
+     "name": "load_orders",
+     "node_role": "semantic"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": null,
+    "entity_type": "entity",
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id5>",
+     "idempotency_key": null,
+     "message": "Entity created: load_orders",
+     "operation": "entity.create",
+     "requested_by": "cli:openlineage",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "dataset:postgres://db:5432:raw.orders",
+    "entity_type": "dataset",
+    "event_type": "entity.created",
+    "payload": {
+     "document_ids": [],
+     "name": "raw.orders",
+     "node_role": "semantic"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": null,
+    "entity_type": "entity",
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id6>",
+     "idempotency_key": null,
+     "message": "Entity created: raw.orders",
+     "operation": "entity.create",
+     "requested_by": "cli:openlineage",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "dataset:postgres://db:5432:mart.orders",
+    "entity_type": "dataset",
+    "event_type": "entity.created",
+    "payload": {
+     "document_ids": [],
+     "name": "mart.orders",
+     "node_role": "semantic"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": null,
+    "entity_type": "entity",
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id7>",
+     "idempotency_key": null,
+     "message": "Entity created: mart.orders",
+     "operation": "entity.create",
+     "requested_by": "cli:openlineage",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "<id8>",
+    "entity_type": null,
+    "event_type": "link.created",
+    "payload": {
+     "edge_kind": "reads_from",
+     "source_id": "job:airflow:load_orders",
+     "target_id": "dataset:postgres://db:5432:raw.orders"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "job:airflow:load_orders",
+    "entity_type": "entity",
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id9>",
+     "idempotency_key": null,
+     "message": "Link created: job:airflow:load_orders --[reads_from]--> dataset:postgres://db:5432:raw.orders",
+     "operation": "link.create",
+     "requested_by": "cli:openlineage",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "<id10>",
+    "entity_type": null,
+    "event_type": "link.created",
+    "payload": {
+     "edge_kind": "writes_to",
+     "source_id": "job:airflow:load_orders",
+     "target_id": "dataset:postgres://db:5432:mart.orders"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "job:airflow:load_orders",
+    "entity_type": "entity",
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id11>",
+     "idempotency_key": null,
+     "message": "Link created: job:airflow:load_orders --[writes_to]--> dataset:postgres://db:5432:mart.orders",
+     "operation": "link.create",
+     "requested_by": "cli:openlineage",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   }
+  ],
+  "nodes": [
+   {
+    "document_ids": [],
+    "node_id": "dataset:postgres://db:5432:mart.orders",
+    "node_role": "semantic",
+    "node_type": "dataset",
+    "properties": {
+     "extraction_confidence": 1.0,
+     "name": "mart.orders",
+     "namespace": "postgres://db:5432",
+     "physical_uri": "postgres://db:5432/mart.orders",
+     "source_system": "postgres"
+    }
+   },
+   {
+    "document_ids": [],
+    "node_id": "dataset:postgres://db:5432:raw.orders",
+    "node_role": "semantic",
+    "node_type": "dataset",
+    "properties": {
+     "extraction_confidence": 1.0,
+     "name": "raw.orders",
+     "namespace": "postgres://db:5432",
+     "physical_uri": "postgres://db:5432/raw.orders",
+     "source_system": "postgres"
+    }
+   },
+   {
+    "document_ids": [],
+    "node_id": "job:airflow:load_orders",
+    "node_role": "semantic",
+    "node_type": "job",
+    "properties": {
+     "extraction_confidence": 1.0,
+     "name": "load_orders",
+     "namespace": "airflow"
+    }
+   },
+   {
+    "document_ids": [],
+    "node_id": "model.shop.orders",
+    "node_role": "semantic",
+    "node_type": "dbt_model",
+    "properties": {
+     "database": "warehouse",
+     "database_name": "warehouse",
+     "extraction_confidence": 1.0,
+     "name": "orders",
+     "physical_uri": "postgres://warehouse/analytics/orders",
+     "schema": "analytics",
+     "schema_name": "analytics",
+     "source_system": "postgres",
+     "unique_id": "model.shop.orders"
+    }
+   },
+   {
+    "document_ids": [],
+    "node_id": "source.shop.raw.orders",
+    "node_role": "semantic",
+    "node_type": "dbt_source",
+    "properties": {
+     "database": "warehouse",
+     "database_name": "warehouse",
+     "extraction_confidence": 1.0,
+     "name": "orders",
+     "physical_uri": "postgres://warehouse/raw/orders",
+     "schema": "raw",
+     "schema_name": "raw",
+     "source_name": "raw",
+     "source_system": "postgres",
+     "unique_id": "source.shop.raw.orders"
+    }
+   }
+  ],
+  "replies": []
+ },
+ "save_knowledge": {
+  "aliases": [
+   {
+    "entity_id": "01SEEDNOTE",
+    "raw_id": "model.shop.orders",
+    "raw_name": null,
+    "source_system": "dbt"
+   },
+   {
+    "entity_id": "<id10>",
+    "raw_id": "eps",
+    "raw_name": "Eps",
+    "source_system": "name"
+   },
+   {
+    "entity_id": "<id11>",
+    "raw_id": "zeta",
+    "raw_name": "Zeta",
+    "source_system": "name"
+   },
+   {
+    "entity_id": "<id1>",
+    "raw_id": "alpha gotcha",
+    "raw_name": "Alpha gotcha",
+    "source_system": "name"
+   },
+   {
+    "entity_id": "<id3>",
+    "raw_id": "beta",
+    "raw_name": "Beta",
+    "source_system": "name"
+   },
+   {
+    "entity_id": "<id7>",
+    "raw_id": "gamma",
+    "raw_name": "Gamma",
+    "source_system": "name"
+   },
+   {
+    "entity_id": "<id8>",
+    "raw_id": "delta",
+    "raw_name": "Delta",
+    "source_system": "name"
+   }
+  ],
+  "documents": [
+   {
+    "content": "Some evidence prose about delta.",
+    "doc_id": "<id9>"
+   }
+  ],
+  "edges": [
+   {
+    "edge_type": "appliesTo",
+    "properties": {
+     "derived_from": "properties.domain"
+    },
+    "source_id": "<id13>",
+    "target_id": "domain:trellis"
+   },
+   {
+    "edge_type": "appliesTo",
+    "properties": {
+     "derived_from": "properties.domain"
+    },
+    "source_id": "<id1>",
+    "target_id": "domain:trellis"
+   },
+   {
+    "edge_type": "appliesTo",
+    "properties": {
+     "derived_from": "properties.domain"
+    },
+    "source_id": "<id3>",
+    "target_id": "domain:trellis"
+   },
+   {
+    "edge_type": "entity_related_to",
+    "properties": {},
+    "source_id": "<id11>",
+    "target_id": "<id1>"
+   },
+   {
+    "edge_type": "entity_related_to",
+    "properties": {},
+    "source_id": "<id3>",
+    "target_id": "tool:bash"
+   }
+  ],
+  "events": [
+   {
+    "entity_id": "<id1>",
+    "entity_type": "concept",
+    "event_type": "entity.created",
+    "payload": {
+     "document_ids": [],
+     "name": "Alpha gotcha",
+     "node_role": "semantic"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": null,
+    "entity_type": "concept",
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id15>",
+     "idempotency_key": null,
+     "message": "Entity created: Alpha gotcha",
+     "operation": "entity.create",
+     "requested_by": "mcp:save_knowledge",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "<id2>",
+    "entity_type": null,
+    "event_type": "link.created",
+    "payload": {
+     "edge_kind": "appliesTo",
+     "source_id": "<id1>",
+     "target_id": "domain:trellis"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": null,
+    "entity_type": null,
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id16>",
+     "idempotency_key": null,
+     "message": "Link created: <id1> --[appliesTo]--> domain:trellis",
+     "operation": "link.create",
+     "requested_by": "mcp:save_knowledge",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "<id3>",
+    "entity_type": "concept",
+    "event_type": "entity.created",
+    "payload": {
+     "document_ids": [],
+     "name": "Beta",
+     "node_role": "semantic"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": null,
+    "entity_type": "concept",
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id17>",
+     "idempotency_key": null,
+     "message": "Entity created: Beta",
+     "operation": "entity.create",
+     "requested_by": "mcp:save_knowledge",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "<id4>",
+    "entity_type": null,
+    "event_type": "link.created",
+    "payload": {
+     "edge_kind": "entity_related_to",
+     "source_id": "<id3>",
+     "target_id": "tool:bash"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": null,
+    "entity_type": null,
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id18>",
+     "idempotency_key": null,
+     "message": "Link created: <id3> --[entity_related_to]--> tool:bash",
+     "operation": "link.create",
+     "requested_by": "mcp:save_knowledge",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "<id5>",
+    "entity_type": null,
+    "event_type": "link.created",
+    "payload": {
+     "edge_kind": "appliesTo",
+     "source_id": "<id3>",
+     "target_id": "domain:trellis"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": null,
+    "entity_type": null,
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id19>",
+     "idempotency_key": null,
+     "message": "Link created: <id3> --[appliesTo]--> domain:trellis",
+     "operation": "link.create",
+     "requested_by": "mcp:save_knowledge",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "<id6>",
+    "entity_type": "concept",
+    "event_type": "entity.created",
+    "payload": {
+     "document_ids": [],
+     "name": "Alpha gotcha",
+     "node_role": "semantic"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": null,
+    "entity_type": "concept",
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id20>",
+     "idempotency_key": null,
+     "message": "Entity created: Alpha gotcha",
+     "operation": "entity.create",
+     "requested_by": "mcp:save_knowledge",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "<id7>",
+    "entity_type": "concept",
+    "event_type": "entity.created",
+    "payload": {
+     "document_ids": [],
+     "name": "Gamma",
+     "node_role": "semantic"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": null,
+    "entity_type": "concept",
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id21>",
+     "idempotency_key": null,
+     "message": "Entity created: Gamma",
+     "operation": "entity.create",
+     "requested_by": "mcp:save_knowledge",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "<id9>",
+    "entity_type": "document",
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id22>",
+     "idempotency_key": null,
+     "message": "Evidence stored: <id9>",
+     "operation": "evidence.ingest",
+     "requested_by": "mcp:save_knowledge",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "<id8>",
+    "entity_type": "concept",
+    "event_type": "entity.created",
+    "payload": {
+     "document_ids": [
+      "<id9>"
+     ],
+     "name": "Delta",
+     "node_role": "semantic"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": null,
+    "entity_type": "concept",
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id23>",
+     "idempotency_key": null,
+     "message": "Entity created: Delta",
+     "operation": "entity.create",
+     "requested_by": "mcp:save_knowledge",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "<id10>",
+    "entity_type": "concept",
+    "event_type": "entity.created",
+    "payload": {
+     "document_ids": [],
+     "name": "Eps",
+     "node_role": "semantic"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": null,
+    "entity_type": "concept",
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id24>",
+     "idempotency_key": null,
+     "message": "Entity created: Eps",
+     "operation": "entity.create",
+     "requested_by": "mcp:save_knowledge",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "<id11>",
+    "entity_type": "person",
+    "event_type": "entity.created",
+    "payload": {
+     "document_ids": [],
+     "name": "Zeta",
+     "node_role": "semantic"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": null,
+    "entity_type": "person",
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id25>",
+     "idempotency_key": null,
+     "message": "Entity created: Zeta",
+     "operation": "entity.create",
+     "requested_by": "mcp:save_knowledge",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "<id12>",
+    "entity_type": null,
+    "event_type": "link.created",
+    "payload": {
+     "edge_kind": "entity_related_to",
+     "source_id": "<id11>",
+     "target_id": "<id1>"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": null,
+    "entity_type": null,
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id26>",
+     "idempotency_key": null,
+     "message": "Link created: <id11> --[entity_related_to]--> <id1>",
+     "operation": "link.create",
+     "requested_by": "mcp:save_knowledge",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "<id13>",
+    "entity_type": "concept",
+    "event_type": "entity.created",
+    "payload": {
+     "document_ids": [],
+     "name": "Alpha  GOTCHA ",
+     "node_role": "semantic"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": null,
+    "entity_type": "concept",
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id27>",
+     "idempotency_key": null,
+     "message": "Entity created: Alpha  GOTCHA ",
+     "operation": "entity.create",
+     "requested_by": "mcp:save_knowledge",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": "<id14>",
+    "entity_type": null,
+    "event_type": "link.created",
+    "payload": {
+     "edge_kind": "appliesTo",
+     "source_id": "<id13>",
+     "target_id": "domain:trellis"
+    },
+    "source": "mutation_executor"
+   },
+   {
+    "entity_id": null,
+    "entity_type": null,
+    "event_type": "mutation.executed",
+    "payload": {
+     "command_id": "<id28>",
+     "idempotency_key": null,
+     "message": "Link created: <id13> --[appliesTo]--> domain:trellis",
+     "operation": "link.create",
+     "requested_by": "mcp:save_knowledge",
+     "status": "success"
+    },
+    "source": "mutation_executor"
+   }
+  ],
+  "nodes": [
+   {
+    "document_ids": [
+     "<id9>"
+    ],
+    "node_id": "<id8>",
+    "node_role": "semantic",
+    "node_type": "concept",
+    "properties": {
+     "domain": "!!!",
+     "evidence_ref": "<id9>",
+     "name": "Delta"
+    }
+   },
+   {
+    "document_ids": [],
+    "node_id": "01SEEDNOTE",
+    "node_role": "semantic",
+    "node_type": "Concept",
+    "properties": {
+     "name": "Seed note"
+    }
+   },
+   {
+    "document_ids": [],
+    "node_id": "<id10>",
+    "node_role": "semantic",
+    "node_type": "concept",
+    "properties": {
+     "name": "Eps"
+    }
+   },
+   {
+    "document_ids": [],
+    "node_id": "<id11>",
+    "node_role": "semantic",
+    "node_type": "person",
+    "properties": {
+     "name": "Zeta"
+    }
+   },
+   {
+    "document_ids": [],
+    "node_id": "<id13>",
+    "node_role": "semantic",
+    "node_type": "concept",
+    "properties": {
+     "domain": "Trellis",
+     "name": "Alpha  GOTCHA "
+    }
+   },
+   {
+    "document_ids": [],
+    "node_id": "<id1>",
+    "node_role": "semantic",
+    "node_type": "concept",
+    "properties": {
+     "domain": "trellis",
+     "name": "Alpha gotcha"
+    }
+   },
+   {
+    "document_ids": [],
+    "node_id": "<id3>",
+    "node_role": "semantic",
+    "node_type": "concept",
+    "properties": {
+     "domain": [
+      "Finance",
+      "trellis"
+     ],
+     "name": "Beta"
+    }
+   },
+   {
+    "document_ids": [],
+    "node_id": "<id6>",
+    "node_role": "semantic",
+    "node_type": "concept",
+    "properties": {
+     "name": "Alpha gotcha"
+    }
+   },
+   {
+    "document_ids": [],
+    "node_id": "<id7>",
+    "node_role": "semantic",
+    "node_type": "concept",
+    "properties": {
+     "name": "Gamma"
+    }
+   },
+   {
+    "document_ids": [],
+    "node_id": "domain:trellis",
+    "node_role": "semantic",
+    "node_type": "Concept",
+    "properties": {
+     "name": "trellis"
+    }
+   },
+   {
+    "document_ids": [],
+    "node_id": "tool:bash",
+    "node_role": "semantic",
+    "node_type": "SoftwareApplication",
+    "properties": {
+     "name": "Bash"
+    }
+   }
+  ],
+  "replies": [
+   "Entity created: <id1> (concept: Alpha gotcha)\nDomain link: <id2> --[appliesTo]--> domain:trellis",
+   "Entity created: <id3> (concept: Beta)\nResolved relates_to 'Bash' -> tool:bash (SoftwareApplication, via tool:slug)\nEdge created: <id4> --[entity_related_to]--> tool:bash\nNote: domain 'Finance' has no domain node \u2014 not linked\nDomain link: <id5> --[appliesTo]--> domain:trellis",
+   "Entity created: <id6> (concept: Alpha gotcha)",
+   "Entity created: <id7> (concept: Gamma)\nWarning: target entity not found: nonexistent_id \u2014 edge not created",
+   "Entity created: <id8> (concept: Delta)\nEvidence document: <id9>\nNote: domain '!!!' has no domain node \u2014 not linked",
+   "Entity created: <id10> (concept: Eps)\nWarning: target entity not found: model.shop.orders \u2014 edge not created",
+   "Entity created: <id11> (person: Zeta)\nResolved relates_to 'Alpha gotcha' -> <id1> (concept, via name-alias)\nEdge created: <id12> --[entity_related_to]--> <id1>",
+   "Entity created: <id13> (concept: Alpha  GOTCHA )\nDomain link: <id14> --[appliesTo]--> domain:trellis"
+  ]
+ }
+}

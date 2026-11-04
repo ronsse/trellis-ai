@@ -27,7 +27,8 @@ surface (``get_context_max_tokens``, ``get_context_max_items``,
 every surface that builds a pack (``disclosure_body_items``,
 ``excerpt_max_chars``) — pinned by :data:`_PACK_BUDGET_KNOB_NAMES`,
 bringing the total to 42. ``graph_recency_fallback`` (#961) is the 43rd,
-``access_log`` the 44th and ``get_lessons_pack_event`` the 45th.
+``access_log`` the 44th, ``get_lessons_pack_event`` the 45th and
+``knowledge_link_or_mint`` the 46th.
 """
 
 from __future__ import annotations
@@ -132,8 +133,8 @@ class TestCatalogMembership:
             | _PACK_BUDGET_KNOB_NAMES
         )
 
-    def test_fortyfive_entries_total(self) -> None:
-        assert len(SETTINGS_REGISTRY) == 45
+    def test_fortysix_entries_total(self) -> None:
+        assert len(SETTINGS_REGISTRY) == 46
 
     def test_class_prior_mode_enum_has_no_demote_option(self) -> None:
         """A dropped mode must not linger in the registry as an allowed
@@ -390,7 +391,9 @@ class TestRiskTiersMatchThePlanPlusOneDocumentedExtension:
     the spec itself). The seven pack-size/excerpt knobs added by a
     parallel PR join it too: each one trades response size/cost against
     how much an agent sees, in either direction, which is the same
-    "caution" bar. None of this is an oversight, so pin both tiers
+    "caution" bar. ``knowledge_link_or_mint`` joins it as well: on, it
+    writes nodes and aliases into the live graph and can change which
+    packs seed the graph axis. None of this is an oversight, so pin both tiers
     rather than let them silently drift.
     """
 
@@ -426,6 +429,7 @@ class TestRiskTiersMatchThePlanPlusOneDocumentedExtension:
             "rest_pack_max_tokens",
             "disclosure_body_items",
             "excerpt_max_chars",
+            "knowledge_link_or_mint",
         }
 
     def test_minhash_seed_max_docs_is_low_risk_but_restart_required(self) -> None:

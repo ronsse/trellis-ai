@@ -454,6 +454,21 @@ Resolution reads this index first (one indexed row) and only falls back to a bou
 
 `get_aliases(entity_id, source_system="name")` is the audit surface for what got bound. There is no revoke command — `delete_node` on the entity is the only unbind today. Alias writes go straight to the graph store (`upsert_alias` is idempotent via SCD-2); the governed pipeline has no alias verb, matching the existing precedent in `trellis_api/routes/ingest.py`.
 
+### External identities on extraction drafts
+
+`EntityDraft.aliases` is a list of `AliasDraft(source_system, raw_id, raw_name=None)`. A draft only
+*names* an identity; nothing is stored until `result_to_batch(..., bind_identity=True)` turns it
+into a bind-if-absent `alias.upsert` command (the `TRELLIS_KNOWLEDGE_LINK_OR_MINT` knob, off by
+default; see [operations.md](operations.md)). `(source_system, raw_id)` is kept verbatim for every
+system but Unity Catalog, so a dbt `unique_id`, an OpenLineage `namespace/name` and a three-part
+Unity Catalog `catalog.schema.table` all take the same shape. A JSON rule binding under
+`unity_catalog` stores the id lower-cased and unquoted (`normalize_alias_raw_id`), because those
+identifiers are case-insensitive; `save_knowledge` looks it up with the same function. A draft's
+`aliases` are left out of the `unparsed_residue["rejected_by_validators"]` dump, so that record has
+the shape it had before aliases existed. A draft without an `entity_id` binds nothing. `EntityRule` (JSON rules) gains
+`alias_source_system`: when set, the matched `id_field` value is bound under that system. The wire
+`EntityDraft` carries no aliases.
+
 ---
 
 ## Observation

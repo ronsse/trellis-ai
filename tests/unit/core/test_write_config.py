@@ -800,3 +800,52 @@ class TestAccessLogKnob:
 
     def test_the_field_is_stamped_even_when_off(self) -> None:
         assert WriteBehaviourConfig().as_dict()["access_log"] is False
+
+
+class TestKnowledgeLinkOrMintKnob:
+    """``knowledge_link_or_mint`` ships off and follows the shared truthy convention."""
+
+    def test_ships_off(self) -> None:
+        assert WriteBehaviourConfig().knowledge_link_or_mint is False
+        assert WriteBehaviourConfig.from_env({}).knowledge_link_or_mint is False
+
+    def test_env_var_name(self) -> None:
+        assert (
+            ENV_VAR_BY_FIELD["knowledge_link_or_mint"]
+            == "TRELLIS_KNOWLEDGE_LINK_OR_MINT"
+        )
+
+    @pytest.mark.parametrize("spelling", ["1", "true", "yes", "on", "ON", " True "])
+    def test_the_truthy_spellings_turn_it_on(self, spelling: str) -> None:
+        env = {ENV_VAR_BY_FIELD["knowledge_link_or_mint"]: spelling}
+        assert WriteBehaviourConfig.from_env(env).knowledge_link_or_mint is True
+
+    @pytest.mark.parametrize(
+        "spelling", ["", "   ", "0", "false", "no", "off", "n", "disabled", "nonsense"]
+    )
+    def test_any_other_spelling_leaves_it_off(self, spelling: str) -> None:
+        env = {ENV_VAR_BY_FIELD["knowledge_link_or_mint"]: spelling}
+        assert WriteBehaviourConfig.from_env(env).knowledge_link_or_mint is False
+
+    def test_turning_it_on_moves_only_its_own_field(self) -> None:
+        config = WriteBehaviourConfig.from_env(
+            {ENV_VAR_BY_FIELD["knowledge_link_or_mint"]: "1"}
+        )
+        defaults = WriteBehaviourConfig().as_dict()
+        changed = {
+            name for name, value in config.as_dict().items() if value != defaults[name]
+        }
+        assert changed == {"knowledge_link_or_mint"}
+
+    def test_the_field_is_stamped_even_when_off(self) -> None:
+        assert WriteBehaviourConfig().as_dict()["knowledge_link_or_mint"] is False
+
+    def test_reader_follows_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trellis.core.write_config import knowledge_link_or_mint_enabled
+
+        monkeypatch.delenv("TRELLIS_KNOWLEDGE_LINK_OR_MINT", raising=False)
+        assert knowledge_link_or_mint_enabled() is False
+        monkeypatch.setenv("TRELLIS_KNOWLEDGE_LINK_OR_MINT", "1")
+        assert knowledge_link_or_mint_enabled() is True

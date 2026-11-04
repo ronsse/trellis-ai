@@ -603,6 +603,37 @@ _SPECS: tuple[SettingSpec, ...] = (
         env_var=ENV_VAR_BY_FIELD["access_log"],
     ),
     SettingSpec(
+        name="knowledge_link_or_mint",
+        label="Knowledge link-or-mint",
+        type="bool",
+        default=False,
+        description=(
+            "When on, save_knowledge mints a domain:<slug> node for a "
+            "domain that has none and links the note to it, attaches to an "
+            "existing same-named note of the same type instead of creating "
+            "a duplicate, resolves relates_to through external-system "
+            "aliases, and reports an unresolvable value by count and "
+            "position. Extraction also binds each entity's external "
+            "identity (dbt unique_id, OpenLineage namespace/name) as an "
+            "alias, bind-if-absent and never rebound. A minted domain node "
+            "is something graph seeding resolves, so turning this on "
+            "changes which packs seed the graph axis: leave it off until "
+            "the serving freeze lifts. Off writes exactly what earlier "
+            "builds wrote."
+        ),
+        surfaces=("mcp", "cli"),
+        restart_required=False,
+        risk="caution",
+        risk_note=(
+            "A minted domain node changes which packs seed the graph axis, "
+            "and the new nodes and aliases are written to the live graph. "
+            "Leave off until the serving freeze lifts and the readout is in."
+        ),
+        group="ingest_tagging",
+        settings_live=True,
+        env_var=ENV_VAR_BY_FIELD["knowledge_link_or_mint"],
+    ),
+    SettingSpec(
         name="graph_seeding",
         label="Graph seeding",
         type="bool",

@@ -402,6 +402,15 @@ class AliasUpsertHandler:
 
     def handle(self, command: Command) -> tuple[str | None, str]:
         store = self._registry.knowledge.graph_store
+        # Opt-in guard for callers that bind an alias in the same batch that
+        # creates its entity (extraction): a create the policy gate refused
+        # must not leave an alias pointing at a node that does not exist.
+        # Absent or false keeps the handler's historical behaviour.
+        if command.args.get("require_entity") and (
+            store.get_node(command.args["entity_id"]) is None
+        ):
+            msg = f"Cannot bind alias: entity {command.args['entity_id']!r} not found"
+            raise ValidationError(msg)
         kwargs = {
             "raw_name": command.args.get("raw_name"),
             "match_confidence": command.args.get("match_confidence", 1.0),
@@ -510,11 +519,17 @@ class LinkCreateHandler:
         if not allow_dangling:
             source_id, target_id = self._resolve_endpoints(source_id, target_id)
 
+        # ``extractor_tier`` is forwarded only when the caller names one, so
+        # a command without it reaches the store exactly as it always did.
+        provenance: dict[str, Any] = {}
+        if command.args.get("extractor_tier") is not None:
+            provenance["extractor_tier"] = command.args["extractor_tier"]
         edge_id = store.upsert_edge(
             source_id=source_id,
             target_id=target_id,
             edge_type=edge_kind,
             properties=command.args.get("properties"),
+            **provenance,
         )
 
         self._registry.operational.event_log.emit(

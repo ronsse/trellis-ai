@@ -534,12 +534,16 @@ _ALLOWED_UNREADABLE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         _PASSTHROUGH_REASON,
     ),
+    ("src/trellis/extract/commands.py", "_alias_command", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
     ("src/trellis/extract/commands.py", "reconcile_node_roles", "batch.requested_by"): (
         1,
         _PASSTHROUGH_REASON,
     ),
     ("src/trellis/extract/commands.py", "result_to_batch", "requested_by"): (
-        4,
+        5,
         _PASSTHROUGH_REASON,
     ),
     (
@@ -574,6 +578,22 @@ _ALLOWED_UNREADABLE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         _PASSTHROUGH_REASON,
     ),
     ("src/trellis/mcp/knowledge_links.py", "_link_relates_to", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/mcp/knowledge_links.py", "_link_or_mint", "requested_by"): (
+        2,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/mcp/knowledge_links.py", "_lom_domains", "requested_by"): (
+        2,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/mcp/knowledge_links.py", "_lom_relates_to", "requested_by"): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    ("src/trellis/mcp/knowledge_links.py", "_mint_domain", "requested_by"): (
         1,
         _PASSTHROUGH_REASON,
     ),
