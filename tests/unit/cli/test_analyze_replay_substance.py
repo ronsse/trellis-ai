@@ -1,8 +1,9 @@
 """``trellis analyze replay --entity-requires-description / --min-distinct-words``.
 
-The arms read the graph and document stores as they are now (nothing in
-``PACK_ASSEMBLED`` records a description flag or the served text), and the
-report says so. Counts below are computed by hand from ``_seed``.
+Nothing in ``PACK_ASSEMBLED`` records a description flag or the served text,
+so the arms read it back: a graph entity as the graph held it when the pack was
+assembled, a document as it is now, and the report says which. Counts below are
+computed by hand from ``seeded``.
 """
 
 from __future__ import annotations
@@ -112,7 +113,7 @@ def test_entity_arm_reports_hand_computed_counts_and_its_basis(
     assert data["unresolved"]["items"] == 1
     assert data["unresolved"]["unjudged_tokens"] == 10
     assert data["unresolved_entity_description"] == 1
-    assert data["judged_on"] == {"entity_requires_description": "current_state"}
+    assert data["judged_on"] == {"entity_requires_description": "as_served"}
 
 
 def test_word_arm_reports_hand_computed_counts_and_its_basis(
@@ -126,7 +127,10 @@ def test_word_arm_reports_hand_computed_counts_and_its_basis(
     assert data["removed"]["tokens"] == 60
     assert data["removed"]["unhelpful_items"] == 2
     assert data["unresolved"]["items"] == 1
-    assert data["judged_on"] == {"min_distinct_words": "current_state"}
+    assert data["judged_on"] == {
+        "min_distinct_words.entity": "as_served",
+        "min_distinct_words.document": "current_state",
+    }
 
 
 def test_the_arms_combine_and_a_serving_both_remove_counts_once(
@@ -161,7 +165,7 @@ def test_text_output_names_the_basis_and_never_echoes_item_text(
     out = plain(result.stdout)
     assert "Substance Replay" in out
     assert "judged on" in out
-    assert "current_state" in out
+    assert "as_served" in out
     assert "removed" in out
     assert "unresolved" in out
     assert _RUNBOOK_BODY not in out
@@ -180,15 +184,42 @@ def test_a_replay_without_the_arms_is_still_the_walk_report(
 @pytest.mark.parametrize(
     ("args", "phrase"),
     [
-        (["--min-distinct-words", "0"], "min_distinct_words must be >= 1"),
+        (["--min-distinct-words", "0"], "--min-distinct-words must be >= 1; got 0"),
         (
             ["--entity-requires-description", "--max-items", "5"],
-            "removal-only",
+            (
+                "--entity-requires-description is removal-only and cannot be "
+                "combined with --max-items, which re-runs the token walk"
+            ),
         ),
-        (["--min-distinct-words", "3", "--no-refill"], "removal-only"),
+        (
+            ["--min-distinct-words", "3", "--no-refill"],
+            (
+                "--min-distinct-words is removal-only and cannot be combined with "
+                "--no-refill, which re-runs the token walk"
+            ),
+        ),
         (
             ["--min-distinct-words", "3", "--body-items", "4"],
-            "removal-only",
+            (
+                "--min-distinct-words is removal-only and cannot be combined with "
+                "--body-items, which re-runs the token walk"
+            ),
+        ),
+        (
+            [
+                "--entity-requires-description",
+                "--min-distinct-words",
+                "3",
+                "--excerpt-max-chars",
+                "80",
+                "--no-refill",
+            ],
+            (
+                "--entity-requires-description and --min-distinct-words are "
+                "removal-only and cannot be combined with --excerpt-max-chars, "
+                "--no-refill, which re-run the token walk"
+            ),
         ),
         (
             ["--entity-requires-description", "--graph-selection", "seeded"],
@@ -207,6 +238,15 @@ def test_refusals_exit_the_same_whatever_the_format(
     assert envelope["status"] == "error"
     assert phrase in envelope["message"]
     assert phrase in plain(as_text.output).replace("\n", " ")
+    # The reader typed flags; the message does not leak the policy's fields.
+    for field in (
+        "min_distinct_words",
+        "max_items",
+        "excerpt_max_chars",
+        "body_items",
+        "entity_requires_description",
+    ):
+        assert field not in envelope["message"]
 
 
 def test_success_exits_the_same_whatever_the_format(seeded: StoreRegistry) -> None:

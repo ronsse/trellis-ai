@@ -8,12 +8,16 @@ Every expected count below is computed by hand from the seeded rows in
 * a row the stores cannot answer for is ``unresolved`` and is neither removed
   nor kept;
 * a serving two rules both remove counts once;
-* a held-out pack never reaches a count.
+* a held-out pack never reaches a count;
+* an entity is judged as the graph held it when the pack was assembled
+  (``get_node(..., as_of=...)``), a document as it is now.
 """
 
 from __future__ import annotations
 
 import json
+import time
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +30,7 @@ from trellis.retrieve.excerpts import (
     truncate_excerpt,
 )
 from trellis.retrieve.pack_replay import (
+    SUBSTANCE_BASIS_AS_SERVED,
     SUBSTANCE_BASIS_CURRENT_STATE,
     ReplayPolicy,
     _entity_served_text,
@@ -34,7 +39,7 @@ from trellis.retrieve.pack_replay import (
     replay_substance,
 )
 from trellis.retrieve.strategies import GRAPH_CALLER_SEED_IDS_KEY, GraphSearch
-from trellis.stores.base.event_log import EventType
+from trellis.stores.base.event_log import Event, EventType
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 from trellis.stores.sqlite.graph import SQLiteGraphStore
@@ -212,8 +217,13 @@ def test_entity_requires_description_at_each_description_edge(stores: _Stores) -
     assert report.unresolved_entity_description == 1
     assert report.removed_by_entity_description == 3
     assert report.removed_by_min_distinct_words == 0
-    assert report.judged_on == {"entity_requires_description": "current_state"}
-    assert any("judged on current state, not as served" in n for n in report.notes)
+    assert report.judged_on == {
+        "entity_requires_description": SUBSTANCE_BASIS_AS_SERVED
+    }
+    assert any("Graph entities are judged as served" in n for n in report.notes)
+    # Only the word arm reads a document, so the entity arm alone says nothing
+    # about documents being on current state.
+    assert not any("Documents are judged on current state" in n for n in report.notes)
 
 
 @pytest.mark.parametrize(
@@ -243,7 +253,11 @@ def test_min_distinct_words_hand_computed_verdict_counts(stores: _Stores) -> Non
     assert (r.unjudged_items, r.unjudged_tokens) == (2, 60)
     u = report.unresolved  # e_gone (helpful 30), d_gone (unhelpful 10)
     assert (u.items, u.helpful_tokens, u.unhelpful_tokens) == (2, 30, 10)
-    assert report.judged_on == {"min_distinct_words": SUBSTANCE_BASIS_CURRENT_STATE}
+    assert report.judged_on == {
+        "min_distinct_words.entity": SUBSTANCE_BASIS_AS_SERVED,
+        "min_distinct_words.document": SUBSTANCE_BASIS_CURRENT_STATE,
+    }
+    assert any("Documents are judged on current state" in n for n in report.notes)
 
 
 def test_both_arms_count_a_serving_both_remove_once(stores: _Stores) -> None:
@@ -486,3 +500,236 @@ def test_default_policy_replays_byte_identically_to_before_the_substance_arms(
         assert json.dumps(got[name], sort_keys=True) == json.dumps(
             expected, sort_keys=True
         ), name
+
+
+# -- entities are judged as served --------------------------------------------
+
+_PAUSE = 0.02  # the graph and the event log stamp wall-clock instants
+
+
+def _pack_rows(item_id: str, *, tokens: int = 10) -> dict[str, Any]:
+    return {
+        "item_id": item_id,
+        "item_type": "entity",
+        "rank": 1,
+        "estimated_tokens": tokens,
+        "strategy_source": "graph",
+    }
+
+
+def _emit_entity_pack(
+    log: SQLiteEventLog,
+    pack_id: str,
+    item_ids: list[str],
+    *,
+    unhelpful: list[str] | None = None,
+    occurred_at: datetime | None = None,
+) -> None:
+    """One pack serving ``item_ids``; ``occurred_at`` overrides the stamp.
+
+    Every id is cited, helpful unless listed in ``unhelpful``: a pack whose
+    feedback names no item is not attributed and reaches no count.
+    """
+    unhelpful = unhelpful or []
+    stamp = {"occurred_at": occurred_at} if occurred_at is not None else {}
+    log.append(
+        Event(
+            event_type=EventType.PACK_ASSEMBLED,
+            source="pack_builder",
+            entity_id=pack_id,
+            entity_type="pack",
+            payload={
+                "pack_id": pack_id,
+                "injected_items": [_pack_rows(i) for i in item_ids],
+            },
+            **stamp,
+        )
+    )
+    log.emit(
+        EventType.FEEDBACK_RECORDED,
+        source="mcp",
+        entity_id=pack_id,
+        payload={
+            "pack_id": pack_id,
+            "helpful_item_ids": [i for i in item_ids if i not in unhelpful],
+            "unhelpful_item_ids": unhelpful,
+            "rating": 0.5,
+            "success": True,
+        },
+    )
+
+
+def test_a_stub_that_gained_a_description_after_it_was_served_is_removed(
+    tmp_path: Path,
+) -> None:
+    s = _Stores(tmp_path)
+    s.graph.upsert_node("e1", "concept", {"name": "Stub"})  # served as a stub
+    time.sleep(_PAUSE)
+    _emit_entity_pack(s.log, "p1", ["e1"], unhelpful=["e1"])
+    time.sleep(_PAUSE)
+    s.graph.upsert_node(
+        "e1", "concept", {"name": "Stub", "description": "a real description now"}
+    )
+    # The precondition: today's node would pass both arms.
+    assert s.graph.get_node("e1")["properties"]["description"]  # type: ignore[index]
+
+    by_description = s.replay(ReplayPolicy(entity_requires_description=True))
+    by_words = s.replay(ReplayPolicy(min_distinct_words=3))
+
+    for report in (by_description, by_words):
+        assert report.removed.items == 1
+        assert report.removed.unhelpful_items == 1
+        assert report.unresolved.items == 0
+    assert by_description.removed_by_entity_description == 1
+    assert by_words.removed_by_min_distinct_words == 1  # "Stub" is one word
+
+
+def test_a_description_dropped_after_the_serving_does_not_remove_it(
+    tmp_path: Path,
+) -> None:
+    s = _Stores(tmp_path)
+    s.graph.upsert_node("e1", "concept", {"name": "N", "description": "described"})
+    time.sleep(_PAUSE)
+    _emit_entity_pack(s.log, "p1", ["e1"])
+    time.sleep(_PAUSE)
+    s.graph.upsert_node("e1", "concept", {"name": "N"})
+
+    report = s.replay(ReplayPolicy(entity_requires_description=True))
+
+    assert report.removed.items == 0
+    assert report.served.items == 1
+
+
+def test_a_node_minted_after_the_serving_is_unresolved(tmp_path: Path) -> None:
+    s = _Stores(tmp_path)
+    _emit_entity_pack(s.log, "p1", ["e1"], unhelpful=["e1"])
+    time.sleep(_PAUSE)
+    s.graph.upsert_node("e1", "concept", {"name": "Late"})
+
+    report = s.replay(ReplayPolicy(entity_requires_description=True))
+
+    assert report.removed.items == 0
+    assert report.unresolved.items == 1
+    assert report.unresolved_entity_description == 1
+
+
+def test_a_hard_deleted_node_stays_unresolved(tmp_path: Path) -> None:
+    """``delete_node`` purges history, so there is no as-served version to read."""
+    s = _Stores(tmp_path)
+    s.graph.upsert_node("e1", "concept", {"name": "Stub"})
+    time.sleep(_PAUSE)
+    _emit_entity_pack(s.log, "p1", ["e1"], unhelpful=["e1"])
+    time.sleep(_PAUSE)
+    assert s.graph.delete_node("e1")
+
+    report = s.replay(ReplayPolicy(entity_requires_description=True))
+
+    assert report.removed.items == 0
+    assert report.unresolved.items == 1
+    assert report.unresolved.unhelpful_items == 1
+
+
+def test_one_node_is_read_at_each_packs_own_time(tmp_path: Path) -> None:
+    """The cache is keyed on ``(item_id, served_at)``, not on the id alone."""
+    s = _Stores(tmp_path)
+    s.graph.upsert_node("e1", "concept", {"name": "Stub"})
+    time.sleep(_PAUSE)
+    _emit_entity_pack(s.log, "before", ["e1"])
+    time.sleep(_PAUSE)
+    s.graph.upsert_node("e1", "concept", {"name": "Stub", "description": "described"})
+    time.sleep(_PAUSE)
+    _emit_entity_pack(s.log, "after", ["e1"])
+
+    report = s.replay(ReplayPolicy(entity_requires_description=True))
+
+    assert report.served.items == 2
+    assert report.removed.items == 1  # the serving before the description
+    assert report.unresolved.items == 0
+
+
+class _RecordingGraph:
+    """A graph stand-in that records every ``get_node`` and answers from a dict."""
+
+    def __init__(self, nodes: dict[str, dict[str, Any]]) -> None:
+        self.nodes = nodes
+        self.calls: list[tuple[str, datetime | None]] = []
+
+    def get_node(self, node_id: str, as_of: datetime | None = None):
+        self.calls.append((node_id, as_of))
+        props = self.nodes.get(node_id)
+        return None if props is None else {"node_id": node_id, "properties": props}
+
+
+def test_a_node_two_rules_need_is_read_once_per_pack(tmp_path: Path) -> None:
+    s = _Stores(tmp_path)
+    graph = _RecordingGraph({"e1": {"name": "N", "description": "one two three"}})
+    _emit_entity_pack(s.log, "p1", ["e1"])
+    _emit_entity_pack(s.log, "p2", ["e1"])
+
+    replay_substance(
+        s.log,
+        policy=ReplayPolicy(entity_requires_description=True, min_distinct_words=2),
+        graph_store=graph,  # type: ignore[arg-type]
+    )
+
+    # Two packs, two instants, two reads; the second rule reuses the first's.
+    assert len(graph.calls) == 2
+    assert len({as_of for _, as_of in graph.calls}) == 2
+
+
+@pytest.mark.parametrize(
+    "to_stamp",
+    [
+        pytest.param(lambda t: t, id="aware-utc"),
+        pytest.param(lambda t: t.replace(tzinfo=None), id="naive"),
+        pytest.param(
+            lambda t: t.astimezone(timezone(timedelta(hours=5, minutes=30))),
+            id="offset",
+        ),
+    ],
+)
+def test_the_as_of_instant_is_aware_utc_whatever_the_event_stamp(
+    tmp_path: Path, to_stamp: Any
+) -> None:
+    s = _Stores(tmp_path)
+    instant = datetime.now(UTC) - timedelta(hours=1)
+    graph = _RecordingGraph({"e1": {"name": "N", "description": "d"}})
+    _emit_entity_pack(s.log, "p1", ["e1"], occurred_at=to_stamp(instant))
+
+    replay_substance(
+        s.log,
+        policy=ReplayPolicy(entity_requires_description=True),
+        graph_store=graph,  # type: ignore[arg-type]
+    )
+
+    ((_, as_of),) = graph.calls
+    assert as_of is not None
+    assert as_of.utcoffset() == timedelta(0)
+    assert as_of == instant
+
+
+def test_a_document_is_judged_on_current_state_not_as_served(tmp_path: Path) -> None:
+    s = _Stores(tmp_path)
+    s.docs.put("d1", "two words", {})
+    s.emit_pack("p1", [("d1", "document", 10, "unhelpful")])
+    s.docs.put("d1", "alpha beta gamma delta epsilon zeta", {})
+
+    report = s.replay(ReplayPolicy(min_distinct_words=5))
+
+    # Six words today, so it is kept, though it served two.
+    assert report.removed.items == 0
+    assert report.judged_on["min_distinct_words.document"] == (
+        SUBSTANCE_BASIS_CURRENT_STATE
+    )
+
+
+def test_a_truncated_event_scan_is_stated_in_a_note(stores: _Stores) -> None:
+    capped = stores.replay(ReplayPolicy(min_distinct_words=5), limit=2)
+    complete = stores.replay(ReplayPolicy(min_distinct_words=5))
+
+    truncated = [n for n in capped.notes if "TRUNCATED" in n]
+    assert len(truncated) == 1
+    assert "newer part of the window only" in truncated[0]
+    assert not any("TRUNCATED" in n for n in complete.notes)
+    # Only the note differs: the counts are of what was read.
+    assert capped.notes[: len(complete.notes)] == complete.notes

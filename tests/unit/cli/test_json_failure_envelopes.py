@@ -174,7 +174,7 @@ def _replay_bad_policy(tmp_path, monkeypatch):
 
 def _replay_substance_bad_words(tmp_path, monkeypatch):
     args = ["analyze", "replay", "--min-distinct-words", "0"]
-    return args, "min_distinct_words must be >= 1", EXIT_VALIDATION
+    return args, "--min-distinct-words must be >= 1", EXIT_VALIDATION
 
 
 def _replay_substance_with_a_walk_lever(tmp_path, monkeypatch):

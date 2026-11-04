@@ -68,7 +68,10 @@ from pydantic import Field
 from trellis.core.base import TrellisModel
 from trellis.feedback.attribution import is_sectioned_payload
 from trellis.feedback.pack_rows import has_served_rows, served_rows_from_payload
-from trellis.learning.pack_observations import join_pack_feedback
+from trellis.learning.pack_observations import (
+    join_pack_events_with_coverage,
+    join_pack_feedback,
+)
 from trellis.retrieve.class_prior import (
     DEFAULT_SCOPE,
     PARENTS_AND_CHUNKS_SCOPE,
@@ -85,10 +88,11 @@ from trellis.retrieve.excerpts import (
 from trellis.retrieve.pack_value import MIN_ATTRIBUTED_PACKS, collect_pack_verdicts
 from trellis.retrieve.strategies import GRAPH_STRATEGY_NAME
 from trellis.schemas.document_metadata import document_form_of
+from trellis.stores.base.trace import as_utc
 
 if TYPE_CHECKING:
     from trellis.stores.base.document import DocumentStore
-    from trellis.stores.base.event_log import EventLog
+    from trellis.stores.base.event_log import EventLog, ScanCoverage
     from trellis.stores.base.graph import GraphStore
 
 logger = structlog.get_logger(__name__)
@@ -1192,10 +1196,18 @@ def replay_class_prior(
 #: from ``PACK_ASSEMBLED.injected_items[]``: the row carries ``item_type``,
 #: ``estimated_tokens`` and a ``title`` that graph entities mostly lack (the
 #: graph strategy folds the name into the excerpt), but neither a description
-#: flag nor the served text, only a content hash of it. So both arms read the
-#: stores as they are *now*. A node edited, re-minted or deleted since the
-#: serving answers for a different row, and the report says so rather than
-#: presenting the count as an as-served measurement.
+#: flag nor the served text, only a content hash of it. The stores answer
+#: instead, on two bases:
+#:
+#: * **as served**, for a graph entity. The graph keeps SCD history, so the
+#:   node is read at the pack's ``PACK_ASSEMBLED.occurred_at``
+#:   (``get_node(..., as_of=...)``) and a stub that gained a description
+#:   afterwards is judged as the stub it was.
+#: * **current state**, for a document. The document store keeps no history, so
+#:   a document edited or removed since the serving answers for a different
+#:   row, and the report says so rather than presenting the count as an
+#:   as-served measurement.
+SUBSTANCE_BASIS_AS_SERVED = "as_served"
 SUBSTANCE_BASIS_CURRENT_STATE = "current_state"
 
 _RULE_ENTITY_DESCRIPTION = "entity_requires_description"
@@ -1244,8 +1256,10 @@ class SubstanceReplayReport(TrellisModel):
     #: ``mode=... forms=... axes=...`` when ``--class-prior`` was combined, else empty.
     class_prior: str = ""
     attributed_packs: int = 0
-    #: Rule name to where its input came from. Only ``"current_state"`` exists
-    #: today; see :data:`SUBSTANCE_BASIS_CURRENT_STATE`.
+    #: Rule (and, for the word arm, the kind of item it read) to where its
+    #: input came from: ``"as_served"`` for a graph entity, read from the
+    #: graph's history at the pack's time, ``"current_state"`` for a document;
+    #: see :data:`SUBSTANCE_BASIS_AS_SERVED`.
     judged_on: dict[str, str] = Field(default_factory=dict)
     #: Every serving in the attributed packs.
     served: SubstanceTally = Field(default_factory=SubstanceTally)
@@ -1301,14 +1315,21 @@ class _VerdictTally:
         )
 
 
-class _CurrentStateReader:
+class _SubstanceReader:
     """Read the graph and document stores for the substance predicates.
 
-    One read per distinct id, memoized, so an entity served in forty packs
-    costs one. A missing row, a missing store and a store that raises all read
-    as ``None``: the caller counts that as unresolved, never as a verdict. A
-    raising store is caught whole, as :class:`_ParentFormLookup` does, because
-    one unreadable row must not abort a measurement.
+    A graph node is read **as of the pack's time**, so the cache is keyed on
+    ``(item_id, served_at)``: the same node served in two packs may have been a
+    stub in one and described in the other. A document has no history and is
+    read once per id, as it is now. A missing row, a missing store and a store
+    that raises all read as ``None``: the caller counts that as unresolved,
+    never as a verdict. A raising store is caught whole, as
+    :class:`_ParentFormLookup` does, because one unreadable row must not abort
+    a measurement.
+
+    A node hard-deleted since the serving has no history left to read
+    (``delete_node`` purges every version), and one minted after it had none at
+    that time: both read as ``None``, never as the current node.
     """
 
     def __init__(
@@ -1316,19 +1337,23 @@ class _CurrentStateReader:
     ) -> None:
         self._graph = graph_store
         self._documents = document_store
-        self._nodes: dict[str, Mapping[str, Any] | None] = {}
+        self._nodes: dict[tuple[str, datetime], Mapping[str, Any] | None] = {}
         self._docs: dict[str, Mapping[str, Any] | None] = {}
 
-    def node_properties(self, item_id: str) -> Mapping[str, Any] | None:
-        if item_id not in self._nodes:
+    def node_properties(
+        self, item_id: str, served_at: datetime
+    ) -> Mapping[str, Any] | None:
+        """The node's properties as of ``served_at`` (aware UTC), or ``None``."""
+        key = (item_id, served_at)
+        if key not in self._nodes:
             node: Mapping[str, Any] | None = None
             if self._graph is not None:
                 try:
-                    node = self._graph.get_node(item_id)
+                    node = self._graph.get_node(item_id, as_of=served_at)
                 except Exception:
                     logger.warning("substance_replay_node_read_failed")
-            self._nodes[item_id] = node
-        node = self._nodes[item_id]
+            self._nodes[key] = node
+        node = self._nodes[key]
         if node is None:
             return None
         props = node.get("properties")
@@ -1392,6 +1417,7 @@ def _substance_notes(
     policy: ReplayPolicy,
     report: SubstanceReplayReport,
     class_prior_off: bool,
+    coverage: ScanCoverage,
 ) -> list[str]:
     notes = [
         (
@@ -1402,15 +1428,23 @@ def _substance_notes(
             "budget would have admitted instead, and cannot grade it."
         ),
         (
-            "judged on current state, not as served: PACK_ASSEMBLED records "
-            "no description flag and no served text, so each predicate read "
-            "the graph or document store as it is now. A node or document "
-            "edited or removed since the serving answers for a different "
-            "row; a row that cannot be read is counted as unresolved, "
-            "neither removed nor kept."
+            "Graph entities are judged as served: PACK_ASSEMBLED records no "
+            "description flag and no served text, so each node is read from "
+            "the graph's version history at the pack's PACK_ASSEMBLED time, "
+            "and a stub that gained a description afterwards is judged as the "
+            "stub it was. A node with no version at that time (minted later, "
+            "or hard-deleted, which purges its history) cannot be judged and "
+            "is counted as unresolved, neither removed nor kept."
         ),
     ]
     if policy.min_distinct_words is not None:
+        notes.append(
+            "Documents are judged on current state, not as served: the "
+            "document store keeps no history, so min_distinct_words reads a "
+            "document's content as it is now. A document edited since the "
+            "serving answers for a different row; one removed since is "
+            "unresolved."
+        )
         notes.append(
             "min_distinct_words counts distinct case-folded words as the "
             "content floor does (a path or URL is one word; punctuation is "
@@ -1435,8 +1469,15 @@ def _substance_notes(
     if report.unresolved.items:
         notes.append(
             f"{report.unresolved.items} serving(s) could not be judged "
-            "(node or document unreadable now) and are in `unresolved`, not "
-            "in `removed`."
+            "(no graph version at the serving time, or a document unreadable "
+            "now) and are in `unresolved`, not in `removed`."
+        )
+    if coverage.truncated:
+        # The window held more events than the scan limit, so the oldest packs
+        # and feedback fell outside every count in this report.
+        notes.append(
+            (coverage.note or "TRUNCATED: the event scan hit its cap.")
+            + " Every count in this report covers the newer part of the window only."
         )
     return notes
 
@@ -1461,8 +1502,11 @@ def replay_substance(  # noqa: PLR0912, PLR0915 - one pass over the rows, one ta
             ``min_distinct_words``.
         days: Look-back window.
         limit: Per-event-type scan limit.
-        graph_store: Read for an entity's description and served text.
-        document_store: Read for a document's served text, and for a chunk's
+        graph_store: Read for an entity's description and served text, **as
+            of each pack's ``PACK_ASSEMBLED.occurred_at``** (``get_node(...,
+            as_of=...)``), so an entity is judged as it was served.
+        document_store: Read for a document's served text (as it is now: a
+            document store keeps no history), and for a chunk's
             parent under a chunk-scope ``class_prior_config``. A missing
             store makes every serving that needs it unresolved.
         class_prior_config: When given, the class-prior rule is judged beside
@@ -1481,20 +1525,23 @@ def replay_substance(  # noqa: PLR0912, PLR0915 - one pass over the rows, one ta
         and bool(class_prior_config.axes)
     )
     since = datetime.now(tz=UTC) - timedelta(days=days)
-    feedback_events, pack_payloads, _ = join_pack_feedback(
+    # The pack events, not only their payloads: an entity is judged as the
+    # graph held it when the pack was assembled.
+    feedback_events, pack_events, _, coverage = join_pack_events_with_coverage(
         event_log, since=since, limit=limit
     )
     flat_packs = {
-        pack_id: payload
-        for pack_id, payload in pack_payloads.items()
-        if has_served_rows(payload) and not is_sectioned_payload(payload)
+        pack_id: event.payload or {}
+        for pack_id, event in pack_events.items()
+        if has_served_rows(event.payload or {})
+        and not is_sectioned_payload(event.payload or {})
     }
     verdicts = collect_pack_verdicts(feedback_events, flat_packs)
     helpful_by_pack = verdicts["helpful"]
     unhelpful_by_pack = verdicts["unhelpful"]
     attributed = sorted(set(helpful_by_pack) | set(unhelpful_by_pack))
 
-    reader = _CurrentStateReader(graph_store, document_store)
+    reader = _SubstanceReader(graph_store, document_store)
     parent_lookup = _ParentFormLookup(document_store)
     served = _VerdictTally()
     removed = _VerdictTally()
@@ -1506,6 +1553,9 @@ def replay_substance(  # noqa: PLR0912, PLR0915 - one pass over the rows, one ta
 
     for pack_id in attributed:
         payload = flat_packs[pack_id]
+        # SQLite hands back an ``occurred_at`` naive or aware by build; the
+        # graph stores compare instants, so settle it before it is a key.
+        served_at = as_utc(pack_events[pack_id].occurred_at)
         rows = [
             s.row
             for s in served_rows_from_payload(
@@ -1554,7 +1604,7 @@ def replay_substance(  # noqa: PLR0912, PLR0915 - one pass over the rows, one ta
             if item_id in class_removed:
                 fired.append(_RULE_CLASS_PRIOR)
             if policy.entity_requires_description and is_entity:
-                props = reader.node_properties(item_id)
+                props = reader.node_properties(item_id, served_at)
                 if props is None:
                     unresolved_by_rule[_RULE_ENTITY_DESCRIPTION] += 1
                     could_not_judge = True
@@ -1566,7 +1616,7 @@ def replay_substance(  # noqa: PLR0912, PLR0915 - one pass over the rows, one ta
                 else:
                     text: str | None
                     if is_entity:
-                        props = reader.node_properties(item_id)
+                        props = reader.node_properties(item_id, served_at)
                         text = None if props is None else _entity_served_text(props)
                     else:
                         text = reader.document_content(item_id)
@@ -1597,10 +1647,23 @@ def replay_substance(  # noqa: PLR0912, PLR0915 - one pass over the rows, one ta
         ),
         attributed_packs=len(attributed),
         judged_on={
-            rule: SUBSTANCE_BASIS_CURRENT_STATE
-            for rule, active in (
-                (_RULE_ENTITY_DESCRIPTION, policy.entity_requires_description),
-                (_RULE_MIN_WORDS, policy.min_distinct_words is not None),
+            basis_key: basis
+            for basis_key, basis, active in (
+                (
+                    _RULE_ENTITY_DESCRIPTION,
+                    SUBSTANCE_BASIS_AS_SERVED,
+                    policy.entity_requires_description,
+                ),
+                (
+                    f"{_RULE_MIN_WORDS}.entity",
+                    SUBSTANCE_BASIS_AS_SERVED,
+                    policy.min_distinct_words is not None,
+                ),
+                (
+                    f"{_RULE_MIN_WORDS}.document",
+                    SUBSTANCE_BASIS_CURRENT_STATE,
+                    policy.min_distinct_words is not None,
+                ),
             )
             if active
         },
@@ -1619,6 +1682,7 @@ def replay_substance(  # noqa: PLR0912, PLR0915 - one pass over the rows, one ta
         policy=policy,
         report=report,
         class_prior_off=class_prior_config is not None and not class_prior_active,
+        coverage=coverage,
     )
     logger.debug(
         "pack_value_substance_replayed",
@@ -2267,6 +2331,7 @@ def replay_graph_selection(
 
 __all__ = [
     "EXCERPT_MAX_CHARS",
+    "SUBSTANCE_BASIS_AS_SERVED",
     "SUBSTANCE_BASIS_CURRENT_STATE",
     "ClassPriorReplayReport",
     "GraphSelectionReplayReport",

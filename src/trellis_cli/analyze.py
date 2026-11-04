@@ -1159,10 +1159,10 @@ def replay(  # noqa: PLR0912, PLR0915 - one flag per arm, dispatched here
         False,
         "--entity-requires-description",
         help=(
-            "Substance arm: withhold every served graph entity whose stored "
-            "node has no (or only a blank) description. Removal-only; reads "
-            "the graph store as it is now, not as served. Combines with "
-            "--class-prior and --min-distinct-words."
+            "Substance arm: withhold every served graph entity whose node has "
+            "no (or only a blank) description. Removal-only; judged as "
+            "served: the node is read from the graph's history at the pack's "
+            "time. Combines with --class-prior and --min-distinct-words."
         ),
     ),
     min_distinct_words: int | None = typer.Option(
@@ -1171,8 +1171,8 @@ def replay(  # noqa: PLR0912, PLR0915 - one flag per arm, dispatched here
         help=(
             "Substance arm: withhold every served item whose text has fewer "
             "than this many distinct words (the content floor's measure). "
-            "Removal-only; reads the graph and document stores as they are "
-            "now, not as served."
+            "Removal-only; entities are judged as served (graph history at "
+            "the pack's time), documents on their current content."
         ),
     ),
     graph_selection: str | None = typer.Option(
@@ -1225,11 +1225,14 @@ def replay(  # noqa: PLR0912, PLR0915 - one flag per arm, dispatched here
     ``--entity-requires-description`` and ``--min-distinct-words N`` price
     withholding stubs: removal-only arms that report, per served
     ``(pack, item)``, how many helpful, unhelpful and unjudged items and tokens
-    the cut removes. Neither predicate is recorded in PACK_ASSEMBLED, so both
-    read the graph / document stores as they are now and say so; a row that
-    cannot be read is counted ``unresolved``, never removed or kept. They
-    combine with each other and with ``--class-prior`` (a serving two rules
-    remove counts once), not with the width options.
+    the cut removes. Neither predicate is recorded in PACK_ASSEMBLED, so the
+    stores answer: a graph entity is judged as served (its node is read from
+    the graph's history at the pack's time, so a stub that gained a
+    description later is still a stub), a document on its current content
+    (the document store keeps no history). A row that cannot be read is
+    counted ``unresolved``, never removed or kept. They combine with each
+    other and with ``--class-prior`` (a serving two rules remove counts
+    once), not with the width options.
 
     Examples::
 
@@ -1278,23 +1281,40 @@ def replay(  # noqa: PLR0912, PLR0915 - one flag per arm, dispatched here
     if entity_requires_description or min_distinct_words is not None:
         from trellis.retrieve.pack_replay import ReplayPolicy  # noqa: PLC0415
 
-        # The exit sits below the format branch, so a refused invocation
-        # exits 2 whatever ``--format`` says.
-        try:
-            substance_policy = ReplayPolicy(
-                excerpt_max_chars=excerpt_max_chars,
-                body_items=body_items,
-                max_items=max_items,
-                refill=not no_refill,
-                entity_requires_description=entity_requires_description,
-                min_distinct_words=min_distinct_words,
-            )
-        except ValueError as exc:
+        refusal = _substance_refusal(
+            walk_levers=[
+                flag
+                for flag, given in (
+                    ("--excerpt-max-chars", excerpt_max_chars is not None),
+                    ("--body-items", body_items is not None),
+                    ("--max-items", max_items is not None),
+                    ("--no-refill", no_refill),
+                )
+                if given
+            ],
+            arms=[
+                flag
+                for flag, given in (
+                    ("--entity-requires-description", entity_requires_description),
+                    ("--min-distinct-words", min_distinct_words is not None),
+                )
+                if given
+            ],
+            min_distinct_words=min_distinct_words,
+        )
+        if refusal is not None:
+            # The exit sits below the format branch: a refused invocation
+            # exits 2 whatever ``--format`` says
+            # (``tests/unit/test_format_exit_parity_rule.py``).
             if output_format == "json":
-                emit_json({"status": "error", "message": str(exc)})
+                emit_json({"status": "error", "message": refusal})
             else:
-                console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
-            raise typer.Exit(code=2) from exc
+                console.print(f"[red]{refusal}[/red]", soft_wrap=True)
+            raise typer.Exit(code=2)
+        substance_policy = ReplayPolicy(
+            entity_requires_description=entity_requires_description,
+            min_distinct_words=min_distinct_words,
+        )
         _replay_substance_command(
             substance_policy,
             class_prior=class_prior,
@@ -1380,6 +1400,31 @@ def replay(  # noqa: PLR0912, PLR0915 - one flag per arm, dispatched here
         return
 
     _render_replay(report)
+
+
+def _substance_refusal(
+    *,
+    walk_levers: list[str],
+    arms: list[str],
+    min_distinct_words: int | None,
+) -> str | None:
+    """Why the substance arms cannot run as invoked, or ``None``.
+
+    Names the CLI flags, not the ``ReplayPolicy`` fields behind them: the
+    reader typed ``--max-items``, not ``max_items``. Pure, so the exit stays in
+    the command where the exit-parity rule can see it. The message is already
+    markup-escaped.
+    """
+    if min_distinct_words is not None and min_distinct_words < 1:
+        return f"--min-distinct-words must be >= 1; got {min_distinct_words}"
+    if walk_levers:
+        return (
+            f"{escape(' and '.join(arms))} "
+            f"{'is' if len(arms) == 1 else 'are'} removal-only and cannot be "
+            f"combined with {escape(', '.join(walk_levers))}, which "
+            f"{'re-runs' if len(walk_levers) == 1 else 're-run'} the token walk"
+        )
+    return None
 
 
 def _replay_substance_command(

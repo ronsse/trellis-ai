@@ -10,8 +10,12 @@ All notable changes to Trellis will be documented in this file.
   removal-only replay arms that price withholding title-only stubs.** Each reports served, removed
   and `unresolved` servings and tokens, split helpful / unhelpful / unjudged per `(pack_id, item_id)`
   like `--class-prior`, and combines with it. Neither predicate is recorded in `PACK_ASSEMBLED`, so
-  both are judged on the graph and document stores as they are now, and the report says so.
-  Replay only: serving is unchanged and a default `ReplayPolicy` replays byte-identically.
+  the stores answer: a graph entity is judged as served, its node read from the graph's version
+  history at the pack's `occurred_at` (a stub that gained a description later is still a stub, and a
+  node hard-deleted or minted after the serving is `unresolved`), while the word arm reads a document
+  as it is now, since the document store keeps no history. The report's `judged_on` and notes say
+  which; a scan that hit its limit says so too. A refusal names the CLI flags. Replay only: serving
+  is unchanged and a default `ReplayPolicy` replays byte-identically.
 
 - **`trellis analyze pack-judge`: an offline relevance judge for served pack items, and a
   calibration report against agent feedback (shadow only).** The judge phase (`--out`) asks a
