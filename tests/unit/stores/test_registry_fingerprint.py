@@ -104,11 +104,14 @@ class TestMismatchedFingerprints:
         assert "TRELLIS_SKIP_FINGERPRINT_CHECK" in rendered
 
     def test_the_message_names_what_an_operator_can_do(self, tmp_path: Path) -> None:
-        """No command migrates a store, so the message must not name one.
+        """No command converts a mismatched store, so the message must not
+        promise one.
 
-        It used to say "Run migrations". What an operator can do is what the
-        runbook's Upgrading section describes: point the backend back, run
-        the build that wrote the store, or restore a backup.
+        It used to say "Run migrations". ``trellis admin migrate`` exists now,
+        but it applies schema steps and does not clear this mismatch, so the
+        message says so. What an operator can do is what the runbook's
+        Upgrading section describes: point the backend back, run the build that
+        wrote the store, or restore a backup.
         """
         stores_dir = tmp_path / "stores"
         stores_dir.mkdir(parents=True)
@@ -124,7 +127,8 @@ class TestMismatchedFingerprints:
         text = " ".join(str(exc).split())
 
         assert "Run migrations" not in text
-        assert "there is no migration command" in text
+        assert "no command converts it" in text
+        assert "does not clear this mismatch" in text
         assert "set stores.document.backend back to the recorded one" in text
         assert "restore a backup" in text
         assert "does not convert or repair the store" in text
@@ -134,7 +138,7 @@ class TestMismatchedFingerprints:
             encoding="utf-8"
         )
         assert "\n## Upgrading\n" in runbook
-        assert "There is no migration command." in runbook
+        assert "No command converts a store between backends" in runbook
 
     def test_schema_version_bump_raises_config_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

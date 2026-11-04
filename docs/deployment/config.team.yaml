@@ -1,0 +1,32 @@
+# Trellis config for docs/deployment/docker-compose.team.yml.
+#
+# Mounted read-only into the api and mcp containers at /etc/trellis/config.yaml.
+# It is deploy/config.compose.yaml plus one line: API keys live in Postgres, so
+# a key survives a container being recreated and is covered by the same
+# pg_dump as the data it protects.
+#
+# DSNs come from env vars the compose file injects:
+#   TRELLIS_KNOWLEDGE_PG_DSN
+#   TRELLIS_OPERATIONAL_PG_DSN
+#
+# Still on the trellis-data volume (SQLite-only stores, no Postgres backend):
+# outcomes.db, parameters.db and tuner_state.db, plus the local blob directory,
+# the feedback audit log and the policy and settings files.
+
+knowledge:
+  graph:
+    backend: postgres
+  vector:
+    backend: pgvector
+  document:
+    backend: postgres
+  blob:
+    backend: local
+
+operational:
+  trace:
+    backend: postgres
+  event_log:
+    backend: postgres
+  api_key:
+    backend: postgres

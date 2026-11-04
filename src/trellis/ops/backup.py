@@ -19,7 +19,12 @@ The set of stores comes from the registry
 explicit ``db_path`` is found and a stray file in the directory is not
 mistaken for one. A store on any other backend is reported ``skipped`` and
 makes the backup ``incomplete``; the command never reports success for data
-it did not copy. It also copies the policy file and the feedback audit log.
+it did not copy. A store on Postgres (``postgres``, ``pgvector``) is dumped
+with ``pg_dump`` in its custom format, one dump per distinct DSN, the DSN
+passed to the tool through its environment and never its argv
+(:mod:`trellis.ops.backup_postgres`); with ``skip_postgres`` those stores are
+``skipped`` by request and the run stays complete. It also copies the policy
+file and the feedback audit log.
 Every other file under the stores directory is named in ``not_copied``.
 
 There is no restore here: a restore is placing the files back and
@@ -32,6 +37,7 @@ import contextlib
 import json
 import shutil
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -45,6 +51,8 @@ from trellis.core.version import resolve_code_version
 from trellis.errors import ConfigError, ValidationError
 from trellis.feedback.recording import feedback_log_dir
 from trellis.mutate.policy_source import POLICY_FILENAME, resolve_policy_path
+from trellis.ops.backup_postgres import DUMPED, DumpResult, run_pg_dump
+from trellis.ops.backup_postgres import TOOL_MISSING as DUMP_TOOL_MISSING
 from trellis.stores.registry import _PLANE_OF, _SQLITE_DB_NAMES, StoreRegistry
 
 logger = structlog.get_logger(__name__)
@@ -63,20 +71,35 @@ _BUSY_TIMEOUT_S = 30.0
 #: What the not-SQLite pointer says. Named once so the text and the docs agree.
 NON_SQLITE_HINT = (
     "not backed up by this command; use the backend's own tool"
-    " (pg_dump for Postgres, neo4j-admin for Neo4j, the ArcadeDB backup"
-    " command, bucket versioning or replication for S3)"
+    " (neo4j-admin for Neo4j, the ArcadeDB backup command, bucket"
+    " versioning or replication for S3)"
 )
+
+#: Backends this command dumps with ``pg_dump``.
+POSTGRES_BACKENDS = frozenset({"postgres", "pgvector"})
+
+#: Where the dumps land under the output directory (not under ``stores/``: a
+#: dump is restored with ``pg_restore``, not copied into the data directory).
+OUTPUT_POSTGRES_SUBDIR = "postgres"
 
 # ``copied`` and ``empty`` are the only outcomes that mean "nothing was lost".
 # ``absent`` is a SQLite store whose file does not exist (stores are created
 # when first opened), ``skipped`` is data on a backend this command does not
-# copy, ``not_applicable`` is a backend that stores nothing.
+# copy, ``not_applicable`` is a backend that stores nothing, ``tool_missing`` is
+# a Postgres store whose dump could not run because ``pg_dump`` is not installed
+# (a failure, with its own name so it is not read as a backend left out).
 COPIED = "copied"
 ABSENT = "absent"
 SKIPPED = "skipped"
 FAILED = "failed"
 EMPTY = "empty"
 NOT_APPLICABLE = "not_applicable"
+TOOL_MISSING = "tool_missing"
+
+#: The ``reason`` of a Postgres store left out because the operator asked
+#: (``--skip-postgres``). It is ``skipped``, but a request is not a gap: it does
+#: not make the run ``incomplete``.
+SKIP_POSTGRES_REASON = "skip_postgres_flag"
 
 STATUS_OK = "ok"
 STATUS_INCOMPLETE = "incomplete"
@@ -101,6 +124,10 @@ class BackedUpItem:
         return {k: v for k, v in self.__dict__.items() if v is not None}
 
 
+def _skipped_on_request(item: BackedUpItem) -> bool:
+    return item.status == SKIPPED and item.reason == SKIP_POSTGRES_REASON
+
+
 @dataclass
 class BackupReport:
     """The manifest: everything the command did, and did not, copy."""
@@ -115,11 +142,14 @@ class BackupReport:
     def status(self) -> str:
         """``ok`` | ``incomplete`` | ``error``; the exit code reads this alone."""
         items = [*self.stores, *self.files]
-        if any(i.status == FAILED for i in items):
+        if any(i.status in (FAILED, TOOL_MISSING) for i in items):
             return STATUS_ERROR
         copied = any(i.status == COPIED for i in self.stores)
-        skipped = any(i.status == SKIPPED for i in self.stores)
-        if not copied and not skipped:
+        requested = any(_skipped_on_request(i) for i in self.stores)
+        skipped = any(
+            i.status == SKIPPED and not _skipped_on_request(i) for i in self.stores
+        )
+        if not copied and not skipped and not requested:
             # Every store file is missing: a wrong data directory looks
             # exactly like this, and an empty backup must not read as success.
             return STATUS_ERROR
@@ -247,9 +277,14 @@ def _not_sqlite(
 
 
 def _backup_store(
-    registry: StoreRegistry, store_type: str, out_stores: Path
+    registry: StoreRegistry,
+    store_type: str,
+    out_stores: Path,
+    pg_items: dict[str, BackedUpItem],
 ) -> BackedUpItem:
     backend = registry.configured_backend(store_type)
+    if store_type in pg_items:
+        return pg_items[store_type]
     other = _not_sqlite(registry, store_type, backend)
     if other is not None:
         return other
@@ -306,6 +341,65 @@ def _blob_dir_item(registry: StoreRegistry) -> BackedUpItem:
     )
 
 
+def _dump_postgres_stores(
+    registry: StoreRegistry,
+    output: Path,
+    dump: Callable[[str, Path], DumpResult] = run_pg_dump,
+    *,
+    skip_postgres: bool = False,
+) -> dict[str, BackedUpItem]:
+    """Dump every Postgres store, one ``pg_dump`` per distinct DSN.
+
+    Stores that share a DSN (the knowledge plane's document, graph and vector
+    stores usually do) share one dump file, named for the planes it covers.
+    Returns each Postgres store's report row, keyed by store type. With
+    ``skip_postgres`` no DSN is read and no dump runs: each is ``skipped`` with
+    :data:`SKIP_POSTGRES_REASON`.
+    """
+    groups: dict[str, list[str]] = {}
+    items: dict[str, BackedUpItem] = {}
+    for store_type in _PLANE_OF:
+        backend = registry.configured_backend(store_type)
+        if backend not in POSTGRES_BACKENDS:
+            continue
+        if skip_postgres:
+            items[store_type] = BackedUpItem(
+                store_type, SKIPPED, backend=backend, reason=SKIP_POSTGRES_REASON
+            )
+            continue
+        dsn = registry.configured_postgres_dsn(store_type)
+        if not dsn:
+            items[store_type] = BackedUpItem(
+                store_type,
+                FAILED,
+                backend=backend,
+                reason="no DSN configured (set the store's dsn or its plane's"
+                " TRELLIS_*_PG_DSN variable)",
+            )
+            continue
+        groups.setdefault(dsn, []).append(store_type)
+    for dsn, store_types in groups.items():
+        planes = sorted({_PLANE_OF[t] for t in store_types})
+        rel = f"{OUTPUT_POSTGRES_SUBDIR}/postgres-{'-'.join(planes)}.dump"
+        result = dump(dsn, output / rel)
+        for store_type in store_types:
+            backend = registry.configured_backend(store_type)
+            if result.status == DUMPED:
+                items[store_type] = BackedUpItem(
+                    store_type,
+                    COPIED,
+                    backend=backend,
+                    file=rel,
+                    size_bytes=result.size_bytes,
+                )
+            else:
+                status = TOOL_MISSING if result.status == DUMP_TOOL_MISSING else FAILED
+                items[store_type] = BackedUpItem(
+                    store_type, status, backend=backend, reason=result.reason
+                )
+    return items
+
+
 def _backup_file(
     name: str, source: Path | None, dest: Path, rel: str, *, count_lines: bool = False
 ) -> BackedUpItem:
@@ -355,12 +449,17 @@ def _list_not_copied(
     return left
 
 
-def backup_stores(registry: StoreRegistry, output: Path) -> BackupReport:
+def backup_stores(
+    registry: StoreRegistry, output: Path, *, skip_postgres: bool = False
+) -> BackupReport:
     """Back up ``registry``'s SQLite stores into ``output`` and write the manifest.
 
     ``output`` must already be prepared (:func:`prepare_target`). A store that
     fails does not stop the others: each outcome is in the report, and the
-    manifest is written whatever the status.
+    manifest is written whatever the status. ``skip_postgres`` leaves the
+    Postgres and pgvector stores to a tool that has ``pg_dump`` (a run inside an
+    image without it): they read ``skipped`` with :data:`SKIP_POSTGRES_REASON`
+    and do not make the run ``incomplete``.
     """
     stores_dir = registry.stores_dir
     if stores_dir is None:
@@ -376,8 +475,9 @@ def backup_stores(registry: StoreRegistry, output: Path) -> BackupReport:
     out_stores = output / OUTPUT_STORES_SUBDIR
     out_stores.mkdir(mode=0o700, exist_ok=True)
 
+    pg_items = _dump_postgres_stores(registry, output, skip_postgres=skip_postgres)
     for store_type in _PLANE_OF:
-        report.stores.append(_backup_store(registry, store_type, out_stores))
+        report.stores.append(_backup_store(registry, store_type, out_stores, pg_items))
 
     report.files.append(
         _backup_file(
@@ -409,6 +509,10 @@ def backup_stores(registry: StoreRegistry, output: Path) -> BackupReport:
         blobs_accounted=registry.configured_backend("blob") == "local",
     )
 
+    return _finish(report, output)
+
+
+def _finish(report: BackupReport, output: Path) -> BackupReport:
     manifest = output / MANIFEST_NAME
     manifest.write_text(json.dumps(report.as_dict(), indent=2) + "\n")
     manifest.chmod(0o600)
@@ -420,6 +524,7 @@ __all__ = [
     "FEEDBACK_LOG_NAME",
     "MANIFEST_NAME",
     "NON_SQLITE_HINT",
+    "SKIP_POSTGRES_REASON",
     "BackedUpItem",
     "BackupReport",
     "backup_stores",

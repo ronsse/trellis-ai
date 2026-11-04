@@ -1377,6 +1377,24 @@ class StoreRegistry:
             return None
         return self._stores_dir / name
 
+    def configured_postgres_dsn(self, store_type: str) -> str | None:
+        """Return the DSN ``store_type`` would connect with, without connecting.
+
+        Same read-only, non-connecting contract as :meth:`configured_backend`,
+        which it calls first. ``None`` unless the store is configured for a
+        Postgres backend (``postgres`` or ``pgvector``) and a DSN is set: the
+        store's own ``dsn`` wins, else its plane's ``TRELLIS_*_PG_DSN``
+        variable, the order ``_instantiate`` uses.
+
+        **The return value is a credential.** Hand it to a driver or a child
+        process's environment; never log, render or serialise it.
+        """
+        if self.configured_backend(store_type) not in _PG_DSN_BACKENDS:
+            return None
+        _backend, params = self._resolve_backend(store_type)
+        dsn = params.get("dsn") or _resolve_plane_pg_dsn(store_type)
+        return str(dsn) if dsn else None
+
     def _instantiate(  # noqa: PLR0915
         self, store_type: str, *, construct: bool = True
     ) -> Any:
@@ -1740,8 +1758,10 @@ class StoreRegistry:
                 f"(plane={_PLANE_OF.get(store_type, '?')}): "
                 f"configured fingerprint '{want}' != stored fingerprint '{have}'. "
                 "The store was last written under a different backend or schema "
-                "version than this build is configured for, and there is no "
-                "migration command to convert it. If the backend changed, set "
+                "version than this build is configured for, and no command "
+                "converts it (`trellis admin migrate` reports and applies the "
+                "schema steps this build ships; it does not clear this "
+                "mismatch). If the backend changed, set "
                 f"stores.{store_type}.backend back to the recorded one. If the "
                 "schema version changed, run the build that wrote the store or "
                 "restore a backup taken before the change "

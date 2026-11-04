@@ -1,19 +1,23 @@
-"""``trellis admin backup`` — copy the SQLite stores while they are in use.
+"""``trellis admin backup`` — copy the SQLite stores and dump the Postgres ones.
 
 A plain ``cp *.db`` of a live store drops acknowledged writes that still sit
 in its write-ahead log and passes ``integrity_check`` anyway, so this command
 copies each store with SQLite's online backup API instead
 (:mod:`trellis.ops.backup`), writes a manifest next to the copies, and says
-what it did *not* copy. There is no restore command: the procedure is in
+what it did *not* copy. Postgres stores are dumped with ``pg_dump``
+(:mod:`trellis.ops.backup_postgres`). There is no restore command: the procedure is in
 ``docs/agent-guide/operations.md``.
 
 Exit codes follow :mod:`trellis_cli.exit_codes`, computed the same way
 regardless of ``--format`` (``tests/unit/test_format_exit_parity_rule.py``):
 
-* :data:`EXIT_OK` (0) — every configured store was copied and checked.
+* :data:`EXIT_OK` (0) — every configured store was copied and checked (with
+  ``--skip-postgres``, every store but the Postgres ones: those read ``skipped``
+  with reason ``skip_postgres_flag`` and are the operator's to dump).
 * :data:`EXIT_VALIDATION` (2) — ``--output`` is not an empty directory.
-* :data:`EXIT_STORE` (5) — a store failed, a store is on a backend this
-  command does not copy (``incomplete``), or no store file was found.
+* :data:`EXIT_STORE` (5) — a store failed, ``pg_dump`` is needed and not
+  installed (``tool_missing``), a store is on a backend this command does not
+  copy (``incomplete``), or no store file was found.
 """
 
 from __future__ import annotations
@@ -49,6 +53,7 @@ _STATUS_MARKUP = {
     "absent": "[yellow]absent[/yellow]",
     "skipped": "[red]SKIPPED[/red]",
     "failed": "[red]FAILED[/red]",
+    "tool_missing": "[red]TOOL MISSING[/red]",
 }
 
 _HEADLINE = {
@@ -113,8 +118,17 @@ def backup_command(
     output_format: str = typer.Option(
         "text", "--format", help="Output format: text or json"
     ),
+    skip_postgres: bool = typer.Option(
+        False,
+        "--skip-postgres",
+        help=(
+            "Do not dump Postgres or pgvector stores (for a run inside an image"
+            " without pg_dump). They read 'skipped' and do not fail the run;"
+            " dump them with pg_dump from somewhere that has it."
+        ),
+    ),
 ) -> None:
-    """Back up the SQLite stores, safely, while they are in use.
+    """Back up the SQLite stores and dump the Postgres ones.
 
     Each store is copied with SQLite's online backup API, so writes
     acknowledged to a running server are in the copy (a plain file copy
@@ -124,10 +138,17 @@ def backup_command(
     the copy. The stores are copied one after another, so the set is not
     one instant: stop writers if documents and events must agree.
 
-    A store on a backend other than SQLite is reported ``skipped`` (use
-    that backend's own dump tool) and the exit status is non-zero, so a
-    backup that left data out never reads as success. Files under the
-    stores directory that were not copied are named in the report.
+    A Postgres or pgvector store is dumped with ``pg_dump`` (custom format,
+    one dump per distinct DSN) into ``postgres/``; the DSN reaches the tool
+    through its environment, never the command line. If ``pg_dump`` is not
+    installed the store is ``tool_missing`` and the exit is non-zero.
+    ``--skip-postgres`` leaves them out on purpose (reason
+    ``skip_postgres_flag``) without making the run incomplete.
+
+    A store on any other backend (Neo4j, ArcadeDB, S3) is reported
+    ``skipped`` (use that backend's own tool) and the exit status is
+    non-zero, so a backup that left data out never reads as success. Files
+    under the stores directory that were not copied are named in the report.
 
     The output holds every memory and the API-key hashes: keep it private.
     """
@@ -135,7 +156,7 @@ def backup_command(
     payload: dict[str, Any]
     try:
         prepare_target(output)
-        report = backup_stores(registry, output)
+        report = backup_stores(registry, output, skip_postgres=skip_postgres)
         payload = report.as_dict()
         exit_code = EXIT_OK if report.status == STATUS_OK else EXIT_STORE
     except TrellisError as exc:
