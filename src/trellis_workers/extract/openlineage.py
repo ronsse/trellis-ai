@@ -15,6 +15,7 @@ import structlog
 from trellis.extract.base import ExtractorTier
 from trellis.schemas import well_known as wk
 from trellis.schemas.extraction import (
+    AliasDraft,
     EdgeDraft,
     EntityDraft,
     ExtractionProvenance,
@@ -23,6 +24,11 @@ from trellis.schemas.extraction import (
 
 if TYPE_CHECKING:
     from trellis.extract.context import ExtractionContext
+
+#: Jobs and datasets live under separate ``source_system`` values so a job and
+#: a dataset that share a ``namespace/name`` never contend for one alias.
+OPENLINEAGE_JOB_ALIAS_SOURCE_SYSTEM = "openlineage_job"
+OPENLINEAGE_DATASET_ALIAS_SOURCE_SYSTEM = "openlineage_dataset"
 
 logger = structlog.get_logger(__name__)
 
@@ -87,6 +93,13 @@ def _ensure_dataset(
             entity_type="dataset",
             name=ds_name,
             properties=props,
+            aliases=[
+                AliasDraft(
+                    source_system=OPENLINEAGE_DATASET_ALIAS_SOURCE_SYSTEM,
+                    raw_id=f"{ds_ns}/{ds_name}",
+                    raw_name=ds_name,
+                )
+            ],
         )
     return did
 
@@ -142,6 +155,13 @@ class OpenLineageExtractor:
                         "namespace": job_ns,
                         "name": job_name,
                     },
+                    aliases=[
+                        AliasDraft(
+                            source_system=OPENLINEAGE_JOB_ALIAS_SOURCE_SYSTEM,
+                            raw_id=f"{job_ns}/{job_name}",
+                            raw_name=job_name,
+                        )
+                    ],
                 )
 
             # OpenLineage events stream in chunks: a job emitted in one

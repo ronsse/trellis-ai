@@ -14,6 +14,7 @@ from rich.markup import escape
 from trellis.core.document_write import put_document
 from trellis.core.ids import generate_ulid
 from trellis.core.vector_metadata import resolve_vector_store
+from trellis.core.write_config import knowledge_link_or_mint_enabled
 from trellis.extract.commands import result_to_batch
 from trellis.extract.dispatcher import ExtractionDispatcher
 from trellis.extract.registry import ExtractorRegistry
@@ -1169,7 +1170,11 @@ def _run_extractor_on_fixture(
     result = asyncio.run(
         dispatcher.dispatch(raw_input, source_hint=source_hint),
     )
-    batch = result_to_batch(result, requested_by=f"cli:demo-load:{source_hint}")
+    batch = result_to_batch(
+        result,
+        requested_by=f"cli:demo-load:{source_hint}",
+        bind_identity=knowledge_link_or_mint_enabled(registry),
+    )
     results = build_curate_executor(
         registry,
         clearance="restricted",  # trusted: operator CLI

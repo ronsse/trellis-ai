@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Annotated, Final, Literal
+from collections.abc import Mapping
+from typing import Annotated, Any, Final, Literal
 
 from pydantic import Field, StringConstraints
 
@@ -95,60 +96,53 @@ class PrecedentRecord(TrellisModel):
 
     def expected_candidate_id(self) -> str:
         """The id this record's own content derives; ``candidate_id`` must equal it."""
-        return derive_candidate_id(
-            rule=self.rule,
-            situation=self.situation,
-            action=self.action,
-            because=self.because,
-            evidence=self.evidence,
-            confidence=self.confidence,
-            provenance_tier=self.provenance_tier,
-            distiller_version=self.distiller_version,
-        )
+        return derive_candidate_id(self.model_dump(mode="json"))
+
+    @classmethod
+    def derive(cls, **content: Any) -> PrecedentRecord:
+        """Build a record whose ``candidate_id`` is the id its content derives.
+
+        ``content`` is every field but ``candidate_id``. The record is built
+        first, with a placeholder id, and the id is then derived from the
+        record's own dump, so no caller lists the fields that go into it.
+        """
+        draft = cls(candidate_id=_PENDING_ID, **content)
+        return draft.model_copy(update={"candidate_id": draft.expected_candidate_id()})
 
 
-def derive_candidate_id(
-    *,
-    rule: str,
-    situation: PrecedentSituation,
-    action: PrecedentAction,
-    because: str,
-    evidence: PrecedentEvidence,
-    confidence: float,
-    provenance_tier: str,
-    distiller_version: str,
-) -> str:
-    """A stable id from the record's evidence and its whole content.
+#: The record fields the id does not cover. ``candidate_id`` is the id itself;
+#: ``lifecycle`` has one legal value, so it cannot tell two records apart.
+#: Everything else a record carries, including a field added later, is hashed:
+#: the canonical form is built from the model dump minus these keys, never from
+#: a hand-kept list (``tests/unit/schemas/test_precedent_record_id.py``).
+ID_EXCLUDED_FIELDS: Final = frozenset({"candidate_id", "lifecycle"})
 
-    The same input always gives the same id, so a rerun over the same trace
-    derives the candidates it derived before and the idempotency key catches
-    them. The id covers the content too (rule, situation, action, because,
-    confidence, provenance tier, distiller version), so a record whose text was
-    forged cannot carry the id the distiller derives for a real trace: its own
-    content derives a different one, and ``candidate_id`` must equal that.
-    A new ``distiller_version`` mints new ids on purpose: a changed rule is a
-    different candidate.
+_PENDING_ID: Final = "pcand_pending"
+
+
+def derive_candidate_id(record: Mapping[str, Any]) -> str:
+    """A stable id from a record's whole content.
+
+    ``record`` is a record's JSON dump. Every key but :data:`ID_EXCLUDED_FIELDS`
+    is hashed, nested fields included, so a forged record cannot carry the id
+    the distiller derives for a real trace: its own content derives another,
+    and ``candidate_id`` must equal that. The same input always gives the same
+    id, so a rerun over the same trace derives the candidates it derived before
+    and the idempotency key catches them. A new ``distiller_version`` mints new
+    ids on purpose: a changed rule is a different candidate.
 
     The input is encoded as JSON with sorted keys, not joined with a separator,
-    so ``["x,y"]`` and ``["x", "y"]`` cannot collide. The evidence lists are
-    sorted first: the same lesson cited in another order is the same lesson.
-    ``ensure_ascii`` keeps the encoding total over any string.
+    so ``["x,y"]`` and ``["x", "y"]`` cannot collide. Every list under
+    ``evidence`` is sorted first: the same lesson cited in another order is the
+    same lesson. ``ensure_ascii`` keeps the encoding total over any string.
     """
-    canonical = {
-        "rule": rule,
-        "situation": situation.model_dump(mode="json"),
-        "action": action.model_dump(mode="json"),
-        "because": because,
-        "evidence": {
-            "trace_ids": sorted(evidence.trace_ids),
-            "step_indexes": sorted(evidence.step_indexes),
-            "feedback_ids": sorted(evidence.feedback_ids),
-            "pack_ids": sorted(evidence.pack_ids),
-        },
-        "confidence": confidence,
-        "provenance_tier": provenance_tier,
-        "distiller_version": distiller_version,
-    }
+    canonical = {k: v for k, v in record.items() if k not in ID_EXCLUDED_FIELDS}
+    evidence = canonical.get("evidence")
+    if isinstance(evidence, Mapping):
+        canonical["evidence"] = {
+            key: sorted(value) if isinstance(value, list) else value
+            for key, value in evidence.items()
+        }
     encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(encoded.encode("ascii")).hexdigest()
     return f"pcand_{digest[:24]}"
@@ -161,6 +155,7 @@ __all__ = [
     "MAX_ID_CHARS",
     "MAX_LIST_ITEMS",
     "MAX_TRIGGER_CHARS",
+    "ID_EXCLUDED_FIELDS",
     "RECORD_LIFECYCLE_CANDIDATE",
     "PrecedentAction",
     "PrecedentEvidence",

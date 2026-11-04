@@ -8,6 +8,8 @@ from pydantic import ValidationError
 from tests.precedent_candidates import recovering_trace
 from trellis.learning.precedent_distill import (
     DISTILLER_VERSION,
+    DROP_ENTITY_ID_OVERLONG,
+    DROP_FAILED_APPROACH_OVER_CAP,
     RULE_FAILED_OUTCOME,
     RULE_FAILED_STEP_AVOID,
     RULE_FAILED_STEP_DO,
@@ -29,6 +31,7 @@ from trellis.schemas.precedent_record import (
     MAX_BECAUSE_CHARS,
     MAX_DOMAIN_CHARS,
     MAX_ID_CHARS,
+    MAX_LIST_ITEMS,
     MAX_TRIGGER_CHARS,
     PrecedentRecord,
 )
@@ -164,16 +167,93 @@ def test_interleaved_step_names_are_paired_by_kind() -> None:
     assert _reasons(trace) == [SKIP_TRANSIENT_RETRY]
 
 
-def test_arguments_that_differ_only_past_the_display_cut_are_different() -> None:
+def test_arguments_that_differ_only_past_the_display_cut_are_told_apart() -> None:
     long = "x" * 300
     trace = _trace(
         [_step(error="boom", blob=long + "1"), _step(blob=long + "2")],
         Outcome(status="success"),
     )
 
-    # Equality compares the whole arguments, not the shortened display text.
-    assert RULE_FAILED_STEP_AVOID in _records(trace)
+    by_rule = _records(trace)
+    [avoid], [do] = by_rule[RULE_FAILED_STEP_AVOID], by_rule[RULE_FAILED_STEP_DO]
+
+    # Equality compares the whole arguments, so the avoid exists. The shortened
+    # display of the two calls reads the same, so the avoid names where they differ.
     assert _reasons(trace) == []
+    assert "(differs at 'blob')" in avoid.action.text
+    assert "differs at" not in do.action.text
+
+
+def test_the_first_differing_key_is_named_in_key_order() -> None:
+    long = "y" * 300
+    trace = _trace(
+        [
+            _step(error="boom", a=long, b=long + "1", c=long + "1"),
+            _step(a=long, b=long + "2", c=long + "2"),
+        ],
+        Outcome(status="success"),
+    )
+
+    [avoid] = _records(trace)[RULE_FAILED_STEP_AVOID]
+
+    assert "(differs at 'b')" in avoid.action.text
+
+
+def test_a_key_present_on_one_side_only_is_the_difference() -> None:
+    long = "z" * 300
+    trace = _trace(
+        [_step(error="boom", a=long, b=1), _step(a=long, c=1)],
+        Outcome(status="success"),
+    )
+
+    # Same length, same shortened display: only the key sets differ.
+    [avoid] = _records(trace)[RULE_FAILED_STEP_AVOID]
+    assert "(differs at 'b')" in avoid.action.text
+
+
+def test_a_longer_argument_set_reads_differently_without_a_hint() -> None:
+    long = "z" * 300
+    trace = _trace(
+        [_step(error="boom", a=long), _step(a=long, extra=1)],
+        Outcome(status="success"),
+    )
+
+    # The elision marker counts what was cut, so the two displays already differ.
+    [avoid] = _records(trace)[RULE_FAILED_STEP_AVOID]
+    assert "differs at" not in avoid.action.text
+
+
+def test_arguments_that_read_differently_get_no_hint() -> None:
+    [avoid] = _records(recovering_trace())[RULE_FAILED_STEP_AVOID]
+
+    assert "differs at" not in avoid.action.text
+
+
+def test_an_integral_float_is_the_same_argument_as_the_integer() -> None:
+    same = _trace(
+        [
+            _step(error="boom", n=1.0, nested={"a": [2.0, {"b": 3.0}]}),
+            _step(n=1, nested={"a": [2, {"b": 3}]}),
+        ],
+        Outcome(status="success"),
+    )
+    assert distill_trace(same).records == ()
+    assert _reasons(same) == [SKIP_TRANSIENT_RETRY]
+
+    # A boolean is not the number one, and 1.5 is not 1.
+    for first, second in ((True, 1), (1.5, 1), (0.0, False)):
+        trace = _trace(
+            [_step(error="boom", n=first), _step(n=second)], Outcome(status="success")
+        )
+        assert RULE_FAILED_STEP_AVOID in _records(trace), (first, second)
+
+
+def test_comparing_arguments_does_not_change_them() -> None:
+    step = _step(error="boom", n=1.0, nested={"a": [2.0]})
+    distill_trace(_trace([step, _step(n=1)], Outcome(status="success")))
+
+    assert step.args == {"n": 1.0, "nested": {"a": [2.0]}}
+    assert isinstance(step.args["n"], float)
 
 
 def test_failures_that_never_worked_skip_once_per_step_kind() -> None:
@@ -342,3 +422,111 @@ def test_a_trace_that_cannot_make_a_valid_record_is_a_skip_not_a_crash() -> None
     assert tally.traces_read == 3
     assert tally.skips_by_reason[SKIP_INVALID_RECORD] == 2
     assert [r.evidence.trace_ids for r in tally.records] == [["t1"]]
+
+
+def _nested(depth: int) -> dict:
+    node: dict = {"leaf": 1}
+    for _ in range(depth):
+        node = {"k": node}
+    return node
+
+
+def _cycle() -> dict:
+    node: dict = {}
+    node["self"] = node
+    return node
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param({"deep": _nested(5000)}, id="nested-too-deep"),
+        pytest.param({"mixed": {1: "a", "b": 2}}, id="keys-that-do-not-sort"),
+        pytest.param({"loop": _cycle()}, id="cycle"),
+    ],
+)
+def test_arguments_that_cannot_be_compared_are_a_skip_not_an_exception(
+    args: dict,
+) -> None:
+    bad = _trace(
+        [
+            TraceStep(step_type="tool_call", name="run", error="boom", args=args),
+            TraceStep(step_type="tool_call", name="run", args=args),
+        ],
+        Outcome(status="success"),
+    )
+    good = _trace([_step()], Outcome(status="failure", summary="s"))
+
+    result = distill_trace(bad)
+    tally = distill_traces([bad, good])
+
+    assert result.records == ()
+    assert [s.reason for s in result.skips] == [SKIP_INVALID_RECORD]
+    assert tally.traces_read == 2
+    assert tally.skips_by_reason[SKIP_INVALID_RECORD] == 1
+    assert [r.evidence.trace_ids for r in tally.records] == [["t1"]]
+
+
+def test_an_unexpected_error_is_not_swallowed() -> None:
+    # Only the errors comparing arguments can raise are caught; a bug is loud.
+    class BoomError(Exception):
+        pass
+
+    class Exploding(dict):
+        def items(self):
+            raise BoomError
+
+    trace = _trace(
+        [
+            TraceStep(
+                step_type="tool_call", name="run", error="boom", args={"x": 1}
+            ).model_copy(update={"args": Exploding(x=1)}),
+            _step(x=2),
+        ],
+        Outcome(status="success"),
+    )
+
+    with pytest.raises(BoomError):
+        distill_trace(trace)
+
+
+def test_an_over_long_entity_id_is_left_out_and_counted() -> None:
+    trace = _trace([_step()], Outcome(status="failure", summary="s")).model_copy(
+        update={
+            "evidence_used": [
+                EvidenceRef(evidence_id="ok-id"),
+                EvidenceRef(evidence_id="e" * (MAX_ID_CHARS + 1)),
+                EvidenceRef(evidence_id="f" * (MAX_ID_CHARS + 5)),
+            ]
+        }
+    )
+
+    result = distill_trace(trace)
+    tally = distill_traces([trace, trace])
+
+    assert [r.situation.entity_ids for r in result.records] == [["ok-id"]]
+    assert result.dropped == {DROP_ENTITY_ID_OVERLONG: 2}
+    # The tally adds the traces' counts; a name that dropped nothing is absent.
+    assert dict(tally.dropped) == {DROP_ENTITY_ID_OVERLONG: 4}
+
+
+def test_a_trace_that_drops_nothing_reports_no_drop() -> None:
+    assert distill_trace(recovering_trace()).dropped == {}
+    assert dict(distill_traces([recovering_trace()]).dropped) == {}
+
+
+def test_failed_approaches_beyond_the_cap_are_not_avoided_and_are_counted() -> None:
+    extra = 4
+    failed = MAX_LIST_ITEMS - 1 + extra
+    steps = [_step(error=f"boom {i}", n=i) for i in range(failed)]
+    steps.append(_step(n=failed))
+    trace = _trace(steps, Outcome(status="success"))
+
+    result = distill_trace(trace)
+    avoids = [r for r in result.records if r.rule == RULE_FAILED_STEP_AVOID]
+
+    assert len(avoids) == MAX_LIST_ITEMS - 1
+    assert result.dropped == {DROP_FAILED_APPROACH_OVER_CAP: extra}
+    # The latest failures are the ones kept, the earliest are the ones dropped.
+    kept = sorted(i for r in avoids for i in r.evidence.step_indexes[:1])
+    assert kept == list(range(extra, failed))

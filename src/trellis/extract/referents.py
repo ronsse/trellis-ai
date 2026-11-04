@@ -154,6 +154,20 @@ class ReferentResolution:
         return None
 
 
+def split_namespace(value: str) -> tuple[str | None, str]:
+    """Split a known namespace prefix off *value*: ``(namespace | None, name)``.
+
+    ``"tool:mcp__trellis__search"`` is ``("tool", "mcp__trellis__search")``.
+    Only a prefix naming a namespace in :data:`ID_FORMS` is split, so
+    ``"foo:bar"`` is ``(None, "foo:bar")``. Pure — no store access.
+    """
+    text = value.strip()
+    prefix, sep, tail = text.partition(":")
+    if sep and prefix.strip().casefold() in ID_FORMS:
+        return prefix.strip().casefold(), tail
+    return None, text
+
+
 def namespace_candidates(
     value: str,
     namespaces: Sequence[str] = DEFAULT_REFERENT_NAMESPACES,
@@ -165,14 +179,10 @@ def namespace_candidates(
     (``tool:mcp__trellis__search``) is derived within that namespace only,
     and only if it is one of *namespaces*.
     """
-    text = value.strip()
-    prefix, sep, tail = text.partition(":")
+    namespace, name = split_namespace(value)
     scoped: Sequence[str] = namespaces
-    name = text
-    if sep and prefix.strip().casefold() in ID_FORMS:
-        namespace = prefix.strip().casefold()
+    if namespace is not None:
         scoped = (namespace,) if namespace in namespaces else ()
-        name = tail
     derived: list[tuple[IdForm, str]] = []
     for namespace in scoped:
         for form in ID_FORMS[namespace]:

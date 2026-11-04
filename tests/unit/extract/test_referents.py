@@ -25,6 +25,7 @@ from trellis.extract.referents import (
     namespace_candidates,
     resolve_referent,
     resolve_referents,
+    split_namespace,
 )
 from trellis.extract.trace import TraceExtractor
 from trellis.schemas.trace import Trace
@@ -436,3 +437,21 @@ class TestReversesTraceMinting:
         ):
             assert resolution.match is not None, draft.entity_id
             assert resolution.match.node_id == draft.entity_id
+
+
+class TestSplitNamespace:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("domain:finance", ("domain", "finance")),
+            ("  Domain : Finance ", ("domain", " Finance")),
+            ("tool:mcp__x", ("tool", "mcp__x")),
+            ("foo:bar", (None, "foo:bar")),
+            ("finance", (None, "finance")),
+            ("trace:abc", (None, "trace:abc")),
+        ],
+    )
+    def test_only_a_known_namespace_prefix_is_split(
+        self, value: str, expected: tuple[str | None, str]
+    ) -> None:
+        assert split_namespace(value) == expected

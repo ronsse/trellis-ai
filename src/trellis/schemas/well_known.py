@@ -464,6 +464,78 @@ def normalize_entity_name(value: str) -> str:
     return unicodedata.normalize("NFC", collapsed.casefold())
 
 
+#: ``source_system`` an alias for a Unity Catalog ``catalog.schema.table`` id
+#: is bound under.
+UNITY_CATALOG_SOURCE_SYSTEM: Final = "unity_catalog"
+
+
+def _split_dotted_identifier(value: str) -> list[str] | None:
+    """Split ``a.`b`.c`` into its unquoted parts, or ``None`` if malformed.
+
+    A part may be backtick-quoted (``` `my.catalog` ```), in which case a dot
+    inside it is part of the name and a doubled backtick is a literal one.
+    Anything after a closing quote other than a dot, or a quote left open,
+    makes the whole value malformed rather than guessed at.
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    quoted = False
+    i = 0
+    while i < len(value):
+        char = value[i]
+        if quoted:
+            if char == "`":
+                if value[i + 1 : i + 2] == "`":
+                    current.append("`")
+                    i += 1
+                else:
+                    quoted = False
+                    if value[i + 1 : i + 2] not in ("", "."):
+                        return None
+            else:
+                current.append(char)
+        elif char == "`":
+            if "".join(current).strip():
+                return None
+            current = []
+            quoted = True
+        elif char == ".":
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+        i += 1
+    if quoted:
+        return None
+    parts.append("".join(current))
+    return parts
+
+
+def normalize_alias_raw_id(source_system: str, raw_id: str) -> str:
+    """The key an alias ``raw_id`` is bound and looked up under.
+
+    Every source system's ids are kept verbatim except Unity Catalog's,
+    whose identifiers are case-insensitive and may be backtick-quoted per
+    part. For ``unity_catalog``, ``Main.Sales.Orders`` and
+    ``` `main`.`sales`.`orders` ``` both become ``main.sales.orders``. A part is
+    quoted again in the result only when it holds a dot or a backtick, so
+    ``` `a.b`.c ``` and ``a.b.c`` stay distinct. A value that does not parse
+    (an unterminated quote) is returned unchanged.
+
+    Bind and lookup both call this, so the two cannot disagree about a key.
+    """
+    if source_system != UNITY_CATALOG_SOURCE_SYSTEM:
+        return raw_id
+    parts = _split_dotted_identifier(raw_id.strip())
+    if parts is None:
+        return raw_id
+    folded = [part.lower() for part in parts]
+    return ".".join(
+        f"`{part.replace('`', '``')}`" if "." in part or "`" in part else part
+        for part in folded
+    )
+
+
 # ---------------------------------------------------------------------------
 # Anti-pattern blocklist — soft enforcement (Track G)
 # ---------------------------------------------------------------------------

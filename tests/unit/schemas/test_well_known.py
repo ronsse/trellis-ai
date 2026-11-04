@@ -479,3 +479,41 @@ class TestObservationRegistration:
         # Observation/Measurement entities + hasObservation edge;
         # 1.2.0 adds the dedicated Measurement edge kind.
         assert wk.WELL_KNOWN_VERSION == "1.2.0"
+
+
+class TestNormalizeAliasRawId:
+    """Unity Catalog ids are case-insensitive and quotable; nothing else is touched."""
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "main.sales.orders",
+            "Main.Sales.Orders",
+            "MAIN.SALES.ORDERS",
+            "`main`.`sales`.`orders`",
+            "`Main`.sales.`Orders`",
+            "  main.sales.orders  ",
+        ],
+    )
+    def test_unity_catalog_spellings_share_one_key(self, raw: str) -> None:
+        assert wk.normalize_alias_raw_id("unity_catalog", raw) == "main.sales.orders"
+
+    def test_a_dot_inside_a_quoted_part_stays_quoted(self) -> None:
+        quoted = wk.normalize_alias_raw_id("unity_catalog", "`My.Cat`.sales.orders")
+        assert quoted == "`my.cat`.sales.orders"
+        assert quoted != wk.normalize_alias_raw_id(
+            "unity_catalog", "my.cat.sales.orders"
+        )
+
+    def test_a_doubled_backtick_is_a_literal_one(self) -> None:
+        key = wk.normalize_alias_raw_id("unity_catalog", "`a``b`.c.d")
+        assert key == "`a``b`.c.d"
+
+    @pytest.mark.parametrize("raw", ["`main.sales.orders", "ma`in.sales.orders"])
+    def test_a_malformed_value_is_returned_unchanged(self, raw: str) -> None:
+        assert wk.normalize_alias_raw_id("unity_catalog", raw) == raw
+
+    @pytest.mark.parametrize("system", ["dbt", "openlineage_dataset", "name", "x"])
+    def test_every_other_system_is_verbatim(self, system: str) -> None:
+        raw = " `Model`.Shop.Orders "
+        assert wk.normalize_alias_raw_id(system, raw) == raw

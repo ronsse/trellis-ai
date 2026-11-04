@@ -101,6 +101,52 @@ two keys are returned by `GET /api/v1/stats`, field for field.
 > that wants that number reads `document_rows`. Nothing errors on the change —
 > a reader that is not updated silently reports a different population.
 
+### `save_knowledge` link-or-mint and extractor alias binding (`TRELLIS_KNOWLEDGE_LINK_OR_MINT`)
+
+**Off by default, and off until the serving readout.** Set `TRELLIS_KNOWLEDGE_LINK_OR_MINT=1`
+(or the `knowledge_link_or_mint` setting) to turn it on. A minted `domain:<slug>` node is something
+graph seeding resolves, so turning it on changes which packs seed the graph axis; the design is in
+[`adr-knowledge-link-or-mint.md`](../design/adr-knowledge-link-or-mint.md). Off, every surface
+writes and replies exactly as before (`tests/unit/mcp/test_knowledge_link_or_mint_differential.py`
+pins that against a golden captured from `main`). On:
+
+- **`save_knowledge` mints a missing domain.** `properties.domain` is normalised to a slug
+  (NFKC, case-folded, runs of letters and digits joined by `-`, the form trace extraction uses). If
+  `domain:<slug>` does not exist it is created as a `Concept` through the executor, then the note is
+  linked to it with `appliesTo`. The reply gains `Domain minted: domain:<slug>`. A `domain:`
+  prefix is stripped first (`domain:finance` mints `domain:finance`), and a value carrying another
+  namespace prefix (`tool:x`) mints nothing. A value with no letters or digits, or a mint a policy
+  denies, also mints nothing; all of these count as unresolved. The mint carries a key derived from
+  the domain id and is checked against the graph immediately before it is written, so it never
+  replaces the properties of a `domain:<slug>` node that already exists.
+- **A same-named note is attached to, not duplicated.** If the normalised name already resolves (via
+  its `name` alias) to a current, semantic, non-namespaced node of the same `entity_type`, no node
+  is created. An attach **writes no caller properties**, so naming a note cannot archive it
+  (`lifecycle`), noise-tag it (`content_tags`) or change what it is. The only write is one
+  `entity.update` that appends the new evidence document id to the node's `document_ids` and sets
+  `evidence_ref` when the node has none; nothing to add means no write. The reply starts `Entity
+  exists: <id> ... attached, not created`. `supersedes=` always creates.
+- **`relates_to` resolves raw ids through external aliases.** After the existing id, slug and name
+  resolution, a value is tried as a raw id under `dbt`, `openlineage_dataset`, `openlineage_job` and
+  `unity_catalog`, or as `<source_system>:<raw_id>` for any other system. Two nodes claiming one raw
+  id is ambiguous and links nothing. Raw ids are matched verbatim except for `unity_catalog`, whose
+  identifiers are case-insensitive: `Main.Sales.Orders` and `` `main`.`sales`.`orders` `` find the
+  node bound as `main.sales.orders`. A resolved reference is reported by position
+  (`Resolved relates_to (position 1) -> <node id> (...)`), not by the text typed.
+- **Unresolvable references are reported by count and position.** One line, only when something is
+  unresolved: `Unresolved: 2 of 3 references (positions 1, 2) - not linked`. References are
+  `relates_to` (when given) and then each domain value, in order. The caller's text is not echoed.
+- **Extraction binds external identities.** `result_to_batch(..., bind_identity=True)` (the CLI
+  `ingest dbt-manifest`, `ingest openlineage`, `extract refresh` and demo call sites read the knob)
+  emits a bind-if-absent `alias.upsert` after each entity that carries
+  `EntityDraft.aliases`, and passes the result's tier on every edge as `extractor_tier`. dbt binds
+  `unique_id` under `dbt`; OpenLineage binds `namespace/name` under `openlineage_job` or
+  `openlineage_dataset`; a JSON rule binds under its `alias_source_system` (a Unity Catalog
+  `catalog.schema.table` id under `unity_catalog`, case-folded and unquoted by the same function the
+  lookup uses, needs no other support). A bound pair is never
+  rebound, and an alias for an entity whose create did not land is refused. The REST extraction
+  routes and the memory and trace ingest hooks do not bind aliases.
+
 ### Per-key access log (`trellis admin access-log`, `GET /api/v1/access-log/keys`)
 
 Answers "what did this key read, and when did it last run?" from `access.key_read`
@@ -5112,10 +5158,19 @@ candidate that would only restate the intent is skipped, and a trace whose
 records fail the schema's bounds is skipped as `invalid_record`; neither stops the
 run.
 
+Two quiet limits are counted instead of stated in text. `dropped` reports
+`entity_id_overlong` (a step's entity id longer than the schema allows is left out
+of the situation, not truncated) and `failed_approach_over_cap` (distinct failed
+approaches beyond the cap of `avoid` lines kept). When a failed approach's shown
+arguments equal the working call's after the display cut, its `avoid` text names
+the first differing key (`differs at 'key'`) so the two lines are not identical.
+An integral float compares equal to the integer (`1.0` and `1`).
+
 The JSON report carries `mode`, `traces_read`, `truncated`, `candidates`,
-`by_rule`, `skipped` (by reason), `duplicates` (already recorded), `would_record`
-(dry run) or `recorded` (`--apply`), `rejected`, `failed` and `candidate_ids`. It
-carries no trace text. The exit code does not depend on `--format`.
+`by_rule`, `skipped` (by reason), `dropped` (by reason), `duplicates` (already
+recorded), `would_record` (dry run) or `recorded` (`--apply`), `rejected`,
+`failed` and `candidate_ids`. It carries no trace text. The exit code does not
+depend on `--format`.
 
 **Candidates are never served.** `precedent.candidate` (args: `record`, a
 `PrecedentRecord`) emits one `PRECEDENT_CANDIDATE_MINED` event and writes to no
@@ -5126,6 +5181,72 @@ servable precedent from a candidate) is deferred. Only the `deterministic`
 provenance tier is recorded; a record naming `local_model` or `human` is refused
 as a policy violation. See
 [`adr-precedent-record.md`](../design/adr-precedent-record.md).
+
+### `trellis curate evaluate-precedent-gate`
+
+Count, night by night, what the two-stage precedent gate would mint and activate.
+**Report only:** it serves nothing, promotes nothing, demotes nothing, builds no
+executor, emits no event (not even on failure) and writes to no store. It exists to
+price the gate before any serving code reads it.
+
+```bash
+trellis curate evaluate-precedent-gate [--candidates PATH] [--days N] \
+  [--scan-limit N] [--trace-limit N] [--domain D] [--dry-run] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--candidates` | learning-artifacts dir | `intent_learning_candidates.json`, read as `auto-promote-candidates` reads it. |
+| `--days` | 30 | Look-back window for packs, feedback and traces. |
+| `--scan-limit` | 5000 | Most events read per event type, newest first. A capped read is stated. |
+| `--trace-limit` | 500 | Most traces the dry distiller reads. |
+| `--domain` | (all) | Restrict stage 1 to one trace domain. |
+| `--dry-run` | off | Accepted for symmetry with `auto-promote-candidates`; the command writes nothing with or without it. |
+
+**Stage 1 (mint)** runs `trellis worker distill-precedents` in dry-run over the
+window's traces (the same function, not a subprocess) and reports `traces_read`,
+`would_mint`, `duplicates` of already-recorded candidates, `by_rule`, `skipped` and
+`dropped` counters.
+
+**Stage 2 (activate)** tests each promotable learning candidate, the same
+population `auto-promote-candidates` evaluates, against h >= 3 helpful citations,
+u < h, >= 2 distinct helpful sessions, a within-pack permutation P < 0.05 and a
+lift >= 1.2 over the pack baseline (see
+[`adr-precedent-record.md`](../design/adr-precedent-record.md), "Stage 2 activation
+criteria"). Beside it, the current gate's verdict from the candidates file's
+`citation_evidence`. The `stage2` block reports `evaluated`, `promotable`,
+`not_promotable`, `current_gate_pass`, `new_gate_pass`, `both`, `only_new`,
+`only_current`, `failed_at` (the first criterion each candidate missed:
+`helpful`, `unhelpful`, `sessions`, `p_value`, `lift`; the counts add up to the
+candidates that failed), `without_graded_servings`, the thresholds of both gates, a
+`differences` list saying why the two counts are not one measurement twice, and
+`targets`: candidate ids that pass at least one gate, with counts, lift and P.
+
+The two gates read different evidence. The current gate reads the candidates file's
+`citation_evidence`, which counts a citation per feedback event and counts ungraded
+packs as servings; the new gate recomputes from this window, counts a pack once and
+only packs a grader named items in, lets helpful win over unhelpful on one item, and
+judges a candidate over the graded packs of its own intent family. Candidates
+already promoted are evaluated like any other.
+
+Recorded candidates (`PRECEDENT_CANDIDATE_MINED`) are event-only and never served,
+so they have no citations: `candidates_recorded` and `candidates_with_servings`
+(expected 0 until serving reads candidates) say so plainly. `packs` reports
+`scanned`, `held_out_dropped`, `with_item_rows` and `graded` and the same for
+feedback: held-out packs and the feedback naming them reach no count
+(`drop_holdout`), and the numbers dropped are stated. `scan` states any truncated
+read and `notes` repeats it. Implicit signals (fetches, re-retrieval) feed
+nothing here.
+
+Output is counts and candidate ids only: no item text, intent or trace text. The
+exit code is `0` on a completed run and does not depend on `--format`; a
+configuration `ValueError` exits `2` with a value-free message in both formats.
+
+Proposed nightly line, next to the auto-promote report:
+
+```bash
+trellis curate evaluate-precedent-gate --dry-run --format json
+```
 
 ### `trellis worker capture-sessions`
 

@@ -51,12 +51,16 @@ skipped as `invalid_record` (counted, no text) so one bad trace never stops a
 run.
 
 **The id.** The candidate id is a hash of a canonical encoding (JSON, sorted
-keys) of the record's evidence and its whole content: rule, situation, action,
-because, confidence, provenance tier and distiller version. The evidence lists
-are sorted before hashing, so the same lesson cited in another order is the same
-candidate. A rerun derives the same ids; a forged record cannot take the id the
-distiller derives for a real trace, because its own text derives another one and
-the handler refuses a record whose `candidate_id` does not match.
+keys) of the record's model dump minus the fields that are not content:
+`candidate_id` itself and `lifecycle`, which has one value. The dump is the
+hash's input, not a hand-written list, so a field added to the record or to a
+nested model enters the hash without anyone remembering to add it; a test builds
+one variant per field from `model_fields` and requires each to change the id. The
+evidence lists are sorted before hashing, so the same lesson cited in another
+order is the same candidate. A rerun derives the same ids; a forged record cannot
+take the id the distiller derives for a real trace, because its own content
+derives another one and the handler refuses a record whose `candidate_id` does
+not match.
 
 **Candidates are event-only.** The governed operation `precedent.candidate`
 emits exactly one `PRECEDENT_CANDIDATE_MINED` event whose payload holds the
@@ -70,7 +74,9 @@ or promotion reads. `is_miner_candidate_event` is unchanged.
 
 **The command.** `trellis worker distill-precedents` is a dry run by default and
 reports counts and ids only (no trace text); `--apply` records. It is not wired
-into any nightly script.
+into any nightly script. Two quiet limits are counted rather than silent:
+over-long entity ids left out of the situation (`entity_id_overlong`) and failed
+approaches beyond the cap of `avoid` lines (`failed_approach_over_cap`).
 
 ## Deferred: activation
 
@@ -80,6 +86,50 @@ activated candidate's citations count as calibrated, beside or apart from the
 promoted precedents measured today, is a question the readout has to answer
 first. Promotion code (`_build_precedent_description`, `candidate_auto_promote`,
 the promote handler's rendered text) is untouched here.
+
+## Stage 2 activation criteria
+
+The gate has two stages. **Stage 1, mint,** is automatic and dedup only: a
+candidate is recorded when it is new. **Stage 2, activate,** asks whether the
+citations a target collected are better than chance. The existing gate
+(`candidate_auto_promote`) asks for a fixed count of helpful citations and no
+unhelpful one, which at the observed citation rates takes dozens of servings with
+no unhelpful citation to reach. Stage 2 replaces that count with a test.
+
+A target is activated when all of these hold, checked in this order (the first
+one missed is the one reported):
+
+1. **h >= 3**: at least three packs cited it helpful.
+2. **u < h**: fewer packs cited it unhelpful than helpful.
+3. **>= 2 distinct sessions** among the helpful packs. A pack with no session id
+   never counts as one.
+4. **P < 0.05** under a within-pack permutation null.
+5. **lift >= 1.2**: the target's helpful rate over its pack baseline.
+
+The unit is a pack. A pack counts once whatever the number of graders; verdicts
+are unioned per pack and helpful wins over unhelpful on one item. Only packs a
+grader named items in count as servings.
+
+**The null keeps the packs' structure.** A pack has a size n (items served) and a
+citation count k (items cited helpful). Shuffling the helpful labels within the
+pack makes the target helpful with probability k / n, so the null draws one
+Bernoulli per pack the target was served in and sums them. Pack sizes and
+citation counts never change, so a target is not credited for sitting in small,
+heavily cited packs, where it is helpful by arithmetic. A null that used one
+global helpful rate would be wrong exactly there; a test pins the difference on
+packs that vary in size and citation count. P = (1 + #{null >= observed}) /
+(1 + R) with R = 2000 resamples, a fixed seed and a per-target generator of its
+own, so a target's P does not depend on the other targets or on global random
+state. The pack baseline is the null's mean, sum(k / n) over the target's
+servings, and lift is the observed helpful rate over it.
+
+**This is an experiment, not a finding.** Whether a criterion on calibrated
+citations is good enough to serve on is the open question. The thresholds are
+arguments of a frozen, validated dataclass, not settings; nothing here reads them
+from configuration. `trellis curate evaluate-precedent-gate` only counts, night by
+night, how many candidates would mint and how many would activate beside what the
+current gate passes; it serves, promotes and writes nothing, and implicit signals
+feed it nothing.
 
 ## Consequences
 
