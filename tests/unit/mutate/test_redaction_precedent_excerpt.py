@@ -25,10 +25,11 @@ from trellis.learning.scoring import (
     build_learning_promotion_payloads,
     submit_learning_promotion,
 )
-from trellis.mutate import build_curate_executor, handlers
+from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.mutate.executor import MutationExecutor
 from trellis.mutate.handlers import RedactionApplyHandler, create_curate_handlers
+from trellis.mutate.handlers import redaction as redaction_handlers
 from trellis.mutate.policy_gate import DefaultPolicyGate
 from trellis.retrieve.precedents import list_precedents
 from trellis.retrieve.strategies import NamespaceSeedExtractor
@@ -803,7 +804,7 @@ class TestPrecedentScan:
             _promote(registry, f"doc-{name}")
         _node(registry, "doc-z")
         last = _promote(registry, "doc-z")
-        monkeypatch.setattr(handlers, "_PRECEDENT_PAGE_SIZE", 2)
+        monkeypatch.setattr(redaction_handlers, "_PRECEDENT_PAGE_SIZE", 2)
         graph = registry.knowledge.graph_store
         pages: list[int] = []
         real = graph.search_nodes
@@ -828,7 +829,7 @@ class TestPrecedentScan:
         precedent_id = _promote(registry, "doc-a")
         for name in ("b1", "b2", "b3"):
             _promote(registry, f"doc-{name}")
-        monkeypatch.setattr(handlers, "_PRECEDENT_PAGE_SIZE", 2)
+        monkeypatch.setattr(redaction_handlers, "_PRECEDENT_PAGE_SIZE", 2)
         graph = registry.knowledge.graph_store
         real = graph.search_nodes
 
@@ -859,7 +860,7 @@ class TestPrecedentScan:
         precedent_id = _promote(registry, "doc-a")
         for name in ("b1", "b2", "b3"):
             _promote(registry, f"doc-{name}")
-        monkeypatch.setattr(handlers, "_PRECEDENT_PAGE_SIZE", 2)
+        monkeypatch.setattr(redaction_handlers, "_PRECEDENT_PAGE_SIZE", 2)
         graph = registry.knowledge.graph_store
         real = graph.search_nodes
 

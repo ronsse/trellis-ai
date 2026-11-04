@@ -31,7 +31,6 @@ from tests.document_recency import fake_document_clock, keyword_recency_ratio
 from tests.unit.mutate._purge_race import redaction, rival_inside_first_read
 from trellis.errors import ValidationError
 from trellis.mutate import build_curate_executor
-from trellis.mutate import handlers as handlers_module
 from trellis.mutate import retention as retention_module
 from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.mutate.handlers import (
@@ -39,6 +38,7 @@ from trellis.mutate.handlers import (
     RetentionPruneHandler,
     create_curate_handlers,
 )
+from trellis.mutate.handlers import retention_handlers as retention_handlers_module
 from trellis.mutate.retention import (
     ARCHIVED_STATE,
     CURRENT_STATE,
@@ -2047,7 +2047,7 @@ class TestEntityScanPaging:
         self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(retention_module, "MAX_ENTITIES_SCANNED", 3)
-        monkeypatch.setattr(handlers_module, "MAX_ENTITIES_SCANNED", 3)
+        monkeypatch.setattr(retention_handlers_module, "MAX_ENTITIES_SCANNED", 3)
         monkeypatch.setattr(retention_module, "_SCAN_PAGE", 2)
         clock = self._clock(monkeypatch)
         for i in range(3):
@@ -2741,7 +2741,7 @@ class TestScanTruncatedPlanes:
         registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(retention_module, "MAX_DOCUMENTS_SCANNED", 2)
-        monkeypatch.setattr(handlers_module, "MAX_DOCUMENTS_SCANNED", 2)
+        monkeypatch.setattr(retention_handlers_module, "MAX_DOCUMENTS_SCANNED", 2)
         monkeypatch.setattr(retention_module, "_SCAN_PAGE", 2)
         for i in range(4):
             _put_doc(registry, f"d{i}")
@@ -2770,7 +2770,7 @@ class TestScanTruncatedPlanes:
     ) -> None:
         self._capped_documents(registry, monkeypatch)
         monkeypatch.setattr(retention_module, "MAX_ENTITIES_SCANNED", 2)
-        monkeypatch.setattr(handlers_module, "MAX_ENTITIES_SCANNED", 2)
+        monkeypatch.setattr(retention_handlers_module, "MAX_ENTITIES_SCANNED", 2)
         graph = registry.knowledge.graph_store
         for i in range(4):
             graph.upsert_node(

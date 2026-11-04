@@ -49,6 +49,13 @@ All notable changes to Trellis will be documented in this file.
 
 ### Changed
 
+- **`trellis.mutate.handlers` is a package, one submodule per handler family.** The 5,400-line
+  `handlers.py` became `mutate/handlers/` (`precedent`, `classify_rules`, `graph`, `redaction`,
+  `retention_handlers`, `factories` and seven smaller modules, plus `_common` for the helpers
+  two families share). Every name the module exposed still imports from `trellis.mutate.handlers`,
+  pinned by a surface test. A move only: no handler, signature, event payload or class name
+  changed. A test that patches a handler-module name now patches the submodule that uses it.
+
 - **The seven pack-size, excerpt and disclosure knob resolvers live in `trellis.core.knobs`.**
   `get_context_max_tokens`, `get_context_max_items`, `search_max_tokens`,
   `rest_pack_max_items`, `rest_pack_max_tokens`, `disclosure_body_items` and

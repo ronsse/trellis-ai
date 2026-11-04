@@ -47,7 +47,7 @@ What core already owns and we are *not* relitigating:
 - The 5-stage governed pipeline (validate → policy → idempotency → execute → emit
   event) in [`src/trellis/mutate/executor.py`](../../src/trellis/mutate/executor.py).
 - The `allow_dangling` flag on `EdgeDraft` and the `LinkCreateHandler` FK pre-flight
-  ([`src/trellis/mutate/handlers.py`](../../src/trellis/mutate/handlers.py)).
+  ([`src/trellis/mutate/handlers/`](../../src/trellis/mutate/handlers/)).
 - The SCD-2 edge upsert in
   [`src/trellis/stores/bolt_opencypher/graph.py`](../../src/trellis/stores/bolt_opencypher/graph.py)
   and the `GraphStore` ABC in
@@ -192,7 +192,7 @@ that exists.*
   accident. The degradation note states plainly what is lost: no audit journal, no
   cross-restart idempotency (cache-only), no feedback/effectiveness loop.
 - A **caveat on the `LinkCreateHandler`**: it currently emits `LINK_CREATED` directly to
-  `registry.operational.event_log` ([`handlers.py:328-337`](../../src/trellis/mutate/handlers.py)),
+  `registry.operational.event_log` ([`handlers.py:328-337`](../../src/trellis/mutate/handlers/)),
   *not* via the executor's optional-log path. For a knowledge-only executor this handler
   must route its emit through the same null-tolerant seam (or skip it when no log
   exists) — otherwise the "graph-only" promise breaks on the first link. Resolving this
@@ -220,7 +220,7 @@ The one enforced contract, in priority order:
 1. **`allow_dangling=False` (default) → fail review-first.** The `LinkCreateHandler` FK
    pre-flight runs, the missing endpoint is reported by side (source/target/both) with
    the IDs attempted, and the executor emits `MUTATION_REJECTED` with `reason=orphan_edge`
-   — no partial write ([`handlers.py:281-319`](../../src/trellis/mutate/handlers.py)).
+   — no partial write ([`handlers.py:281-319`](../../src/trellis/mutate/handlers/)).
    This is already the behavior; we are blessing it as *the* default and forbidding
    silent materialization underneath it.
 2. **`allow_dangling=True` → honor it end-to-end.** When the draft says the edge may

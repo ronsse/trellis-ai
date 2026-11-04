@@ -221,7 +221,7 @@ formal plan-and-ADR discipline that the codebase has adopted since.
 
 The `PRECEDENT_PROMOTED` event it emits has a **separate, manual
 producer** in production: `PrecedentPromoteHandler` in
-`src/trellis/mutate/handlers.py` (governed via the
+`src/trellis/mutate/handlers/` (governed via the
 `Operation.PRECEDENT_PROMOTE` command). The downstream consumer
 `trellis.retrieve.precedents.list_precedents()` queries the event type
 and is wired into both CLI (`src/trellis_cli/retrieve.py`) and API
@@ -299,7 +299,7 @@ The decision turns on a project-positioning question:
   consumer list + `compaction-and-agent-patterns.md` "unique strength"
   claim to match. Possibly preserve `extract_precedent_from_trace`
   (the ~30-LOC deterministic shaper) into a smaller surface in
-  `trellis/mutate/handlers.py` — that helper is independently useful
+  `trellis/mutate/handlers/` — that helper is independently useful
   even without the LLM-batch path.
 
 ## 4. `src/trellis_workers/maintenance/retention.py` (220 LOC)

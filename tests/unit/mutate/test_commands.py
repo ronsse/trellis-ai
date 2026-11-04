@@ -410,7 +410,7 @@ class TestIdBearingArgNulSafety:
 
     def test_mapping_hand_read_floor(self) -> None:
         """Pinned to the exact count found by reading every handler in
-        ``mutate/handlers.py`` (see ``ID_BEARING_ARG_KEYS``'s docstring for
+        ``mutate/handlers/`` (see ``ID_BEARING_ARG_KEYS``'s docstring for
         which operation/key pairs and why, and which were deliberately left
         out). Deleting an entry drops one of these counts and fails here —
         a silent shrink is the one failure mode this test exists to catch.

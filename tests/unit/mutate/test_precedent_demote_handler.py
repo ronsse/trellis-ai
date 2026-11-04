@@ -28,7 +28,7 @@ import pytest
 from tests.mined_precedents import emit_historical_miner_row
 from trellis.errors import ValidationError
 from trellis.learning.candidate_auto_promote import AUTO_PROMOTE_REQUESTED_BY
-from trellis.mutate import build_curate_executor, handlers
+from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.mutate.handlers import (
     AUTO_DEMOTE_REQUESTED_BY,
@@ -39,6 +39,7 @@ from trellis.mutate.handlers import (
     create_curate_handlers,
     precedent_already_demoted_message,
 )
+from trellis.mutate.handlers import _common as handlers_common
 from trellis.retrieve.builder_factory import build_strategies
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.strategies import SearchStrategy
@@ -987,7 +988,7 @@ class TestVectorSyncRoutesThroughTheSharedMirror:
         monkeypatch: pytest.MonkeyPatch,
     ) -> list[tuple[str, tuple[str, ...]]]:
         calls: list[tuple[str, tuple[str, ...]]] = []
-        real = handlers.sync_vector_metadata_outcome
+        real = handlers_common.sync_vector_metadata_outcome
 
         def _wrapped(
             store: Any, item_id: str, document_metadata: Any, *, keys: Any
@@ -995,7 +996,7 @@ class TestVectorSyncRoutesThroughTheSharedMirror:
             calls.append((item_id, tuple(keys)))
             return real(store, item_id, document_metadata, keys=keys)
 
-        monkeypatch.setattr(handlers, "sync_vector_metadata_outcome", _wrapped)
+        monkeypatch.setattr(handlers_common, "sync_vector_metadata_outcome", _wrapped)
         return calls
 
     def test_demote_calls_the_shared_vector_metadata_mirror(

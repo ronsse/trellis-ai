@@ -402,7 +402,7 @@ class TestNewestItemAtIsAStalenessGate:
         """The premise: this surface is not on ``PackBuilder``'s collect seam.
 
         Not a fix test — it passes against the un-fixed code, by design. It
-        exists because the two "latent" arguments in ``mutate/handlers.py``
+        exists because the two "latent" arguments in ``mutate/handlers/``
         and ``classify/feedback.py`` are scoped to the pack surfaces, and
         nothing else would fail if someone read them as unqualified.
         """

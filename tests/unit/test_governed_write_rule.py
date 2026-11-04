@@ -235,7 +235,7 @@ def _is_exempt_path(relative: Path) -> bool:
     # count, not by the 24 classified-site count (backend self.upsert never
     # enters the 24).
     return relative.parts[:2] == ("trellis", "stores") or (
-        relative.as_posix() == "trellis/mutate/handlers.py"
+        relative.parts[:3] == ("trellis", "mutate", "handlers")
     )
 
 
