@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from tests.unit.retrieve.test_sensitivity import label
@@ -135,6 +136,20 @@ PLANTED_VALUES = (
 
 PUBLIC_IDS = ("pub-drain", "pub-promote", "pub-verify", "pub-stale", "pub-parent")
 
+#: Source-clock age, in days, of the two public documents whose scores tie
+#: exactly: ``pub-drain`` and ``pub-promote`` have the same length and hold the
+#: query words the same number of times, so BM25 gives them one score and the
+#: bag-of-words cosine gives them one score. Only recency then ranks them, and
+#: left to the row write clock that is a race: each row reads its own
+#: ``datetime.now()``, so the two are ordered by whether the few milliseconds
+#: between their writes exceed the time between two reads in one scoring loop,
+#: which a stalled process reverses. A stamp in the metadata bag outranks the
+#: row clock (``resolve_recency_stamp``), and a day apart is a gap no stall
+#: closes. ``pub-promote`` is the fresher, the order the write clock gives.
+#: Relative to the seeding time, because an absolute date decays to the same
+#: floor in a few years and ties again.
+TIE_BREAKING_AGE_DAYS: dict[str, int] = {"pub-drain": 2, "pub-promote": 1}
+
 
 def leaked(blob: str, needles: Iterable[str]) -> list[str]:
     """The needles found in ``blob``; assert this is empty.
@@ -177,6 +192,11 @@ def _put(
 def seed_public(registry: StoreRegistry) -> None:
     """The documents every world holds. All are labelled ``public``."""
     pub = label("public")
+    seeded_at = datetime.now(UTC)
+    source_stamp = {
+        doc_id: {"created_at": (seeded_at - timedelta(days=days)).isoformat()}
+        for doc_id, days in TIE_BREAKING_AGE_DAYS.items()
+    }
     for doc_id, text, title in (
         (
             "pub-drain",
@@ -202,6 +222,7 @@ def seed_public(registry: StoreRegistry) -> None:
                 **PLANTED_METADATA,
                 "title": title,
                 "document_form": "runbook",
+                **source_stamp.get(doc_id, {}),
                 **pub,
             },
         )

@@ -78,6 +78,13 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **`test_external_key_hidden_corpus.py` no longer fails about one run in six (test-only).**
+  `pub-drain` and `pub-promote` in the shared public corpus score alike on every axis, so the
+  row write clock ordered them, and each row reads its own `datetime.now()`: a stalled scoring
+  loop reversed them in one world and not the next (a clock race, not hash order). `seed_public`
+  now stamps them a day apart in `created_at`, which outranks the row clock. Nothing under
+  `src/` changed.
+
 - **The two commonest trace-shape mistakes are repaired at the write boundary instead of
   rejecting the whole trace.** A step `result` sent as a bare string becomes
   `{"summary": <the string>}`, and a `context.repo` key moves to top-level `metadata["repo"]`.
