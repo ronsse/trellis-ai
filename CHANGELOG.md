@@ -14,6 +14,14 @@ All notable changes to Trellis will be documented in this file.
   warns; at or above 10 it turns `warn`, with a named reason, when fewer than half of them
   retrieved. Exit codes are unchanged. See `docs/agent-guide/operations.md`, "Retrieval
   adoption in `trellis analyze health`".
+- **Every `PACK_ASSEMBLED` row now names the experiment arm it was assembled under.** A new
+  `variants` key, a `{experiment: arm}` mapping on both the flat and the sectioned payload,
+  lets a reader tell which arm of each running serving experiment produced a pack once
+  several run at once. Today the only experiment is the pack holdout: `{"pack_holdout":
+  "held_out"}` or `{"pack_holdout": "served"}` while `TRELLIS_PACK_HOLDOUT_RATE` is above
+  `0`, and `{}` at `0`. It restates the holdout draw and takes none of its own: pack items,
+  order, rendered text, budget and the draw itself are unchanged, and later flags register in
+  `trellis.core.variants.active_variants`. Documented in `docs/agent-guide/operations.md`.
 
 ### Fixed
 
