@@ -4,9 +4,12 @@
 
 # Git-derived PEP 440 version for the working tree, e.g. 0.9.0.dev157+gd9939e8ee.
 # The Docker build context excludes .git, so this is the only way an image can
-# know which commit it was built from — see the ARG in Dockerfile.
+# know which commit it was built from — see the ARG in Dockerfile. On an exactly
+# tagged commit `git describe` prints the bare tag, which names no commit, so the
+# sha is appended as a local segment (0.10.1+g05f77dd0a) for the stamp to parse.
 BUILD_VERSION := $(shell git describe --tags --abbrev=9 --dirty=.dirty --always \
-	| sed -E 's/^v//; s/-([0-9]+)-g/.dev\1+g/')
+	| sed -E 's/^v//; s/-([0-9]+)-g/.dev\1+g/' \
+	| sed -E "/\+g/!s/(\.dirty)?$$/+g$$(git rev-parse --short=9 HEAD)\1/")
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
