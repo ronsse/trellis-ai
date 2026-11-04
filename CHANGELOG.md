@@ -6,6 +6,7 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`trellis analyze intent-families`: an offline relabel of served packs under a software-work family set (measurement only).** An ordered, deterministic, word-boundary rule set (`bugfix`, `feature`, `refactor`, `review`, `investigate`, `test`, `ops`, `docs`, `data`, fallback `general`; the first match wins and names its rule id) is overridable per deployment under `retrieval.intent_families` in `config.yaml`, and a malformed block raises `ConfigError` instead of reading as the defaults. The report gives, per new family, packs, graded packs, helpful and unhelpful citations, a helpful rate with a Wilson 95% interval (withheld, with a stated reason, below 20 graded packs), the mean pack rating and the top rule ids, plus the fallback share and a legacy-by-new cross-tab. It prints no intent text, drops held-out packs, and exits the same on every `--format`; also `GET /api/v1/analyze/intent-families`. `normalize_intent_family` and everything that calls it are unchanged, and an import-graph test keeps serving and learning from importing the new module. See `docs/agent-guide/operations.md`, "`trellis analyze intent-families`".
 - **`trellis analyze pack-judge`: an offline relevance judge for served pack items, and a
   calibration report against agent feedback (shadow only).** The judge phase (`--out`) asks a
   model, built through the `llm:` router as the new `pack_judge` consumer so any

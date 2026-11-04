@@ -2226,6 +2226,15 @@ class StoreRegistry:
         return None
 
     @property
+    def retrieval_config(self) -> dict[str, Any]:
+        """The raw ``retrieval:`` block of ``config.yaml`` (``{}`` when absent).
+
+        For readers of a ``retrieval.*`` key that validate it themselves; a key
+        with a resolver of its own (``budget_config``) is read through that.
+        """
+        return self._retrieval_config
+
+    @property
     def budget_config(self) -> Any:
         """Return the :class:`BudgetConfig` resolved from ``retrieval.budgets``.
 
