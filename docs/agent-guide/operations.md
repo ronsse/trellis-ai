@@ -3891,7 +3891,9 @@ the evidence start are dropped and rates use the covered window.
 
 Read-only weekly series: one row per ISO week, oldest first, composed from the
 analyze readers that already exist rather than re-derived. Each reader is run once
-per week over that week's window (`since` inclusive, `until` exclusive), so a
+per week over that week's window (start inclusive, end exclusive: the readers'
+`until` is inclusive, so each week is read up to one microsecond before the next
+week starts and an event on a boundary counts once), so a
 week-scale regression, such as subagent retrieval adoption falling across a few
 days, shows up as a row instead of hiding inside a 30-day average. Builds are
 carried alongside, so a change reads as a segment boundary.

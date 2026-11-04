@@ -333,6 +333,8 @@ def week_bounds(
 
     ``end`` is exclusive, so a window ending exactly on a Monday closes the
     previous week. The last week is partial when ``end`` falls inside it.
+    The event log's ``until`` is inclusive, so ``_week_row`` reads each week
+    up to one microsecond before its ``end``.
     """
     last_start = _monday(end - timedelta(microseconds=1))
     rows: list[tuple[str, datetime, datetime, bool]] = []
@@ -416,9 +418,13 @@ def _week_row(
     partial: bool,
     limit: int,
 ) -> tuple[TrendWeek, list[Event]]:
-    window: dict[str, Any] = {"since": start, "until": end}
+    # The event log's ``until`` is inclusive and this week's ``end`` is the
+    # next week's ``start``, so read one microsecond short of it: an event
+    # stamped exactly on the boundary counts in the later week only.
+    read_until = end - timedelta(microseconds=1)
+    window: dict[str, Any] = {"since": start, "until": read_until}
     feedback, pack_events, _, join_scan = join_pack_events_with_coverage(
-        event_log, since=start, until=end, limit=limit
+        event_log, since=start, until=read_until, limit=limit
     )
     value = summarize_pack_value(event_log, limit=limit, **window)
     serve = summarize_serve_attribution(event_log, limit=limit, **window)

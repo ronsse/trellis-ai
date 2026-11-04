@@ -1097,7 +1097,8 @@ def resolve_scan_window(
     window which is not trailing (a calendar week, say) names ``since`` and/or
     ``until``; ``until`` alone opens the window ``days`` before it. An explicit
     ``since`` wins over ``days``, which is then only echoed by the reader.
-    ``until`` is exclusive, as it is in :meth:`EventLog.get_events`.
+    ``until`` is inclusive, as it is in :meth:`EventLog.get_events`, so a
+    caller tiling adjacent windows must stop each one short of the next.
     """
     if since is not None:
         return since, until

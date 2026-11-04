@@ -89,6 +89,21 @@ class TestWeekBounds:
         assert [partial for *_, partial in rows] == [False, False]
         assert rows[-1][2] == seed_mod.W45
 
+    def test_an_event_on_a_week_boundary_counts_once_in_the_later_week(
+        self, tmp_path: Path
+    ) -> None:
+        # The event log's ``until`` is inclusive, so a week read up to the
+        # next week's ``start`` would count a Monday-00:00 event twice.
+        log = SQLiteEventLog(tmp_path / "events.db")
+        seed_mod.pack(log, "p-edge", seed_mod.W44, None, [("doc:edge", 10)])
+        seed_mod.feedback(log, "p-edge", seed_mod.W44, helpful=("doc:edge",))
+        seed_mod.pack(log, "p-at-until", UNTIL, None, [("doc:late", 10)])
+
+        report = summarize_trend(log, weeks=3, until=UNTIL)
+
+        assert [week.packs for week in report.weeks] == [0, 1, 0]
+        assert [week.serve_attribution.packs for week in report.weeks] == [0, 1, 0]
+
     def test_the_iso_year_boundary_labels_by_iso_year(self) -> None:
         rows = week_bounds(2, datetime(2026, 1, 3, tzinfo=UTC))
 
