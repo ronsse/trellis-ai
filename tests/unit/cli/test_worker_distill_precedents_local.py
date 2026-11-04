@@ -9,14 +9,22 @@ from typing import TYPE_CHECKING
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import plain
 from tests.precedent_candidates import SENTINEL, recovering_trace
 from trellis.llm.types import LLMResponse
 from trellis.mutate.handlers.precedent import LOCAL_MODEL_CANDIDATE_REQUESTERS
 from trellis.schemas.enums import OutcomeStatus, TraceSource
+from trellis.schemas.precedent_record import (
+    PrecedentAction,
+    PrecedentEvidence,
+    PrecedentRecord,
+    PrecedentSituation,
+)
 from trellis.schemas.trace import Outcome, Trace, TraceContext, TraceStep
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_cli import worker
+from trellis_cli import worker_distill_precedents_local as local_mod
 from trellis_cli.main import app
 from trellis_cli.stores import _reset_registry
 from trellis_cli.worker_distill_precedents_local import REQUESTED_BY
@@ -259,3 +267,105 @@ def test_a_route_with_no_model_and_no_label_is_a_validation_error(
 
 def test_the_sanctioned_requester_is_the_one_the_handler_accepts() -> None:
     assert REQUESTED_BY in LOCAL_MODEL_CANDIDATE_REQUESTERS
+
+
+def test_apply_with_no_logged_judged_op_records_nothing(
+    stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The handler accepts a ``local_model`` record only on a logged judged op,
+    so a run whose judged events were lost records no candidate and says so."""
+    from trellis.learning import precedent_local
+
+    _seed(stores)
+    _wire(monkeypatch, FakeClient(LESSON, LESSON, SAME))
+    monkeypatch.setattr(
+        precedent_local, "emit_memory_op_judged", lambda *_a, **_k: None
+    )
+
+    result = _run("--apply", "--format", "json")
+
+    payload = json.loads(result.stdout)
+    assert result.exit_code != 0
+    assert payload["rejected"] == 3
+    assert payload["recorded"] == {"distill": 0, "merge": 0}
+    assert _count(stores, EventType.PRECEDENT_CANDIDATE_MINED) == 0
+    assert _count(stores, EventType.MEMORY_OP_JUDGED) == 0
+    assert SENTINEL not in result.stdout
+
+
+# --- the merge pool ----------------------------------------------------------
+
+
+def _candidate(suffix: str) -> PrecedentRecord:
+    return PrecedentRecord.derive(
+        rule="local_model_lesson",
+        situation=PrecedentSituation(
+            intent_family="load data", trigger="a bulk load stalls on a held lock"
+        ),
+        action=PrecedentAction(kind="avoid", text=f"act {suffix}"),
+        because=f"why {suffix}",
+        evidence=PrecedentEvidence(trace_ids=[f"trace-{suffix}"], step_indexes=[0]),
+        confidence=0.4,
+        provenance_tier="local_model",
+        distiller_version="precedent-distill/v1",
+    )
+
+
+def _mined(stores: StoreRegistry, *suffixes: str) -> None:
+    """Recorded-candidate events, oldest first, as the governed op writes them."""
+    for suffix in suffixes:
+        record = _candidate(suffix)
+        stores.operational.event_log.emit(
+            EventType.PRECEDENT_CANDIDATE_MINED,
+            "test",
+            entity_id=record.candidate_id,
+            payload={"record": record.model_dump(mode="json")},
+        )
+
+
+def test_the_merge_pool_keeps_the_newest_candidates_when_the_limit_is_hit(
+    stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mined(stores, "old", "mid", "new")
+    monkeypatch.setattr(local_mod, "MERGE_POOL_LIMIT", 2)
+
+    pool = local_mod._recorded_pool(stores)
+
+    assert [r.action.text for r in pool.records] == ["act new", "act mid"]
+    assert pool.as_payload() == {"read": 2, "limit": 2, "truncated": True}
+
+
+def test_the_merge_pool_is_not_truncated_at_or_under_the_limit(
+    stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mined(stores, "old", "new")
+    monkeypatch.setattr(local_mod, "MERGE_POOL_LIMIT", 2)
+
+    assert local_mod._recorded_pool(stores).as_payload() == {
+        "read": 2,
+        "limit": 2,
+        "truncated": False,
+    }
+    _mined(stores, "newer")
+    assert local_mod._recorded_pool(stores).as_payload()["truncated"] is True
+
+
+def test_the_payload_and_the_text_name_the_merge_pool(
+    stores: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed(stores)
+    _mined(stores, "old", "mid", "new")
+    monkeypatch.setattr(local_mod, "MERGE_POOL_LIMIT", 2)
+
+    _wire(monkeypatch, FakeClient(LESSON, LESSON, SAME))
+    payload = json.loads(_run("--format", "json").stdout)
+    assert payload["merge_pool"] == {"read": 2, "limit": 2, "truncated": True}
+
+    _wire(monkeypatch, FakeClient(LESSON, LESSON, SAME))
+    text = " ".join(plain(_run().stdout).split())  # the console wraps long lines
+    assert "merge pool: read 2 recorded candidate(s) (limit 2)" in text
+    assert "oldest were not paired" in text
+
+    _wire(monkeypatch, FakeClient(LESSON, LESSON))
+    off = json.loads(_run("--merge-limit", "0", "--format", "json").stdout)
+    assert off["merge_pool"] is None

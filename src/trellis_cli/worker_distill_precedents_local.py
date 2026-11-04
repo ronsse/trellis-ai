@@ -76,7 +76,9 @@ console = build_console()
 
 REQUESTED_BY = "cli:distill-precedents-local"
 
-#: Recorded candidates read as the merge pool, newest first.
+#: Most recorded candidates read as the merge pool. When more exist, the newest
+#: ``MERGE_POOL_LIMIT`` are read and the older ones are not paired; the payload's
+#: ``merge_pool`` block says so (``truncated``).
 MERGE_POOL_LIMIT = 200
 
 
@@ -86,6 +88,7 @@ class _Tally:
 
     traces_read: int = 0
     truncated: bool = False
+    merge_pool: _MergePool | None = None
     calls: Counter[str] = field(default_factory=Counter)
     outcomes: Counter[str] = field(default_factory=Counter)
     skipped: Counter[str] = field(default_factory=Counter)
@@ -96,13 +99,37 @@ class _Tally:
     code: int = EXIT_OK
 
 
-def _recorded_pool(registry: StoreRegistry) -> list[PrecedentRecord]:
-    """Candidates already recorded, newest first. A row that is not one is skipped."""
+@dataclass(frozen=True)
+class _MergePool:
+    """The recorded candidates a run may pair, and whether older ones were left out."""
+
+    records: list[PrecedentRecord]
+    limit: int
+    truncated: bool
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "read": len(self.records),
+            "limit": self.limit,
+            "truncated": self.truncated,
+        }
+
+
+def _recorded_pool(registry: StoreRegistry) -> _MergePool:
+    """The newest recorded candidates, newest first. A row that is not one is skipped.
+
+    ``order="desc"`` makes the store's ``limit`` cut the oldest rows, not the
+    newest; one extra row is read to know whether anything was cut. The pairing
+    order does not depend on this one: :func:`candidate_pairs` sorts by id.
+    """
     pool: list[PrecedentRecord] = []
     events = registry.operational.event_log.get_events(
-        event_type=EventType.PRECEDENT_CANDIDATE_MINED, limit=MERGE_POOL_LIMIT
+        event_type=EventType.PRECEDENT_CANDIDATE_MINED,
+        limit=MERGE_POOL_LIMIT + 1,
+        order="desc",
     )
-    for event in events:
+    truncated = len(events) > MERGE_POOL_LIMIT
+    for event in events[:MERGE_POOL_LIMIT]:
         raw = (event.payload or {}).get("record")
         if not isinstance(raw, dict):
             continue  # an event from the older miner carries no governed record
@@ -110,7 +137,7 @@ def _recorded_pool(registry: StoreRegistry) -> list[PrecedentRecord]:
             pool.append(PrecedentRecord.model_validate(raw))
         except PydanticValidationError:
             continue
-    return pool
+    return _MergePool(records=pool, limit=MERGE_POOL_LIMIT, truncated=truncated)
 
 
 def _label_for(registry: StoreRegistry, consumer: LLMConsumer, model_id: str) -> str:
@@ -314,7 +341,8 @@ def _run(
             domain=domain,
         )
         if "merge" in runners:
-            pool = [*tally.distilled, *_recorded_pool(registry)]
+            tally.merge_pool = _recorded_pool(registry)
+            pool = [*tally.distilled, *tally.merge_pool.records]
             await _merge_phase(runners["merge"], tally, pool, merge_limit=merge_limit)
 
     asyncio.run(go())
@@ -354,6 +382,7 @@ def _run(
         },
         "traces_read": tally.traces_read,
         "truncated": tally.truncated,
+        "merge_pool": tally.merge_pool.as_payload() if tally.merge_pool else None,
         "model_calls": dict(sorted(tally.calls.items())),
         "outcomes": dict(sorted(tally.outcomes.items())),
         "refusals": dict(sorted(tally.refusals.items())),
@@ -403,6 +432,17 @@ def _render(payload: dict[str, Any]) -> None:
             "[yellow]  the window holds more traces than --limit; "
             "older ones were not read.[/yellow]"
         )
+    pool = payload["merge_pool"]
+    if pool is not None:
+        console.print(
+            f"  merge pool: read {pool['read']} recorded candidate(s) "
+            f"(limit {pool['limit']})"
+        )
+        if pool["truncated"]:
+            console.print(
+                "[yellow]  more candidates are recorded than the merge pool holds; "
+                "the oldest were not paired.[/yellow]"
+            )
     if mode == "dry-run":
         would = sum(payload["would_record"].values())
         console.print(

@@ -10,16 +10,29 @@ from tests.mined_precedents import promote_through_executor
 from tests.precedent_candidates import (
     SENTINEL,
     candidates_of,
+    local_model_copy,
+    local_model_record_payload,
+    log_judged_lesson,
+    log_judged_merge,
     record_candidate,
     record_candidates,
     recovering_trace,
 )
+from trellis.core.memory_op_judged import emit_memory_op_judged
+from trellis.learning.precedent_judged import (
+    JUDGED_LOOKUP_LIMIT,
+    judged_source,
+)
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Command, CommandStatus, Operation
-from trellis.mutate.handlers.precedent import LOCAL_MODEL_CANDIDATE_REQUESTERS
+from trellis.mutate.handlers.precedent import (
+    JUDGED_OP_MISSING_MESSAGE,
+    LOCAL_MODEL_CANDIDATE_REQUESTERS,
+)
 from trellis.mutate.policy_source import resolve_policy_path
 from trellis.retrieve.precedents import list_precedents
 from trellis.schemas.enums import PolicyType
+from trellis.schemas.memory_op import InputDigest, JudgedOpType, SubjectRef
 from trellis.schemas.policy import Policy, PolicyRule, PolicyScope
 from trellis.schemas.precedent_record import PrecedentRecord
 from trellis.stores.base.event_log import EventType
@@ -244,15 +257,6 @@ def test_only_the_deterministic_tier_is_recorded_for_now(
     assert _events(registry, EventType.PRECEDENT_CANDIDATE_MINED) == []
 
 
-def _local_model_record() -> dict:
-    [real, *_] = candidates_of(recovering_trace())
-    claimed = real.model_copy(update={"provenance_tier": "local_model"})
-    claimed = claimed.model_copy(
-        update={"candidate_id": claimed.expected_candidate_id()}
-    )
-    return claimed.model_dump(mode="json")
-
-
 def _execute_as(registry: StoreRegistry, payload: dict, requested_by: str):
     return build_curate_executor(registry, clearance="restricted").execute(
         Command(
@@ -263,11 +267,35 @@ def _execute_as(registry: StoreRegistry, payload: dict, requested_by: str):
     )
 
 
+SANCTIONED = min(LOCAL_MODEL_CANDIDATE_REQUESTERS)
+TRACE_ID = "trace-recover"
+
+
+def _merged_payload(first: PrecedentRecord, second: PrecedentRecord) -> dict:
+    """A merge record over two candidates, built the way the merger builds one."""
+    from trellis.learning.precedent_local import merge_records
+
+    merged = merge_records(first, second)
+    assert merged is not None
+    return merged.model_dump(mode="json")
+
+
+def _two_candidates() -> tuple[PrecedentRecord, PrecedentRecord]:
+    [real, *_] = candidates_of(recovering_trace())
+    a = local_model_copy(real)
+    b = local_model_copy(
+        real.model_copy(update={"because": "a second statement of the lesson"})
+    )
+    return a, b
+
+
 @pytest.mark.parametrize("requester", sorted(LOCAL_MODEL_CANDIDATE_REQUESTERS))
-def test_a_local_model_record_is_accepted_from_the_sanctioned_requester(
+def test_a_local_model_record_is_accepted_with_its_judged_op_and_requester(
     registry: StoreRegistry, requester: str
 ) -> None:
-    result = _execute_as(registry, _local_model_record(), requester)
+    log_judged_lesson(registry.operational.event_log, TRACE_ID)
+
+    result = _execute_as(registry, local_model_record_payload(), requester)
 
     assert result.status == CommandStatus.SUCCESS
     [event] = _events(registry, EventType.PRECEDENT_CANDIDATE_MINED)
@@ -280,17 +308,237 @@ def test_a_local_model_record_is_accepted_from_the_sanctioned_requester(
 def test_a_local_model_record_is_refused_from_any_other_requester(
     registry: StoreRegistry, requester: str
 ) -> None:
-    result = _execute_as(registry, _local_model_record(), requester)
+    """The requester is the second conjunct: a judged op alone is not enough."""
+    log_judged_lesson(registry.operational.event_log, TRACE_ID)
+
+    result = _execute_as(registry, local_model_record_payload(), requester)
 
     assert result.status == CommandStatus.REJECTED
     assert result.metadata["rejection_reason"] == "policy_violation"
     assert _events(registry, EventType.PRECEDENT_CANDIDATE_MINED) == []
 
 
-def test_the_human_tier_stays_refused_even_from_the_sanctioned_requester(
+def test_the_sanctioned_requester_alone_is_refused_without_a_judged_op(
     registry: StoreRegistry,
 ) -> None:
-    payload = _local_model_record()
+    """The caller-set requester string is a claim; the event log is the proof."""
+    result = _execute_as(registry, local_model_record_payload(), SANCTIONED)
+
+    assert result.status == CommandStatus.REJECTED
+    assert result.metadata["rejection_reason"] == "policy_violation"
+    assert result.message == JUDGED_OP_MISSING_MESSAGE
+    assert _events(registry, EventType.PRECEDENT_CANDIDATE_MINED) == []
+
+
+def test_a_judged_op_naming_another_trace_does_not_back_the_record(
+    registry: StoreRegistry,
+) -> None:
+    log_judged_lesson(registry.operational.event_log, "some-other-trace")
+
+    result = _execute_as(registry, local_model_record_payload(), SANCTIONED)
+
+    assert result.status == CommandStatus.REJECTED
+    assert _events(registry, EventType.PRECEDENT_CANDIDATE_MINED) == []
+
+
+@pytest.mark.parametrize("decision", ["no_lesson", "unparsed"])
+def test_a_verdict_that_produced_no_lesson_does_not_back_a_record(
+    registry: StoreRegistry, decision: str
+) -> None:
+    log_judged_lesson(registry.operational.event_log, TRACE_ID, decision=decision)
+
+    result = _execute_as(registry, local_model_record_payload(), SANCTIONED)
+
+    assert result.status == CommandStatus.REJECTED
+    assert _events(registry, EventType.PRECEDENT_CANDIDATE_MINED) == []
+
+
+def test_a_judged_op_from_another_source_does_not_back_the_record(
+    registry: StoreRegistry,
+) -> None:
+    """A distillation judged about this trace by something else (the session
+    capture distiller, say) is not the local distiller's call."""
+    log_judged_lesson(
+        registry.operational.event_log, TRACE_ID, source="learning:other-prompt/v1"
+    )
+
+    result = _execute_as(registry, local_model_record_payload(), SANCTIONED)
+
+    assert result.status == CommandStatus.REJECTED
+
+
+def test_a_judged_op_of_another_type_does_not_back_the_record(
+    registry: StoreRegistry,
+) -> None:
+    emit_memory_op_judged(
+        registry.operational.event_log,
+        op_type=JudgedOpType.CLASSIFICATION,
+        source=judged_source("precedent-distill/v1"),
+        model_id="test-model",
+        input_digest=InputDigest(hash="0123abcd", length=10),
+        decision="lesson",
+        confidence=0.5,
+        subject_ref=SubjectRef(ref_type="trace", ref_id=TRACE_ID),
+    )
+
+    result = _execute_as(registry, local_model_record_payload(), SANCTIONED)
+
+    assert result.status == CommandStatus.REJECTED
+
+
+def test_a_record_citing_two_traces_or_none_has_no_judged_op_to_back_it(
+    registry: StoreRegistry,
+) -> None:
+    log_judged_lesson(registry.operational.event_log, TRACE_ID)
+    log_judged_lesson(registry.operational.event_log, "trace-second")
+    base = local_model_record_payload()
+    for trace_ids in (["trace-second", TRACE_ID], []):
+        record = PrecedentRecord.model_validate(base)
+        record = record.model_copy(
+            update={
+                "evidence": record.evidence.model_copy(update={"trace_ids": trace_ids})
+            }
+        )
+        record = record.model_copy(
+            update={"candidate_id": record.expected_candidate_id()}
+        )
+
+        result = _execute_as(registry, record.model_dump(mode="json"), SANCTIONED)
+
+        assert result.status == CommandStatus.REJECTED, trace_ids
+    assert _events(registry, EventType.PRECEDENT_CANDIDATE_MINED) == []
+
+
+def test_the_refusal_quotes_no_record_text(registry: StoreRegistry) -> None:
+    payload = local_model_record_payload()
+    payload["because"] = f"attacker text {SENTINEL}"
+    record = PrecedentRecord.model_validate(payload)
+    payload["candidate_id"] = record.expected_candidate_id()
+
+    result = _execute_as(registry, payload, SANCTIONED)
+
+    assert result.status == CommandStatus.REJECTED
+    assert SENTINEL not in result.message
+    assert "attacker" not in result.message
+    assert SENTINEL not in str(result.metadata)
+
+
+def test_the_judged_lookup_is_keyed_by_subject_and_bounded(
+    registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not a scan: the read names the event type, the subject, the source and the
+    verdict, and asks for a handful of rows however many judged events exist."""
+    event_log = registry.operational.event_log
+    for n in range(20):
+        log_judged_lesson(event_log, f"unrelated-{n}")
+    log_judged_lesson(event_log, TRACE_ID)
+    calls: list[dict] = []
+    real = event_log.get_events
+
+    def spy(**kwargs):
+        calls.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(event_log, "get_events", spy)
+
+    result = _execute_as(registry, local_model_record_payload(), SANCTIONED)
+
+    assert result.status == CommandStatus.SUCCESS
+    [lookup] = [c for c in calls if c.get("event_type") == EventType.MEMORY_OP_JUDGED]
+    assert lookup["entity_id"] == TRACE_ID
+    assert lookup["source"] == judged_source("precedent-distill/v1")
+    assert lookup["payload_filters"] == {
+        "op_type": "distillation",
+        "decision": "lesson",
+    }
+    assert lookup["limit"] <= JUDGED_LOOKUP_LIMIT
+
+
+def test_a_merge_record_is_accepted_with_the_pairs_same_verdict(
+    registry: StoreRegistry,
+) -> None:
+    a, b = _two_candidates()
+    payload = _merged_payload(a, b)
+    # Logged in the opposite order to the record's own: the pair is one subject
+    # whichever way round the two ids were handed over.
+    log_judged_merge(
+        registry.operational.event_log,
+        list(reversed(payload["evidence"]["merged_from"])),
+    )
+
+    result = _execute_as(registry, payload, SANCTIONED)
+
+    assert result.status == CommandStatus.SUCCESS
+    [event] = _events(registry, EventType.PRECEDENT_CANDIDATE_MINED)
+    assert sorted(event.payload["record"]["evidence"]["merged_from"]) == sorted(
+        [a.candidate_id, b.candidate_id]
+    )
+
+
+def test_a_merge_record_without_a_judged_op_is_refused(
+    registry: StoreRegistry,
+) -> None:
+    a, b = _two_candidates()
+
+    result = _execute_as(registry, _merged_payload(a, b), SANCTIONED)
+
+    assert result.status == CommandStatus.REJECTED
+    assert result.message == JUDGED_OP_MISSING_MESSAGE
+    assert _events(registry, EventType.PRECEDENT_CANDIDATE_MINED) == []
+
+
+def test_a_merge_record_is_not_backed_by_another_pairs_verdict(
+    registry: StoreRegistry,
+) -> None:
+    a, b = _two_candidates()
+    log_judged_merge(registry.operational.event_log, [a.candidate_id, "pcand_other"])
+
+    result = _execute_as(registry, _merged_payload(a, b), SANCTIONED)
+
+    assert result.status == CommandStatus.REJECTED
+
+
+@pytest.mark.parametrize(
+    ("decision", "op_type"),
+    [
+        ("different", JudgedOpType.RECONCILIATION),
+        ("unparsed", JudgedOpType.RECONCILIATION),
+        ("same", JudgedOpType.DISTILLATION),
+    ],
+)
+def test_a_merge_record_needs_a_same_reconciliation(
+    registry: StoreRegistry, decision: str, op_type: JudgedOpType
+) -> None:
+    a, b = _two_candidates()
+    log_judged_merge(
+        registry.operational.event_log,
+        [a.candidate_id, b.candidate_id],
+        decision=decision,
+        op_type=op_type,
+    )
+
+    result = _execute_as(registry, _merged_payload(a, b), SANCTIONED)
+
+    assert result.status == CommandStatus.REJECTED
+
+
+def test_a_lesson_verdict_on_a_trace_does_not_back_a_forged_merge_record(
+    registry: StoreRegistry,
+) -> None:
+    """Claiming ``merged_from`` moves a record to the merge check, not around it."""
+    a, b = _two_candidates()
+    log_judged_lesson(registry.operational.event_log, TRACE_ID)
+
+    result = _execute_as(registry, _merged_payload(a, b), SANCTIONED)
+
+    assert result.status == CommandStatus.REJECTED
+
+
+def test_the_human_tier_stays_refused_even_with_a_judged_op(
+    registry: StoreRegistry,
+) -> None:
+    log_judged_lesson(registry.operational.event_log, TRACE_ID)
+    payload = local_model_record_payload()
     payload["provenance_tier"] = "human"
     record = PrecedentRecord.model_validate(payload)
     payload["candidate_id"] = record.expected_candidate_id()

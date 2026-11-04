@@ -14,8 +14,10 @@ route: here a cloud route is refused before the first call whatever the label, w
 a typed :class:`RouteNotLocalError` whose reason is ``route_not_local``, counted,
 and no call made. The router never infers locality, and an unrouted consumer
 inherits its parent block's flag, so the check reads the resolved flag, not
-whether a route was named. The egress gate runs as well, beside the check, over
-the stored documents a trace or candidate names.
+whether a route was named. The egress gate is defence in depth behind that check:
+it keeps content labelled above ``internal`` off a non-local route, so it does not
+fire on a route that has passed ``require_local``. It still runs over the stored
+documents a trace or candidate names.
 
 **Every call is a logged judged op.** One ``MEMORY_OP_JUDGED`` event per call
 (:func:`trellis.core.memory_op_judged.emit_memory_op_judged`): ids, a digest of
@@ -25,6 +27,9 @@ because the payload's field set is a pinned contract. Distillation is
 ``distillation`` with ``lesson`` / ``no_lesson`` / ``unparsed``. Merge is
 ``reconciliation`` (two stored items judged to be the same thing or not), with
 ``same`` / ``different`` / ``unparsed``.
+The event is also what the governed ``precedent.candidate`` operation checks
+before it records a ``local_model`` record (:mod:`trellis.learning.precedent_judged`),
+so it is emitted before any record built from the call is recorded.
 
 **Strict parse.** A reply must be one JSON object of exactly the documented shape
 (:class:`_DistillReply`, :class:`_MergeReply`); a missing, extra or mistyped key,
@@ -72,6 +77,12 @@ from trellis.learning.precedent_distill import (
     distill_trace,
     restates_intent,
 )
+from trellis.learning.precedent_judged import (
+    DISTILL_PROMPT_VERSION,
+    MERGE_PROMPT_VERSION,
+    judged_source,
+    pair_ref_id,
+)
 from trellis.learning.scoring import normalize_intent_family
 from trellis.llm.egress import EGRESS_WITHHELD_REASON, EgressGate, EgressVerdict
 from trellis.llm.routing import LLMConsumer, LLMRoutingError
@@ -106,11 +117,6 @@ if TYPE_CHECKING:
     from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
-
-#: Bump on any change to the prompt, the cut limits or the reply shape. Judged
-#: events carry it, so pairs from different prompts stay separable.
-DISTILL_PROMPT_VERSION = "precedent-distill/v1"
-MERGE_PROMPT_VERSION = "precedent-merge/v1"
 
 RULE_LOCAL_LESSON = "local_model_lesson"
 RULE_LOCAL_MERGE = "local_model_merge"
@@ -292,7 +298,7 @@ class LocalModelRunner:
             op_type=op_type,
             # The prompt version rides on the event's ``source``: the payload's field
             # set is a pinned contract (``tests/unit/schemas/test_memory_op.py``).
-            source=f"learning:{prompt_version}",
+            source=judged_source(prompt_version),
             model_id=reported_model or self.model,
             input_digest=InputDigest(
                 hash=content_hash(prompt), length=len(prompt), source_refs=source_refs
@@ -676,7 +682,7 @@ async def merge_pair_local(
         confidence=0.0 if verdict == "unparsed" else 1.0,
         prompt=prompt,
         prompt_version=MERGE_PROMPT_VERSION,
-        subject=SubjectRef(ref_type=REF_TYPE_PRECEDENT_PAIR, ref_id="|".join(pair)),
+        subject=SubjectRef(ref_type=REF_TYPE_PRECEDENT_PAIR, ref_id=pair_ref_id(pair)),
         source_refs=list(pair),
         reported_model=reported,
     )

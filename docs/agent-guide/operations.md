@@ -5199,7 +5199,7 @@ trellis worker distill-precedents-local [--since ISO] [--until ISO] [--limit N] 
 |--------|---------|-------------|
 | `--since` / `--until` | (none) | Read traces created in this ISO-8601 window (inclusive). |
 | `--limit` | 10 | Most traces sent to the model, newest first (each is a call). A window with more behind it reports `truncated: true`. |
-| `--merge-limit` | 5 | Most candidate pairs sent to the merge model. `0` skips merging. |
+| `--merge-limit` | 5 | Most candidate pairs sent to the merge model. `0` skips merging. The pairs are drawn from the newest 200 recorded candidates (see `merge_pool` below). |
 | `--domain` | (all) | Restrict the read to one trace domain. |
 | `--apply` | off | Record the new candidates through the governed `precedent.candidate` operation. |
 | `--model-id` | the route's `model` | The label the judged events carry. A route with no `model` needs it. |
@@ -5228,8 +5228,10 @@ llm:
 A route that is not local is refused before any call: the run exits with
 `EXIT_POLICY` (3), `refusals` reads `{"route_not_local": N}`, and no model is
 called. This is stricter than the egress gate, which only keeps content labelled
-above `internal` off a non-local route; the gate also runs here, and a trace whose
-documents it withholds is skipped.
+above `internal` off a non-local route. The gate is defence in depth behind
+`require_local`: it does not fire on a local route, and a route that fails the
+locality check is refused before it is reached. On a local route a trace whose
+documents it withholds is still skipped.
 
 Distillation (`precedent-distill/v1`, [`trellis.learning.precedent_local`](../../src/trellis/learning/precedent_local.py)).
 A trace the deterministic tier already covers is skipped (`deterministic_covered`,
@@ -5248,6 +5250,13 @@ candidate whose evidence is the union of both and whose `evidence.merged_from`
 names both parents. **A merge never deletes or rewrites a recorded candidate**;
 the parents stay recorded.
 
+The merge pool is the newest 200 recorded candidates (`MERGE_POOL_LIMIT`), read
+newest first, with the 201st row only to detect a cap. When more are recorded than
+that, the older ones are not paired in this run; the JSON report's
+`merge_pool: {read, limit, truncated}` and the text render's `merge pool:` line say
+so (`merge_pool` is `null` with `--merge-limit 0`). Candidate pairs are sorted by
+candidate id after the read, so the pairing does not depend on the read order.
+
 Judged ops. Each model call emits one `MEMORY_OP_JUDGED` event, in dry-run and
 `--apply` alike, because the events are the training stream: `distillation`
 (`lesson` / `no_lesson` / `unparsed`) for a trace, `reconciliation` (`same` /
@@ -5257,7 +5266,7 @@ and the verdict, never trace or record text; the prompt version rides on the
 event's `source` (`learning:precedent-distill/v1`).
 
 The JSON report carries `status`, `mode`, `prompt_versions`, `models`, `window`,
-`traces_read`, `truncated`, `model_calls` (by op), `outcomes`, `refusals` (by
+`traces_read`, `truncated`, `merge_pool`, `model_calls` (by op), `outcomes`, `refusals` (by
 reason), `skipped` (by reason), `llm_errors`, `judged_events` (the number emitted,
 by op and in total), `candidates`, `duplicates`, `would_record` (dry run) or
 `recorded` (`--apply`), `rejected`, `failed` and `candidate_ids`. It carries no
@@ -5267,9 +5276,15 @@ A rerun asks the model again (a `no_lesson` or `different` verdict is not
 remembered); recorded candidates are never duplicated.
 
 **Candidates are still never served,** and the command is in no nightly script.
-The governed operation accepts a `local_model` record only from this command's
-`requested_by`; any other caller, and every `human` record, is still refused as a
-policy violation.
+The governed operation accepts a `local_model` record only when both hold: the
+`requested_by` is this command's, and the event log holds the judged operation
+that produced the record (a `lesson` verdict about the one trace it cites, or a
+`same` verdict about the two candidates it merged). `requested_by` is a caller-set
+string on MCP `execute_mutation` and REST `/commands/batch` without a principal, so
+it is not enough alone, and no MCP tool or REST route can emit the judged event. The
+command emits it before it records. A record with no such event is refused with the
+same policy violation and a fixed message that quotes no record text; any other
+caller, and every `human` record, is refused as before.
 
 ### `trellis curate evaluate-precedent-gate`
 

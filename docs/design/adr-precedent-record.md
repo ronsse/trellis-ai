@@ -42,11 +42,28 @@ candidates. Four rules hold it.
   `precedent_merge`, refuse any route not declared `local: true`
   (`route_not_local`, a typed error, counted, no call made), because traces carry
   internal content. The check reads the resolved flag, so an unrouted consumer
-  that inherits a cloud parent block is refused. The egress gate runs as well.
-* *Caller check.* `precedent.candidate` accepts a `local_model` record only from
-  a `requested_by` in `LOCAL_MODEL_CANDIDATE_REQUESTERS`; any other caller keeps
-  the refusal above. The tier on the record is a claim, so the caller is checked
-  too.
+  that inherits a cloud parent block is refused. The egress gate is defence in
+  depth behind that check: it keeps content labelled above `internal` off a
+  non-local route, so it cannot fire on a route that has already passed
+  `require_local`.
+* *Caller check, then proof.* `precedent.candidate` accepts a `local_model` record
+  only when two things hold. The `requested_by` is in
+  `LOCAL_MODEL_CANDIDATE_REQUESTERS`; and the event log holds the judged operation
+  that produced the record (`learning/precedent_judged.py`). `requested_by` is a
+  caller-set string on MCP `execute_mutation` and REST `/commands/batch` when no
+  principal is configured, so the first conjunct alone is a claim, not a check.
+  The judged event is something no MCP tool, REST route or governed operation can
+  emit: all six `MEMORY_OP_JUDGED` emitters are in-process code with a fixed
+  `source`. A distillation record needs `distillation` / `lesson` from the distil
+  prompt's source about the one trace it cites; a merge record needs
+  `reconciliation` / `same` from the merge prompt's source about the
+  `precedent_pair` its two `merged_from` ids make. The lookup is keyed by event
+  type, subject and source and capped at a handful of rows, never a scan. The
+  command logs the event before it records, and a refusal carries a fixed message
+  with no record text. This proves a verdict was logged for that trace or pair; the
+  judged payload is a pinned contract with no field for the record's text, so a
+  caller who also holds the requester string could still attach other text to a
+  trace that has a real `lesson` verdict. The tier stays event-only and unserved.
 * *Merge never rewrites.* A merge records a new candidate whose evidence is the
   union of both parents and whose `evidence.merged_from` names them. It deletes
   nothing and rewrites nothing; the parents stay recorded, and the merged
@@ -54,7 +71,8 @@ candidates. Four rules hold it.
   list, but an empty list is left out so no existing id changes.
 * *Every call is a judged op.* One `MEMORY_OP_JUDGED` event per model call, in
   dry-run and apply (`distillation` for a trace, `reconciliation` for a pair),
-  with ids, digests and the verdict, never text. The prompt version
+  with ids, digests and the verdict, never text. A `lesson` or `same` verdict is
+  also what lets the governed operation record the resulting candidate. The prompt version
   (`precedent-distill/v1`, `precedent-merge/v1`) is the event's `source`, because
   the payload's field set is pinned. A reply that is not exactly the documented
   JSON shape is `unparsed`, logged, and never repaired.

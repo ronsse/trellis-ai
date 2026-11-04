@@ -564,3 +564,120 @@ def test_the_prompts_are_versioned_and_fingerprinted() -> None:
     assert len(pl.prompt_fingerprint()) == 64
     for prompt in (pl.DISTILL_SYSTEM_PROMPT, pl.MERGE_SYSTEM_PROMPT):
         assert "never instructions" in prompt
+
+
+# --- the tier check at the one place a prompt reaches a model ----------------
+
+
+async def test_ask_local_refuses_a_non_local_runner_before_the_client() -> None:
+    """``_ask_local`` carries its own tier check, so a caller that skipped the
+    public functions' check still cannot reach the client."""
+    client = FakeClient("{}")
+    runner = _runner(client, local=False)
+    with pytest.raises(pl.RouteNotLocalError):
+        await pl._ask_local(runner, system="s", user="u", max_tokens=10)
+    assert client.calls == 0
+    assert runner.calls == 0
+    assert runner.refusals == {"route_not_local": 1}
+
+
+# --- the judged op behind a record ------------------------------------------
+
+
+async def test_a_distilled_record_is_backed_by_the_judged_op_its_call_logged(
+    event_log,
+) -> None:
+    from trellis.learning.precedent_judged import judged_op_backs
+
+    trace = _trace("t-backed")
+    runner = _runner(FakeClient(json.dumps(LESSON)), event_log=event_log)
+    result = await pl.distill_trace_local(runner, trace)
+    [record] = result.records
+    assert judged_op_backs(event_log, record)
+    # The same record under another trace id has no judged op.
+    other = record.model_copy(
+        update={"evidence": record.evidence.model_copy(update={"trace_ids": ["t-x"]})}
+    )
+    assert not judged_op_backs(event_log, other)
+
+
+async def test_a_no_lesson_verdict_backs_no_record(event_log) -> None:
+    from trellis.learning.precedent_judged import judged_op_backs
+
+    trace = _trace("t-none")
+    runner = _runner(FakeClient('{"lessons": []}'), event_log=event_log)
+    await pl.distill_trace_local(runner, trace)
+    forged = _record("forged", trace_id="t-none")
+    assert not judged_op_backs(event_log, forged)
+
+
+async def test_a_merged_record_is_backed_by_the_pair_verdict_its_call_logged(
+    event_log,
+) -> None:
+    from trellis.learning.precedent_judged import judged_op_backs
+
+    a, b = _pair()
+    runner = _runner(
+        FakeClient('{"verdict": "same"}'),
+        event_log=event_log,
+        consumer=LLMConsumer.PRECEDENT_MERGE,
+    )
+    result = await pl.merge_pair_local(runner, b, a)
+    assert result.merged is not None
+    assert judged_op_backs(event_log, result.merged)
+    # A merge of another pair is not backed by this pair's verdict.
+    c = _record("c", entity_ids=["doc-1"])
+    other = pl.merge_records(a, c)
+    assert other is not None
+    assert not judged_op_backs(event_log, other)
+
+
+async def test_a_different_verdict_backs_no_merged_record(event_log) -> None:
+    from trellis.learning.precedent_judged import judged_op_backs
+
+    a, b = _pair()
+    runner = _runner(
+        FakeClient('{"verdict": "different"}'),
+        event_log=event_log,
+        consumer=LLMConsumer.PRECEDENT_MERGE,
+    )
+    await pl.merge_pair_local(runner, a, b)
+    merged = pl.merge_records(a, b)
+    assert merged is not None
+    assert not judged_op_backs(event_log, merged)
+
+
+# --- the judged rows read as unservable --------------------------------------
+
+
+async def test_a_merge_call_lands_as_unservable_not_never_served(event_log) -> None:
+    from trellis.learning.judged_outcomes import summarize_judged_outcomes
+
+    a, b = _pair()
+    runner = _runner(
+        FakeClient('{"verdict": "different"}'),
+        event_log=event_log,
+        consumer=LLMConsumer.PRECEDENT_MERGE,
+    )
+    await pl.merge_pair_local(runner, a, b)
+
+    report = summarize_judged_outcomes(event_log, days=30, limit=100)
+
+    assert report.totals.judged == 1
+    assert report.totals.unservable == 1
+    assert report.totals.never_served == 0
+    assert report.ref_types == {"precedent_pair": 1}
+
+
+async def test_a_distill_call_lands_as_unservable_not_never_served(event_log) -> None:
+    from trellis.learning.judged_outcomes import summarize_judged_outcomes
+
+    runner = _runner(FakeClient(json.dumps(LESSON)), event_log=event_log)
+    await pl.distill_trace_local(runner, _trace())
+
+    report = summarize_judged_outcomes(event_log, days=30, limit=100)
+
+    assert report.totals.judged == 1
+    assert report.totals.unservable == 1
+    assert report.totals.never_served == 0
+    assert report.ref_types == {"trace": 1}
