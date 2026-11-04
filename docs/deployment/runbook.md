@@ -431,8 +431,10 @@ This is for the default SQLite stores. `scripts/upgrade_check.sh` upgrades a sto
 from the previous release to the build under test, then reads it back with the
 previous release, and `.github/workflows/upgrade-check.yml` runs it on release
 tags and nightly. Postgres, pgvector, Neo4j, ArcadeDB and S3 are **not** covered
-by it. There is no migration command. The registry does keep a schema
-fingerprint: `stores/_trellis_meta.json` records `<store>/<backend>/v<N>` per
+by it. No command converts a store between backends or versions;
+`trellis admin migrate` (below) reports each store's schema version and applies
+the steps a build ships, and only when you run it. The registry does keep a
+schema fingerprint: `stores/_trellis_meta.json` records `<store>/<backend>/v<N>` per
 store, and when the API server starts it refuses a store whose recorded value
 differs from the build's (`SchemaFingerprintMismatch`;
 `TRELLIS_SKIP_FINGERPRINT_CHECK=1` bypasses it). Every store class has been at
@@ -448,12 +450,16 @@ signal.
 2. **Install.** Stop `trellis admin serve` and any worker, then
    `pip install --upgrade trellis-ai` (or pull the new image). The new build
    opens the existing stores in place.
-3. **Run.** Start the server and workers as before.
-4. **Check.** `trellis admin health --format json` exits 0 with the store files
+3. **Migrate, if you choose.** `trellis admin migrate` reports, and writes
+   nothing, which schema steps the build would run on each store;
+   `trellis admin migrate --apply` runs them. Neither happens at start-up.
+   See [`operations.md`](../agent-guide/operations.md#trellis-admin-migrate).
+4. **Run.** Start the server and workers as before.
+5. **Check.** `trellis admin health --format json` exits 0 with the store files
    present, and `trellis admin stats --format json` reports at least the counts
    you saw before. A pack serves different items under a different build by
    design, so compare counts, not served items.
-5. **Roll back.** Reinstall the previous version against the same stores. What
+6. **Roll back.** Reinstall the previous version against the same stores. What
    the check proves: after the new build had written to a store, the previous
    release read every row back, the new build's included (documents, traces,
    entities, edges, pack and feedback events, and `admin health`). It does not
@@ -469,6 +475,9 @@ feedback (the MCP `record_feedback` tool and `POST /packs/{id}/feedback`) is not
 in it.
 
 ## Recovery operations
+
+For a team stack on Postgres, backing up, restoring and migrating are covered in
+[`team-compose.md`](team-compose.md#backing-up).
 
 ### Feedback reconciliation
 
