@@ -3912,7 +3912,7 @@ trellis analyze pack-judge --judged judged.jsonl [--since DATE] [--until DATE] [
 | `--days` | `30` | Window length when `--since` is not given |
 | `--limit` | `0` | Judge phase: stop after this many attempts (`0` = no cap). Items an agent graded are judged first, so a cap spends calls where calibration can use them |
 | `--scan-limit` | `5000` | Max events scanned per event type; the newest are kept, and the report states when a scan truncated |
-| `--model-id` | route's model | Label written on each row; in the calibrate phase it selects which judge's rows to use |
+| `--model-id` | route's model | Label written on each row and part of the resume key; required when the route names no model (exit `2`, under either format), so two unnamed endpoints never share a key. In the calibrate phase it selects which judge's rows to use |
 | `--min-graded` | `30` | Calibrate phase: refuse below this many agent-graded items the judge answered |
 
 **Judge phase.** Reads `PACK_ASSEMBLED` rows in the window, drops held-out packs
@@ -3927,17 +3927,27 @@ as it is judged:
 |-------|---------|
 | `pack_id`, `item_id` | The served pair |
 | `label` | `helpful`, `unhelpful`, `unsure`, `unparsed` or `unjudgeable` |
-| `reason` | For `unjudgeable`: `missing` (no stored row), `egress_withheld` (a labelled document and a route not declared local), `empty`, `no_intent`. Null otherwise |
+| `reason` | For `unjudgeable`: `missing` (no stored row), `pack_egress_withheld` (a route not declared local, and the pack served a document labelled above `internal` or one the gate could not read), `egress_withheld`, `empty`, `no_intent`. Null otherwise |
 | `model`, `reported_model` | The configured label, and the model name the endpoint answered with |
 | `prompt_version`, `judged_at`, `item_tokens` | Version of the question, UTC instant, estimated tokens served |
 
 No intent text, item text or excerpt is written to the file, to the report or to a
 log. The command writes no event, no mutation and no document or vector row, and
-the module takes no event log to write to. A rerun skips every pair already in the
-file for the same `prompt_version` and `model`, so an interrupted run resumes. A
-failed model call or document read writes no row (the pair is retried next run) and
-exits `5`; five consecutive failed calls abort the run with the rows written so far
-kept.
+the module takes no event log to write to. A rerun skips every pair already
+answered in the file for the same `prompt_version` and `model`, so an interrupted
+run resumes. An `unjudgeable` pair is not skipped: a missing document can appear
+and a route can become local, so the next run asks about it again, after the pairs
+never tried, and a changed outcome supersedes the old row (a reader keeps the last
+row for a key; an unchanged outcome adds no row). A failed model call or document
+read writes no row (the pair is retried next run) and exits `5`, logging the
+exception's type and never its message; five consecutive failed calls abort the run
+with the rows written so far kept.
+
+**Egress is per pack.** The pack's intent goes to the model with every item, and it
+names what the session was asked to do, so a pack that served a document labelled
+above `internal` (or one the gate could not read) is withheld whole from a route not
+declared local: every item in it is written `unjudgeable: pack_egress_withheld` and
+none is sent. A declared-local route sends everything, as before.
 
 **Calibrate phase.** Joins the judged rows to `FEEDBACK_RECORDED`
 `helpful_item_ids` / `unhelpful_item_ids` through `trellis.feedback.pack_rows`, the
@@ -3951,7 +3961,9 @@ one for the same pair). Over the agent-graded items the judge answered it report
   the helpful side cheap. It is withheld, with the reason, below 10 agent-unhelpful
   items;
 - Cohen's kappa over the items the judge committed on (`unsure` is an abstention and
-  is left out of kappa);
+  is left out of kappa). Kappa has the same floor as `--min-graded`, counted over
+  those committed items: below it `kappa` is null and `kappa_unavailable` says why,
+  so 30 graded items of which 28 are `unsure` print no kappa;
 - coverage, judged tokens over injected tokens;
 - the token-weighted useful fraction the judge implies over **all** judged items,
   beside the agent-graded lower bound over the same judged-token denominator.
@@ -3963,24 +3975,33 @@ typed refusal with no kappa and no agreement figures. A refusal exits `2`, and `
 code.
 
 **Pointing it at a local model.** The client is built by the router, never by this
-command. Declare an OpenAI-compatible endpoint in the `llm:` block of
-`config.yaml` and route the `pack_judge` consumer to it:
+command. Give `pack_judge` its own tier and route it there, so the endpoint and the
+`local` declaration apply to this one consumer and not to the other six:
 
 ```yaml
 llm:
-  provider: openai
-  base_url: http://localhost:8000/v1   # any OpenAI-compatible server
-  api_key_env: PACK_JUDGE_API_KEY      # a non-empty value; a local server ignores it
-  model: my-local-model
-  local: true                          # your statement that content stays on this host
+  provider: openai                     # the parent block: every other consumer keeps it
+  model: gpt-4o-mini
+  api_key_env: OPENAI_API_KEY
+  tiers:
+    local_judge:
+      base_url: http://localhost:8000/v1   # any OpenAI-compatible server
+      api_key_env: PACK_JUDGE_API_KEY      # a non-empty value; a local server ignores it
+      model: my-local-model
+      local: true                          # your statement that content stays on this host
+  routes:
+    pack_judge: local_judge
 ```
 
+`local: true` and `base_url` sit on the tier because the same keys on the parent
+`llm:` block would declare all seven consumers local and send them to that endpoint,
+lifting the egress gate for every one of them.
+
 Set `PACK_JUDGE_API_KEY` (or whatever `api_key_env` names) to any non-empty value.
-`trellis admin llm-routes` shows the resolved route without building a client. A
-`tiers:` / `routes:` block can send `pack_judge` to its own tier. Without
-`local: true` the route is not local and a document labelled above `internal` is
-recorded as `unjudgeable: egress_withheld` instead of being sent. See "Keeping
-labelled content off a hosted model" below.
+`trellis admin llm-routes` shows the resolved route without building a client.
+Without `local: true` the route is not local and a pack that served a document
+labelled above `internal` is recorded as `unjudgeable: pack_egress_withheld` instead
+of being sent. See "Keeping labelled content off a hosted model" below.
 
 ### `trellis analyze holdout`
 

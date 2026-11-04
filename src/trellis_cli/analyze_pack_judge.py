@@ -55,8 +55,6 @@ logger = structlog.get_logger(__name__)
 
 console: Console = build_console()
 
-_UNKNOWN_MODEL = "unknown"
-
 
 def _window(
     since: str | None, until: str | None, days: int
@@ -154,7 +152,7 @@ def _render_calibration(report: PackJudgeCalibration) -> None:
         kappa = (
             _num(report.kappa)
             if report.kappa_unavailable is None
-            else f"undefined ({escape(report.kappa_unavailable)})"
+            else f"unavailable ({escape(report.kappa_unavailable)})"
         )
         console.print(
             f"  Cohen's kappa             {kappa}  "
@@ -228,7 +226,8 @@ def pack_judge_command(
         "--model-id",
         help=(
             "Label recorded on each judged row (default: the route's configured "
-            "model). In the calibrate phase, selects which judge's rows to use."
+            "model; required when the route names none). In the calibrate phase, "
+            "selects which judge's rows to use."
         ),
     ),
     min_graded: int = typer.Option(
@@ -341,9 +340,17 @@ def _judge_phase(
         LLMConsumer.PACK_JUDGE, command="analyze pack-judge"
     )
     document_store = registry.knowledge.document_store
-    label = (
-        model_id or registry.llm_route(LLMConsumer.PACK_JUDGE).model or _UNKNOWN_MODEL
-    )
+    # The label is the resume and calibration key. A route that names no model
+    # gives it nothing to default to, and one shared fallback would make two
+    # unnamed endpoints one judge, so the operator names it. Raised below no
+    # format branch, so the exit is the same under text and json.
+    label = model_id or registry.llm_route(LLMConsumer.PACK_JUDGE).model
+    if not label:
+        message = (
+            "The pack_judge route names no model, so the judged rows have no label "
+            "to be keyed by. Pass --model-id <label>, or set model on the route."
+        )
+        raise PackJudgeError(message)
     window = load_window(
         registry.operational.event_log, since=start, until=end, scan_limit=scan_limit
     )

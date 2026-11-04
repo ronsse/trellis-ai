@@ -22,8 +22,11 @@ Two phases.
   (:func:`parse_label`): anything but one of the three labels is recorded as
   ``unparsed``, never coerced. A row holds ids, a label, the model, the prompt
   version, a timestamp and an estimated token count. It holds no intent text, no
-  item text and no excerpt. The run is resumable: a pair already in the file for
-  the same prompt version and model is skipped.
+  item text and no excerpt. The run is resumable: a pair already answered in the
+  file for the same prompt version and model is skipped. An ``unjudgeable`` pair
+  is not: it is asked about again on the next run, since a missing document can
+  appear and a route can become local, and its row is replaced by the new one
+  (:func:`read_judged_rows` keeps the last row for a key).
 * :func:`calibrate` joins those rows to ``FEEDBACK_RECORDED`` through
   :mod:`trellis.feedback.pack_rows` (the one typed reader) and reports the
   confusion matrix, overall agreement, agreement on the unhelpful side, Cohen's
@@ -38,11 +41,16 @@ the share the judge also marked unhelpful is the harder target.
 
 **``unsure`` is an abstention.** It counts against overall agreement and against
 the unhelpful-side share (the judge declined where an agent committed), and is
-left out of kappa, which needs the same two categories on both sides.
+left out of kappa, which needs the same two categories on both sides. Kappa has
+its own floor, the same ``min_graded``, over the items it is computed on: 30
+graded items of which 28 are ``unsure`` leave a kappa over two.
 
-**What is sent, and where.** Item text goes to the model, so a document labelled
-above ``internal`` is withheld from a route not declared local
-(:class:`~trellis.llm.egress.EgressGate`) and recorded as ``unjudgeable``.
+**What is sent, and where.** Item text goes to the model, and so does the pack's
+intent, which names what the session was asked to do. A pack that served a
+document labelled above ``internal`` (or one the gate could not read) is withheld
+whole from a route not declared local (:class:`~trellis.llm.egress.EgressGate`):
+every item in it is recorded as ``unjudgeable`` and none is sent, because the
+intent beside a permitted item would still name the withheld one.
 """
 
 from __future__ import annotations
@@ -64,6 +72,7 @@ from trellis.core.elision import elide_text
 from trellis.core.pack_holdout import drop_holdout
 from trellis.errors import ValidationError
 from trellis.feedback.pack_rows import has_served_rows, served_rows_from_payload
+from trellis.llm.egress import EgressVerdict
 from trellis.llm.types import Message
 from trellis.retrieve.pack_value import collect_pack_verdicts
 from trellis.stores.base.event_log import (
@@ -163,6 +172,9 @@ ANSWER_LABELS: frozenset[JudgeLabel] = frozenset(
 
 REASON_MISSING = "missing"
 REASON_EGRESS_WITHHELD = "egress_withheld"
+#: Another item in the same pack read ``WITHHELD`` or ``UNREADABLE`` on this
+#: route, so the whole pack is kept off it (the intent would name that item).
+REASON_PACK_EGRESS_WITHHELD = "pack_egress_withheld"
 REASON_EMPTY = "empty"
 REASON_NO_INTENT = "no_intent"
 
@@ -204,7 +216,11 @@ class JudgedRow(TrellisModel):
 
 
 def read_judged_rows(path: Path) -> list[JudgedRow]:
-    """Every row in a judged file; an absent file is no rows.
+    """One row per resume key in a judged file; an absent file is no rows.
+
+    A key written twice keeps its last row: an ``unjudgeable`` pair is asked
+    about again on the next run and the new row supersedes the old one, so the
+    file stays append-only and every reader sees one row per key.
 
     A line that is not a valid row raises :class:`PackJudgeError` naming the
     line: resuming over a damaged file would re-judge what it cannot read, and
@@ -212,17 +228,18 @@ def read_judged_rows(path: Path) -> list[JudgedRow]:
     """
     if not path.exists():
         return []
-    rows: list[JudgedRow] = []
+    rows: dict[tuple[str, str, str, str], JudgedRow] = {}
     with path.open(encoding="utf-8") as handle:
         for number, line in enumerate(handle, start=1):
             if not line.strip():
                 continue
             try:
-                rows.append(JudgedRow.model_validate_json(line))
+                row = JudgedRow.model_validate_json(line)
             except ValueError as exc:
                 message = f"{path}: line {number} is not a judged row"
                 raise PackJudgeError(message) from exc
-    return rows
+            rows[row.key()] = row
+    return list(rows.values())
 
 
 # ---------------------------------------------------------------------------
@@ -412,7 +429,7 @@ def _order_for_judging(items: Iterable[ServedItem]) -> list[ServedItem]:
     ]
 
 
-async def judge_window(  # noqa: PLR0915 - one loop, one tally
+async def judge_window(  # noqa: PLR0912, PLR0915 - one loop, one tally
     window: PackWindow,
     *,
     document_store: DocumentStore,
@@ -427,16 +444,28 @@ async def judge_window(  # noqa: PLR0915 - one loop, one tally
     Appends one :class:`JudgedRow` per pair, flushed as it is written, so an
     interrupted run keeps what it did and the next one resumes. ``limit`` caps
     the pairs *attempted* this run (``0`` is no cap). An item whose document is
-    gone, empty, or labelled above what the route may carry is written as
-    ``unjudgeable`` with its reason; an LLM error or a failed document read
-    writes nothing, so the next run retries it, and is counted.
+    gone, empty, or labelled above what the route may carry, or whose pack served
+    such a document to a route that is not local, is written as ``unjudgeable``
+    with its reason. Such a pair is not "done": the next run asks about it again,
+    after the pairs never tried, and writes a row only when the reason changed. An
+    LLM error or a failed document read writes nothing, so the next run retries
+    it, and is counted.
 
     Writes to no Trellis store. ``gate`` must come from
     :meth:`~trellis.llm.egress.EgressGate.for_route` for this run's route: the
     egress tripwire (``tests/unit/test_llm_egress_rule.py``) rosters this
     function as the entry point that sends stored content to the model.
     """
-    done = {row.key() for row in read_judged_rows(out_path)}
+    prior = read_judged_rows(out_path)
+    done = {row.key() for row in prior if row.label is not JudgeLabel.UNJUDGEABLE}
+    # A re-check that lands on the same reason writes nothing: one row per key.
+    unjudgeable_before = {
+        row.key(): row.reason for row in prior if row.label is JudgeLabel.UNJUDGEABLE
+    }
+    pack_items: dict[str, list[str]] = {}
+    for served in window.items:
+        pack_items.setdefault(served.pack_id, []).append(served.item_id)
+    pack_withheld: dict[str, bool] = {}
     tally: dict[str, int] = {label.value: 0 for label in JudgeLabel}
     unjudgeable: dict[str, int] = {}
     already = attempted = written = llm_errors = read_errors = 0
@@ -454,6 +483,16 @@ async def judge_window(  # noqa: PLR0915 - one loop, one tally
             reported_model: str | None = None,
         ) -> None:
             nonlocal written
+            key = (item.pack_id, item.item_id, PROMPT_VERSION, model)
+            if (
+                label is JudgeLabel.UNJUDGEABLE
+                and key in unjudgeable_before
+                and unjudgeable_before[key] == reason
+            ):
+                tally[label.value] += 1
+                if reason:
+                    unjudgeable[reason] = unjudgeable.get(reason, 0) + 1
+                return
             row = JudgedRow(
                 pack_id=item.pack_id,
                 item_id=item.item_id,
@@ -472,7 +511,15 @@ async def judge_window(  # noqa: PLR0915 - one loop, one tally
             if label is JudgeLabel.UNJUDGEABLE and reason:
                 unjudgeable[reason] = unjudgeable.get(reason, 0) + 1
 
-        for item in _order_for_judging(window.items):
+        # Pairs never tried come before pairs being re-checked, so a --limit run
+        # spends its calls on new ground, not on items that stay unjudgeable.
+        ordered = sorted(
+            _order_for_judging(window.items),
+            key=lambda i: (
+                (i.pack_id, i.item_id, PROMPT_VERSION, model) in unjudgeable_before
+            ),
+        )
+        for item in ordered:
             if (item.pack_id, item.item_id, PROMPT_VERSION, model) in done:
                 already += 1
                 continue
@@ -480,13 +527,29 @@ async def judge_window(  # noqa: PLR0915 - one loop, one tally
                 limit_reached = True
                 break
             attempted += 1
+            if item.pack_id not in pack_withheld:
+                # The intent goes with every item, and it names what the pack
+                # served, so one withheld or unreadable item keeps the pack off
+                # a route that is not local (the rule in ``trellis.llm.egress``).
+                pack_withheld[item.pack_id] = any(
+                    gate.stored_verdict(item_id) is not EgressVerdict.PERMITTED
+                    for item_id in pack_items[item.pack_id]
+                )
+            if pack_withheld[item.pack_id]:
+                write(item, JudgeLabel.UNJUDGEABLE, reason=REASON_PACK_EGRESS_WITHHELD)
+                continue
             try:
                 doc = document_store.get(item.item_id)
-            except Exception:
+            except Exception as exc:
                 # GRACEFUL-DEGRADATION: a store that cannot answer for one id
                 # must not end a long run; it is counted, and nothing is written
-                # for the id so the next run asks again.
-                logger.warning("pack_judge_document_read_failed", item_id=item.item_id)
+                # for the id so the next run asks again. The exception's type is
+                # logged, never its message, which can quote stored text.
+                logger.warning(
+                    "pack_judge_document_read_failed",
+                    item_id=item.item_id,
+                    error_type=type(exc).__name__,
+                )
                 read_errors += 1
                 continue
             if doc is None:
@@ -506,11 +569,17 @@ async def judge_window(  # noqa: PLR0915 - one loop, one tally
                 label, reported = await _ask_judge(
                     client, intent=item.intent, item_text=content
                 )
-            except Exception:
+            except Exception as exc:
                 # GRACEFUL-DEGRADATION: one failed call is counted and retried by
                 # the next run; five in a row mean the endpoint is down, so the
-                # run stops and says so rather than looping over the window.
-                logger.warning("pack_judge_llm_call_failed", item_id=item.item_id)
+                # run stops and says so rather than looping over the window. The
+                # exception's type is logged, never its message, which can echo
+                # the prompt back.
+                logger.warning(
+                    "pack_judge_llm_call_failed",
+                    item_id=item.item_id,
+                    error_type=type(exc).__name__,
+                )
                 llm_errors += 1
                 consecutive += 1
                 if consecutive >= MAX_CONSECUTIVE_LLM_ERRORS:
@@ -821,6 +890,14 @@ def calibrate(  # noqa: PLR0912, PLR0915 - one pass over the rows, one tally
         + unhelpful_row.helpful
         + unhelpful_row.unhelpful
     )
+    if kappa_n < min_graded:
+        # ``graded`` counts ``unsure`` and kappa does not, so the floor that
+        # let this report through says nothing about the items kappa is over.
+        kappa = None
+        unavailable = (
+            f"{kappa_n} item(s) the judge committed on, fewer than {min_graded}; "
+            "a kappa over so few would mislead"
+        )
     withheld = None
     unhelpful_agreement = _ratio(unhelpful_row.unhelpful, unhelpful_row.total)
     if unhelpful_row.total < min_unhelpful:

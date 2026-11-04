@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 
 from trellis.core.pack_holdout import HOLDOUT_KEY
 from trellis.learning import pack_judge
@@ -22,10 +23,13 @@ from trellis.learning.pack_judge import (
     MAX_CONSECUTIVE_LLM_ERRORS,
     MIN_GRADED_ITEMS,
     PROMPT_VERSION,
+    REASON_PACK_EGRESS_WITHHELD,
     JudgedRow,
     JudgeLabel,
     PackJudgeError,
     PackJudgeRefusal,
+    PackWindow,
+    ServedItem,
     calibrate,
     cohens_kappa,
     judge_window,
@@ -37,7 +41,7 @@ from trellis.learning.pack_judge import (
 )
 from trellis.llm.egress import EgressGate
 from trellis.llm.types import LLMResponse, Message
-from trellis.stores.base.event_log import Event, EventType
+from trellis.stores.base.event_log import Event, EventType, ScanCoverage
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 from trellis.stores.sqlite.event_log import SQLiteEventLog
 
@@ -442,10 +446,12 @@ def test_a_document_above_internal_is_withheld_from_a_remote_route(
     out = tmp_path / "remote.jsonl"
     run_judge(log, docs, client, out, gate=EgressGate(docs, local=False))
 
-    assert client.asked() == ["open"]
+    # The pack served a confidential document, so its intent stays home too.
+    assert client.calls == []
     rows = {row.item_id: row for row in read_judged_rows(out)}
     assert rows["secret"].label is JudgeLabel.UNJUDGEABLE
-    assert rows["secret"].reason == "egress_withheld"
+    assert rows["secret"].reason == REASON_PACK_EGRESS_WITHHELD
+    assert rows["open"].label is JudgeLabel.UNJUDGEABLE
 
     local = FakeClient({"open": "helpful", "secret": "helpful"})
     run_judge(
@@ -654,7 +660,7 @@ def test_calibration_matches_the_hand_computed_figures(
     report = calibrate(
         load_window(log, since=SINCE),
         _rows_from_answers(),
-        min_graded=9,
+        min_graded=7,  # kappa is over the 7 committed items and has the same floor
         min_unhelpful=4,
     )
 
@@ -697,7 +703,7 @@ def test_the_end_to_end_run_calibrates_to_the_same_figures(
     out = tmp_path / "judged.jsonl"
     run_judge(log, docs, FakeClient(_ANSWERS), out)
     report = pack_judge.calibrate_from_log(
-        log, out, since=SINCE, min_graded=9, min_unhelpful=4
+        log, out, since=SINCE, min_graded=7, min_unhelpful=4
     )
 
     assert report.status == "ok"
@@ -844,3 +850,276 @@ def test_a_damaged_judged_file_is_named_not_skipped(tmp_path: Path) -> None:
     with pytest.raises(PackJudgeError, match="line 1"):
         read_judged_rows(path)
     assert read_judged_rows(tmp_path / "absent.jsonl") == []
+
+
+# -- the pack is the unit of egress ----------------------------------------------
+
+
+class _FlakyStore:
+    """A document store that cannot answer for the ids it is told to fail on."""
+
+    def __init__(self, inner: SQLiteDocumentStore, fail: frozenset[str]) -> None:
+        self._inner = inner
+        self._fail = fail
+
+    def get(self, doc_id: str) -> Any:
+        if doc_id in self._fail:
+            message = "store unavailable"
+            raise RuntimeError(message)
+        return self._inner.get(doc_id)
+
+
+def _mixed_world(log: SQLiteEventLog, docs: SQLiteDocumentStore) -> None:
+    seed_pack(log, "mixed", intent=INTENT_A, item_ids=("open1", "secret", "open2"))
+    seed_pack(log, "clean", intent=INTENT_B, item_ids=("fine1", "fine2"))
+    for item in ("open1", "open2", "fine1", "fine2"):
+        seed_doc(docs, item)
+    seed_doc(docs, "secret", data_classification={"sensitivity": "restricted"})
+
+
+_MIXED_ANSWERS = dict.fromkeys(
+    ("open1", "secret", "open2", "fine1", "fine2"), "helpful"
+)
+
+
+def test_a_pack_that_served_a_withheld_document_sends_none_of_its_items_remotely(
+    log: SQLiteEventLog, docs: SQLiteDocumentStore, tmp_path: Path
+) -> None:
+    _mixed_world(log, docs)
+    client = FakeClient(_MIXED_ANSWERS)
+    out = tmp_path / "remote.jsonl"
+
+    summary = run_judge(log, docs, client, out, gate=EgressGate(docs, local=False))
+
+    # Only the clean pack reaches the model: the mixed pack's intent would name
+    # the restricted document beside every permitted item.
+    assert sorted(client.asked()) == ["fine1", "fine2"]
+    rows = {row.item_id: row for row in read_judged_rows(out)}
+    for item in ("open1", "secret", "open2"):
+        assert rows[item].label is JudgeLabel.UNJUDGEABLE
+        assert rows[item].reason == REASON_PACK_EGRESS_WITHHELD
+    assert rows["fine1"].label is JudgeLabel.HELPFUL
+    assert summary.unjudgeable == {REASON_PACK_EGRESS_WITHHELD: 3}
+    assert INTENT_A not in out.read_text(encoding="utf-8")
+
+
+def test_a_pack_with_an_unreadable_document_is_withheld_from_a_remote_route(
+    log: SQLiteEventLog, docs: SQLiteDocumentStore, tmp_path: Path
+) -> None:
+    _mixed_world(log, docs)
+    client = FakeClient(_MIXED_ANSWERS)
+    # The gate's store cannot answer for "open2": no label is read, so the pack
+    # is held back rather than guessed to be unlabelled.
+    gate = EgressGate(_FlakyStore(docs, frozenset({"open2"})), local=False)  # type: ignore[arg-type]
+    out = tmp_path / "remote.jsonl"
+
+    run_judge(log, docs, client, out, gate=gate)
+
+    assert sorted(client.asked()) == ["fine1", "fine2"]
+    reasons = {row.item_id: row.reason for row in read_judged_rows(out)}
+    assert reasons["open1"] == REASON_PACK_EGRESS_WITHHELD
+
+
+def test_a_local_route_still_judges_every_item_of_the_mixed_pack(
+    log: SQLiteEventLog, docs: SQLiteDocumentStore, tmp_path: Path
+) -> None:
+    _mixed_world(log, docs)
+    client = FakeClient(_MIXED_ANSWERS)
+
+    summary = run_judge(
+        log, docs, client, tmp_path / "local.jsonl", gate=EgressGate(docs, local=True)
+    )
+
+    assert sorted(client.asked()) == sorted(_MIXED_ANSWERS)
+    assert summary.unjudgeable == {}
+
+
+# -- an unjudgeable pair is asked about again -----------------------------------------
+
+
+def test_an_unjudgeable_pair_is_retried_and_its_row_replaced(
+    log: SQLiteEventLog, docs: SQLiteDocumentStore, tmp_path: Path
+) -> None:
+    seed_pack(log, "p", intent=INTENT_A, item_ids=("here", "late"))
+    seed_doc(docs, "here")
+    out = tmp_path / "judged.jsonl"
+    first = run_judge(log, docs, FakeClient({"here": "helpful"}), out)
+    assert first.unjudgeable == {"missing": 1}
+
+    seed_doc(docs, "late")  # the document appears after the first run
+    client = FakeClient({"late": "unhelpful"})
+    second = run_judge(log, docs, client, out)
+
+    assert client.asked() == ["late"]  # "here" was answered and stays done
+    assert second.already_judged == 1
+    rows = {row.item_id: row for row in read_judged_rows(out)}
+    assert len(rows) == 2  # one row per key, the newest
+    assert rows["late"].label is JudgeLabel.UNHELPFUL
+    assert rows["late"].reason is None
+
+
+def test_an_unchanged_unjudgeable_pair_adds_no_row(
+    log: SQLiteEventLog, docs: SQLiteDocumentStore, tmp_path: Path
+) -> None:
+    seed_pack(log, "p", intent=INTENT_A, item_ids=("gone",))
+    out = tmp_path / "judged.jsonl"
+    run_judge(log, docs, FakeClient({}), out)
+    before = out.read_text(encoding="utf-8")
+
+    again = run_judge(log, docs, FakeClient({}), out)
+
+    assert again.attempted == 1  # it was checked again
+    assert again.unjudgeable == {"missing": 1}
+    assert again.rows_written == 0
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_a_pack_withheld_from_a_remote_route_is_judged_once_the_route_is_local(
+    log: SQLiteEventLog, docs: SQLiteDocumentStore, tmp_path: Path
+) -> None:
+    _mixed_world(log, docs)
+    out = tmp_path / "judged.jsonl"
+    run_judge(
+        log,
+        docs,
+        FakeClient(_MIXED_ANSWERS),
+        out,
+        gate=EgressGate(docs, local=False),
+    )
+
+    client = FakeClient(_MIXED_ANSWERS)
+    summary = run_judge(log, docs, client, out, gate=EgressGate(docs, local=True))
+
+    assert sorted(client.asked()) == ["open1", "open2", "secret"]
+    assert summary.unjudgeable == {}
+    rows = read_judged_rows(out)
+    assert len(rows) == 5
+    assert all(row.label is JudgeLabel.HELPFUL for row in rows)
+
+
+def test_a_limited_run_tries_new_pairs_before_rechecking_unjudgeable_ones(
+    log: SQLiteEventLog, docs: SQLiteDocumentStore, tmp_path: Path
+) -> None:
+    seed_pack(log, "old", intent=INTENT_A, item_ids=("gone",))
+    out = tmp_path / "judged.jsonl"
+    run_judge(log, docs, FakeClient({}), out)
+
+    seed_pack(log, "new", intent=INTENT_B, item_ids=("fresh",))
+    seed_doc(docs, "fresh")
+    client = FakeClient({"fresh": "helpful"})
+    run_judge(log, docs, client, out, limit=1)
+
+    assert client.asked() == ["fresh"]  # the one attempt went to new ground
+
+
+# -- failure logs name the cause, never the text ------------------------------------
+
+
+@pytest.mark.usefixtures("world")
+def test_a_failed_call_is_logged_with_its_type_and_never_its_message(
+    log: SQLiteEventLog, docs: SQLiteDocumentStore, tmp_path: Path
+) -> None:
+    flaky = FakeClient(_ANSWERS, fail_on=frozenset({"h2"}))
+
+    with capture_logs() as logs:
+        run_judge(log, docs, flaky, tmp_path / "judged.jsonl")
+
+    failed = [e for e in logs if e["event"] == "pack_judge_llm_call_failed"]
+    assert len(failed) == 1
+    assert failed[0]["error_type"] == "RuntimeError"
+    assert failed[0]["item_id"] == "h2"
+    assert "endpoint refused" not in json.dumps(logs, default=str)
+
+
+def test_a_failed_document_read_is_logged_with_its_type_and_never_its_message(
+    log: SQLiteEventLog, docs: SQLiteDocumentStore, tmp_path: Path
+) -> None:
+    seed_pack(log, "p", intent=INTENT_A, item_ids=("ok", "broken"))
+    seed_doc(docs, "ok")
+    store = _FlakyStore(docs, frozenset({"broken"}))
+
+    import asyncio
+
+    with capture_logs() as logs:
+        summary = asyncio.run(
+            judge_window(
+                load_window(log, since=SINCE),
+                document_store=store,  # type: ignore[arg-type]
+                client=FakeClient({"ok": "helpful"}),
+                gate=LOCAL,
+                model="judge-a",
+                out_path=tmp_path / "judged.jsonl",
+            )
+        )
+
+    assert summary.read_errors == 1
+    failed = [e for e in logs if e["event"] == "pack_judge_document_read_failed"]
+    assert [e["error_type"] for e in failed] == ["RuntimeError"]
+    assert "store unavailable" not in json.dumps(logs, default=str)
+
+
+# -- kappa has its own floor -----------------------------------------------------
+
+
+def _window_of(items: list[ServedItem]) -> PackWindow:
+    return PackWindow(
+        items=tuple(items),
+        packs=1,
+        held_out_packs=0,
+        coverage=ScanCoverage.model_validate({}),
+        since=SINCE,
+    )
+
+
+def _judged(item_id: str, answer: JudgeLabel) -> JudgedRow:
+    return JudgedRow(
+        pack_id="p",
+        item_id=item_id,
+        label=answer,
+        model="m",
+        prompt_version=PROMPT_VERSION,
+        judged_at=datetime.now(tz=UTC),
+        item_tokens=TOKENS,
+    )
+
+
+def test_a_kappa_over_two_committed_items_is_withheld_though_thirty_were_graded() -> (
+    None
+):
+    # 30 agent-graded items clear the overlap floor, but the judge committed on
+    # two of them: it answered ``unsure`` to the other 28.
+    items, rows = [], []
+    for n in range(30):
+        verdict = "helpful" if n % 2 == 0 else "unhelpful"
+        items.append(ServedItem("p", f"i{n}", "intent", TOKENS, verdict))  # type: ignore[arg-type]
+        committed = {0: JudgeLabel.HELPFUL, 1: JudgeLabel.UNHELPFUL}.get(n)
+        rows.append(_judged(f"i{n}", committed or JudgeLabel.UNSURE))
+
+    report = calibrate(_window_of(items), rows)
+
+    assert report.status == "ok"
+    assert report.graded_overlap == 30
+    assert report.kappa_n == 2
+    assert report.kappa is None
+    assert report.kappa_unavailable
+    assert "2" in report.kappa_unavailable
+    assert "30" in report.kappa_unavailable
+    assert report.agreement == pytest.approx(2 / 30)  # the other figures stand
+
+
+@pytest.mark.usefixtures("world")
+def test_kappa_prints_at_exactly_the_floor_and_not_one_below(
+    log: SQLiteEventLog,
+) -> None:
+    window = load_window(log, since=SINCE)
+    rows = _rows_from_answers()  # the hand-computed world: kappa over 7 items
+
+    at_floor = calibrate(window, rows, min_graded=7, min_unhelpful=4)
+    below = calibrate(window, rows, min_graded=8, min_unhelpful=4)
+
+    assert at_floor.kappa == pytest.approx(10 / 24)
+    assert at_floor.kappa_unavailable is None
+    assert below.status == "ok"  # nine graded items clear 8
+    assert below.kappa_n == 7
+    assert below.kappa is None
+    assert below.kappa_unavailable

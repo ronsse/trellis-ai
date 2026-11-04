@@ -11,6 +11,7 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -155,14 +156,38 @@ def test_judge_then_calibrate_without_touching_any_store(
     assert log.count() == before
 
 
-def test_the_model_label_defaults_when_no_route_names_one(
+@pytest.mark.parametrize("fmt", ["text", "json"])
+def test_a_route_with_no_model_needs_a_label_rather_than_a_shared_default(
+    seeded: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fmt: str
+) -> None:
+    # Two unnamed endpoints used to share the label "unknown", so one's rows
+    # were skipped on resume and averaged into the other's calibration.
+    client = _client(monkeypatch, _Client())
+    out = tmp_path / "j.jsonl"
+
+    result = _run("--out", str(out), "--since", "2020-01-01", fmt=fmt)
+
+    assert result.exit_code == EXIT_VALIDATION  # the same under both formats
+    assert "--model-id" in plain(result.output)
+    assert client.calls == 0
+    assert not out.exists()
+
+
+def test_the_label_defaults_to_the_model_the_route_names(
     seeded: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _client(monkeypatch, _Client())
+    registry = _get_registry()
+    monkeypatch.setattr(
+        registry,
+        "llm_route",
+        lambda _c=None: SimpleNamespace(model="route-m", local=True),
+    )
+
     result = _run("--out", str(tmp_path / "j.jsonl"), "--since", "2020-01-01")
 
     assert result.exit_code == EXIT_OK, result.output
-    assert json.loads(result.stdout)["model"] == "unknown"
+    assert json.loads(result.stdout)["model"] == "route-m"
 
 
 @pytest.mark.parametrize("fmt", ["text", "json"])
@@ -171,7 +196,8 @@ def test_a_refused_calibration_exits_the_same_whatever_the_format(
 ) -> None:
     _client(monkeypatch, _Client())
     out = tmp_path / "judged.jsonl"
-    assert _run("--out", str(out), "--since", "2020-01-01").exit_code == EXIT_OK
+    judged = _run("--out", str(out), "--model-id", "m", "--since", "2020-01-01")
+    assert judged.exit_code == EXIT_OK
 
     result = _run("--judged", str(out), "--since", "2020-01-01", fmt=fmt)
 
@@ -192,7 +218,9 @@ def test_a_failing_endpoint_exits_non_zero_whatever_the_format(
     _client(monkeypatch, _Client(fail=True))
     out = tmp_path / f"{fmt}.jsonl"
 
-    result = _run("--out", str(out), "--since", "2020-01-01", fmt=fmt)
+    result = _run(
+        "--out", str(out), "--model-id", "m", "--since", "2020-01-01", fmt=fmt
+    )
 
     assert result.exit_code == EXIT_STORE
     if fmt == "json":
@@ -245,7 +273,9 @@ def test_a_path_that_looks_like_markup_prints_verbatim(
         force_colour(monkeypatch, judge_cli)
     out = tmp_path / "out[dev].jsonl"
 
-    result = _run("--out", str(out), "--since", "2020-01-01", fmt="text")
+    result = _run(
+        "--out", str(out), "--model-id", "m", "--since", "2020-01-01", fmt="text"
+    )
 
     assert result.exit_code == EXIT_OK, result.output
     assert str(out) in plain(result.output)

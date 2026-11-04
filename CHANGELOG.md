@@ -15,8 +15,14 @@ All notable changes to Trellis will be documented in this file.
   The calibrate phase (`--judged`) joins those rows to `FEEDBACK_RECORDED` through the typed
   pack-row reader and reports the confusion matrix, overall and unhelpful-side agreement,
   Cohen's kappa, coverage and the judge-implied useful-token fraction beside the agent-graded
-  lower bound, refusing below 30 graded items. Nothing it writes feeds serving, tags, demotion
-  or promotion. See `docs/agent-guide/operations.md`, "`trellis analyze pack-judge`".
+  lower bound, refusing below 30 graded items, and printing no kappa when fewer than 30 of
+  them are items the judge committed on (`unsure` is left out of kappa). Nothing it writes
+  feeds serving, tags, demotion or promotion. On a route not declared `local`, a pack that
+  served a withheld or unreadable document is withheld whole (every item
+  `unjudgeable: pack_egress_withheld`, none sent), since the intent sent beside any item
+  would name it. An `unjudgeable` pair is asked about again on the next run, and a route that
+  names no model needs `--model-id` (exit `2`). See `docs/agent-guide/operations.md`,
+  "`trellis analyze pack-judge`".
 
 - **`get_lessons` can emit a gradable `PACK_ASSEMBLED`, behind `TRELLIS_GET_LESSONS_PACK_EVENT`
   (default off).** With the knob on, a call that serves lessons writes one event
