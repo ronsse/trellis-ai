@@ -108,14 +108,28 @@ The join itself is delegated to
 :func:`trellis.learning.pack_observations.join_pack_feedback` rather than
 re-implemented, so this analyzer and the learning loop cannot drift on
 what "joins to a pack" means.
+
+**Two additive blocks, report-only.** :attr:`PackValueReport.implicit` reads
+two signals that cost the agent nothing and that nothing read before: a
+``PACK_ITEMS_FETCHED`` event (the agent opened an item's full body) and a
+second ``PACK_ASSEMBLED`` in the same ``session_id`` soon after the first.
+:attr:`PackValueReport.by_tier` splits the headline's own population by how
+each item was served, body or pointer. Neither feeds anything: they sit
+beside ``useful_token_fraction``, which stays the pessimistic explicit-only
+metric, and no caller in ``learning/``, ``classify/`` or the promotion and
+demotion paths may read them (``tests/unit/retrieve/test_pack_value_implicit.py``
+pins it). A missing fetch is an absence of evidence, and "demotion requires
+evidence of unhelpfulness, never absence of evidence of helpfulness".
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Mapping
-from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from itertools import pairwise
+from typing import TYPE_CHECKING, Any, get_args
 
 import structlog
 from pydantic import Field
@@ -131,11 +145,14 @@ from trellis.feedback.attribution import (
     stray_shape,
 )
 from trellis.feedback.pack_rows import (
+    ServedRow,
     has_served_rows,
     iter_feedback_rows,
     served_rows_from_payload,
 )
-from trellis.learning.pack_observations import join_pack_feedback_with_coverage
+from trellis.learning.pack_observations import join_pack_events_with_coverage
+from trellis.retrieve.disclosure import POINTER_SELECTION_REASON, DisclosureMode
+from trellis.retrieve.lessons_pack import GET_LESSONS_SURFACE
 from trellis.retrieve.strategies import (
     GRAPH_SELECTION_CALLER_SEEDED,
     GRAPH_SELECTION_RECENCY_WINDOW,
@@ -151,9 +168,10 @@ from trellis.stores.base.event_log import (
     resolve_scan_window,
     scan_events,
 )
+from trellis.stores.base.trace import as_utc
 
 if TYPE_CHECKING:
-    from trellis.stores.base.event_log import EventLog
+    from trellis.stores.base.event_log import Event, EventLog
 
 logger = structlog.get_logger(__name__)
 
@@ -170,6 +188,34 @@ SUPPRESSED_THIN_SAMPLE = "below_min_attributed_packs"
 #: nothing in the cell got a verdict at all, so ``helpful / judged`` is
 #: undefined rather than zero.
 SUPPRESSED_NO_JUDGED_TOKENS = "no_judged_tokens"
+
+#: Reason slug for an ``implicit`` ratio computed over fewer than
+#: :data:`MIN_ATTRIBUTED_PACKS` packs. Named for what it counts: the
+#: ``implicit`` population is every attributable pack, graded or not.
+SUPPRESSED_THIN_PACK_SAMPLE = "below_min_packs"
+
+#: Fetched-and-graded servings below which ``P(helpful | fetched)`` and the
+#: base rate it is read against are withheld. Thirty is the usual floor under
+#: which a proportion is a few anecdotes; the counts are reported either way.
+MIN_FETCH_OVERLAP = 30
+
+#: Reason slug for an agreement pair withheld under :data:`MIN_FETCH_OVERLAP`.
+SUPPRESSED_THIN_FETCH_OVERLAP = "below_min_fetch_overlap"
+
+#: A pack counts as re-retrieved when another pack in the same ``session_id``
+#: was assembled within this many minutes after it (inclusive). Stated in the
+#: report as ``re_retrieval_window_minutes`` so the figure is never read
+#: without it. Chosen, not measured: a long session runs several tasks, and a
+#: wider window folds a new task's first retrieval in as a failure of the last.
+RE_RETRIEVAL_WINDOW_MINUTES = 30
+
+#: ``by_tier`` buckets. A served row records its tier in exactly three ways
+#: (see :func:`served_tier`); a row none of them covers is ``unknown``, and
+#: the tier is never inferred from rank.
+TIER_BODY = "body"
+TIER_POINTER = "pointer"
+TIER_UNKNOWN = "unknown"
+_TIERS = (TIER_BODY, TIER_POINTER, TIER_UNKNOWN)
 
 _DEFAULT_EVENT_LIMIT = DEFAULT_SCAN_LIMIT
 
@@ -295,6 +341,137 @@ class ValueBreakdown(TrellisModel):
     judged_token_coverage: float | None = None
     suppressed: bool = False
     suppressed_reason: str = ""
+
+
+class TierBreakdown(TrellisModel):
+    """The headline's own population, split by how an item was served.
+
+    Same population, same token charge and same verdict rule as
+    ``useful_token_fraction``, so the three tiers sum to the headline's
+    ``injected_tokens`` / ``helpful_tokens`` / ``unhelpful_tokens`` /
+    ``unjudged_tokens`` (pinned by test). A pointer still counts as a served
+    token, at the cost the pack charged for it; this split exists to show how
+    much of the unjudged tail is pointers.
+
+    ``unknown`` is a row whose tier the payload does not record (see
+    :func:`served_tier`). It is never filled in from rank.
+
+    Fractions are refused, as the headline's are, below
+    :data:`MIN_ATTRIBUTED_PACKS`; the counts are not.
+    """
+
+    tier: str
+    #: ``(pack, item)`` servings in attributed packs.
+    items: int = 0
+    helpful_items: int = 0
+    unhelpful_items: int = 0
+    unjudged_items: int = 0
+    injected_tokens: int = 0
+    helpful_tokens: int = 0
+    unhelpful_tokens: int = 0
+    unjudged_tokens: int = 0
+    #: ``unjudged_tokens / injected_tokens`` within this tier.
+    unjudged_token_fraction: float | None = None
+    #: This tier's ``unjudged_tokens`` over the report's: which tier the
+    #: unjudged tail is made of.
+    share_of_unjudged_tokens: float | None = None
+    suppressed: bool = False
+    suppressed_reason: str = ""
+
+
+class ImplicitSignals(TrellisModel):
+    """What the agent did that it was never asked to grade, beside the grades.
+
+    **Report-only, and never merged into** ``useful_token_fraction``. A fetch
+    is a positive hint about one item and a re-retrieval is a weak hint about
+    one pack. Neither is a verdict, and *no fetch* says nothing: an item
+    nobody opened is not an unhelpful one, so nothing here may be read as
+    demotion evidence (CLAUDE.md: "Demotion requires evidence of
+    unhelpfulness, never absence of evidence of helpfulness").
+
+    **Population.** Every attributable pack in the window, graded or not,
+    because the point is the tail the explicit metric cannot see. That is
+    wider than the headline's (attributed packs only), so :attr:`packs`,
+    :attr:`injected_tokens` and :attr:`unjudged_tokens` here are this block's
+    own and are not the report's fields of the same name.
+
+    **Fetch.** ``PACK_ITEMS_FETCHED.served_item_ids`` joined to a served row
+    by ``(pack_id, item_id)``; the ids the call asked for but did not get
+    (omitted, not found) are not fetches. A ``(pack, item)`` fetched twice
+    counts once. One that cannot join is counted in :attr:`fetch_unjoined`,
+    by reason, and never dropped. A fetch naming a held-out pack cannot be
+    told from one naming a pack outside the window (the join drops withheld
+    packs before this module sees them), so it lands in
+    ``fetch_unjoined_pack_not_in_window``; nothing here is split by arm.
+
+    **Agreement.** For servings both fetched and graded, ``P(helpful |
+    fetched)`` beside the base ``P(helpful)`` over every graded serving,
+    each with its counts. The base includes the fetched servings. Both
+    ratios are withheld together below :data:`MIN_FETCH_OVERLAP`.
+
+    **Re-retrieval.** Pack-level and weak: the same ``session_id`` assembled
+    another pack within :data:`RE_RETRIEVAL_WINDOW_MINUTES`. It may mean the
+    first pack was not enough or that the task changed. Packs with no
+    ``session_id`` cannot be tested and are counted apart.
+    """
+
+    # -- Population ----------------------------------------------------
+    packs: int = 0
+    injected_tokens: int = 0
+    #: Tokens on servings nobody graded, over :attr:`packs`.
+    unjudged_tokens: int = 0
+
+    # -- Fetch -----------------------------------------------------------
+    fetch_events: int = 0
+    fetched_items: int = 0
+    #: Tokens the packs charged for the fetched servings (the same unit as
+    #: :attr:`injected_tokens`), not the size of the bodies fetched.
+    fetched_tokens: int = 0
+    #: ``fetched_tokens / injected_tokens``; ``None`` when refused.
+    fetched_token_fraction: float | None = None
+    #: Fetched tokens nobody graded: how far the signal reaches into the
+    #: unjudged tail.
+    fetched_unjudged_tokens: int = 0
+    #: ``fetched_unjudged_tokens / unjudged_tokens``; ``None`` when refused.
+    fetched_unjudged_token_share: float | None = None
+    #: Distinct ``(pack, item)`` fetches that joined to no served row. The sum
+    #: of the three reasons below.
+    fetch_unjoined: int = 0
+    fetch_unjoined_no_pack: int = 0
+    fetch_unjoined_pack_not_in_window: int = 0
+    fetch_unjoined_item_not_served: int = 0
+    fetch_suppressed: bool = False
+    fetch_suppressed_reason: str = ""
+    #: Coverage of the ``PACK_ITEMS_FETCHED`` read. Its own field: merging it
+    #: into the report's ``scan`` would change a field that must not move.
+    fetch_scan: ScanCoverage = Field(default_factory=ScanCoverage)
+
+    # -- Agreement on the overlap ----------------------------------------
+    #: Servings with a helpful or unhelpful verdict, over :attr:`packs`.
+    graded_servings: int = 0
+    graded_helpful_servings: int = 0
+    #: Servings both fetched and graded: the overlap the floor applies to.
+    fetched_graded_servings: int = 0
+    fetched_graded_helpful_servings: int = 0
+    min_fetch_overlap: int = MIN_FETCH_OVERLAP
+    #: ``graded_helpful_servings / graded_servings``; ``None`` when withheld.
+    p_helpful: float | None = None
+    #: ``fetched_graded_helpful_servings / fetched_graded_servings``.
+    p_helpful_given_fetched: float | None = None
+    agreement_suppressed: bool = False
+    agreement_suppressed_reason: str = ""
+
+    # -- Re-retrieval ----------------------------------------------------
+    re_retrieval_window_minutes: int = RE_RETRIEVAL_WINDOW_MINUTES
+    #: Packs followed by another pack in the same session within the window.
+    #: A weak signal, pack-level only.
+    re_retrieved_packs: int = 0
+    packs_with_session: int = 0
+    packs_without_session: int = 0
+
+    #: Caveats that travel with the block. Separate from the report's
+    #: ``notes``, which must not change.
+    notes: list[str] = Field(default_factory=list)
 
 
 class PackValueReport(TrellisModel):
@@ -459,6 +636,13 @@ class PackValueReport(TrellisModel):
     #: Machine-readable caveats a renderer must not drop.
     notes: list[str] = Field(default_factory=list)
 
+    #: Fetch and re-retrieval signals, beside the explicit grades and never
+    #: merged into them. Report-only: see :class:`ImplicitSignals`.
+    implicit: ImplicitSignals = Field(default_factory=ImplicitSignals)
+    #: The headline's population split by ``body`` / ``pointer`` /
+    #: ``unknown``, in that order. Empty only on a report built by hand.
+    by_tier: list[TierBreakdown] = Field(default_factory=list)
+
     #: What produced the token counts, for auditability — the same ~4
     #: chars/token heuristic ``trellis analyze cost`` prices.
     estimator: str = "estimate_4_chars_per_token"
@@ -531,11 +715,17 @@ def summarize_pack_value(
         mistake "refused" for "measured zero".
     """
     since, until = resolve_scan_window(days, since=since, until=until)
-    feedback_events, pack_payloads, pack_event_count, join_coverage = (
-        join_pack_feedback_with_coverage(
-            event_log, since=since, limit=limit, until=until
-        )
+    # The event-keeping form of the join ``join_pack_feedback_with_coverage``
+    # projects, so the pack payloads below are exactly what that function
+    # returns and the re-retrieval signal can read ``occurred_at``. One scan
+    # either way: the held-out packs, and the feedback naming them, are
+    # dropped inside it.
+    feedback_events, pack_events, pack_event_count, join_coverage = (
+        join_pack_events_with_coverage(event_log, since=since, limit=limit, until=until)
     )
+    pack_payloads = {
+        pack_id: event.payload or {} for pack_id, event in pack_events.items()
+    }
 
     # A pack with no per-item rows (a sectioned pack from before #958, or a
     # withheld one) is separated before any ratio touches it; say how many.
@@ -572,6 +762,7 @@ def summarize_pack_value(
     by_item_type = tally["by_item_type"]
     by_namespace = tally["by_item_namespace"]
     by_graph_selection = tally["by_graph_selection"]
+    by_tier = tally["by_tier"]
     by_family = tally["by_family"]
     distinct_helpful = tally["distinct_helpful"]
     cited_not_served = tally["cited_not_served"]
@@ -587,6 +778,18 @@ def summarize_pack_value(
         judged_reason = SUPPRESSED_THIN_SAMPLE
     elif not judged:
         judged_reason = SUPPRESSED_NO_JUDGED_TOKENS
+
+    implicit = _implicit_signals(
+        event_log,
+        pack_events=pack_events,
+        pack_payloads=pack_payloads,
+        flat_packs=flat_packs,
+        helpful_by_pack=helpful_by_pack,
+        unhelpful_by_pack=unhelpful_by_pack,
+        since=since,
+        until=until,
+        limit=limit,
+    )
 
     resolved_model, price, price_source = resolve_pricing(model, price_per_mtok)
     injected_dollars = estimate_dollars(injected, price)
@@ -663,6 +866,8 @@ def summarize_pack_value(
         by_intent_family=_sorted_cells(by_family),
         by_graph_selection=by_graph_selection,
         attributed_servings=sum(cell.servings for cell in by_graph_selection),
+        implicit=implicit,
+        by_tier=_finalize_tiers(by_tier, thin=thin, unjudged=unjudged),
         notes=_build_notes(
             attributed_packs=attributed_packs,
             sectioned=sectioned,
@@ -855,6 +1060,7 @@ def _accumulate(
     totals = {"injected": 0, "helpful": 0, "unhelpful": 0}
     strategy_axis, type_axis, namespace_axis = _Axis(), _Axis(), _Axis()
     graph_axis = _GraphSelectionAxis()
+    tier_cells = {tier: TierBreakdown(tier=tier) for tier in _TIERS}
     by_family: dict[str, ValueBreakdown] = {}
     distinct_helpful: set[str] = set()
     cited_not_served = 0
@@ -874,24 +1080,8 @@ def _accumulate(
         # on this deployment (219 of 219 flat packs, measured 2026-09-16)
         # — this is a guard against drift, not a live fix.
         served = served_item_ids(flat_packs[pack_id])
-        charged = _charged_tokens(flat_packs[pack_id])
-        # ``flat_packs`` is every attributable pack (sectioned ones included,
-        # since their rows carry the same ``(pack, item)`` serving identity);
-        # withheld packs were dropped by the join that built it, so no holdout
-        # policy here.
-        for served_row in served_rows_from_payload(
-            pack_id,
-            flat_packs[pack_id],
-            include_sectioned=True,
-            include_holdout=True,
-        ):
+        for served_row, item_id, tokens in _iter_servings(pack_id, flat_packs[pack_id]):
             raw = served_row.row
-            item_id = served_row.item_id
-            if not item_id:
-                continue
-            raw_tokens = served_row.estimated_tokens
-            fallback = int(raw_tokens) if raw_tokens is not None else 0
-            tokens = charged.get(item_id, fallback)
 
             # An item cannot be both; helpful wins, so a contradictory
             # pair can never inflate the denominator's judged share.
@@ -915,6 +1105,9 @@ def _accumulate(
                 verdict,
             )
             graph_axis.charge(pack_id, item_id, raw, verdict)
+            _charge_tier(
+                tier_cells[served_tier(raw, flat_packs[pack_id])], tokens, verdict
+            )
 
             totals["injected"] += tokens
             if verdict == "helpful":
@@ -935,11 +1128,321 @@ def _accumulate(
         "by_item_type": type_axis.finalize(),
         "by_item_namespace": namespace_axis.finalize(),
         "by_graph_selection": graph_axis.finalize(),
+        "by_tier": [tier_cells[tier] for tier in _TIERS],
         "by_family": by_family,
         "distinct_helpful": distinct_helpful,
         "cited_not_served": cited_not_served,
         "cited_not_served_shapes": stray_shapes,
     }
+
+
+def _iter_servings(
+    pack_id: str, payload: Mapping[str, Any]
+) -> Iterator[tuple[ServedRow, str, int]]:
+    """``(row, item_id, tokens)`` for every nameable serving in one pack.
+
+    The one place a serving's cost is resolved: what the budget walk charged
+    where it recorded a charge, else the row's ``estimated_tokens``. A row
+    naming no usable ``item_id`` is skipped.
+
+    ``payload`` is a pack the join already admitted (every attributable pack,
+    sectioned ones included, since their rows carry the same ``(pack, item)``
+    identity), and the join drops withheld packs, so no holdout policy here.
+    """
+    charged = _charged_tokens(payload)
+    for served_row in served_rows_from_payload(
+        pack_id, payload, include_sectioned=True, include_holdout=True
+    ):
+        item_id = served_row.item_id
+        if not item_id:
+            continue
+        raw_tokens = served_row.estimated_tokens
+        fallback = int(raw_tokens) if raw_tokens is not None else 0
+        yield served_row, item_id, charged.get(item_id, fallback)
+
+
+def served_tier(row: Mapping[str, Any], payload: Mapping[str, Any]) -> str:
+    """How one ``injected_items[]`` row was served: body, pointer or unknown.
+
+    Read off what the payload records, never inferred from rank:
+
+    1. The row's ``selection_reason`` is
+       :data:`~trellis.retrieve.disclosure.POINTER_SELECTION_REASON`:
+       graduated disclosure demoted this item to a pointer. Stamped per row.
+    2. The pack's ``index_mode`` is ``True``: every row is an index line.
+    3. The pack recorded that graduation ran (``disclosure.mode`` is one of
+       its modes) and that it was no index pack (``index_mode`` is ``False``),
+       and the row is not a pointer: the item kept its excerpt. That covers
+       an item inside ``body_items`` and one too short to be worth a pointer,
+       which ``apply_disclosure`` leaves whole.
+
+    Anything else is ``unknown``: a pack from before ``disclosure`` was
+    recorded, or a sectioned pack, whose payload carries neither
+    ``index_mode`` nor ``disclosure``, so a row without the pointer stamp
+    cannot be called a body.
+    """
+    if row.get("selection_reason") == POINTER_SELECTION_REASON:
+        return TIER_POINTER
+    index_mode = payload.get("index_mode")
+    if index_mode is True:
+        return TIER_POINTER
+    disclosure = payload.get("disclosure")
+    mode = disclosure.get("mode") if isinstance(disclosure, Mapping) else None
+    if index_mode is False and mode in get_args(DisclosureMode):
+        return TIER_BODY
+    return TIER_UNKNOWN
+
+
+def _charge_tier(cell: TierBreakdown, tokens: int, verdict: str) -> None:
+    """Add one serving to its tier, by the rule ``_charge_cells`` applies."""
+    cell.items += 1
+    cell.injected_tokens += tokens
+    if verdict == "helpful":
+        cell.helpful_items += 1
+        cell.helpful_tokens += tokens
+    elif verdict == "unhelpful":
+        cell.unhelpful_items += 1
+        cell.unhelpful_tokens += tokens
+    else:
+        cell.unjudged_items += 1
+        cell.unjudged_tokens += tokens
+
+
+def _finalize_tiers(
+    cells: list[TierBreakdown], *, thin: bool, unjudged: int
+) -> list[TierBreakdown]:
+    """Apply the thin-sample refusal to the tier fractions."""
+    for cell in cells:
+        if thin:
+            cell.suppressed = True
+            cell.suppressed_reason = SUPPRESSED_THIN_SAMPLE
+            continue
+        cell.unjudged_token_fraction = _fraction(
+            cell.unjudged_tokens, cell.injected_tokens
+        )
+        cell.share_of_unjudged_tokens = _fraction(cell.unjudged_tokens, unjudged)
+    return cells
+
+
+@dataclass(frozen=True, slots=True)
+class _Fetch:
+    """One ``PACK_ITEMS_FETCHED`` event: the pack it names and what it served."""
+
+    pack_id: str | None
+    served_item_ids: tuple[str, ...]
+
+
+def _fetch_row(event: Event) -> _Fetch:
+    """Read one fetch event; never raises on a payload shape.
+
+    ``served_item_ids`` only: ``requested_item_ids`` also holds what was
+    omitted for budget or not found, and neither was fetched. The pack is the
+    payload's ``pack_id``, else the event's ``entity_id`` (the emitter writes
+    both).
+    """
+    payload = event.payload or {}
+    raw_pack = payload.get("pack_id")
+    pack_id = raw_pack.strip() if isinstance(raw_pack, str) else ""
+    ids = payload.get("served_item_ids")
+    served = (
+        tuple(i.strip() for i in ids if isinstance(i, str) and i.strip())
+        if isinstance(ids, list)
+        else ()
+    )
+    return _Fetch(pack_id=pack_id or event.entity_id or None, served_item_ids=served)
+
+
+def _count_re_retrieved(pack_events: Iterable[Event]) -> tuple[int, int, int]:
+    """``(re_retrieved, with_session, without_session)`` over served packs.
+
+    A pack is re-retrieved when the next pack in its ``session_id``, by
+    ``occurred_at``, follows within :data:`RE_RETRIEVAL_WINDOW_MINUTES`
+    (inclusive). A pack with no usable ``session_id`` cannot be tested.
+    ``get_lessons`` rows are not context retrievals and are left out, as
+    neither a pack nor a "next" pack. A stored stamp can be naive or aware,
+    so each is read as UTC before it is sorted or subtracted.
+    """
+    window = timedelta(minutes=RE_RETRIEVAL_WINDOW_MINUTES)
+    by_session: dict[str, list[tuple[datetime, str]]] = defaultdict(list)
+    without = 0
+    for event in pack_events:
+        payload = event.payload or {}
+        if payload.get("surface") == GET_LESSONS_SURFACE:
+            continue
+        session = payload.get("session_id")
+        if isinstance(session, str) and session.strip():
+            by_session[session.strip()].append(
+                (as_utc(event.occurred_at), event.event_id)
+            )
+        else:
+            without += 1
+    re_retrieved = 0
+    for stamps in by_session.values():
+        stamps.sort()
+        re_retrieved += sum(1 for (a, _), (b, _) in pairwise(stamps) if b - a <= window)
+    return re_retrieved, sum(len(v) for v in by_session.values()), without
+
+
+def _implicit_signals(
+    event_log: EventLog,
+    *,
+    pack_events: Mapping[str, Event],
+    pack_payloads: Mapping[str, Mapping[str, Any]],
+    flat_packs: Mapping[str, Mapping[str, Any]],
+    helpful_by_pack: Mapping[str, set[str]],
+    unhelpful_by_pack: Mapping[str, set[str]],
+    since: datetime,
+    until: datetime | None,
+    limit: int,
+) -> ImplicitSignals:
+    """Fetch, agreement and re-retrieval over the window's served packs.
+
+    Every ``PACK_ASSEMBLED`` read here came through the join that dropped
+    held-out packs, so the held-out arm is not in any count. Nothing reads a
+    session outcome.
+    """
+    servings: dict[tuple[str, str], tuple[int, str]] = {}
+    for pack_id, payload in flat_packs.items():
+        helpful = helpful_by_pack.get(pack_id, set())
+        unhelpful = unhelpful_by_pack.get(pack_id, set())
+        for _row, item_id, tokens in _iter_servings(pack_id, payload):
+            if item_id in helpful:
+                verdict = "helpful"
+            elif item_id in unhelpful:
+                verdict = "unhelpful"
+            else:
+                verdict = "unjudged"
+            servings.setdefault((pack_id, item_id), (tokens, verdict))
+
+    injected = sum(tokens for tokens, _ in servings.values())
+    unjudged = sum(t for t, verdict in servings.values() if verdict == "unjudged")
+    graded = [key for key, (_, verdict) in servings.items() if verdict != "unjudged"]
+    graded_helpful = sum(1 for key in graded if servings[key][1] == "helpful")
+
+    fetch_events = 0
+    joined: set[tuple[str, str]] = set()
+    unjoined: dict[str, set[tuple[str, str]]] = {
+        "no_pack": set(),
+        "pack_not_in_window": set(),
+        "item_not_served": set(),
+    }
+    fetch_scan = ScanCoverage()
+    try:
+        scan = scan_events(
+            event_log,
+            event_type=EventType.PACK_ITEMS_FETCHED,
+            since=since,
+            until=until,
+            limit=limit,
+        )
+        fetch_scan = scan.coverage
+        for event in scan.events:
+            fetch_events += 1
+            fetch = _fetch_row(event)
+            for item_id in fetch.served_item_ids:
+                if fetch.pack_id is None:
+                    unjoined["no_pack"].add(("", item_id))
+                elif fetch.pack_id not in pack_payloads:
+                    unjoined["pack_not_in_window"].add((fetch.pack_id, item_id))
+                elif (fetch.pack_id, item_id) not in servings:
+                    unjoined["item_not_served"].add((fetch.pack_id, item_id))
+                else:
+                    joined.add((fetch.pack_id, item_id))
+    except Exception:
+        # GRACEFUL-DEGRADATION: the fetch half is an additive hint beside a
+        # report that stands without it; a read failure degrades to no fetch
+        # signal, not to no report. Logged, and the zeros are not a finding.
+        logger.exception("fetch_signal_read_failed")
+
+    fetched_tokens = sum(servings[key][0] for key in joined)
+    fetched_unjudged = sum(
+        servings[key][0] for key in joined if servings[key][1] == "unjudged"
+    )
+    overlap = [key for key in joined if servings[key][1] != "unjudged"]
+    overlap_helpful = sum(1 for key in overlap if servings[key][1] == "helpful")
+
+    thin = len(flat_packs) < MIN_ATTRIBUTED_PACKS
+    thin_overlap = len(overlap) < MIN_FETCH_OVERLAP
+    re_retrieved, with_session, without_session = _count_re_retrieved(
+        pack_events.values()
+    )
+    return ImplicitSignals(
+        packs=len(flat_packs),
+        injected_tokens=injected,
+        unjudged_tokens=unjudged,
+        fetch_events=fetch_events,
+        fetched_items=len(joined),
+        fetched_tokens=fetched_tokens,
+        fetched_token_fraction=None if thin else _fraction(fetched_tokens, injected),
+        fetched_unjudged_tokens=fetched_unjudged,
+        fetched_unjudged_token_share=(
+            None if thin else _fraction(fetched_unjudged, unjudged)
+        ),
+        fetch_unjoined=sum(len(v) for v in unjoined.values()),
+        fetch_unjoined_no_pack=len(unjoined["no_pack"]),
+        fetch_unjoined_pack_not_in_window=len(unjoined["pack_not_in_window"]),
+        fetch_unjoined_item_not_served=len(unjoined["item_not_served"]),
+        fetch_suppressed=thin,
+        fetch_suppressed_reason=SUPPRESSED_THIN_PACK_SAMPLE if thin else "",
+        fetch_scan=fetch_scan,
+        graded_servings=len(graded),
+        graded_helpful_servings=graded_helpful,
+        fetched_graded_servings=len(overlap),
+        fetched_graded_helpful_servings=overlap_helpful,
+        p_helpful=None if thin_overlap else _fraction(graded_helpful, len(graded)),
+        p_helpful_given_fetched=(
+            None if thin_overlap else _fraction(overlap_helpful, len(overlap))
+        ),
+        agreement_suppressed=thin_overlap,
+        agreement_suppressed_reason=(
+            SUPPRESSED_THIN_FETCH_OVERLAP if thin_overlap else ""
+        ),
+        re_retrieved_packs=re_retrieved,
+        packs_with_session=with_session,
+        packs_without_session=without_session,
+        notes=_implicit_notes(
+            fetch_scan=fetch_scan,
+            overlap=len(overlap),
+            without_session=without_session,
+        ),
+    )
+
+
+def _implicit_notes(
+    *, fetch_scan: ScanCoverage, overlap: int, without_session: int
+) -> list[str]:
+    """Caveats for the ``implicit`` block, in both output formats."""
+    notes = [
+        (
+            "implicit signals are report-only and are not merged into "
+            "useful_token_fraction. A fetch is a positive hint about one item; "
+            "the absence of a fetch is no evidence it was unhelpful, so none of "
+            "this is demotion evidence."
+        ),
+        (
+            "fetched_token_fraction and fetched_unjudged_token_share count over "
+            "every flat pack in the window, graded or not, so they are not "
+            "shares of the headline's attributed-pack tokens."
+        ),
+        (
+            "re_retrieved_packs is a weak, pack-level signal: another pack in "
+            f"the same session within {RE_RETRIEVAL_WINDOW_MINUTES} minutes may "
+            "mean the first was not enough or that the task changed."
+        ),
+    ]
+    if fetch_scan.truncated and fetch_scan.note:
+        notes.insert(0, f"fetch events: {fetch_scan.note}")
+    if overlap < MIN_FETCH_OVERLAP:
+        notes.append(
+            f"Agreement withheld: {overlap} fetched-and-graded serving(s) is "
+            f"below the {MIN_FETCH_OVERLAP}-serving floor."
+        )
+    if without_session:
+        notes.append(
+            f"{without_session} pack(s) carry no session_id and cannot be "
+            "tested for re-retrieval."
+        )
+    return notes
 
 
 def _charged_tokens(payload: Mapping[str, Any]) -> dict[str, int]:
@@ -1118,14 +1621,24 @@ __all__ = [
     "GRAPH_SELECTION_NOT_GRAPH",
     "GRAPH_SELECTION_UNSTAMPED",
     "MIN_ATTRIBUTED_PACKS",
+    "MIN_FETCH_OVERLAP",
     "NO_NAMESPACE",
+    "RE_RETRIEVAL_WINDOW_MINUTES",
+    "TIER_BODY",
+    "TIER_POINTER",
+    "TIER_UNKNOWN",
     "collect_pack_verdicts",
     "SUPPRESSED_NO_JUDGED_TOKENS",
+    "SUPPRESSED_THIN_FETCH_OVERLAP",
+    "SUPPRESSED_THIN_PACK_SAMPLE",
     "SUPPRESSED_THIN_SAMPLE",
     "GraphSelectionBreakdown",
+    "ImplicitSignals",
     "PackValueReport",
+    "TierBreakdown",
     "ValueBreakdown",
     "graph_selection_bucket",
     "item_namespace",
+    "served_tier",
     "summarize_pack_value",
 ]
