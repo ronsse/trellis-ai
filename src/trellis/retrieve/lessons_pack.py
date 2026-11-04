@@ -9,14 +9,16 @@ The event is written only when ``TRELLIS_GET_LESSONS_PACK_EVENT`` is on
 Off, ``get_lessons`` replies exactly as it did before and writes nothing, so
 a reader that counts retrievals from ``PACK_ASSEMBLED`` sees no new stream.
 
-**Holdout exemption.** ``get_lessons`` is never drawn for the pack holdout.
-The row says so rather than leaving it to absence: ``holdout`` is ``False``
-(:func:`trellis.core.pack_holdout.is_holdout` needs a literal ``True``, so
-``drop_holdout`` keeps the row and the feedback naming it) and
-``holdout_rate`` is ``0.0``, which makes
-:func:`trellis.core.variants.active_variants` stamp ``variants == {}``: this
+**Holdout exemption.** ``get_lessons`` is never drawn for the pack holdout,
+and the row carries no ``holdout`` or ``holdout_rate`` key, so the holdout
+analysis reads it as it reads a row written before the experiment: never a
+second rate in the window, never a unit. ``is_holdout`` needs a literal
+``True``, so ``drop_holdout`` keeps the row and the feedback naming it, and
+:func:`trellis.core.variants.active_variants` stamps ``variants == {}``: this
 pack is under no experiment. Nothing here calls ``holdout_draw`` or
-``is_held_out``, and the reply is always the full list.
+``is_held_out``, and the reply is always the full list. The knob also reads
+as off while a holdout rate is set, so no lessons row is written inside an
+experiment's window at all.
 """
 
 from __future__ import annotations
@@ -26,7 +28,6 @@ from typing import Any
 import structlog
 
 from trellis.core.ids import generate_ulid
-from trellis.core.pack_holdout import HOLDOUT_KEY
 from trellis.core.variants import VARIANTS_KEY, active_variants
 from trellis.retrieve.token_tracker import estimate_tokens
 from trellis.stores.base.event_log import EventLog, EventType
@@ -89,9 +90,7 @@ def lessons_pack_payload(
         "injected_items": rows,
         "budget_max_items": len(rows),
         "budget_max_tokens": max_tokens,
-        # Never drawn: see the module docstring.
-        HOLDOUT_KEY: False,
-        "holdout_rate": 0.0,
+        # No holdout keys: see the module docstring.
         VARIANTS_KEY: active_variants(holdout_rate=0.0, held_out=False),
     }
 

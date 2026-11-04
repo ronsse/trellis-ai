@@ -389,21 +389,40 @@ def _get_lessons_pack_event_enabled(settings: Mapping[str, Any] | None = None) -
     Same shape as :func:`_graph_recency_fallback_enabled`: unset is **off**, a
     value in neither spelling set warns and reads as off whatever the stored
     setting says, and a non-bool stored value is ignored.
+
+    While a pack holdout runs (``TRELLIS_PACK_HOLDOUT_RATE`` above zero) the
+    knob reads as off and warns: a new ``PACK_ASSEMBLED`` stream mid-window
+    would change the population the experiment counts.
     """
     raw = os.environ.get(GET_LESSONS_PACK_EVENT_ENV, "").strip().lower()
     if not raw:
         value = (settings or {}).get(GET_LESSONS_PACK_EVENT_SETTING)
-        return value if isinstance(value, bool) else False
-    if raw in _TRUTHY:
-        return True
-    if raw not in _FALSEY:
+        enabled = value if isinstance(value, bool) else False
+    elif raw in _TRUTHY:
+        enabled = True
+    else:
+        if raw not in _FALSEY:
+            logger.warning(
+                "get_lessons_pack_event_env_unrecognised",
+                var=GET_LESSONS_PACK_EVENT_ENV,
+                value=raw,
+                effective=False,
+            )
+        enabled = False
+    if not enabled:
+        return False
+    rate = WriteBehaviourConfig.from_env_and_settings(
+        settings=settings
+    ).pack_holdout_rate
+    if rate > 0:
         logger.warning(
-            "get_lessons_pack_event_env_unrecognised",
+            "get_lessons_pack_event_suppressed_by_holdout",
             var=GET_LESSONS_PACK_EVENT_ENV,
-            value=raw,
+            holdout_rate=rate,
             effective=False,
         )
-    return False
+        return False
+    return True
 
 
 def describe_axes(

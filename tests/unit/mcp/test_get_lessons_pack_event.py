@@ -5,9 +5,11 @@ from __future__ import annotations
 import pytest
 
 from tests.unit.mcp.conftest import unwrap_tool
+from trellis.analyze.holdout import analyze_holdout
 from trellis.core.pack_holdout import drop_holdout, is_holdout
 from trellis.feedback.attribution import lookup_pack_item_ids
 from trellis.mcp.server import get_lessons as _get_lessons
+from trellis.retrieve.lessons_pack import lessons_pack_payload
 from trellis.retrieve.builder_factory import (
     GET_LESSONS_PACK_EVENT_ENV,
     GET_LESSONS_PACK_EVENT_SETTING,
@@ -17,6 +19,8 @@ from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
 get_lessons = unwrap_tool(_get_lessons)
+
+HOLDOUT_RATE_ENV = "TRELLIS_PACK_HOLDOUT_RATE"
 
 
 def _seed(registry: StoreRegistry, *names: str) -> None:
@@ -39,6 +43,7 @@ def _packs(registry: StoreRegistry) -> list:
 @pytest.fixture(autouse=True)
 def _knob_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(GET_LESSONS_PACK_EVENT_ENV, raising=False)
+    monkeypatch.delenv(HOLDOUT_RATE_ENV, raising=False)
 
 
 class TestKnobOff:
@@ -115,20 +120,29 @@ class TestKnobOn:
             temp_registry.operational.event_log, event.entity_id
         ) == ["prec-0"]
 
-    def test_the_event_is_exempt_from_the_holdout_draw(
+    def test_a_running_holdout_suppresses_the_event(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed(temp_registry, "First lesson")
+        off_reply = get_lessons()
+        monkeypatch.setenv(GET_LESSONS_PACK_EVENT_ENV, "1")
+        monkeypatch.setenv(HOLDOUT_RATE_ENV, "0.2")
+
+        assert get_lessons() == off_reply
+        assert _packs(temp_registry) == []
+
+    def test_the_row_carries_no_holdout_key(
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _seed(temp_registry, "First lesson")
         monkeypatch.setenv(GET_LESSONS_PACK_EVENT_ENV, "1")
-        # A rate of 1.0 would hold out every built pack. It must not touch this.
-        monkeypatch.setenv("TRELLIS_PACK_HOLDOUT_RATE", "1.0")
 
         reply = get_lessons()
 
         (event,) = _packs(temp_registry)
         assert "First lesson" in reply
-        assert event.payload["holdout"] is False
-        assert event.payload["holdout_rate"] == 0.0
+        assert "holdout" not in event.payload
+        assert "holdout_rate" not in event.payload
         assert is_holdout(event.payload) is False
         kept, _ = drop_holdout([event], [])
         assert kept == [event]
@@ -161,6 +175,39 @@ class TestKnobOn:
         assert get_lessons() == off_reply
 
 
+class TestHoldoutAnalysis:
+    def test_a_lessons_row_never_adds_a_second_rate(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        event_log = temp_registry.operational.event_log
+        for index, held in enumerate((False, True)):
+            event_log.emit(
+                EventType.PACK_ASSEMBLED,
+                source="test",
+                entity_id=f"pack-{index}",
+                payload={
+                    "pack_id": f"pack-{index}",
+                    "holdout": held,
+                    "holdout_rate": 0.1,
+                },
+            )
+        lesson = {"entity_id": "prec-0", "title": "First lesson", "domain": "ops"}
+        event_log.emit(
+            EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id="lessons-pack",
+            payload=lessons_pack_payload(
+                "lessons-pack", [lesson], domain="ops", max_tokens=2000
+            ),
+        )
+
+        report = analyze_holdout(
+            event_log, days=60, permutations=10, bootstraps=10, power_sims=10
+        )
+
+        assert report.rate == pytest.approx(0.1)
+
+
 class TestResolver:
     def test_unset_is_off(self) -> None:
         assert _get_lessons_pack_event_enabled() is False
@@ -179,6 +226,15 @@ class TestResolver:
         )
         monkeypatch.setenv(GET_LESSONS_PACK_EVENT_ENV, "on")
         assert _get_lessons_pack_event_enabled({GET_LESSONS_PACK_EVENT_SETTING: False})
+
+    def test_a_holdout_rate_reads_the_knob_as_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(GET_LESSONS_PACK_EVENT_ENV, "1")
+        monkeypatch.setenv(HOLDOUT_RATE_ENV, "0.2")
+        assert not _get_lessons_pack_event_enabled()
+        monkeypatch.setenv(HOLDOUT_RATE_ENV, "0")
+        assert _get_lessons_pack_event_enabled()
 
     def test_an_unrecognised_env_value_ignores_a_stored_true(
         self, monkeypatch: pytest.MonkeyPatch
