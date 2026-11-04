@@ -532,7 +532,7 @@ class TestExecuteMutationErrors:
         the original cause chained via ``from`` and the command_id in
         ``data`` for correlation. The message names the exception by its
         type alone, because its text can be a driver's."""
-        import trellis.mcp.server as server_mod
+        import trellis.mcp.tools.mutation as mutation_tools_mod
 
         class _ExplodingExecutor:
             def execute(self, _command: object) -> None:
@@ -540,7 +540,9 @@ class TestExecuteMutationErrors:
                 raise RuntimeError(msg)
 
         monkeypatch.setattr(
-            server_mod, "build_curate_executor", lambda _r, **_kw: _ExplodingExecutor()
+            mutation_tools_mod,
+            "build_curate_executor",
+            lambda _r, **_kw: _ExplodingExecutor(),
         )
 
         with pytest.raises(McpError) as excinfo:

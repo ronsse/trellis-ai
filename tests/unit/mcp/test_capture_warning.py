@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 import trellis.mcp.server as server_mod
+import trellis.mcp.tools.context as context_tools_mod
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
@@ -156,7 +157,7 @@ class TestCaptureWarningBanner:
             msg = "event log unavailable"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr(server_mod, "check_capture_health", _boom)
+        monkeypatch.setattr(context_tools_mod, "check_capture_health", _boom)
         result = get_context("something entirely obscure")
         assert _BANNER not in result
         assert "No context found" in result

@@ -8,7 +8,6 @@ import contextvars
 import json
 import re
 import time
-from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +16,7 @@ from fastmcp import Client, FastMCP
 from mcp.types import TextContent
 
 import trellis.mcp.server as server_mod
+from tests.mcp_server_modules import server_source
 from tests.unit.mcp.conftest import unwrap_tool
 from tests.unit.mcp.test_sensitivity_surfaces import as_http, as_stdio
 from tests.unit.retrieve.public_corpus import EMBED_FN_PATH, QUERY, build_world
@@ -32,7 +32,6 @@ if TYPE_CHECKING:
 get_context = unwrap_tool(server_mod.get_context)
 get_items = unwrap_tool(server_mod.get_items)
 search = unwrap_tool(server_mod.search)
-SERVER_SOURCE = Path(server_mod.__file__)
 #: A pack id differs on every call; nothing else in the answer may.
 _ULID = re.compile(r"\b[0-9A-HJKMNP-TV-Z]{26}\b")
 PROBE = "sk-live-PROBE-SECRET-123"
@@ -393,8 +392,8 @@ class TestRealClient:
 
 
 def _read_scoped_tools() -> dict[str, ast.FunctionDef]:
-    """Tools ``server.py`` registers with ``trellis_scope(SCOPE_READ)``."""
-    tree = ast.parse(SERVER_SOURCE.read_text())
+    """Tools the server modules register with ``trellis_scope(SCOPE_READ)``."""
+    tree = ast.parse(server_source())
     found: dict[str, ast.FunctionDef] = {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):

@@ -327,7 +327,7 @@ re-check, never a skip — and the embed is deliberately **not** fail-soft here 
 would reproduce the green-looking no-op the item exists to fix.
 
 ⚠️ **The observation half did not land, and the item's title over-promises.**
-`record_observation` ([`mcp/server.py`](../../src/trellis/mcp/server.py)) still has no embed
+`record_observation` ([`mcp/tools/observation.py`](../../src/trellis/mcp/tools/observation.py)) still has no embed
 call on any path and the worker walks the **trace store only** — verified 2026-08-31. If
 observations matter, that is a separate item; do not read `trace_embed/` as covering them.
 
@@ -540,7 +540,7 @@ replaced both duplicated scans with the shared
 an indexed `resolve_alias(source_system="name", key)` row read first, a bounded scan only
 to bootstrap, and the unambiguous result minted back into `entity_aliases` so the next
 lookup is indexed. Both call sites delegate to it
-(`memory_ingest_hook._graph_alias_resolver`, `mcp/server.py:_build_alias_resolver`), and
+(`memory_ingest_hook._graph_alias_resolver`, `mcp/wiring.py:_build_alias_resolver`), and
 all four backends index the lookup — SQLite/Postgres with a partial *unique* index on
 `(source_system, raw_id) WHERE valid_to IS NULL`, the Bolt pair (Neo4j, ArcadeDB) with a
 non-unique composite index plus close-then-insert. ~20 tests in

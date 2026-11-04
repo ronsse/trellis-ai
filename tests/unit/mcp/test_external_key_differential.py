@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 import trellis.mcp.server as server_mod
+import trellis.mcp.wiring as wiring_mod
 from tests.unit.mcp.conftest import mint, unwrap_tool
 from tests.unit.mcp.test_sensitivity_surfaces import as_http
 from tests.unit.retrieve.public_corpus import (
@@ -131,8 +132,8 @@ def _capture(
     monkeypatch.setenv("TRELLIS_EMBEDDING_FN", EMBED_FN_PATH)
     monkeypatch.delenv("TRELLIS_ENABLE_EMBED_ON_INGEST", raising=False)
     reg = StoreRegistry(stores_dir=root / "stores")
-    previous = server_mod._registry
-    server_mod._registry = reg
+    previous = wiring_mod._registry
+    wiring_mod._registry = reg
     try:
         build_world(reg, kind)
         if seed_graph:
@@ -150,7 +151,7 @@ def _capture(
                 out[name] = _mask(call())
         return out
     finally:
-        server_mod._registry = previous
+        wiring_mod._registry = previous
         reg.close()
 
 
