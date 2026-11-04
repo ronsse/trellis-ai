@@ -10,7 +10,10 @@ Two jobs, both small and both reversible:
   command that names the packaged executable is one a person reading the file
   understands. The merge preserves every key and every foreign hook, is
   idempotent (a re-run writes nothing), and uninstalling removes exactly the
-  entries it added, plus any container it emptied by doing so. A settings file
+  entries it added, plus any container it emptied by doing so (which includes
+  an empty one that was there before the install). An install then uninstall
+  keeps the content, and the bytes only for a file already in the layout
+  :func:`render_settings` writes. A settings file
   that is not a JSON object is refused and never rewritten. A write goes to a
   temp file in the same directory and is renamed over the target, after the
   previous content is copied to ``<name>.trellis-bak``.

@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,8 @@ from trellis_wire.loop_text import (
     HOOK_PREWORK_NUDGE,
     HOOK_TRACE_ASK,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 PACK_A = "01HZX3K9Q7M2V8T5N4B6C0D1EF"
 PACK_B = "01HZX3K9Q7M2V8T5N4B6C0D2GH"
@@ -215,6 +218,42 @@ class TestScan:
         assert facts is not None
         assert not facts.retrieval_called
 
+    @pytest.mark.parametrize(
+        ("server_name", "recognised"),
+        [
+            ("mcp__trellis__get_context", True),
+            ("mcp__plugin_trellis_trellis__get_context", True),
+            ("mcp__claude_ai_Trellis__get_context", True),
+            ("mcp__trellis-http__get_context", True),
+            ("mcp__memory__get_context", False),
+            ("mcp__notes__get_context", False),
+            ("get_context", False),
+        ],
+    )
+    def test_a_server_is_recognised_by_a_trellis_in_its_registered_name(
+        self, tmp_path: Path, server_name: str, recognised: bool
+    ):
+        log = Transcript()
+        log.served_pack(name=server_name)
+        facts = scan_transcript(log.write(tmp_path / "t.jsonl"))
+        assert facts is not None
+        assert facts.retrieval_called is recognised
+        assert facts.ungraded == ([PACK_A] if recognised else [])
+
+    def test_the_docs_state_the_server_naming_rule_and_its_consequences(self):
+        for page in (
+            "docs/agent-guide/operations.md",
+            "docs/getting-started/integrate-your-agent.md",
+        ):
+            text = " ".join((REPO_ROOT / page).read_text(encoding="utf-8").split())
+            for claim in (
+                "registered name contains `trellis`",
+                "the edit deny fires",
+                "the nudge fires",
+                "the grade ask never fires",
+            ):
+                assert claim in text, (page, claim)
+
     def test_an_empty_pack_is_a_retrieval_with_nothing_to_grade(self, tmp_path: Path):
         log = Transcript()
         log.empty_pack()
@@ -285,6 +324,43 @@ class TestScan:
 
     def test_a_directory_in_place_of_a_file_is_unknown(self, tmp_path: Path):
         assert scan_transcript(tmp_path) is None
+
+    def test_a_device_in_place_of_a_file_is_unknown(self):
+        # Not a regular file, so not read: an empty read would look like "no
+        # retrieval yet" and nudge.
+        assert scan_transcript(os.devnull) is None
+
+    def test_a_line_that_is_not_utf8_is_skipped_and_the_scan_goes_on(
+        self, tmp_path: Path
+    ):
+        # ``\xc3\x28`` is no UTF-16 byte-order mark, so ``json.loads`` decodes the
+        # line as UTF-8 and raises UnicodeDecodeError, which is a ValueError but
+        # not a JSONDecodeError.
+        log = Transcript()
+        log.served_pack()
+        log.work(2)
+        head, tail = log.lines[:2], log.lines[2:]
+        bad = (
+            b'{"message": {"content": [{"type": "tool_use", "id": "x",'
+            b' "input": "\xc3\x28"}]}}'
+        )
+        path = tmp_path / "t.jsonl"
+        path.write_bytes(
+            "\n".join(head).encode()
+            + b"\n"
+            + bad
+            + b"\n"
+            + "\n".join(tail).encode()
+            + b"\n"
+        )
+        facts = scan_transcript(path)
+        assert facts is not None
+        assert facts.tool_uses == 3
+        assert facts.ungraded == [PACK_A]
+        # And the hook that reads it still speaks, once, instead of failing.
+        reply = decide_grade(_stop(path), HookState(tmp_path / "s"), threshold=3)
+        assert reply is not None
+        assert reply["decision"] == "block"
 
 
 # ---------------------------------------------------------------------------
@@ -528,6 +604,78 @@ class TestEditGuard:
         Transcript().write(session)
         payload = _edit(session, hook_event_name="PostToolUse")
         assert decide_edit_guard(payload, state, scope="all") is None
+
+    @pytest.mark.parametrize(
+        ("agent_id", "file_name"),
+        [
+            ("a1", "agent-a1.jsonl"),
+            ("agent-a1", "agent-a1.jsonl"),
+            ("agent-a1", "agent-agent-a1.jsonl"),
+        ],
+    )
+    def test_an_agent_id_with_or_without_the_agent_prefix_finds_its_transcript(
+        self, state: HookState, session: Path, agent_id: str, file_name: str
+    ):
+        Transcript().write(session)
+        folder = session.with_suffix("") / "subagents"
+        Transcript(sidechain=True).write(folder / file_name)
+        payload = _subagent_edit(session, agent_id)
+        assert decide_edit_guard(payload, state) is not None
+        assert decide_edit_guard(payload, state) is None
+
+    def test_a_prefixed_id_that_retrieved_is_not_denied(
+        self, state: HookState, session: Path
+    ):
+        Transcript().write(session)
+        own = Transcript(sidechain=True)
+        own.served_pack()
+        own.write(session.with_suffix("") / "subagents" / "agent-a1.jsonl")
+        assert decide_edit_guard(_subagent_edit(session, "agent-a1"), state) is None
+
+    def test_a_prefixed_id_with_no_file_is_unknown(
+        self, state: HookState, session: Path
+    ):
+        Transcript().write(session)
+        assert decide_edit_guard(_subagent_edit(session, "agent-a1"), state) is None
+        assert not state.seen("edit-guard", "sess-1", "agent-a1")
+
+    def test_a_prefixed_id_is_still_checked_before_it_names_a_file(
+        self, state: HookState, session: Path
+    ):
+        Transcript().write(session)
+        folder = session.with_suffix("") / "subagents"
+        # ``agent-x/../a1.jsonl`` resolves to this transcript, which has not
+        # retrieved, so an unchecked id would be denied.
+        (folder / "agent-x").mkdir(parents=True)
+        Transcript(sidechain=True).write(folder / "a1.jsonl")
+        payload = _subagent_edit(session, "agent-x/../a1")
+        assert decide_edit_guard(payload, state) is None
+
+    def test_racing_hooks_give_exactly_one_deny(self, tmp_path: Path, session: Path):
+        # ``seen`` and the scan both run before ``claim``, so the claim alone
+        # decides which of the racing hooks speaks.
+        Transcript().write(session)
+        Transcript(sidechain=True).write(_subagent_log(session))
+        for trial in range(10):
+            racing = HookState(tmp_path / f"race-{trial}")
+            replies: list[dict[str, Any] | None] = []
+            barrier = threading.Barrier(8)
+
+            def decide(
+                racing: HookState = racing,
+                replies: list[dict[str, Any] | None] = replies,
+                barrier: threading.Barrier = barrier,
+            ) -> None:
+                barrier.wait()
+                replies.append(decide_edit_guard(_subagent_edit(session), racing))
+
+            threads = [threading.Thread(target=decide) for _ in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            assert len(replies) == 8
+            assert sum(reply is not None for reply in replies) == 1, trial
 
 
 # ---------------------------------------------------------------------------
@@ -982,7 +1130,7 @@ class TestAsAProcess:
     """The hook as Claude Code runs it: a fresh interpreter, stdin in, JSON out."""
 
     def _run_hook_process(
-        self, *args: str, stdin_text: str, state_dir: Path
+        self, *args: str, stdin_text: str, state_dir: Path, timeout: float = 30
     ) -> subprocess.CompletedProcess[str]:
         env = {
             **os.environ,
@@ -995,7 +1143,7 @@ class TestAsAProcess:
             capture_output=True,
             text=True,
             env=env,
-            timeout=30,
+            timeout=timeout,
             check=False,
         )
 
@@ -1032,5 +1180,82 @@ class TestAsAProcess:
             "grade",
             stdin_text="\x00 not json",
             state_dir=tmp_path / "state",
+        )
+        assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+
+    def _run_before_a_deadline(
+        self, hook_args: list[str], payload: dict[str, Any], state_dir: Path
+    ) -> subprocess.CompletedProcess[str]:
+        """Run one hook and fail, rather than hang, when it blocks past 5 s."""
+        try:
+            return self._run_hook_process(
+                "-m",
+                "trellis_cli.hooks",
+                *hook_args,
+                stdin_text=json.dumps(payload),
+                state_dir=state_dir,
+                timeout=5,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail(f"`trellis-hook {' '.join(hook_args)}` hung past 5 s")
+
+    @pytest.fixture(params=["no_writer", "silent_writer"])
+    def fifo(self, request: pytest.FixtureRequest, tmp_path: Path):
+        """A named pipe, with nothing holding it or a silent writer holding it.
+
+        With no writer an ``open`` for reading blocks; with a silent one the
+        ``open`` returns and a ``read`` blocks.
+        """
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("needs named pipes")
+        path = tmp_path / "pipes" / "t.jsonl"
+        path.parent.mkdir()
+        os.mkfifo(path)
+        writer = os.open(path, os.O_RDWR) if request.param == "silent_writer" else None
+        yield path
+        if writer is not None:
+            os.close(writer)
+
+    @pytest.mark.parametrize(
+        ("hook_args", "make_payload"),
+        [
+            (["prework"], _prompt),
+            (["edit-guard", "--scope", "all"], _edit),
+            (["grade", "--threshold", "1"], _stop),
+            (
+                ["grade", "--threshold", "1"],
+                lambda fifo: _stop(
+                    "/nonexistent/parent.jsonl",
+                    hook_event_name="SubagentStop",
+                    agent_id="a1",
+                    agent_transcript_path=str(fifo),
+                ),
+            ),
+        ],
+        ids=["prework", "edit-guard", "grade", "subagent-stop"],
+    )
+    def test_a_named_pipe_as_the_transcript_is_unknown_not_a_hang(
+        self,
+        tmp_path: Path,
+        fifo: Path,
+        hook_args: list[str],
+        make_payload: Any,
+    ):
+        done = self._run_before_a_deadline(
+            hook_args, make_payload(fifo), tmp_path / "state"
+        )
+        assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs named pipes")
+    @pytest.mark.parametrize("agent_id", ["a1", "agent-a1"])
+    def test_a_named_pipe_as_the_derived_subagent_transcript_is_unknown(
+        self, tmp_path: Path, session: Path, agent_id: str
+    ):
+        Transcript().write(session)
+        folder = session.with_suffix("") / "subagents"
+        folder.mkdir(parents=True)
+        os.mkfifo(folder / "agent-a1.jsonl")
+        done = self._run_before_a_deadline(
+            ["edit-guard"], _subagent_edit(session, agent_id), tmp_path / "state"
         )
         assert (done.returncode, done.stdout, done.stderr) == (0, "", "")

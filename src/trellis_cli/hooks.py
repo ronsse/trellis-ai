@@ -54,6 +54,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 import time
@@ -112,6 +113,9 @@ _PACK_HEADER = re.compile(r"\*\*pack_id:\*\* `([0-9A-HJKMNP-TV-Z]{26})`")
 _HEADER_SEARCH_CHARS = 16384
 _SAFE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
+#: Open flag that keeps ``open`` from blocking on a named pipe; absent on Windows.
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
 _DISABLE_ENV = "TRELLIS_HOOKS_DISABLED"
 _STATE_DIR_ENV = "TRELLIS_HOOK_STATE_DIR"
 
@@ -142,8 +146,11 @@ _MCP_NAME_PARTS = 3
 def _trellis_tool(name: Any) -> str | None:
     """The bare tool name of an MCP tool served by a Trellis server, else ``None``.
 
-    ``mcp__trellis__get_context`` and a plugin-scoped
-    ``mcp__plugin_x_trellis__get_context`` both give ``get_context``.
+    ``mcp__trellis__get_context``, a plugin-scoped
+    ``mcp__plugin_x_trellis__get_context`` and a connector's
+    ``mcp__claude_ai_Trellis__get_context`` all give ``get_context``. The
+    server's registered name must contain ``trellis`` (any case); a Trellis
+    server registered as ``memory`` is not recognised.
     """
     if not isinstance(name, str):
         return None
@@ -287,6 +294,11 @@ class _Scan:
         return self.facts
 
 
+def _open_nonblocking(path: str | os.PathLike[str], flags: int) -> int:
+    """``open``'s opener: never block on a file swapped for a pipe after ``stat``."""
+    return os.open(path, flags | _O_NONBLOCK)
+
+
 def scan_transcript(
     path: str | os.PathLike[str] | None,
     *,
@@ -296,7 +308,8 @@ def scan_transcript(
 ) -> TranscriptFacts | None:
     """Stream a transcript JSONL file and report what it says about the loop.
 
-    Returns ``None`` when the file is missing, unreadable, larger than
+    Returns ``None`` when the file is missing, unreadable, not a regular file
+    (a named pipe would block the read), larger than
     :data:`MAX_TRANSCRIPT_BYTES` or slower to read than ``deadline_seconds``:
     the answer is then unknown, and an unknown answer never produces output. A
     line that is not valid JSON (a truncated last line, say) is skipped.
@@ -314,9 +327,12 @@ def scan_transcript(
     started = time.monotonic()
     try:
         source = Path(path)
-        if source.stat().st_size > MAX_TRANSCRIPT_BYTES:
+        info = source.stat()
+        # A FIFO reports size 0 and ``open`` blocks until a writer appears, long
+        # past the deadline, which is only checked between lines.
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_TRANSCRIPT_BYTES:
             return None
-        with source.open("rb") as handle:
+        with open(source, "rb", opener=_open_nonblocking) as handle:
             for number, line in enumerate(handle):
                 if number % 256 == 0 and time.monotonic() - started > deadline_seconds:
                     return None
@@ -413,22 +429,28 @@ def _agent_id(payload: dict[str, Any]) -> str | None:
     return value if value is not None and _SAFE_ID.fullmatch(value) else None
 
 
-def _subagent_transcript(payload: dict[str, Any], agent_id: str) -> str | None:
-    """A subagent's own transcript: named on stdin, else laid out as documented.
+def _subagent_transcripts(payload: dict[str, Any], agent_id: str) -> list[str]:
+    """The paths a subagent's own transcript may be at, in the order to try.
 
     ``SubagentStop`` names it as ``agent_transcript_path``. A ``PreToolUse``
     inside a subagent does not, so it is derived from the session transcript
     the way Claude Code lays it out: ``<session>/subagents/agent-<id>.jsonl``
-    beside ``<session>.jsonl``. A path that is not there reads as unknown.
+    beside ``<session>.jsonl``. An id that already starts ``agent-`` (the hooks
+    reference shows one) is also tried as the file name itself, so a build that
+    sends the prefix still finds its file. A path that is not there reads as
+    unknown.
     """
     named = _text(payload, "agent_transcript_path")
     if named is not None:
-        return named
+        return [named]
     session_transcript = _text(payload, "transcript_path")
     if session_transcript is None:
-        return None
-    base = Path(session_transcript)
-    return str(base.with_suffix("") / "subagents" / f"agent-{agent_id}.jsonl")
+        return []
+    folder = Path(session_transcript).with_suffix("") / "subagents"
+    names = [f"agent-{agent_id}.jsonl"]
+    if agent_id.startswith("agent-"):
+        names.append(f"{agent_id}.jsonl")
+    return [str(folder / name) for name in names]
 
 
 def decide_prework(  # noqa: PLR0911 - one return per fail-open guard
@@ -480,14 +502,18 @@ def decide_edit_guard(
     key = (session, agent or "")
     if state.seen("edit-guard", *key):
         return None
-    path = (
-        _subagent_transcript(payload, agent)
+    paths: Sequence[str | None] = (
+        _subagent_transcripts(payload, agent)
         if agent is not None
-        else _text(payload, "transcript_path")
+        else [_text(payload, "transcript_path")]
     )
-    facts = scan_transcript(
-        path, stop_at_retrieval=True, include_sidechain=agent is not None
-    )
+    facts = None
+    for path in paths:
+        facts = scan_transcript(
+            path, stop_at_retrieval=True, include_sidechain=agent is not None
+        )
+        if facts is not None:
+            break
     if facts is None or facts.retrieval_called:
         return None
     if not state.claim("edit-guard", *key):

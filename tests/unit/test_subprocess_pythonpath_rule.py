@@ -642,8 +642,10 @@ def test_the_derived_builder_set_is_exactly_the_real_ones() -> None:
         "mcp_subprocess_env",  # pinned via env.update({...})
         "initialized_cli_env",  # pinned only by returning its cli_env param
         # tests/unit/cli/test_hooks.py: builds the pinned env inline and returns
-        # the finished subprocess, so the derivation counts it.
+        # the finished subprocess, so the derivation counts it; the second one
+        # only adds a timeout around the first and returns its result.
         "_run_hook_process",
+        "_run_before_a_deadline",
     }
 
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from typer.testing import CliRunner
@@ -34,6 +34,8 @@ from trellis_cli.main import app
 from trellis_cli.prompts import agent_rule_text
 
 runner = CliRunner()
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 EVENTS = {"UserPromptSubmit", "SubagentStart", "PreToolUse", "Stop", "SubagentStop"}
 
@@ -356,7 +358,7 @@ class TestUninstall:
             ({}, 2, True),
         ],
     )
-    def test_restores_the_original_bytes(
+    def test_restores_the_bytes_of_a_file_in_the_installers_layout(
         self, tmp_path: Path, original: dict[str, Any], indent: int, newline: bool
     ):
         path = _write(
@@ -412,6 +414,130 @@ class TestUninstall:
         install_hooks(path)
         uninstall_hooks(path)
         assert _load(path) == original
+
+
+def _layout(data: dict[str, Any], indent: int | str, *, newline: bool = True) -> str:
+    """``data`` as the installer lays a file out: its indent, unescaped non-ASCII."""
+    return json.dumps(data, indent=indent, ensure_ascii=False) + (
+        "\n" if newline else ""
+    )
+
+
+def _round_trip(path: Path) -> str:
+    install_hooks(path)
+    uninstall_hooks(path)
+    return path.read_text(encoding="utf-8")
+
+
+class TestWhatTheRoundTripPreserves:
+    """Each sentence of the ``Round trip`` bullet in ``operations.md``, as behaviour."""
+
+    ORIGINALS: ClassVar[list[str]] = [
+        # compact and escaped: not the installer's layout
+        '{"model": "demo-model", "name": "caf\\u00e9"}\n',
+        # no final newline, four-space indent, a foreign hook
+        _layout(FOREIGN, 4, newline=False),
+        # a tab indent and a literal non-ASCII character
+        _layout({"name": "caf\u00e9", "model": "demo-model"}, "\t"),
+    ]
+
+    @pytest.mark.parametrize("original", ORIGINALS)
+    def test_content_is_preserved_whatever_the_layout(
+        self, tmp_path: Path, original: str
+    ):
+        path = tmp_path / "settings.json"
+        path.write_text(original, encoding="utf-8")
+        after = _round_trip(path)
+        # Parsed equality ignores key order, so compare the order explicitly too.
+        assert json.loads(after) == json.loads(original)
+        assert json.dumps(json.loads(after)) == json.dumps(json.loads(original))
+
+    @pytest.mark.parametrize("indent", [2, 4, "\t"])
+    @pytest.mark.parametrize("newline", [True, False])
+    def test_bytes_come_back_for_a_file_in_the_installers_layout(
+        self, tmp_path: Path, indent: int | str, newline: bool
+    ):
+        original = _layout(
+            {"name": "caf\u00e9", "hooks": FOREIGN["hooks"]}, indent, newline=newline
+        )
+        path = tmp_path / "settings.json"
+        path.write_text(original, encoding="utf-8")
+        assert _round_trip(path) == original
+
+    def test_the_first_install_re_renders_the_file(self, tmp_path: Path):
+        original = '{"model": "demo-model", "name": "caf\\u00e9"}\n'
+        path = tmp_path / "settings.json"
+        path.write_text(original, encoding="utf-8")
+        install_hooks(path)
+        installed = path.read_text(encoding="utf-8")
+        assert installed.startswith(
+            '{\n  "model": "demo-model",\n  "name": "caf\u00e9",'
+        )
+        uninstall_hooks(path)
+        # Content is back, the bytes are not: the layout is the installer's now.
+        assert path.read_text(encoding="utf-8") == _layout(json.loads(original), 2)
+        assert path.read_text(encoding="utf-8") != original
+
+    @pytest.mark.parametrize(
+        ("original", "expected"),
+        [
+            ({"hooks": {}}, {}),
+            ({"hooks": {"Stop": []}, "model": "demo-model"}, {"model": "demo-model"}),
+            (
+                {
+                    "hooks": {
+                        "Stop": [],
+                        "Notification": FOREIGN["hooks"]["Notification"],
+                    }
+                },
+                {"hooks": {"Notification": FOREIGN["hooks"]["Notification"]}},
+            ),
+        ],
+    )
+    def test_an_empty_container_that_existed_before_is_dropped(
+        self, tmp_path: Path, original: dict[str, Any], expected: dict[str, Any]
+    ):
+        path = _write(tmp_path / "settings.json", original)
+        assert _round_trip(path) == _layout(expected, 2)
+
+    def test_the_backup_holds_the_previous_write_only(self, tmp_path: Path):
+        path = tmp_path / "settings.json"
+        backup = tmp_path / f"settings.json{BACKUP_SUFFIX}"
+        original = _layout(FOREIGN, 2)
+        path.write_text(original, encoding="utf-8")
+        install_hooks(path)
+        installed = path.read_bytes()
+        assert backup.read_bytes() == original.encode()
+        uninstall_hooks(path)
+        # The original bytes are in the backup no longer: it is the install's file.
+        assert backup.read_bytes() == installed
+        assert backup.read_bytes() != original.encode()
+        # A run that changes nothing writes nothing, backup included.
+        uninstall_hooks(path)
+        assert backup.read_bytes() == installed
+
+    def test_the_docs_say_what_the_tests_above_pin(self):
+        text = (REPO_ROOT / "docs/agent-guide/operations.md").read_text(
+            encoding="utf-8"
+        )
+        flat = " ".join(text.split())
+        assert "restores the original bytes" not in flat
+        assert "uninstall of a fresh install restores" not in flat
+        bullet = next(
+            line for line in text.splitlines() if line.startswith("- **Round trip.**")
+        )
+        for claim in (
+            "preserves the file's content",
+            "only for a file already in the layout the installer writes",
+            "`json.dumps` with the file's detected indent",
+            "non-ASCII characters unescaped",
+            "The first install re-renders the whole file",
+            "An empty container that existed before the install",
+            '`"hooks": {}`',
+            "is dropped by the round trip",
+            "`<file>.trellis-bak` holds the previous write only",
+        ):
+            assert claim in bullet, claim
 
 
 # ---------------------------------------------------------------------------

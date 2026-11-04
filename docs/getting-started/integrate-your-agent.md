@@ -105,6 +105,12 @@ oversized or slow transcript, or `TRELLIS_HOOKS_DISABLED=1` makes it do
 nothing. They need the `trellis-hook` console script (installed with the
 package) on the `PATH` of the shell Claude Code runs hooks through.
 
+A hook recognises a retrieval only when the MCP server's registered name
+contains `trellis` (`trellis`, `claude_ai_Trellis` and `trellis-http` all do).
+Under any other name, such as `memory`, the edit deny fires even after the
+agent retrieved, the nudge fires, and the grade ask never fires, so register
+the server with `trellis` in its name.
+
 Subagents can also be given the rule directly. This appends the agent rule to
 each `*.md` agent definition in a directory, after the frontmatter, and
 `--uninstall` removes it again:
