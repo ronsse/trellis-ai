@@ -439,8 +439,9 @@ class TestExtractionValidatorEnforcement:
         with_alias = rejected["entities"][0]
         without_alias = EntityDraft(
             entity_id="ent_a", entity_type="x", name="a"
-        ).model_dump(mode="json", exclude={"aliases"})
+        ).model_dump(mode="json", exclude={"aliases", "if_absent"})
         assert with_alias == without_alias
+        assert "if_absent" not in with_alias
 
     async def test_emits_extraction_rejected_event(
         self, event_log: SQLiteEventLog
