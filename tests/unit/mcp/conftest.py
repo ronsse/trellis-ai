@@ -4,7 +4,7 @@
 
 * Unwrap FastMCP ``FunctionTool`` objects to their underlying callables.
 * Suppress structlog output (these tools log a lot).
-* Patch a tmp ``StoreRegistry`` into ``trellis.mcp.server._registry``.
+* Patch a tmp ``StoreRegistry`` into ``trellis.mcp.wiring._registry``.
 * Mint scoped API keys, and reset the process-global auth state that
   ``trellis.mcp.auth`` keeps between tests.
 
