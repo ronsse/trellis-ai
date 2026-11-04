@@ -20,6 +20,8 @@ import pytest
 from mcp.shared.exceptions import McpError
 
 import trellis.mcp.server as server_mod
+import trellis.mcp.tools.memory as memory_tools_mod
+import trellis.mcp.tools.observation as observation_tools_mod
 from trellis.stores.registry import StoreRegistry
 
 from .conftest import unwrap_tool
@@ -42,11 +44,12 @@ class _ExplodingExecutor:
 
 
 def _force_executor_explosion(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        server_mod,
-        "build_curate_executor",
-        lambda *args, **kwargs: _ExplodingExecutor(),
-    )
+    for tool_module in (memory_tools_mod, observation_tools_mod):
+        monkeypatch.setattr(
+            tool_module,
+            "build_curate_executor",
+            lambda *args, **kwargs: _ExplodingExecutor(),
+        )
 
 
 class TestExecutorEscapeIsSanitized:

@@ -34,6 +34,7 @@ import pytest
 from mcp.shared.exceptions import McpError
 
 import trellis.mcp.server as server_mod
+import trellis.mcp.wiring as wiring_mod
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.core.write_config import MINHASH_SEED_MAX_DOCS_ENV
 from trellis.stores.registry import StoreRegistry
@@ -65,7 +66,7 @@ NEIGHBOUR = (
 @pytest.fixture
 def _fresh_index(monkeypatch: pytest.MonkeyPatch) -> None:
     """Force ``_get_minhash_index`` to rebuild inside the test."""
-    monkeypatch.setattr(server_mod, "_minhash_index", None)
+    monkeypatch.setattr(wiring_mod, "_minhash_index", None)
 
 
 def _enable(monkeypatch: pytest.MonkeyPatch, max_docs: int = 500) -> None:
@@ -141,7 +142,7 @@ class TestSeedReadsRows:
         past it is not. The predecessor's single ``limit=500`` read would
         have silently capped a larger store.
         """
-        monkeypatch.setattr(server_mod, "_MINHASH_SEED_PAGE_SIZE", 2)
+        monkeypatch.setattr(wiring_mod, "_MINHASH_SEED_PAGE_SIZE", 2)
         store = temp_registry.knowledge.document_store
         for i in range(5):
             store.put(f"doc-{i}", f"{STORED} Variation number {i} of the note.")
@@ -160,7 +161,7 @@ class TestSeedReadsRows:
         _enable(monkeypatch)
         recorded: list[tuple[str, dict[str, Any]]] = []
         monkeypatch.setattr(
-            server_mod.logger,
+            wiring_mod.logger,
             "info",
             lambda event, **kw: recorded.append((event, kw)),
         )
@@ -287,7 +288,7 @@ class TestSeedFailureIsVisible:
         _enable(monkeypatch)
         recorded: list[tuple[str, dict[str, Any]]] = []
         monkeypatch.setattr(
-            server_mod.logger,
+            wiring_mod.logger,
             "warning",
             lambda event, **kw: recorded.append((event, kw)),
         )
@@ -313,7 +314,7 @@ class TestSeedFailureIsVisible:
         _enable(monkeypatch)
         recorded: list[str] = []
         monkeypatch.setattr(
-            server_mod.logger,
+            wiring_mod.logger,
             "warning",
             lambda event, **kw: recorded.append(event),
         )
@@ -335,7 +336,7 @@ class TestSeedFailureIsVisible:
         the stop is a warning, not a shrug.
         """
         page = [{"doc_id": "same", "content": STORED}]
-        monkeypatch.setattr(server_mod, "_MINHASH_SEED_PAGE_SIZE", 1)
+        monkeypatch.setattr(wiring_mod, "_MINHASH_SEED_PAGE_SIZE", 1)
         monkeypatch.setattr(
             temp_registry.knowledge.document_store,
             "list_documents",
@@ -344,7 +345,7 @@ class TestSeedFailureIsVisible:
         _enable(monkeypatch, max_docs=10)
         recorded: list[tuple[str, dict[str, Any]]] = []
         monkeypatch.setattr(
-            server_mod.logger,
+            wiring_mod.logger,
             "warning",
             lambda event, **kw: recorded.append((event, kw)),
         )
@@ -404,14 +405,14 @@ class TestAFailedSeedIsNotCached:
         store = temp_registry.knowledge.document_store
         for i in range(3):
             store.put(f"doc-{i}", f"{STORED} Variation number {i} of the note.")
-        monkeypatch.setattr(server_mod, "_MINHASH_SEED_PAGE_SIZE", 2)
+        monkeypatch.setattr(wiring_mod, "_MINHASH_SEED_PAGE_SIZE", 2)
         _enable(monkeypatch, max_docs=10)
         self._fail_after_the_first_page(store, monkeypatch)
 
         with pytest.raises(McpError):
             server_mod._get_minhash_index(temp_registry)
 
-        assert server_mod._minhash_index is None
+        assert wiring_mod._minhash_index is None
 
     def test_the_call_after_a_seed_failure_raises_too(
         self,
@@ -428,7 +429,7 @@ class TestAFailedSeedIsNotCached:
         store = temp_registry.knowledge.document_store
         for i in range(3):
             store.put(f"doc-{i}", f"{STORED} Variation number {i} of the note.")
-        monkeypatch.setattr(server_mod, "_MINHASH_SEED_PAGE_SIZE", 2)
+        monkeypatch.setattr(wiring_mod, "_MINHASH_SEED_PAGE_SIZE", 2)
         _enable(monkeypatch, max_docs=10)
         self._fail_after_the_first_page(store, monkeypatch)
 
@@ -446,7 +447,7 @@ class TestAFailedSeedIsNotCached:
         store = temp_registry.knowledge.document_store
         for i in range(3):
             store.put(f"doc-{i}", f"{STORED} Variation number {i} of the note.")
-        monkeypatch.setattr(server_mod, "_MINHASH_SEED_PAGE_SIZE", 2)
+        monkeypatch.setattr(wiring_mod, "_MINHASH_SEED_PAGE_SIZE", 2)
         _enable(monkeypatch, max_docs=10)
         real = store.list_documents
         self._fail_after_the_first_page(store, monkeypatch)

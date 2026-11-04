@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 import trellis.classify.ingest as ingest_mod
 import trellis.mcp.server as server_mod
+import trellis.mcp.tools.memory as memory_tools_mod
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.classify.ingest import CLASSIFY_ON_INGEST_FLAG
 from trellis.stores.base.event_log import EventType
@@ -174,7 +175,7 @@ class TestReconcileTierClassifyOnWrite:
         _enable(monkeypatch)
         monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
         monkeypatch.setattr(
-            server_mod, "_build_llm_client", lambda _registry, _consumer: None
+            memory_tools_mod, "_build_llm_client", lambda _registry, _consumer: None
         )
 
         doc_id = _doc_id(save_memory(_INFRA))
@@ -192,7 +193,7 @@ class TestReconcileTierClassifyOnWrite:
         save_memory(_INFRA)
         monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
         monkeypatch.setattr(
-            server_mod, "_build_llm_client", lambda _registry, _consumer: None
+            memory_tools_mod, "_build_llm_client", lambda _registry, _consumer: None
         )
 
         doc_id = _doc_id(save_memory(_INFRA_NEAR))
@@ -211,7 +212,7 @@ class TestReconcileTierClassifyOnWrite:
         save_memory(_INFRA)
         monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
         monkeypatch.setattr(
-            server_mod, "_build_llm_client", lambda _registry, _consumer: None
+            memory_tools_mod, "_build_llm_client", lambda _registry, _consumer: None
         )
 
         caller_tags = {"domain": ["backend"], "signal_quality": "high"}
@@ -228,7 +229,7 @@ class TestReconcileTierClassifyOnWrite:
         _enable(monkeypatch)
         monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
         monkeypatch.setattr(
-            server_mod, "_build_llm_client", lambda _registry, _consumer: None
+            memory_tools_mod, "_build_llm_client", lambda _registry, _consumer: None
         )
         monkeypatch.setattr(ingest_mod, "_ingest_classifier", _BoomPipeline())
 
@@ -242,7 +243,7 @@ class TestReconcileTierClassifyOnWrite:
         _disable(monkeypatch)
         monkeypatch.setenv("TRELLIS_ENABLE_RECONCILE_ON_WRITE", "1")
         monkeypatch.setattr(
-            server_mod, "_build_llm_client", lambda _registry, _consumer: None
+            memory_tools_mod, "_build_llm_client", lambda _registry, _consumer: None
         )
 
         doc_id = _doc_id(save_memory(_INFRA))

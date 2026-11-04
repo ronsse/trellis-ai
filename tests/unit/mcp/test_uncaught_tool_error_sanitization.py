@@ -34,6 +34,8 @@ from mcp.shared.exceptions import McpError
 from mcp.types import INVALID_PARAMS, ErrorData
 
 import trellis.mcp.server as server_mod
+import trellis.mcp.tools.experience_knowledge as experience_tools_mod
+import trellis.mcp.tools.memory as memory_tools_mod
 from trellis.errors import StoreError
 from trellis.mcp.auth import set_auth_enforced
 from trellis.stores.registry import StoreRegistry
@@ -66,11 +68,12 @@ class _ExplodingExecutor:
 
 
 def _force_executor_explosion(monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
-    monkeypatch.setattr(
-        server_mod,
-        "build_curate_executor",
-        lambda *args, **kwargs: _ExplodingExecutor(exc),
-    )
+    for tool_module in (experience_tools_mod, memory_tools_mod):
+        monkeypatch.setattr(
+            tool_module,
+            "build_curate_executor",
+            lambda *args, **kwargs: _ExplodingExecutor(exc),
+        )
 
 
 @pytest.fixture(autouse=True)

@@ -1,0 +1,858 @@
+[
+ {
+  "name": "get_context",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "intent": {
+     "type": "string",
+     "description": "What you're trying to do or learn about."
+    },
+    "domain": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional domain scope (e.g., \"platform\", \"data\"). Scoped\nwith default-pass semantics \u2014 a memory that carries no domain is\nnever hard-excluded; only an explicit mismatch is dropped."
+    },
+    "max_tokens": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Maximum response size in tokens. Leave unset to use the\ndeployment's configured default (2000 unless an operator has\noverridden it via settings)."
+    },
+    "session_id": {
+     "default": "",
+     "type": "string",
+     "description": "Optional conversation/session identifier. When supplied,\nitems already returned by recent calls in this session are\nexcluded, preventing repetition across calls."
+    },
+    "run_id": {
+     "default": "",
+     "type": "string",
+     "description": "Optional identifier for the unit of work this context is\nfor (one task / job / workflow run \u2014 narrower than a session).\nRecorded on the pack so later feedback can credit the runs a\nmemory actually helped. Leave empty when you have no such id."
+    },
+    "sections": {
+     "anyOf": [
+      {
+       "items": {
+        "additionalProperties": true,
+        "type": "object"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional custom section layout \u2014 a list of section config\ndicts (each with ``name`` plus optional ``retrieval_affinities``,\n``content_types``, ``scopes``, ``entity_ids``, ``max_tokens``,\n``max_items``). When provided, context is organised into\nindependently budgeted sections instead of a flat list."
+    },
+    "refresh": {
+     "default": false,
+     "type": "boolean",
+     "description": "Bypass session dedup for this call only (default False).\nSet when the caller's context window was truncated (e.g. after\ncompaction) and it needs previously-served items re-injected.\nOnly affects this call; ``session_id`` must still be supplied\nfor it to matter, and later calls dedup normally."
+    },
+    "index": {
+     "default": false,
+     "type": "boolean",
+     "description": "Return an id index instead of excerpt bodies (default\nFalse): one compact line per item \u2014 ``item_id``, type, title,\nestimated read cost \u2014 so the same ``max_tokens`` surveys many\nmore items. The pack is real (same ``pack_id``, same\ntelemetry), so ``record_feedback`` works unchanged; fetch the\nbodies you choose with ``get_items``. Because it is a real\npack, an index survey **counts as a serve**: with a\n``session_id``, every id it listed is deduped out of later\npacks in that session, so pass ``refresh=True`` on a\nfollow-up full retrieval that needs them back. Flat layout\nonly \u2014 combining with ``sections`` is an error."
+    },
+    "retrieval_phase": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional \u2014 when in the task this retrieval\nhappens, relative to the work it's meant to inform: one of\n\"pre_work\", \"mid_task\", \"post_hoc\". Pass \"post_hoc\" when\nretrieving after the work is done, e.g. to check conclusions.\nLeave unset when you don't know."
+    }
+   },
+   "required": [
+    "intent"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "name": "save_experience",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "trace_json": {
+     "type": "string",
+     "description": "JSON string conforming to the Trace schema. The required\ntop-level keys are ``source``, ``intent``, and ``context``.\n``source`` must be one of ``agent``, ``human``, ``workflow``, or\n``system``. Put execution details such as ``agent_id``, ``domain``,\n``started_at``, and ``ended_at`` inside ``context``. A step takes\n``step_type`` and ``name`` (both required) and, optionally,\n``args``, ``result``, ``error``, ``duration_ms``, and\n``started_at``; there is no ``action`` or ``observation`` field.\nA step's ``args`` and ``result`` are objects, never a bare string:\nwrite ``{\"summary\": \"12 passed\"}``, not ``\"12 passed\"``. Record a\nstep that failed in its ``error`` string. Put how the work ended\nin top-level ``outcome``: ``status`` (``success``, ``failure``,\n``partial`` or ``unknown``) and ``summary``. Validation is\nall-or-nothing: an unknown top-level or context field rejects the\n**entire trace** and nothing is recorded \u2014 not just that field. So\nput additional data in top-level ``metadata`` (or outcome\nmeasurements in ``outcome.metrics``).\n\nExample valid trace:\n{\n  \"source\": \"agent\",\n  \"intent\": \"Fix a failing test\",\n  \"context\": {\n    \"agent_id\": \"coder-1\",\n    \"domain\": \"bugfix\",\n    \"started_at\": \"2026-08-27T00:00:00Z\",\n    \"ended_at\": \"2026-08-27T00:01:00Z\"\n  },\n  \"steps\": [\n    {\n      \"step_type\": \"tool_call\",\n      \"name\": \"run_tests\",\n      \"args\": {\"path\": \"tests/unit\"},\n      \"result\": {\"summary\": \"1 failed, 11 passed\"}\n    },\n    {\n      \"step_type\": \"tool_call\",\n      \"name\": \"edit_file\",\n      \"args\": {\"path\": \"src/parser.py\"},\n      \"error\": \"patch did not apply: file changed on disk\"\n    },\n    {\n      \"step_type\": \"tool_call\",\n      \"name\": \"edit_file\",\n      \"args\": {\"path\": \"src/parser.py\"},\n      \"result\": {\"summary\": \"patched\"}\n    }\n  ],\n  \"outcome\": {\n    \"status\": \"success\",\n    \"summary\": \"Fixed the failing parser test\"\n  },\n  \"metadata\": {\"repo\": \"my/repo\"}\n}"
+    }
+   },
+   "required": [
+    "trace_json"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "name": "save_knowledge",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "name": {
+     "type": "string",
+     "description": "Entity name."
+    },
+    "entity_type": {
+     "default": "concept",
+     "type": "string",
+     "description": "Type (e.g., \"concept\", \"person\", \"system\").\nDefault: \"concept\"."
+    },
+    "properties": {
+     "anyOf": [
+      {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional additional properties. A ``domain`` string (or\nlist of strings) also links the entity ``appliesTo`` each\nexisting ``domain:`` node it names; a domain with no node is\nreported, never created."
+    },
+    "relates_to": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional entity to create a relationship to \u2014 a node id,\nor a name such as a tool, domain, agent, team or artifact name.\nA name linking to more than one node creates no edge and lists\nthe candidates."
+    },
+    "edge_kind": {
+     "default": "entity_related_to",
+     "type": "string",
+     "description": "Relationship type if relates_to is set.\nDefault: \"entity_related_to\"."
+    },
+    "content": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional evidence prose. When given without ``evidence_ref``,\nan evidence document is auto-created and linked (pointer-not-prose)."
+    },
+    "evidence_ref": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional existing document id to point at. Must reference\na document that already exists \u2014 a nonexistent id is rejected\nbefore any mutation, because a graph pointer at a missing document\nis exactly the dangling state this tool exists to prevent. When\nset, no document is created and ``content`` is ignored (a notice\nis appended to the result)."
+    },
+    "supersedes": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional id of an existing entity this one replaces.\nRequires ``content`` or ``evidence_ref``. The old entity and its\nevidence document are marked superseded by the new evidence\ndocument, so a pack holding both serves only the new version; an\nevidence document that cannot be marked (chunked, archived, or\nsuperseded by something else) is left unchanged and named in the\nreply. Refused, with nothing written, if the id is unknown, a\ndocument, archived, or already superseded by something else."
+    },
+    "sensitivity": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional label for the evidence document created from\n``content`` (see ``save_memory``). The entity itself carries no\nlabel, so keep sensitive prose in ``content``, not in ``name`` or\n``properties``. Not valid with ``evidence_ref``: relabelling an\nexisting document is not supported here."
+    }
+   },
+   "required": [
+    "name"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "name": "save_memory",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "content": {
+     "type": "string",
+     "description": "Document content to store."
+    },
+    "metadata": {
+     "anyOf": [
+      {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional metadata (tags, source, domain, etc.). May not\ncarry ``lifecycle`` or ``evidence_ref``, which act on other items\nby id (refused, nothing written); use ``supersedes`` to replace a\ndocument."
+    },
+    "doc_id": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional document ID. Auto-generated if not provided. May not\nstart with ``trace-summary:``, which belongs to the trace embed\nworker (refused, nothing written)."
+    },
+    "supersedes": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional id of an existing whole document this memory\nreplaces. It is marked superseded by the saved (or matching)\nmemory, so a pack holding both serves only the new one. Refused,\nwith nothing written, if the id is unknown, a graph entity, part\nof a chunked document, archived, or already superseded by another\ndocument."
+    },
+    "sensitivity": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional label (``public``, ``internal``,\n``confidential``, ``restricted``). Readers whose key lacks that\nclearance are never served the document, and memory extraction is\nskipped for anything above ``internal``. A key can only label up\nto its own clearance (the ``confidential`` / ``restricted`` scope)."
+    }
+   },
+   "required": [
+    "content"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "name": "get_lessons",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "domain": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional domain filter."
+    },
+    "limit": {
+     "default": 10,
+     "type": "integer",
+     "description": "Maximum lessons to return (default 10)."
+    },
+    "max_tokens": {
+     "default": 2000,
+     "type": "integer",
+     "description": "Maximum response size in tokens (default 2000)."
+    }
+   },
+   "type": "object"
+  }
+ },
+ {
+  "name": "get_graph",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "entity_id": {
+     "type": "string",
+     "description": "The entity ID to explore."
+    },
+    "depth": {
+     "default": 1,
+     "type": "integer",
+     "description": "How many relationship hops to traverse (default 1)."
+    },
+    "max_tokens": {
+     "default": 2000,
+     "type": "integer",
+     "description": "Maximum response size in tokens (default 2000)."
+    }
+   },
+   "required": [
+    "entity_id"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "name": "get_items",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "item_ids": {
+     "items": {
+      "type": "string"
+     },
+     "type": "array",
+     "description": "Item ids to fetch (max 50). Copy them verbatim from\nindex lines, pack items, or graph evidence pointers."
+    },
+    "pack_id": {
+     "default": "",
+     "type": "string",
+     "description": "The pack that surfaced these ids (strongly recommended\nafter an index retrieval; empty when there is none)."
+    },
+    "max_tokens": {
+     "default": 4000,
+     "type": "integer",
+     "description": "Maximum response size in tokens (default 4000)."
+    }
+   },
+   "required": [
+    "item_ids"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "name": "get_file_context",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "paths": {
+     "items": {
+      "type": "string"
+     },
+     "type": "array",
+     "description": "File paths to look up (relative or absolute)."
+    },
+    "include_unconfirmed": {
+     "default": false,
+     "type": "boolean",
+     "description": "Also surface unconfirmed extraction mints\n(excluded by default \u2014 extraction attests mention, not fact)."
+    },
+    "max_tokens": {
+     "default": 2000,
+     "type": "integer",
+     "description": "Maximum response size in tokens (default 2000)."
+    }
+   },
+   "required": [
+    "paths"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "name": "record_feedback",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "trace_id": {
+     "default": "",
+     "type": "string",
+     "description": "Trace ID for trace-level feedback (optional)."
+    },
+    "pack_id": {
+     "default": "",
+     "type": "string",
+     "description": "Pack ID for pack-level feedback (optional but preferred\nwhen feedback follows a context retrieval)."
+    },
+    "success": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Whether the task succeeded. Omit when passing ``rating``\n\u2014 it is then derived from the grade. Defaults to success only\nwhen neither is given."
+    },
+    "rating": {
+     "anyOf": [
+      {
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Graded usefulness of the pack, 0.0 (useless) to 1.0\n(everything served was on point)."
+    },
+    "notes": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional notes about what worked or didn't."
+    },
+    "helpful_item_ids": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "IDs of pack items that were actually useful."
+    },
+    "unhelpful_item_ids": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "IDs of pack items that were noise."
+    },
+    "followed_advisory_ids": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "IDs of advisories the agent followed."
+    },
+    "ignored_item_ids": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "IDs of pack items you read and did not use.\nDistinct from ``unhelpful_item_ids``, which claims the item\nwas noise or misleading."
+    }
+   },
+   "type": "object"
+  }
+ },
+ {
+  "name": "search",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "query": {
+     "type": "string",
+     "description": "Search query."
+    },
+    "limit": {
+     "default": 10,
+     "type": "integer",
+     "description": "Maximum results (default 10)."
+    },
+    "max_tokens": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Maximum response size in tokens. Leave unset to use the\ndeployment's configured default (2000 unless an operator has\noverridden it via settings)."
+    },
+    "index": {
+     "default": false,
+     "type": "boolean",
+     "description": "Return an id index instead of excerpt bodies (default\nFalse) \u2014 one compact line per item; raise ``limit`` to survey\nmore. Fetch chosen bodies with ``get_items``; feedback\nattribution via the ``pack_id`` is unchanged. The index is a\nreal pack, so a survey counts as a serve for session dedup \u2014\nuse ``get_context(..., refresh=True)`` if a later retrieval\nin the same session needs the surveyed items back."
+    },
+    "retrieval_phase": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional \u2014 when in the task this search happens:\none of \"pre_work\", \"mid_task\", \"post_hoc\". Pass \"post_hoc\"\nwhen searching after the work is done, e.g. to check\nconclusions. Leave unset when you don't know."
+    }
+   },
+   "required": [
+    "query"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "name": "get_objective_context",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "intent": {
+     "type": "string",
+     "description": "The user's original business objective in their own words."
+    },
+    "domain": {
+     "default": "",
+     "type": "string",
+     "description": "Optional domain filter (e.g., \"orders\", \"data-pipeline\")."
+    },
+    "max_tokens": {
+     "default": 0,
+     "type": "integer",
+     "description": "Token budget override. Pass ``0`` (default) to use the\nconfigured budget from ``retrieval.budgets`` in ``config.yaml``;\npass a positive value to override."
+    },
+    "session_id": {
+     "default": "",
+     "type": "string",
+     "description": "Optional conversation/session identifier. When supplied,\nitems already returned by recent calls in this session are\nexcluded from the result, preventing repetition across calls."
+    },
+    "retrieval_phase": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional \u2014 when in the task this retrieval\nhappens: one of \"pre_work\", \"mid_task\", \"post_hoc\". Pass\n\"post_hoc\" when retrieving after the work is done, e.g. to\ncheck conclusions. Leave unset when you don't know."
+    }
+   },
+   "required": [
+    "intent"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "name": "get_task_context",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "intent": {
+     "type": "string",
+     "description": "Description of the specific task being performed."
+    },
+    "entity_ids": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Entity IDs being touched (e.g., table URIs). They also\nseed the graph axis, so a precedent attached to one is reachable."
+    },
+    "domain": {
+     "default": "",
+     "type": "string",
+     "description": "Optional domain filter."
+    },
+    "max_tokens": {
+     "default": 0,
+     "type": "integer",
+     "description": "Token budget override. Pass ``0`` (default) to use the\nconfigured budget from ``retrieval.budgets`` in ``config.yaml``;\npass a positive value to override."
+    },
+    "session_id": {
+     "default": "",
+     "type": "string",
+     "description": "Optional conversation/session identifier. When supplied,\nitems already returned by recent calls in this session are\nexcluded, preventing repetition across calls."
+    },
+    "retrieval_phase": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional \u2014 when in the task this retrieval\nhappens: one of \"pre_work\", \"mid_task\", \"post_hoc\". Pass\n\"post_hoc\" when retrieving after the work is done, e.g. to\ncheck conclusions. Leave unset when you don't know."
+    }
+   },
+   "required": [
+    "intent"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "name": "get_sectioned_context",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "intent": {
+     "type": "string",
+     "description": "Natural language description of the task or question."
+    },
+    "sections": {
+     "items": {
+      "additionalProperties": true,
+      "type": "object"
+     },
+     "type": "array",
+     "description": "List of section configs. Each section is a dict with:\n- name (str, required): Section heading.\n- retrieval_affinities (list[str]): e.g. [\"domain_knowledge\"]\n- content_types (list[str]): e.g. [\"code\", \"documentation\"]\n- scopes (list[str]): e.g. [\"universal\", \"project\"]\n- entity_ids (list[str]): Entity IDs to anchor retrieval.\n- max_tokens (int): Token budget for this section (default 2000).\n- max_items (int): Max items for this section (default 10)."
+    },
+    "domain": {
+     "default": "",
+     "type": "string",
+     "description": "Optional domain filter applied across all sections."
+    },
+    "max_tokens": {
+     "default": 0,
+     "type": "integer",
+     "description": "Total token budget override. Pass ``0`` (default) to use\nthe configured budget from ``retrieval.budgets`` in\n``config.yaml``; pass a positive value to override."
+    },
+    "session_id": {
+     "default": "",
+     "type": "string",
+     "description": "Optional conversation/session identifier. When supplied,\nitems already returned by recent calls in this session are\nexcluded, preventing repetition across calls."
+    },
+    "retrieval_phase": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional \u2014 when in the task this retrieval\nhappens: one of \"pre_work\", \"mid_task\", \"post_hoc\". Pass\n\"post_hoc\" when retrieving after the work is done, e.g. to\ncheck conclusions. Leave unset when you don't know."
+    }
+   },
+   "required": [
+    "intent",
+    "sections"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "name": "record_observation",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "subject_entity_id": {
+     "type": "string",
+     "description": "The entity the observation is *about*."
+    },
+    "subject_entity_type": {
+     "type": "string",
+     "description": "Open-string entity type of the subject."
+    },
+    "observer_agent_id": {
+     "type": "string",
+     "description": "Which agent (human or automated) produced this."
+    },
+    "content": {
+     "type": "string",
+     "description": "Narrative description of the observation."
+    },
+    "confidence": {
+     "type": "number",
+     "description": "Producer confidence in ``[0.0, 1.0]``."
+    },
+    "evidence_ref": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional pointer to supporting evidence\n(e.g., a trace_id / document_id / URN)."
+    },
+    "metadata": {
+     "anyOf": [
+      {
+       "additionalProperties": true,
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional bag for conventional keys (kind, window_start,\nwindow_end, sample_size, method, \u2026). See ADR \u00a72.3."
+    }
+   },
+   "required": [
+    "subject_entity_id",
+    "subject_entity_type",
+    "observer_agent_id",
+    "content",
+    "confidence"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "name": "query_observations",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "subject_entity_id": {
+     "default": "",
+     "type": "string",
+     "description": "Filter by subject entity id (empty = no filter)."
+    },
+    "observer_agent_id": {
+     "default": "",
+     "type": "string",
+     "description": "Filter by observer agent id (empty = no filter)."
+    },
+    "limit": {
+     "default": 100,
+     "type": "integer",
+     "description": "Maximum results to return (default 100)."
+    }
+   },
+   "type": "object"
+  }
+ },
+ {
+  "name": "execute_mutation",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "operation": {
+     "type": "string",
+     "description": "Operation name. Accepts the wire value\n(e.g. ``\"link.create\"``) or the enum key\n(e.g. ``\"LINK_CREATE\"``)."
+    },
+    "args": {
+     "additionalProperties": true,
+     "type": "object",
+     "description": "Operation-specific argument map. Required keys depend on\nthe operation \u2014 see ``OperationRegistry`` in\n``trellis.mutate.commands``."
+    },
+    "idempotency_key": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional dedup key. Repeat submissions with the\nsame key return ``status=\"duplicate\"`` without re-executing."
+    },
+    "actor": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional audit identifier for the submitter. Defaults to\n``\"mcp:execute_mutation\"`` when not supplied."
+    }
+   },
+   "required": [
+    "operation",
+    "args"
+   ],
+   "type": "object"
+  }
+ },
+ {
+  "name": "list_api_keys",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {},
+   "type": "object"
+  }
+ },
+ {
+  "name": "revoke_api_key",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "key_id": {
+     "type": "string",
+     "description": "The 12-hex-char key id (see ``list_api_keys``)."
+    }
+   },
+   "required": [
+    "key_id"
+   ],
+   "type": "object"
+  }
+ }
+]

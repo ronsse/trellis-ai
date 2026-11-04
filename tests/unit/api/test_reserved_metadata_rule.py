@@ -90,8 +90,9 @@ _GUARD_NAME = "reject_reserved_metadata"
 #:   mutations.py: _build_command's build_evidence_ingest_command_from_args
 #:                 call, _build_command's Command(...) fallback,
 #:                 execute_batch's CommandBatch(...) call                   (3)
-#:   mcp/server.py: execute_mutation's build_evidence_ingest_command_from_args
-#:                  call, execute_mutation's Command(...) fallback          (2)
+#:   mcp/tools/mutation.py: execute_mutation's
+#:                  build_evidence_ingest_command_from_args call,
+#:                  execute_mutation's Command(...) fallback                (2)
 #: Total: 2 + 2 + 3 + 3 + 3 + 2 = 15
 _HAND_READ_FLOOR = 15
 

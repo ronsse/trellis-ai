@@ -23,6 +23,7 @@ from typing import Any
 import pytest
 from fastmcp import Client
 
+import trellis.mcp.rejections as rejections_mod
 import trellis.mcp.server as server_mod
 from trellis.mcp.auth import set_auth_enforced
 from trellis.stores.base.event_log import EventType
@@ -171,7 +172,7 @@ class TestEvent:
         def _boom(**_: Any) -> None:
             raise RuntimeError(SECRET)
 
-        monkeypatch.setattr(server_mod, "_record_boundary_rejection", _boom)
+        monkeypatch.setattr(rejections_mod, "_record_boundary_rejection", _boom)
         result = await _call("record_feedback", {"pack_id": "p", "item_ids": ["a"]})
         text = _text(result)
         assert result.is_error

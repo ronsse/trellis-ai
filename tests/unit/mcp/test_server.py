@@ -18,6 +18,9 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 from structlog.testing import capture_logs
 
 import trellis.mcp.server as server_mod
+import trellis.mcp.tools.context as context_tools_mod
+import trellis.mcp.tools.experience_knowledge as experience_tools_mod
+import trellis.mcp.wiring as wiring_mod
 from tests.duplicate_trace import graph_state, synthetic_trace
 from tests.mined_precedents import emit_historical_miner_row, promote_through_executor
 from tests.structlog_isolation import clear_cached_logger_proxies
@@ -61,7 +64,7 @@ from trellis.mcp.server import (
 from trellis.mcp.server import (
     search as _search,
 )
-from trellis.mutate import build_curate_executor
+from trellis.mutate import MutationExecutor, build_curate_executor
 from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.retrieve.withholding import (
     WithheldGroup,
@@ -1456,11 +1459,11 @@ class TestSaveMemoryEmbedOnIngest:
 
 
 def _reset_memory_extractor_state() -> None:
-    server_mod._memory_extractor = None
-    server_mod._memory_extractor_attempted = False
-    server_mod._memory_extractor_retry_at = None
-    server_mod._memory_extractor_reported = None
-    server_mod._memory_extractor_reported_at = 0.0
+    wiring_mod._memory_extractor = None
+    wiring_mod._memory_extractor_attempted = False
+    wiring_mod._memory_extractor_retry_at = None
+    wiring_mod._memory_extractor_reported = None
+    wiring_mod._memory_extractor_reported_at = 0.0
 
 
 @pytest.fixture
@@ -1481,7 +1484,7 @@ class TestSaveMemoryExtractionFeatureFlag:
         monkeypatch.delenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", raising=False)
         result = save_memory("hello world")
         assert result.startswith("Memory saved:")
-        assert server_mod._memory_extractor is None
+        assert wiring_mod._memory_extractor is None
 
     def test_flag_on_without_llm_client_skips_extractor(
         self,
@@ -1489,10 +1492,10 @@ class TestSaveMemoryExtractionFeatureFlag:
     ) -> None:
         """Flag on but no API key → extractor None, save_memory still succeeds."""
         monkeypatch.setenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", "1")
-        monkeypatch.setattr(server_mod, "_build_llm_client_from_env", lambda: None)
+        monkeypatch.setattr(wiring_mod, "_build_llm_client_from_env", lambda: None)
         result = save_memory("hello again")
         assert result.startswith("Memory saved:")
-        assert server_mod._memory_extractor is None
+        assert wiring_mod._memory_extractor is None
 
     def test_flag_on_with_llm_client_runs_extraction(
         self,
@@ -1521,10 +1524,10 @@ class TestSaveMemoryExtractionFeatureFlag:
                     ),
                 )
 
-        monkeypatch.setattr(server_mod, "_build_llm_client_from_env", _FakeLLM)
+        monkeypatch.setattr(wiring_mod, "_build_llm_client_from_env", _FakeLLM)
         result = save_memory("observation about @system")
         assert result.startswith("Memory saved:")
-        assert server_mod._memory_extractor is not None
+        assert wiring_mod._memory_extractor is not None
         # LLM stage fires exactly once — no "@system" in the graph, so
         # AliasMatch finds no match, residue flows to LLM.
         assert call_count["n"] == 1
@@ -1556,7 +1559,7 @@ class TestSaveMemoryExtractionFeatureFlag:
                     ),
                 )
 
-        monkeypatch.setattr(server_mod, "_build_llm_client_from_env", _CapturingLLM)
+        monkeypatch.setattr(wiring_mod, "_build_llm_client_from_env", _CapturingLLM)
         save_memory("observation about @system")
 
         assert captured[0].role == "system"
@@ -1608,7 +1611,7 @@ class TestSaveMemoryExtractionFeatureFlag:
                     ),
                 )
 
-        monkeypatch.setattr(server_mod, "_build_llm_client_from_env", _FakeLLM)
+        monkeypatch.setattr(wiring_mod, "_build_llm_client_from_env", _FakeLLM)
         result = save_memory("Comparing the Oura ring against alternatives.")
         assert result.startswith("Memory saved:")
         doc_id = result.split("Memory saved:")[1].strip()
@@ -1634,7 +1637,7 @@ class TestSaveMemoryExtractionFeatureFlag:
                 msg = "llm down"
                 raise RuntimeError(msg)
 
-        monkeypatch.setattr(server_mod, "_build_llm_client_from_env", _BrokenLLM)
+        monkeypatch.setattr(wiring_mod, "_build_llm_client_from_env", _BrokenLLM)
         result = save_memory("should still save")
         assert result.startswith("Memory saved:")
 
@@ -1681,14 +1684,14 @@ class TestSaveMemoryExtractionFeatureFlag:
             raise AssertionError(msg)
 
         monkeypatch.setattr(
-            server_mod,
+            wiring_mod,
             "_build_llm_client_from_env",
             _env_path_must_not_run,
         )
 
         result = save_memory("registry preempts env observation about @system")
         assert result.startswith("Memory saved:")
-        assert server_mod._memory_extractor is not None
+        assert wiring_mod._memory_extractor is not None
         # The registry-sourced client handled the extraction call.
         assert call_count["registry_llm"] == 1
 
@@ -1703,7 +1706,7 @@ class TestSaveMemoryExtractionFeatureFlag:
         def _record(_registry: Any, consumer: LLMConsumer) -> None:
             seen.append(consumer)
 
-        monkeypatch.setattr(server_mod, "_build_llm_client", _record)
+        monkeypatch.setattr(wiring_mod, "_build_llm_client", _record)
         assert server_mod._get_memory_extractor(temp_registry) is None
         assert seen == [LLMConsumer.MEMORY_EXTRACTION]
 
@@ -1796,7 +1799,7 @@ class TestBuildLlmClientRouting:
             clients.append(object())
             return clients[-1]
 
-        monkeypatch.setattr(server_mod, "_build_llm_client_from_env", _from_env)
+        monkeypatch.setattr(wiring_mod, "_build_llm_client_from_env", _from_env)
         return clients
 
     @staticmethod
@@ -1832,7 +1835,7 @@ class TestBuildLlmClientRouting:
         consumer: LLMConsumer,
         expected: dict[str, Any],
     ) -> None:
-        client = server_mod._build_llm_client(
+        client = wiring_mod._build_llm_client(
             self._registry(tmp_path, _ROUTED_LLM), consumer
         )
         assert client is not None
@@ -1849,7 +1852,7 @@ class TestBuildLlmClientRouting:
     ) -> None:
         monkeypatch.delenv(_TIER_KEY_ENV)
         registry = self._registry(tmp_path, _ROUTED_LLM)
-        client = server_mod._build_llm_client(registry, LLMConsumer.RECONCILE)
+        client = wiring_mod._build_llm_client(registry, LLMConsumer.RECONCILE)
         assert client is None
         assert built == []
         assert env_clients == []
@@ -1869,7 +1872,7 @@ class TestBuildLlmClientRouting:
         """The documented fallback survives for a consumer nobody routed."""
         monkeypatch.delenv(_PARENT_KEY_ENV)
         registry = self._registry(tmp_path, _ROUTED_LLM)
-        client = server_mod._build_llm_client(registry, LLMConsumer.MEMORY_EXTRACTION)
+        client = wiring_mod._build_llm_client(registry, LLMConsumer.MEMORY_EXTRACTION)
         assert built == []
         assert env_clients == [client]
 
@@ -1891,7 +1894,7 @@ class TestBuildLlmClientRouting:
             "routes": {"reconcile": "deep"},
         }
         registry = self._registry(tmp_path, malformed)
-        client = server_mod._build_llm_client(registry, consumer)
+        client = wiring_mod._build_llm_client(registry, consumer)
         assert client is None
         assert built == []
         assert env_clients == []
@@ -1920,7 +1923,7 @@ class TestBuildLlmClientRouting:
             raise RuntimeError(msg)
 
         monkeypatch.setattr(registry, "build_llm_client", _boom)
-        client = server_mod._build_llm_client(registry, consumer)
+        client = wiring_mod._build_llm_client(registry, consumer)
         assert env_clients == ([client] if reaches_env else [])
         assert (client is None) is not reaches_env
 
@@ -2408,7 +2411,7 @@ class TestGetObjectiveContext:
             msg = "fake builder failure"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr(server_mod, "_build_pack_builder", _boom)
+        monkeypatch.setattr(context_tools_mod, "_build_pack_builder", _boom)
         with pytest.raises(McpError) as excinfo:
             get_objective_context("anything")
         err = excinfo.value
@@ -2468,7 +2471,7 @@ class TestGetTaskContext:
             msg = "fake builder failure"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr(server_mod, "_build_pack_builder", _boom)
+        monkeypatch.setattr(context_tools_mod, "_build_pack_builder", _boom)
         with pytest.raises(McpError) as excinfo:
             get_task_context("anything")
         err = excinfo.value
@@ -2502,7 +2505,7 @@ class TestGetSectionedContextErrors:
             msg = "fake builder failure"
             raise RuntimeError(msg)
 
-        monkeypatch.setattr(server_mod, "_build_pack_builder", _boom)
+        monkeypatch.setattr(context_tools_mod, "_build_pack_builder", _boom)
         with pytest.raises(McpError) as excinfo:
             get_sectioned_context(
                 "intent",
@@ -2929,8 +2932,8 @@ class TestPrewarmRegistry:
         from unittest.mock import PropertyMock
 
         monkeypatch.setattr(server_mod, "_get_minhash_index", lambda registry: None)
-        monkeypatch.setattr(server_mod, "_memory_extractor", None)
-        monkeypatch.setattr(server_mod, "_memory_extractor_attempted", False)
+        monkeypatch.setattr(wiring_mod, "_memory_extractor", None)
+        monkeypatch.setattr(wiring_mod, "_memory_extractor_attempted", False)
         monkeypatch.delenv("TRELLIS_ENABLE_MEMORY_EXTRACTION", raising=False)
 
         registry = MagicMock()
@@ -2978,10 +2981,10 @@ class TestMainShutdown:
 
     def _drain_registry(self) -> None:
         """Reset module-level state so each test starts clean."""
-        if server_mod._registry is not None:
+        if wiring_mod._registry is not None:
             with contextlib.suppress(Exception):
-                server_mod._registry.close()
-        server_mod._registry = None
+                wiring_mod._registry.close()
+        wiring_mod._registry = None
 
     def test_main_closes_registry_on_clean_exit(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2991,7 +2994,7 @@ class TestMainShutdown:
         registry.stores_dir.mkdir(parents=True)
         # Touch a store so close() has something to do.
         registry.knowledge.document_store.put("doc1", "shutdown probe")
-        server_mod._registry = registry
+        wiring_mod._registry = registry
         close_calls: list[int] = []
         original_close = registry.close
 
@@ -3008,7 +3011,7 @@ class TestMainShutdown:
         server_mod.main()
 
         assert close_calls == [1]
-        assert server_mod._registry is None
+        assert wiring_mod._registry is None
 
     def test_main_closes_registry_when_run_raises(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -3016,7 +3019,7 @@ class TestMainShutdown:
         self._drain_registry()
         registry = StoreRegistry(stores_dir=tmp_path / "stores3")
         registry.stores_dir.mkdir(parents=True)
-        server_mod._registry = registry
+        wiring_mod._registry = registry
         close_calls: list[int] = []
         original_close = registry.close
 
@@ -3036,7 +3039,7 @@ class TestMainShutdown:
             server_mod.main()
 
         assert close_calls == [1]
-        assert server_mod._registry is None
+        assert wiring_mod._registry is None
 
     def test_main_logs_write_provenance_on_the_stdio_path(
         self, monkeypatch: pytest.MonkeyPatch
@@ -3074,13 +3077,13 @@ class TestMainShutdown:
         self._drain_registry()
         # No registry constructed; the autouse temp_registry fixture
         # already nulled it out via teardown, but be explicit.
-        assert server_mod._registry is None
+        assert wiring_mod._registry is None
         monkeypatch.setattr(server_mod.mcp, "run", lambda: None)
         monkeypatch.setattr(server_mod, "configure_stderr_logging", lambda: None)
 
         # Should not raise.
         server_mod.main()
-        assert server_mod._registry is None
+        assert wiring_mod._registry is None
 
 
 # ---------------------------------------------------------------------------
@@ -3226,7 +3229,7 @@ class TestStructuredErrorContract:
                 return _R()
 
         monkeypatch.setattr(
-            server_mod,
+            experience_tools_mod,
             "build_curate_executor",
             lambda _registry, **_kwargs: _FailingExecutor(),
         )
@@ -3367,7 +3370,7 @@ class TestStructuredErrorContract:
         def _boom(*args: object, **kwargs: object) -> None:
             raise boom
 
-        monkeypatch.setattr(server_mod.MutationExecutor, "execute", _boom)
+        monkeypatch.setattr(MutationExecutor, "execute", _boom)
 
         with pytest.raises(McpError) as excinfo:
             save_memory("unique content for a non-emit pipeline failure")
@@ -3388,7 +3391,7 @@ class TestStructuredErrorContract:
         """If MinHash index init blows up, ``save_memory`` raises rather
         than silently disabling fuzzy dedup."""
         # Reset module-level cache so _get_minhash_index will try to build.
-        monkeypatch.setattr(server_mod, "_minhash_index", None)
+        monkeypatch.setattr(wiring_mod, "_minhash_index", None)
         # Seeding is off by default (#402), so the read the seed makes only
         # happens when an operator has asked for it — enable it, or this
         # test pins error chaining on a code path that never runs.
@@ -3427,11 +3430,11 @@ class TestStructuredErrorContract:
         ``minhash_index_initialized`` line reports it at DEBUG, which is how
         the broken ``search("")`` seed went unnoticed in the first place.
         """
-        monkeypatch.setattr(server_mod, "_minhash_index", None)
+        monkeypatch.setattr(wiring_mod, "_minhash_index", None)
         temp_registry.knowledge.document_store.put("seeded", "prior memory content")
         recorded: list[tuple[str, dict[str, Any]]] = []
         monkeypatch.setattr(
-            server_mod.logger,
+            wiring_mod.logger,
             "warning",
             lambda event, **kw: recorded.append((event, kw)),
         )
@@ -3457,10 +3460,10 @@ class TestStructuredErrorContract:
         every unit test, which is how a real warning becomes noise nobody
         reads.
         """
-        monkeypatch.setattr(server_mod, "_minhash_index", None)
+        monkeypatch.setattr(wiring_mod, "_minhash_index", None)
         recorded: list[str] = []
         monkeypatch.setattr(
-            server_mod.logger,
+            wiring_mod.logger,
             "warning",
             lambda event, **kw: recorded.append(event),
         )
@@ -3483,7 +3486,7 @@ class TestStructuredErrorContract:
         """
         from trellis.stores.settings_store import SettingsStore
 
-        monkeypatch.setattr(server_mod, "_minhash_index", None)
+        monkeypatch.setattr(wiring_mod, "_minhash_index", None)
         monkeypatch.delenv(MINHASH_SEED_MAX_DOCS_ENV, raising=False)
         assert temp_registry.stores_dir is not None
         SettingsStore(temp_registry.stores_dir / "settings.json").set(

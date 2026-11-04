@@ -17,7 +17,7 @@ configured, extraction is silently skipped and ingest is unaffected.
 
 The MCP ``save_memory`` path and CLI bulk-ingest paths both call
 :func:`run_memory_extraction`; MCP keeps only its cached extractor
-construction in ``trellis.mcp.server``. This shared persistence seam keeps
+construction in ``trellis.mcp.wiring``. This shared persistence seam keeps
 draft policy, governed execution, and judged-operation emission aligned.
 
 Mention resolution goes through

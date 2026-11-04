@@ -79,6 +79,7 @@ import pytest
 
 import trellis.mcp.server as server_mod
 from tests.ast_rules import is_call_to
+from tests.mcp_server_modules import server_source
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.mutate.policy_source import POLICY_GATE_SURFACE
 from trellis.ops.capture_health import (
@@ -107,8 +108,10 @@ SERVER_SOURCE_PATH = Path(inspect.getsourcefile(server_mod) or "")
 #: ``src/`` — ``.../src/trellis/mcp/server.py`` up three.
 SRC_ROOT = SERVER_SOURCE_PATH.parents[2]
 
-#: The module whose rejections this file's tool roster covers.
-MCP_WRAPPER_MODULE = "trellis/mcp/server.py"
+#: The module that defines :data:`RECORDER` and so the only one allowed to call
+#: :data:`EMITTER` directly. The tool roster scans every server module
+#: (``tests/mcp_server_modules.py``); this one holds the wrapper.
+MCP_WRAPPER_MODULE = "trellis/mcp/rejections.py"
 
 #: Every other module allowed to emit a boundary rejection, mapped to the
 #: surface label it emits under (#461).
@@ -265,7 +268,7 @@ def _scan_sites_blind_to_except_handlers(source: str) -> list[_Site]:
     return [site for site in _scan_sites(source) if site.lineno not in excluded]
 
 
-SERVER_SOURCE = SERVER_SOURCE_PATH.read_text(encoding="utf-8")
+SERVER_SOURCE = server_source()
 SITES = _scan_sites(SERVER_SOURCE)
 #: The argument-rejection middleware records for a *computed* ``tool=`` (the
 #: tool the failed call named), so the literal scan cannot see its tools.

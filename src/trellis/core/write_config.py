@@ -80,7 +80,7 @@ RECONCILE_MODEL_ENV = "TRELLIS_RECONCILE_MODEL"
 RECONCILE_TIMEOUT_ENV = "TRELLIS_RECONCILE_TIMEOUT_S"
 
 #: Require element attribution on pack-targeted feedback
-#: (``trellis.mcp.server.record_feedback``).  **Default off**, and off is
+#: (``trellis.mcp.tools.feedback.record_feedback``).  **Default off**, and off is
 #: the shipped behaviour: a caller that names a ``pack_id`` and cites no
 #: items still records a rating.  Turned on, that call is rejected and the
 #: rejection hands back the ids the pack actually served, so the retry is
@@ -100,7 +100,7 @@ RECONCILE_TIMEOUT_ENV = "TRELLIS_RECONCILE_TIMEOUT_S"
 REQUIRE_PACK_ATTRIBUTION_FLAG = "TRELLIS_REQUIRE_PACK_ATTRIBUTION"
 
 #: Require a verdict on every **bodied** item of a pack-targeted feedback
-#: call (``trellis.mcp.server.record_feedback``).  **Default off.**
+#: call (``trellis.mcp.tools.feedback.record_feedback``).  **Default off.**
 #: Stricter than :data:`REQUIRE_PACK_ATTRIBUTION_FLAG`, which asks for one
 #: citation: this asks the caller to account for each item the pack put an
 #: excerpt in front of them, in ``helpful_item_ids``,
@@ -134,7 +134,7 @@ REQUIRE_PACK_ATTRIBUTION_FLAG = "TRELLIS_REQUIRE_PACK_ATTRIBUTION"
 REQUIRE_BODIED_ATTRIBUTION_FLAG = "TRELLIS_REQUIRE_BODIED_ATTRIBUTION"
 
 #: How many stored documents to load into the MCP fuzzy-dedup index at
-#: first use (``trellis.mcp.server._get_minhash_index``).  **Default 0,
+#: first use (``trellis.mcp.wiring._get_minhash_index``).  **Default 0,
 #: which seeds nothing** — so ``save_memory``'s MinHash stage keeps
 #: comparing only against memories written by the same process.
 #:
@@ -592,7 +592,7 @@ def resolve_write_behaviour(
 
     The one call every per-knob reader in :mod:`trellis.classify.ingest`,
     :mod:`trellis.extract.memory_ingest_hook`, :mod:`trellis.extract.trace_ingest_hook`,
-    :mod:`trellis.mcp.reconcile`, :mod:`trellis.mcp.server` and
+    :mod:`trellis.mcp.reconcile`, :mod:`trellis.mcp.wiring` and
     :mod:`trellis.retrieve.embed_ingest_hook` delegates to, so a settings
     override for any of those knobs takes effect at the knob's real
     enforcement site rather than only in a reporting surface.

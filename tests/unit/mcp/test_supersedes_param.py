@@ -27,6 +27,7 @@ from mcp.types import INVALID_PARAMS
 
 import trellis.mcp.auth as auth_mod
 import trellis.mcp.server as server_mod
+import trellis.mcp.tools.memory as memory_tools_mod
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.mcp.server import MUTATION_FAILED
 from trellis.mutate.policy_source import POLICY_FILENAME
@@ -1199,7 +1200,7 @@ def test_reconcile_tier_is_bypassed_only_when_supersedes_is_given(
         reconciled.append("called")
         return "sentinel"
 
-    monkeypatch.setattr(server_mod, "_save_memory_reconciled", sentinel)
+    monkeypatch.setattr(memory_tools_mod, "_save_memory_reconciled", sentinel)
 
     assert save_memory(X_TEXT) == "sentinel"
     assert reconciled == ["called"]

@@ -577,7 +577,7 @@ _ALLOWED_UNREADABLE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         _PASSTHROUGH_REASON,
     ),
-    ("src/trellis/mcp/server.py", "execute_mutation", "requested_by"): (
+    ("src/trellis/mcp/tools/mutation.py", "execute_mutation", "requested_by"): (
         2,
         _PASSTHROUGH_REASON,
     ),

@@ -15,6 +15,7 @@ import pytest
 from mcp.shared.exceptions import McpError
 
 import trellis.mcp.server as server_mod
+import trellis.mcp.wiring as wiring_mod
 from tests.unit.api.test_external_key_by_id_oracle import (
     CORRUPT_ID,
     MISSING_ID,
@@ -36,7 +37,7 @@ def registry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[StoreRegistry]:
     reg = StoreRegistry(stores_dir=tmp_path / "stores")
-    monkeypatch.setattr(server_mod, "_registry", reg)
+    monkeypatch.setattr(wiring_mod, "_registry", reg)
     reg.knowledge.document_store.put("pub-1", "visible words", {**label("public")})
     try:
         yield reg
