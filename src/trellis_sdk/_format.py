@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from trellis_wire.loop_text import sdk_feedback_call
 from trellis_wire.withholding import (
     WithholdingSummary,
     format_withholding_note,
@@ -82,11 +83,7 @@ def format_pack_as_markdown(
         included += 1  # noqa: SIM113
 
     if pack_id:
-        lines.append(
-            "\n---\n"
-            '*Cite feedback via `record_feedback(pack_id="' + pack_id + '", '
-            "rating=..., helpful_item_ids=[...], unhelpful_item_ids=[...])`.*"
-        )
+        lines.append("\n---\n*Cite feedback via `" + sdk_feedback_call(pack_id) + "`.*")
     return "\n".join(lines)
 
 

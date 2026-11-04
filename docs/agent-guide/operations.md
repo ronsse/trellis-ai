@@ -147,6 +147,47 @@ pins that against a golden captured from `main`). On:
   rebound, and an alias for an entity whose create did not land is refused. The REST extraction
   routes and the memory and trace ingest hooks do not bind aliases.
 
+### The loop text has one source, and the grading trailer (`TRELLIS_GRADING_TRAILER`)
+
+The retrieve / record / grade loop used to be restated by hand in the MCP server instructions, the
+packaged prompts (`system.md`, `claude-md.md`, `agent-rule.md`), the `trellis-loop` skill and the
+pack footers, and the copies drifted. `trellis_wire.loop_text` now holds the text as named fragments
+and renders each of those surfaces. It lives in `trellis_wire` (stdlib only) so the SDK, which cannot
+import `trellis`, reads the same fragments as the server.
+
+- **Python surfaces read the fragments at import** (`mcp/app.py` for the server instructions,
+  `retrieve/formatters.py` and `trellis_sdk/_format.py` for the footers).
+- **The files the wheel ships are generated.** `python scripts/generate_loop_text.py` rewrites
+  `src/trellis_cli/prompts/{system,claude-md,agent-rule}.md` and
+  `src/trellis_cli/skills/trellis-loop/SKILL.md`; `--check` exits 1 and names any that differ.
+  `tests/unit/test_loop_text_generated.py` runs that comparison, the way `openapi-check` pins the
+  spec, so editing a shipped file by hand, or a fragment without running the script, fails the suite.
+- **Nothing a client reads changed.** Until the serving readout, every rendered surface is
+  byte-identical to the build before the single source existed.
+  `tests/unit/mcp/test_loop_text_surfaces.py` pins each one (server instructions, tool descriptions,
+  prompts, skills, footers, and the `get_context` / `search` / `get_items` replies) against
+  `tests/unit/mcp/golden/loop_text_surfaces.json`, captured from the old code and never regenerated
+  by the code it checks. Unifying or shortening the wording is a one-file change in `loop_text.py`
+  after the readout, made together with a hand-replaced golden.
+- The tool docstrings (`record_feedback` among them) and the other two packaged skills are not
+  generated; the golden pins them.
+
+**The grading trailer** is one line appended to a pack reply (`get_context`, `search`, the sectioned
+and index forms, an empty pack, and `get_items` when it is given a `pack_id`), naming the pack and the
+minimal grading call (`rating` included, since a call without one records a success):
+
+```markdown
+*Grade this pack: `record_feedback(pack_id="01HABCDEF...", rating=..., helpful_item_ids=[...], unhelpful_item_ids=[...])`.*
+```
+
+**Off by default, and off until the serving readout.** Set `TRELLIS_GRADING_TRAILER=1` (or the
+`grading_trailer` setting) to turn it on; it applies to the MCP surface only. Off, every reply is
+byte-identical to before. The line carries no caller text: `get_items` takes its `pack_id` from the
+caller, so the trailer is added only when the id is a well-formed pack id (26 characters of the ULID
+alphabet) and is otherwise omitted. It is wrapped whole, so a failure assembling it returns the reply
+unchanged rather than failing the retrieval. The settings registry marks the knob `caution`: the
+text is part of what an agent reads.
+
 ### Per-key access log (`trellis admin access-log`, `GET /api/v1/access-log/keys`)
 
 Answers "what did this key read, and when did it last run?" from `access.key_read`
@@ -6690,6 +6731,18 @@ When an agent finishes the task, it calls `record_feedback` with the copied IDs:
 - `rating` (0.0–1.0) — grades how useful the pack actually was. Omit `success` when grading: it is derived from the rating (≥ 0.5 counts as a success), so a mediocre pack is not recorded as an unqualified win. Passing `success` alone still works and is recorded as `rating` 1.0 / 0.0.
 - `helpful_item_ids` / `unhelpful_item_ids` — cite the specific pack items that actually helped or were noise.
 - `followed_advisory_ids` — cite the advisories whose guidance was acted on.
+
+**The minimal call.** `pack_id` plus `helpful_item_ids` and/or `unhelpful_item_ids`, with no `rating`
+and no `success`, is a valid call on the MCP tool, `POST /packs/{pack_id}/feedback` and
+`TrellisClient.record_feedback`, and always has been. With neither given, `success` is true and
+`rating` is 1.0, so the `FEEDBACK_RECORDED` payload has the same keys as a full call (the empty
+`unhelpful_item_ids` / `followed_advisory_ids` lists are left out, as in any call that does not cite
+them). Note the consequence: a call that cites only unhelpful ids and omits the rating still records
+`rating` 1.0, because nothing rated the pack. Pass a `rating` when the pack was not a success.
+`tests/unit/mcp/test_minimal_feedback_form.py` pins this on each surface. Deriving the rating from the
+cited ids would change the reply and the event for calls that are valid today, so it is deferred until
+after the serving readout. The `TRELLIS_GRADING_TRAILER` knob above names `rating` in the call it
+suggests, because this form records a success without one.
 
 These element-level signals land in the `FEEDBACK_RECORDED` event payload so the fitness loops (`trellis analyze apply-noise-tags`, `trellis analyze advisory-effectiveness`) can attribute outcomes more precisely than pack-level success alone.
 
