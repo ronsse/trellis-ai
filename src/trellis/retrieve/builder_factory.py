@@ -124,6 +124,22 @@ GRAPH_RECENCY_FALLBACK_ENV = "TRELLIS_GRAPH_RECENCY_FALLBACK"
 #: :mod:`trellis.core.settings_registry`.
 GRAPH_RECENCY_FALLBACK_SETTING = "graph_recency_fallback"
 
+#: Opt-in for the ``get_lessons`` pack event. Unset means **off**.
+#:
+#: ``get_lessons`` serves promoted precedents and records nothing about it, so
+#: nothing it serves can be graded. On, it emits one ``PACK_ASSEMBLED``
+#: (:mod:`trellis.retrieve.lessons_pack`) and names its ``pack_id`` in the
+#: reply. Off is the shipped default because a reader that counts retrievals
+#: from ``PACK_ASSEMBLED`` would see a new event stream appear mid-window.
+#: Read-side, so it lives here with the other serving knobs and not in
+#: :mod:`trellis.core.write_config`.
+GET_LESSONS_PACK_EVENT_ENV = "TRELLIS_GET_LESSONS_PACK_EVENT"
+
+#: Settings-store key for :data:`GET_LESSONS_PACK_EVENT_ENV` — see
+#: ``SettingSpec(name="get_lessons_pack_event")`` in
+#: :mod:`trellis.core.settings_registry`.
+GET_LESSONS_PACK_EVENT_SETTING = "get_lessons_pack_event"
+
 #: Accepted spellings, matching :mod:`trellis.stores.registry`. A value in
 #: neither set is a typo, and a typo'd kill switch that silently keeps the
 #: default is how an operator ends up believing they disabled something
@@ -367,6 +383,29 @@ def _graph_recency_fallback_enabled(settings: Mapping[str, Any] | None = None) -
     return False
 
 
+def _get_lessons_pack_event_enabled(settings: Mapping[str, Any] | None = None) -> bool:
+    """Read :data:`GET_LESSONS_PACK_EVENT_ENV`, env > settings > default off.
+
+    Same shape as :func:`_graph_recency_fallback_enabled`: unset is **off**, a
+    value in neither spelling set warns and reads as off whatever the stored
+    setting says, and a non-bool stored value is ignored.
+    """
+    raw = os.environ.get(GET_LESSONS_PACK_EVENT_ENV, "").strip().lower()
+    if not raw:
+        value = (settings or {}).get(GET_LESSONS_PACK_EVENT_SETTING)
+        return value if isinstance(value, bool) else False
+    if raw in _TRUTHY:
+        return True
+    if raw not in _FALSEY:
+        logger.warning(
+            "get_lessons_pack_event_env_unrecognised",
+            var=GET_LESSONS_PACK_EVENT_ENV,
+            value=raw,
+            effective=False,
+        )
+    return False
+
+
 def describe_axes(
     builder: PackBuilder,
     strategies_used: list[str],
@@ -510,6 +549,7 @@ SEMANTIC_AXIS_NOTES: dict[str, str] = {
 
 
 __all__ = [
+    "GET_LESSONS_PACK_EVENT_ENV",
     "GRAPH_RECENCY_FALLBACK_ENV",
     "GRAPH_SEEDING_ENV",
     "SEMANTIC_AXIS",

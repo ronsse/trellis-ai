@@ -2450,7 +2450,7 @@ demoted on a partial read.
 
 Only a precedent served through a `get_context` or sectioned pack can
 accumulate evidence this way: `get_lessons` emits no per-item
-attribution (nor does a sectioned pack assembled before #958), so a precedent reachable only through those
+attribution by default (see "`get_lessons` pack event (opt-in)"; nor does a sectioned pack assembled before #958), so a precedent reachable only through those
 surfaces always refuses for want of evidence, regardless of how useful
 it actually is — `attribution_caveat` in this command's own output
 (every format) says so.
@@ -5759,6 +5759,29 @@ Every other serve signal in `trellis analyze health` starts from a pack that exi
 | `scan` | The read's coverage, merged into the report's top-level `scan` like every other section's. |
 
 `warn` adds one `reasons` entry (`retrieval adoption 25% (3/12 captured sessions received a pack in 7 day(s)) is below the 50% floor`) and turns `status` to `warn`; `insufficient_data` never does. The thresholds are constants in `trellis.ops.retrieval_adoption`, not settings: a floor an operator can retune per deployment stops being a comparable reading across deployments. The ratio is over *captured* sessions, so a deployment whose capture is not running has no sessions to count and reads `insufficient_data`; its capture state is the `capture` section's to report. A join that names no pack is also what a transcript with an unparseable retrieval result looks like, so a low ratio is a prompt to read a few joins, not proof that agents are not retrieving. Exit codes are unchanged, and the section is in `--format json` as `retrieval`.
+
+### `get_lessons` pack event (opt-in)
+
+`get_lessons` serves promoted precedents and, by default, records no `PACK_ASSEMBLED`, so
+nothing it serves can be graded. Set `TRELLIS_GET_LESSONS_PACK_EVENT` (or the
+`get_lessons_pack_event` setting; env > settings > default **off**; an unrecognised env value
+warns and reads as off) and each call that serves at least one lesson emits one
+`PACK_ASSEMBLED` and ends its reply with a footer naming the pack:
+
+```
+**pack_id:** `<ulid>`
+
+Served ids (cite in record_feedback):
+- `<precedent id>` <title>
+```
+
+Off, the reply is byte-identical to before and no event is written; the footer is appended
+only after the event is stored. The row carries `surface: "get_lessons"`, the flat pack keys
+readers use (`injected_item_ids`, `injected_items[]` with `item_type: "precedent"`, `rank`,
+`title`, `domain`), and only the lessons that fit `max_tokens`, since those are the ones
+served. It is never drawn for the pack holdout: `holdout` is `false`, `holdout_rate` is `0.0`
+and `variants` is `{}`, so `drop_holdout` keeps it. It is off by default because a reader that
+counts retrievals from `PACK_ASSEMBLED` would see a new event stream appear mid-window.
 
 ### Citing Pack Elements in Feedback
 

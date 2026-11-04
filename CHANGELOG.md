@@ -6,6 +6,13 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`get_lessons` can emit a gradable `PACK_ASSEMBLED`, behind `TRELLIS_GET_LESSONS_PACK_EVENT`
+  (default off).** With the knob on, a call that serves lessons writes one event
+  (`surface: "get_lessons"`, `injected_items[]` for the served precedents) and its reply ends
+  with the `pack_id` and served ids so `record_feedback` can name them. The event is never
+  drawn for the pack holdout (`holdout: false`, `holdout_rate: 0.0`, `variants: {}`). Off, the
+  reply is unchanged and nothing is written. Also settable as `get_lessons_pack_event`.
+
 - **`trellis analyze health` reports whether agents retrieve at all.** A new `retrieval`
   section (`--format json` key `retrieval`) counts the sessions the capture sweep parsed in
   the window and how many of them were served at least one pack, from the

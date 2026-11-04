@@ -529,12 +529,16 @@ def format_entities_as_markdown(
 def format_lessons_as_markdown(
     lessons: list[dict[str, Any]],
     max_tokens: int = 2000,
+    *,
+    served_out: list[dict[str, Any]] | None = None,
 ) -> str:
     """Format precedent/lessons as markdown.
 
     Args:
         lessons: List of lesson/precedent dicts.
         max_tokens: Maximum token budget.
+        served_out: When given, each lesson that made it into the markdown is
+            appended to it, in order. Never changes the returned text.
 
     Returns:
         Markdown-formatted string.
@@ -565,6 +569,8 @@ def format_lessons_as_markdown(
         lines.append(block)
         used += block_tokens
         included += 1  # noqa: SIM113
+        if served_out is not None:
+            served_out.append(lesson)
 
     return "\n".join(lines)
 
