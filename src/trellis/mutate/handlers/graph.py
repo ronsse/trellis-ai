@@ -113,6 +113,19 @@ class EntityCreateHandler:
     retype the node away from precedent in the same call that replaces
     its properties, reaching the same end state as the two-step bypass
     that guard closes.
+
+    **``if_absent`` creates a placeholder and never replaces.** With the
+    arg set, an ``entity_id`` that already names a node is left alone:
+    nothing is written (no new version, no name-alias bind, no
+    ``ENTITY_CREATED`` event) and the existing id is returned with a message
+    saying so. The executor still records the command as executed, because
+    the call was accepted and did what it was asked to do, which was
+    nothing; the message is how that is told apart from a create. An
+    absent node is created as usual. The arg needs an ``entity_id`` to
+    check and is refused without one. A skip writes nothing, so it cannot
+    bypass the precedent refusals above. The check is a read before the
+    write, like every guard in this handler, so it does not order two
+    writers racing on one id; a single extraction run is one writer.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -126,6 +139,15 @@ class EntityCreateHandler:
         caller_id = command.args.get("entity_id")
         node_role = command.args.get("node_role", "semantic")
         generation_spec = command.args.get("generation_spec")
+        if_absent = bool(command.args.get("if_absent", False))
+        if if_absent and caller_id is None:
+            msg = (
+                "entity.create with if_absent needs an entity_id: "
+                "create-if-absent has nothing to check without one"
+            )
+            raise ValidationError(
+                msg, errors=[msg], code="entity_create_if_absent_needs_id"
+            )
 
         # One read serves both the precedent guard below and
         # ``_resolve_document_ids``'s stored-link lookup, so a caller_id
@@ -135,6 +157,9 @@ class EntityCreateHandler:
             if caller_id is not None
             else None
         )
+        if if_absent and existing_node is not None:
+            name = command.args["name"]
+            return (caller_id, f"Entity left alone, already exists (if_absent): {name}")
         if existing_node is not None and existing_node["node_type"] == "precedent":
             supplied_entity_type = command.args["entity_type"]
             if supplied_entity_type != "precedent":

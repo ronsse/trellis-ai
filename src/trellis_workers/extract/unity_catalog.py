@@ -22,12 +22,17 @@ Accepted input, parsed (a dict, or a list of any mix of these):
   not name the table it was requested for, so the export must add
   ``"table_name": "<catalog>.<schema>.<table>"`` beside the two lists.
 
-Lineage never mints an entity.  A table or column that only a lineage row names
-gets no draft: the ``depends_on`` edge to it is emitted with ``allow_dangling``
-and lands on the same id when the metadata run that holds the object arrives,
-in either order.  A draft is an ``entity.create`` that replaces the node's
-properties, so a placeholder from a lineage-only run would overwrite real
-metadata written by an earlier run.
+An object the export names but does not hold is a placeholder.  A lineage row
+can name a table or column the export's metadata lacks, and a table, schema or
+column always hangs from a schema and a catalog that a partial export (tables
+only, lineage only) may not hold either.  Every such object gets a name-only
+draft with ``if_absent=True`` and ``stub=True`` on the same id the real record
+would have, so every edge joins two nodes of the batch and the Bolt stores,
+which refuse a dangling edge, take it.  ``if_absent`` makes the write a
+create-if-absent: the node is created when missing and left alone when it
+exists, so a partial run never replaces what a fuller run wrote.  A record the
+export does hold is a full create, which replaces the node's properties and so
+drops ``stub``: the metadata that arrives after a lineage-only run lands whole.
 
 A wrapper may also carry ``"namespace"``, the OpenLineage dataset namespace for
 the workspace (``unitycatalog://<host>``, a trailing ``/`` is dropped).  The
@@ -396,6 +401,19 @@ def _add_lineage_api(doc: dict[str, Any], where: str, state: _Collected) -> None
                 state.add_table_edge(queried_parts, other, when)
 
 
+def _is_bare_catalog(node: dict[str, Any]) -> bool:
+    """A bare record with a ``name``, none of a table's or column's fields, and
+    a ``full_name`` (when it has one) equal to that ``name``.
+
+    A catalog's three-part-free ``full_name`` is its ``name``; a dotted one
+    belongs to a schema or a table whose ``catalog_name`` the record lost.
+    """
+    if "name" not in node or not node.keys().isdisjoint(_NOT_A_CATALOG_KEYS):
+        return False
+    full_name = node.get("full_name")
+    return full_name is None or _fold(full_name) == _fold(node["name"])
+
+
 def _walk(node: Any, where: str, state: _Collected) -> None:  # noqa: PLR0912 - one dispatch over every accepted shape
     if isinstance(node, list):
         for idx, item in enumerate(node):
@@ -428,7 +446,7 @@ def _walk(node: Any, where: str, state: _Collected) -> None:  # noqa: PLR0912 - 
         _add_table(node, where, state)
     elif "catalog_name" in node:
         _add_schema(node, where, state)
-    elif "name" in node and node.keys().isdisjoint(_NOT_A_CATALOG_KEYS):
+    elif _is_bare_catalog(node):
         _add_catalog(node, where, state)
     else:
         _refuse(f"{where}: not a catalog, schema, table or lineage record or response")
@@ -481,7 +499,9 @@ class UnityCatalogExtractor:
             lineage (default).  Off, columns are counted (``column_count``)
             and column lineage is skipped.
 
-    An object named only by lineage gets no entity (see the module docstring).
+    An object the export names but does not hold, whether through a lineage row
+    or as the parent of a record, becomes a name-only ``if_absent`` placeholder
+    marked ``stub`` (see the module docstring).
 
     A column entity is a structural leaf by the two-signal opt-in of
     ``adr-source-modeling-discipline.md`` §2.5: ``node_role="structural"``
@@ -594,13 +614,15 @@ class _Builder:
     def _ensure_catalog(self, catalog: str) -> str:
         cid = self._catalog_id(catalog)
         if cid not in self._entities:
-            rec = self._state.catalogs.get(catalog) or {}
+            found = self._state.catalogs.get(catalog)
+            rec = found or {}
             key = _identity_key(catalog)
             props = _drop_none(
                 {
                     "name": _text(rec.get("name")) or catalog,
                     "full_name": key,
                     "source_system": "databricks",
+                    "stub": True if found is None else None,
                     "catalog_type": _text(rec.get("catalog_type")),
                     "owner": _text(rec.get("owner")),
                     "description": _text(rec.get("comment"), _MAX_DESCRIPTION),
@@ -616,6 +638,7 @@ class _Builder:
                 entity_type=UC_CATALOG_ENTITY_TYPE,
                 name=props["name"],
                 properties=props,
+                if_absent=found is None,
                 aliases=[
                     AliasDraft(
                         source_system=wk.UNITY_CATALOG_SOURCE_SYSTEM,
@@ -629,7 +652,8 @@ class _Builder:
     def _ensure_schema(self, catalog: str, schema: str) -> str:
         sid = self._schema_id(catalog, schema)
         if sid not in self._entities:
-            rec = self._state.schemas.get((catalog, schema)) or {}
+            found = self._state.schemas.get((catalog, schema))
+            rec = found or {}
             key = _identity_key(catalog, schema)
             props = _drop_none(
                 {
@@ -637,6 +661,7 @@ class _Builder:
                     "full_name": key,
                     "database_name": catalog,
                     "source_system": "databricks",
+                    "stub": True if found is None else None,
                     "owner": _text(rec.get("owner")),
                     "description": _text(rec.get("comment"), _MAX_DESCRIPTION),
                     "storage_location": _text(
@@ -651,6 +676,7 @@ class _Builder:
                 entity_type=UC_SCHEMA_ENTITY_TYPE,
                 name=props["name"],
                 properties=props,
+                if_absent=found is None,
                 aliases=[
                     AliasDraft(
                         source_system=wk.UNITY_CATALOG_SOURCE_SYSTEM,
@@ -667,7 +693,8 @@ class _Builder:
         if tid in self._entities:
             return tid
         catalog, schema, table = parts
-        rec = self._state.tables[parts]
+        found = self._state.tables.get(parts)
+        rec = found or {}
         key = _identity_key(*parts)
         columns = rec.get("columns")
         props: dict[str, Any] = {
@@ -677,6 +704,8 @@ class _Builder:
             "schema_name": schema,
             "source_system": "databricks",
         }
+        if found is None:
+            props["stub"] = True
         host = _host(self._namespace)
         if host:
             props[wk.DATASET_PROP_PHYSICAL_URI] = (
@@ -717,16 +746,18 @@ class _Builder:
             name=props["name"],
             properties=props,
             aliases=aliases,
+            if_absent=found is None,
         )
         self._contains(self._ensure_schema(catalog, schema), tid)
         return tid
 
     def _ensure_column(
-        self, parts: _TableParts, column: str, shown: str, rec: dict[str, Any]
+        self, parts: _TableParts, column: str, shown: str, found: dict[str, Any] | None
     ) -> str:
         cid = self._column_id(parts, column)
         if cid in self._entities:
             return cid
+        rec = found or {}
         position = rec.get("position")
         nullable = rec.get("nullable")
         props: dict[str, Any] = _drop_none(
@@ -734,6 +765,7 @@ class _Builder:
                 "name": shown,
                 "table_full_name": _identity_key(*parts),
                 "source_system": "databricks",
+                "stub": True if found is None else None,
                 "type_text": _text(rec.get("type_text")),
                 "type_name": _text(rec.get("type_name")),
                 "position": position
@@ -750,6 +782,7 @@ class _Builder:
             properties=props,
             node_role=NodeRole.STRUCTURAL,
             allow_structural_leaf=True,
+            if_absent=found is None,
         )
         self._contains(self._ensure_table(parts), cid)
         return cid
@@ -777,19 +810,14 @@ class _Builder:
 
         for (source, target), when in sorted(state.table_lineage.items()):
             if self._kept(source[0]) and self._kept(target[0]):
-                # Ids only: a table the export does not hold gets no entity.
-                self._depends_on(self._table_id(target), self._table_id(source), when)
+                self._table_lineage(source, target, when)
 
         if self._include_columns:
             for ((s_tab, s_name), (t_tab, t_name)), moment in sorted(
                 state.column_lineage.items()
             ):
                 if self._kept(s_tab[0]) and self._kept(t_tab[0]):
-                    self._depends_on(
-                        self._column_id(t_tab, t_name),
-                        self._column_id(s_tab, s_name),
-                        moment,
-                    )
+                    self._column_lineage((s_tab, s_name), (t_tab, t_name), moment)
         elif state.column_lineage:
             state.skipped["column_lineage_with_columns_off"] += len(
                 state.column_lineage
@@ -812,17 +840,38 @@ class _Builder:
             ),
         )
 
-    def _depends_on(self, downstream: str, upstream: str, when: str | None) -> None:
-        if downstream == upstream:
+    def _table_lineage(
+        self, source: _TableParts, target: _TableParts, when: str | None
+    ) -> None:
+        down, up = self._table_id(target), self._table_id(source)
+        if down == up:
             self._state.skipped["self_lineage"] += 1
             return
+        # An endpoint the export does not hold is a placeholder, so the edge
+        # always has two nodes to join and the store never holds it dangling.
+        self._ensure_table(target)
+        self._ensure_table(source)
+        self._depends_on(down, up, when)
+
+    def _column_lineage(
+        self,
+        source: tuple[_TableParts, str],
+        target: tuple[_TableParts, str],
+        when: str | None,
+    ) -> None:
+        down, up = self._column_id(*target), self._column_id(*source)
+        if down == up:
+            self._state.skipped["self_lineage"] += 1
+            return
+        # A placeholder column is named by the folded name its id carries.
+        for tab, name in (target, source):
+            self._ensure_column(tab, name, name, None)
+        self._depends_on(down, up, when)
+
+    def _depends_on(self, downstream: str, upstream: str, when: str | None) -> None:
         self._edges[(EDGE_DEPENDS_ON, downstream, upstream)] = EdgeDraft(
             source_id=downstream,
             target_id=upstream,
             edge_kind=EDGE_DEPENDS_ON,
             properties=_drop_none({"last_event_time": when}),
-            # Lineage may name an object the metadata export does not hold, and
-            # exports arrive in separate runs: the edge lands on the same id
-            # when the run that holds the object does.
-            allow_dangling=True,
         )

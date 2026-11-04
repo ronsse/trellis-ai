@@ -26,6 +26,20 @@ _TABLES = {
         }
     ]
 }
+_CATALOGS = {
+    "catalogs": [{"name": "main", "owner": "data-eng", "comment": "Primary catalog"}]
+}
+_SCHEMAS = {
+    "schemas": [
+        {
+            "name": "sales",
+            "catalog_name": "main",
+            "full_name": "main.sales",
+            "owner": "sales-eng",
+            "comment": "Sales marts",
+        }
+    ]
+}
 _LINEAGE = [
     {
         "source_table_full_name": "main.raw.events",
@@ -70,14 +84,14 @@ class TestRefresh:
         assert first.exit_code == 0, first.stdout
         data = json.loads(first.stdout.strip())
         assert data["status"] == "refreshed"
-        # catalog, schema, table, one column; `main.raw.events` is named by
-        # lineage only, so it gets no entity.
-        assert data["entities_scanned"] == data["new_entities"] == 4
+        # catalog, schema, table and one column, plus the placeholders for
+        # `main.raw.events`, which only lineage names, and its schema `main.raw`.
+        assert data["entities_scanned"] == data["new_entities"] == 6
 
         second = json.loads(_refresh(export).stdout.strip())
         assert second["new_entities"] == 0
         assert second["changed_entities"] == 0
-        assert second["unchanged_entities"] == 4
+        assert second["unchanged_entities"] == 6
         assert second["diffs"] == []
 
     def test_a_lineage_only_refresh_changes_no_entity(self, tmp_path: Path) -> None:
@@ -88,13 +102,38 @@ class TestRefresh:
         assert _refresh(metadata).exit_code == 0
         after = json.loads(_refresh(lineage).stdout.strip())
         assert after["status"] == "refreshed"
-        assert after["entities_scanned"] == 0
-        assert after["new_entities"] == after["changed_entities"] == 0
-        assert after["edges_emitted"] == 1
+        # The run names five nodes: the two lineage endpoints' placeholders
+        # (`main.raw.events` and its schema `main.raw` are new) and the three
+        # the metadata run already wrote (catalog, schema, table), left alone.
+        assert after["entities_scanned"] == 5
+        assert after["new_entities"] == 2
+        assert after["changed_entities"] == 0
+        assert after["unchanged_entities"] == 3
+        assert after["edges_emitted"] == 5  # four contains and one depends_on
         # The metadata run still reads back unchanged: nothing was overwritten.
         again = json.loads(_refresh(metadata).stdout.strip())
         assert again["changed_entities"] == again["new_entities"] == 0
         assert again["unchanged_entities"] == 4
+
+    def test_a_tables_only_refresh_after_a_full_export_changes_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        # The catalog and schema a tables-only export re-names are placeholders,
+        # so they do not replace the owner and description a full export wrote.
+        full = tmp_path / "full"
+        full.mkdir()
+        (full / "catalogs.json").write_text(json.dumps(_CATALOGS))
+        (full / "schemas.json").write_text(json.dumps(_SCHEMAS))
+        (full / "tables.json").write_text(json.dumps(_TABLES))
+        tables = tmp_path / "tables.json"
+        tables.write_text(json.dumps(_TABLES))
+
+        first = json.loads(_refresh(full).stdout.strip())
+        assert first["new_entities"] == 4
+        after = json.loads(_refresh(tables).stdout.strip())
+        assert after["new_entities"] == after["changed_entities"] == 0
+        assert after["unchanged_entities"] == 4
+        assert after["diffs"] == []
 
     def test_single_file_in_either_layout(self, tmp_path: Path) -> None:
         wrapped = tmp_path / "wrapped.json"
@@ -121,7 +160,7 @@ class TestRefresh:
             ],
         )
         assert result.exit_code == 0, result.stdout
-        assert json.loads(result.stdout.strip())["new_entities"] == 4
+        assert json.loads(result.stdout.strip())["new_entities"] == 6
 
 
 class TestRefusals:

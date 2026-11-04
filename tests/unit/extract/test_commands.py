@@ -74,6 +74,36 @@ class TestEntityConversion:
         assert "entity_id" not in cmd.args
         assert cmd.args["name"] == "Bob"
 
+    def test_a_draft_without_if_absent_produces_exactly_todays_command(self) -> None:
+        """The arg is forwarded only when set, so no existing batch changes."""
+        ent = EntityDraft(
+            entity_id="ent-a",
+            entity_type="person",
+            name="Alice",
+            properties={"team": "platform"},
+        )
+        (cmd,) = result_to_batch(_result(entities=[ent]), requested_by="t").commands
+        assert cmd.args == {
+            "entity_id": "ent-a",
+            "entity_type": "person",
+            "name": "Alice",
+            "properties": {"team": "platform", CONFIDENCE_PROPERTY: 1.0},
+            "node_role": "semantic",
+        }
+        explicit_off = ent.model_copy(update={"if_absent": False})
+        (off,) = result_to_batch(
+            _result(entities=[explicit_off]), requested_by="t"
+        ).commands
+        assert off.args == cmd.args
+
+    def test_if_absent_is_forwarded_when_set(self) -> None:
+        ent = EntityDraft(
+            entity_id="ent-a", entity_type="person", name="Alice", if_absent=True
+        )
+        (cmd,) = result_to_batch(_result(entities=[ent]), requested_by="t").commands
+        assert cmd.args["if_absent"] is True
+        assert cmd.args["entity_id"] == "ent-a"
+
 
 class TestEdgeConversion:
     def test_basic_edge(self) -> None:

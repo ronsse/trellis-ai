@@ -3,8 +3,9 @@
 Every name is invented.  The fixture is the smallest export that exercises each
 rule: one managed table, one view, a lineage row naming a table the metadata
 export lacks, a system catalog that must stay out, and one column-level fact.
-A table or column that only lineage names gets no entity, so a lineage-only run
-can never overwrite what a metadata run wrote.
+A table, column, schema or catalog that only lineage (or a child's parent chain)
+names is a placeholder draft: ``if_absent`` and ``stub``, created only when the
+node is missing, so a partial run can never overwrite what a fuller run wrote.
 """
 
 from __future__ import annotations
@@ -195,8 +196,8 @@ class TestInputShapes:
             (TABLES["tables"][:1], 5),  # catalog, schema, table, two columns
             (TABLES["tables"][1], 4),  # one bare record, not in a list
             (TABLES, 7),
-            (TABLE_LINEAGE[:1], 0),  # lineage alone names objects, mints none
-            (LINEAGE_API, 0),
+            (TABLE_LINEAGE[:1], 4),  # catalog, schema, two placeholder tables
+            (LINEAGE_API, 6),  # catalog, two schemas, three placeholder tables
         ],
     )
     async def test_shape_parses(self, raw: Any, entity_count: int) -> None:
@@ -258,6 +259,11 @@ class TestRefusals:
             [{"name": "orders", "table_type": "MANAGED"}],
             [{"name": "orders", "columns": []}],
             [{"name": "amount", "nullable": True}],
+            # A dotted `full_name` is a schema's or a table's, whose catalog
+            # field the record lost; a catalog's is its own name.
+            {"name": "orders", "full_name": "main.sales.orders"},
+            {"name": "sales", "full_name": "main.sales", "comment": "Sales marts"},
+            {"name": "main", "full_name": "other"},
         ],
     )
     async def test_unreadable_input_is_a_typed_refusal(self, raw: Any) -> None:
@@ -284,6 +290,13 @@ class TestRefusals:
         }
         entities = by_id(await extract(record))
         assert list(entities) == [f"uc_catalog:{NS}:main"]
+
+    @pytest.mark.parametrize("full_name", ["main", "Main", " main "])
+    async def test_a_bare_catalog_whose_full_name_is_its_name_parses(
+        self, full_name: str
+    ) -> None:
+        record = {"name": "main", "full_name": full_name, "owner": "data-eng"}
+        assert list(by_id(await extract(record))) == [f"uc_catalog:{NS}:main"]
 
     async def test_a_column_record_inside_a_catalogs_list_is_not_filtered(self) -> None:
         # Under an explicit `catalogs` key the caller said what the records are.
@@ -318,15 +331,18 @@ class TestRefusals:
 class TestGraphShape:
     async def test_hierarchy_and_lineage_counts(self) -> None:
         result = await extract(EVERYTHING)
-        assert len(result.entities) == 7
-        assert len(result.edges) == 9
+        assert len(result.entities) == 9
+        assert len(result.edges) == 11
 
     async def test_contains_edges_run_parent_to_child(self) -> None:
         result = await extract(EVERYTHING)
         main, sales = f"uc_catalog:{NS}:main", f"uc_schema:{NS}:main.sales"
+        raw = f"uc_schema:{NS}:main.raw"
         orders = tid("main.sales.orders")
         assert edge_set(result, "contains") == {
             (main, sales),
+            (main, raw),
+            (raw, tid("main.raw.events")),
             (sales, orders),
             (sales, tid("main.sales.daily_revenue")),
             (orders, f"uc_column:{NS}:main.sales.orders/order_id"),
@@ -363,23 +379,60 @@ class TestGraphShape:
             )
         }
 
-    async def test_lineage_edges_may_dangle_across_batches(self) -> None:
+    async def test_no_edge_is_dangling(self) -> None:
+        # The Bolt stores refuse a dangling edge even with `allow_dangling`, so
+        # every endpoint is an entity of the same batch, real or placeholder.
         result = await extract(EVERYTHING)
-        assert all(
-            e.allow_dangling for e in result.edges if e.edge_kind == "depends_on"
+        ids = set(by_id(result))
+        assert result.edges
+        assert not [e for e in result.edges if e.allow_dangling]
+        for edge in result.edges:
+            assert edge.source_id in ids, edge
+            assert edge.target_id in ids, edge
+
+    async def test_lineage_naming_an_unknown_table_gets_a_placeholder(self) -> None:
+        result = await extract(EVERYTHING)
+        entities = by_id(result)
+        events = entities[tid("main.raw.events")]
+        # Bounded and name-only: identity, parentage and the placeholder marks.
+        assert events.if_absent is True
+        assert events.properties["stub"] is True
+        assert set(events.properties) <= {
+            "name",
+            "full_name",
+            "database_name",
+            "schema_name",
+            "source_system",
+            "stub",
+            "physical_uri",
+            "extraction_confidence",
+        }
+        # So are the schema and catalog it hangs from, when the export lacks them.
+        raw = entities[f"uc_schema:{NS}:main.raw"]
+        assert (raw.if_absent, raw.properties["stub"]) == (True, True)
+        assert (tid("main.sales.orders"), tid("main.raw.events")) in edge_set(
+            result, "depends_on"
         )
 
-    async def test_lineage_naming_an_unknown_table_mints_no_entity(self) -> None:
-        # The edge is emitted and dangles; no draft would be an `entity.create`
-        # that replaces whatever an earlier run wrote for that id.
-        result = await extract(EVERYTHING)
-        events = tid("main.raw.events")
-        assert events not in by_id(result)
-        assert not [e for e in result.entities if "main.raw" in e.entity_id]
-        assert (tid("main.sales.orders"), events) in edge_set(result, "depends_on")
-        assert not [e for e in result.entities if e.properties.get("stub")]
+    async def test_only_what_the_export_lacks_is_a_placeholder(self) -> None:
+        entities = by_id(await extract(EVERYTHING))
+        placeholders = {k for k, e in entities.items() if e.if_absent}
+        assert placeholders == {tid("main.raw.events"), f"uc_schema:{NS}:main.raw"}
+        for key, entity in entities.items():
+            assert ("stub" in entity.properties) == (key in placeholders), key
 
-    async def test_column_lineage_naming_an_unknown_column_mints_no_entity(
+    async def test_a_parent_the_export_lacks_is_a_placeholder(self) -> None:
+        # A tables-only export holds neither the schema nor the catalog.
+        entities = by_id(await extract(TABLES))
+        schema = entities[f"uc_schema:{NS}:main.sales"]
+        catalog = entities[f"uc_catalog:{NS}:main"]
+        for parent in (schema, catalog):
+            assert parent.if_absent is True
+            assert parent.properties["stub"] is True
+            assert not {"owner", "description"} & set(parent.properties)
+        assert entities[tid("main.sales.orders")].if_absent is False
+
+    async def test_column_lineage_naming_an_unknown_column_gets_a_placeholder(
         self,
     ) -> None:
         rows = [
@@ -391,12 +444,17 @@ class TestGraphShape:
             }
         ]
         result = await extract([TABLES, rows])
+        entities = by_id(result)
         src = f"uc_column:{NS}:main.sales.orders/amount"
         tgt = f"uc_column:{NS}:main.sales.daily_revenue/revenue_total"
-        assert src not in by_id(result)
-        assert tgt not in by_id(result)
+        for column in (src, tgt):
+            assert entities[column].if_absent is True
+            assert entities[column].properties["stub"] is True
+            assert entities[column].node_role is NodeRole.STRUCTURAL
+            assert entities[column].allow_structural_leaf is True
         assert edge_set(result, "depends_on") == {(tgt, src)}
-        assert len(edge_set(result, "contains")) == 6  # unchanged by the lineage row
+        assert (tid("main.sales.orders"), src) in edge_set(result, "contains")
+        assert len(edge_set(result, "contains")) == 8  # the six of TABLES, two more
 
     async def test_columns_are_structural_leaves(self) -> None:
         entities = by_id(await extract(EVERYTHING))
@@ -413,7 +471,9 @@ class TestGraphShape:
     async def test_columns_off_drops_column_entities_and_column_lineage(self) -> None:
         result = await extract(EVERYTHING, include_columns=False)
         assert not [e for e in result.entities if e.entity_type == "uc_column"]
-        assert len(result.entities) == 4
+        assert (
+            len(result.entities) == 6
+        )  # catalog, schema, two tables, two placeholders
         assert by_id(result)[tid("main.sales.orders")].properties["column_count"] == 2
         assert len(edge_set(result, "depends_on")) == 2
 
@@ -499,8 +559,8 @@ class TestSystemCatalogs:
 
     async def test_option_keeps_them(self) -> None:
         result = await extract(EVERYTHING, include_system=True)
-        assert len(result.entities) == 10
-        assert len(result.edges) == 12
+        assert len(result.entities) == 12  # the nine of EVERYTHING, plus system's three
+        assert len(result.edges) == 14
         assert (tid("main.sales.orders"), tid("system.access.audit")) in edge_set(
             result, "depends_on"
         )
@@ -645,7 +705,7 @@ class TestIdentity:
                 )
             )
         assert counts[0] == counts[1]
-        assert counts[0][0] == 7
+        assert counts[0][0] == 9
 
 
 # ---------------------------------------------------------------------------
@@ -655,49 +715,100 @@ class TestIdentity:
 #: Table lineage plus one column fact, naming only objects `TABLES` holds.
 LINEAGE_ONLY = [*TABLE_LINEAGE[:1], *COLUMN_LINEAGE]
 
+#: A schema record that carries what a placeholder must never overwrite.
+RICH_SCHEMAS = {
+    "schemas": [
+        {
+            "name": "sales",
+            "catalog_name": "main",
+            "full_name": "main.sales",
+            "owner": "sales-eng",
+            "comment": "Sales marts",
+        }
+    ]
+}
 
-def _store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> StoreRegistry:
-    monkeypatch.setenv("TRELLIS_KNOWLEDGE_LINK_OR_MINT", "1")
-    stores = tmp_path / "stores"
-    stores.mkdir()
-    return StoreRegistry(stores_dir=stores)
+#: Both link-or-mint settings: off writes bare creates, on adds bind-if-absent aliases.
+BOTH_MODES = pytest.mark.parametrize("lom", [False, True], ids=["lom_off", "lom_on"])
 
 
-def _write(registry: StoreRegistry, result: ExtractionResult) -> None:
-    batch = result_to_batch(result, requested_by="test", bind_identity=True)
-    outcomes = build_curate_executor(registry, clearance="restricted").execute_batch(
-        batch
-    )
-    assert all(r.status is CommandStatus.SUCCESS for r in outcomes)
+class Store:
+    """A real SQLite-backed registry and the write path an extraction batch takes."""
+
+    def __init__(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, lom: bool
+    ) -> None:
+        monkeypatch.setenv("TRELLIS_KNOWLEDGE_LINK_OR_MINT", "1" if lom else "0")
+        stores = tmp_path / "stores"
+        stores.mkdir()
+        self.registry = StoreRegistry(stores_dir=stores)
+        self.lom = lom
+
+    @property
+    def graph(self) -> Any:
+        return self.registry.knowledge.graph_store
+
+    def write(self, result: ExtractionResult) -> None:
+        batch = result_to_batch(result, requested_by="test", bind_identity=self.lom)
+        outcomes = build_curate_executor(
+            self.registry, clearance="restricted"
+        ).execute_batch(batch)
+        assert all(r.status is CommandStatus.SUCCESS for r in outcomes)
+
+    def props(self, node_id: str) -> dict[str, Any]:
+        node = self.graph.get_node(node_id)
+        assert node is not None, node_id
+        return dict(node["properties"])
+
+    def snapshot(self) -> list[tuple[str, str, int]]:
+        """Every node's id, properties and version count, to compare store states.
+
+        The version count shows a write that left the properties as they were:
+        a replace adds an SCD-2 version, a skip adds none.
+        """
+        return sorted(
+            (
+                nid,
+                json.dumps(self.props(nid), sort_keys=True),
+                len(self.graph.get_node_history(nid)),
+            )
+            for nid in (n["node_id"] for n in self.graph.query(limit=1000))
+        )
 
 
-def _props(registry: StoreRegistry, node_id: str) -> dict[str, Any]:
-    node = registry.knowledge.graph_store.get_node(node_id)
-    assert node is not None, node_id
-    return dict(node["properties"])
+def _catalog(name: str = "main") -> str:
+    return f"uc_catalog:{NS}:{name}"
+
+
+def _schema(full_name: str = "main.sales") -> str:
+    return f"uc_schema:{NS}:{full_name}"
 
 
 class TestSeparateRuns:
+    @BOTH_MODES
     @pytest.mark.parametrize("metadata_first", [True, False])
     async def test_a_lineage_only_run_does_not_overwrite_metadata(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, metadata_first: bool
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        lom: bool,
+        metadata_first: bool,
     ) -> None:
-        registry = _store(tmp_path, monkeypatch)
+        store = Store(tmp_path, monkeypatch, lom=lom)
         metadata, lineage = await extract(TABLES), await extract(LINEAGE_ONLY)
         for result in (metadata, lineage) if metadata_first else (lineage, metadata):
-            _write(registry, result)
+            store.write(result)
 
-        orders = _props(registry, tid("main.sales.orders"))
+        orders = store.props(tid("main.sales.orders"))
         assert orders["description"] == "One row per order"
         assert orders["owner"] == "data-eng"
         assert orders["table_type"] == "MANAGED"
         assert "stub" not in orders
-        column = _props(registry, f"uc_column:{NS}:main.sales.orders/order_id")
+        column = store.props(f"uc_column:{NS}:main.sales.orders/order_id")
         assert column["type_text"] == "bigint"
         assert column["description"] == "Primary key"
         assert "stub" not in column
 
-        graph = registry.knowledge.graph_store
         revenue = tid("main.sales.daily_revenue")
         for node_id, upstream in (
             (revenue, tid("main.sales.orders")),
@@ -706,40 +817,123 @@ class TestSeparateRuns:
                 f"uc_column:{NS}:main.sales.orders/order_id",
             ),
         ):
-            edges = graph.get_edges(
+            edges = store.graph.get_edges(
                 node_id, direction="outgoing", edge_type="depends_on"
             )
             assert [e["target_id"] for e in edges] == [upstream]
 
-    async def test_a_lineage_only_run_alone_writes_edges_and_no_nodes(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @BOTH_MODES
+    async def test_a_tables_only_run_after_a_full_export_keeps_catalog_and_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lom: bool
     ) -> None:
-        registry = _store(tmp_path, monkeypatch)
-        result = await extract(LINEAGE_ONLY)
-        assert result.entities == []
-        _write(registry, result)
+        # The first re-gate finding: the parents the tables-only run re-named
+        # were full creates, so they replaced what the full export had written.
+        store = Store(tmp_path, monkeypatch, lom=lom)
+        store.write(await extract([CATALOGS, RICH_SCHEMAS, TABLES]))
+        catalog, schema = store.props(_catalog()), store.props(_schema())
+        assert catalog["owner"] == "data-eng"
+        assert catalog["description"] == "Primary catalog"
+        assert schema["owner"] == "sales-eng"
+        assert schema["description"] == "Sales marts"
+        versions = [
+            len(store.graph.get_node_history(n)) for n in (_catalog(), _schema())
+        ]
 
-        graph = registry.knowledge.graph_store
-        # The store accepts a dangling endpoint and creates no node for it.
-        assert graph.count_nodes() == 0
-        assert graph.count_edges() == 2
-        edges = graph.get_edges(
+        store.write(await extract(TABLES))
+        assert store.props(_catalog()) == catalog
+        assert store.props(_schema()) == schema
+        # Not even a same-valued rewrite: the tables are real and are written
+        # again, the parents are placeholders and are not.
+        assert versions == [
+            len(store.graph.get_node_history(n)) for n in (_catalog(), _schema())
+        ]
+
+    @BOTH_MODES
+    async def test_a_schemas_only_run_after_a_full_export_keeps_the_catalog(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lom: bool
+    ) -> None:
+        store = Store(tmp_path, monkeypatch, lom=lom)
+        store.write(await extract([CATALOGS, RICH_SCHEMAS, TABLES]))
+        catalog = store.props(_catalog())
+        assert catalog["owner"] == "data-eng"
+
+        store.write(await extract(RICH_SCHEMAS))
+        assert store.props(_catalog()) == catalog
+        assert store.props(_schema())["owner"] == "sales-eng"
+
+    @BOTH_MODES
+    async def test_a_lineage_only_run_after_a_full_export_keeps_every_node(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lom: bool
+    ) -> None:
+        store = Store(tmp_path, monkeypatch, lom=lom)
+        store.write(await extract([CATALOGS, RICH_SCHEMAS, TABLES, LINEAGE_ONLY]))
+        before = store.snapshot()
+
+        store.write(await extract(LINEAGE_ONLY))
+        assert store.snapshot() == before
+        assert store.props(tid("main.sales.orders"))["owner"] == "data-eng"
+
+    @BOTH_MODES
+    async def test_a_placeholder_is_marked_and_the_real_record_replaces_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lom: bool
+    ) -> None:
+        store = Store(tmp_path, monkeypatch, lom=lom)
+        store.write(await extract(LINEAGE_ONLY))
+        for node_id in (
+            tid("main.sales.orders"),
+            _schema(),
+            _catalog(),
+            f"uc_column:{NS}:main.sales.orders/order_id",
+        ):
+            assert store.props(node_id)["stub"] is True, node_id
+
+        # The metadata that arrives later is a full create, so it lands whole
+        # and carries no placeholder mark.
+        store.write(await extract([CATALOGS, RICH_SCHEMAS, TABLES]))
+        for node_id in (
+            tid("main.sales.orders"),
+            _schema(),
+            _catalog(),
+            f"uc_column:{NS}:main.sales.orders/order_id",
+        ):
+            assert "stub" not in store.props(node_id), node_id
+        assert store.props(tid("main.sales.orders"))["owner"] == "data-eng"
+        assert store.props(_catalog())["owner"] == "data-eng"
+        assert store.props(_schema())["description"] == "Sales marts"
+
+    @BOTH_MODES
+    async def test_a_lineage_only_run_alone_writes_placeholders_and_whole_edges(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lom: bool
+    ) -> None:
+        store = Store(tmp_path, monkeypatch, lom=lom)
+        result = await extract(LINEAGE_ONLY)
+        assert {e.entity_id for e in result.entities if not e.if_absent} == set()
+        store.write(result)
+
+        # catalog, schema, two tables and two columns; five contains and two
+        # depends_on edges, none dangling.
+        assert store.graph.count_nodes() == 6
+        assert store.graph.count_edges() == 7
+        for edge in result.edges:
+            assert store.graph.get_node(edge.source_id) is not None
+            assert store.graph.get_node(edge.target_id) is not None
+        edges = store.graph.get_edges(
             tid("main.sales.daily_revenue"),
             direction="outgoing",
             edge_type="depends_on",
         )
         assert [e["target_id"] for e in edges] == [tid("main.sales.orders")]
 
+    @BOTH_MODES
     async def test_a_rerun_of_each_leaves_the_graph_unchanged(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lom: bool
     ) -> None:
-        registry = _store(tmp_path, monkeypatch)
-        graph = registry.knowledge.graph_store
+        store = Store(tmp_path, monkeypatch, lom=lom)
         counts = []
         for _ in range(2):
             for raw in (TABLES, LINEAGE_ONLY):
-                _write(registry, await extract(raw))
-            counts.append((graph.count_nodes(), graph.count_edges()))
+                store.write(await extract(raw))
+            counts.append((store.graph.count_nodes(), store.graph.count_edges()))
         assert counts[0] == counts[1]
 
 
