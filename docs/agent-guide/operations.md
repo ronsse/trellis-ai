@@ -3857,6 +3857,70 @@ at `--model local` → $0.
 {"period_days": 7, "overhead_events": 28, "overhead_tokens": 34800, "model": "claude-opus", "price_per_mtok": 5.0, "price_source": "model_table", "overhead_dollars": 0.174, "by_operation": [{"operation": "get_context", "layer": "mcp", "calls": 20, "tokens": 30000, "dollars": 0.15}], "estimator": "estimate_4_chars_per_token"}
 ```
 
+### `trellis analyze value`
+
+Read-only value density of what was served: the share of injected tokens a caller
+went on to cite, by strategy, item type, namespace, intent family and graph
+selection. Also `GET /api/v1/analyze/value`.
+
+```bash
+trellis analyze value [--days N] [--model M] [--price-per-mtok P] [--format text|json]
+```
+
+`useful_token_fraction` is the pessimistic, explicit-only metric: tokens an agent
+named in `record_feedback`, over every token injected into an attributed pack. It
+is a lower bound, because feedback is voluntary and an uncited item is not an
+unhelpful one. Two additive, report-only blocks sit beside it. Neither is merged
+into that fraction, and no existing field changes when they are present.
+
+**`implicit`** reads two signals that need no verdict:
+
+- **Fetch.** `PACK_ITEMS_FETCHED` (written by the MCP `get_items` tool) joins to a
+  served row by `(pack_id, item_id)`, using `served_item_ids` only, since
+  `requested_item_ids` also holds ids that were omitted or not found.
+  `fetched_items`, `fetched_tokens` and `fetched_token_fraction` (over every
+  injected token in the window's flat packs, which is a wider population than the
+  headline's attributed packs) say how much was fetched, and `fetched_unjudged_tokens`
+  how much of that nobody graded: the part of the unjudged tail this signal reaches.
+  A fetch that cannot join is counted, never dropped: `fetch_unjoined` is the sum of
+  `fetch_unjoined_no_pack`, `fetch_unjoined_pack_not_in_window` (a pack outside the
+  window, or a held-out one) and `fetch_unjoined_item_not_served`. The fetch
+  ratios are withheld below `min_attributed_packs` (`fetch_suppressed_reason`).
+- **Agreement.** For items both fetched and graded, `p_helpful_given_fetched` sits
+  beside the base `p_helpful` over all graded servings, with the counts that
+  produced them (`fetched_graded_servings`, `graded_servings` and their helpful
+  counts). Both are `null` below `min_fetch_overlap` (30) fetched-and-graded
+  servings, with `agreement_suppressed_reason: "below_min_fetch_overlap"`.
+- **Re-retrieval.** `re_retrieved_packs` counts packs followed by another
+  `PACK_ASSEMBLED` in the same `session_id` within
+  `re_retrieval_window_minutes` (30, inclusive; `RE_RETRIEVAL_WINDOW_MINUTES` in
+  `trellis.retrieve.pack_value`). A pack with no `session_id` cannot be tested and is
+  counted apart in `packs_without_session`. This is a weak, pack-level hint: a
+  second retrieval may mean the first was not enough, or that the task changed.
+
+**`by_tier`** splits injected, helpful, unhelpful and unjudged tokens and item counts
+by how the row was served: `body`, `pointer` or `unknown`. The tier is read off
+the payload and never inferred from rank. A row is a `pointer` when its
+`selection_reason` is `disclosure_pointer` or its pack has `index_mode: true`. It
+is a `body` when the pack recorded that graduated disclosure ran (`disclosure.mode`)
+with no index mode and the row carries no pointer stamp. Otherwise it is `unknown`:
+a pack from before `disclosure` was recorded, or a sectioned pack, whose payload
+has neither key. Pointers still count as served tokens, so `by_tier` shows how much
+of the unjudged tail is pointers.
+
+A held-out pack is in none of this: every `PACK_ASSEMBLED` read goes through
+`drop_holdout`, the withheld arm's outcome is never read, and nothing is split by
+arm. A fetch that names a held-out pack lands in
+`fetch_unjoined_pack_not_in_window`.
+
+**These blocks are never demotion evidence.** A fetch is a positive hint about one
+item, and the absence of a fetch is not evidence that the item was unhelpful;
+demotion requires evidence of unhelpfulness, never the absence of evidence of
+helpfulness. So nothing in `learning/`, the classifiers, `apply_noise_tags`, the
+demotion gate, promotion or precedents reads them, and `analyze trend` does not
+carry them. `tests/unit/retrieve/test_pack_value_implicit.py` pins this: only
+`pack_value`, the CLI and the API route may name the new surface.
+
 ### `trellis analyze judged-outcomes`
 
 Read-only join from each judged memory operation to what followed it.
