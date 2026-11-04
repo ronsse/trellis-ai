@@ -6,6 +6,18 @@ All notable changes to Trellis will be documented in this file.
 
 ### Added
 
+- **`trellis analyze pack-judge`: an offline relevance judge for served pack items, and a
+  calibration report against agent feedback (shadow only).** The judge phase (`--out`) asks a
+  model, built through the `llm:` router as the new `pack_judge` consumer so any
+  OpenAI-compatible `base_url` works, whether each item in the window's non-held-out packs
+  helps its intent, and appends one id-and-label JSONL row per `(pack_id, item_id)` (no intent
+  or item text; resumable by pair, prompt version and model; nothing written to any store).
+  The calibrate phase (`--judged`) joins those rows to `FEEDBACK_RECORDED` through the typed
+  pack-row reader and reports the confusion matrix, overall and unhelpful-side agreement,
+  Cohen's kappa, coverage and the judge-implied useful-token fraction beside the agent-graded
+  lower bound, refusing below 30 graded items. Nothing it writes feeds serving, tags, demotion
+  or promotion. See `docs/agent-guide/operations.md`, "`trellis analyze pack-judge`".
+
 - **`get_lessons` can emit a gradable `PACK_ASSEMBLED`, behind `TRELLIS_GET_LESSONS_PACK_EVENT`
   (default off).** With the knob on, a call that serves lessons writes one event
   (`surface: "get_lessons"`, `injected_items[]` for the served precedents) and its reply ends

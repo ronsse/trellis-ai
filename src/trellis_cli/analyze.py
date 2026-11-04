@@ -4503,3 +4503,8 @@ def schema_evolution(
 
     if strict and candidates:
         raise typer.Exit(code=EXIT_INTERNAL)
+
+
+from trellis_cli.analyze_pack_judge import register as _reg_judge  # noqa: E402
+
+_reg_judge(analyze_app)
