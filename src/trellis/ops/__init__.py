@@ -19,6 +19,10 @@ from trellis.ops.precedent_sync_health import (
 )
 from trellis.ops.recording import record_outcome
 from trellis.ops.registry import ParameterRegistry
+from trellis.ops.retrieval_adoption import (
+    RetrievalAdoptionReport,
+    summarize_retrieval_adoption,
+)
 from trellis.ops.serving_builds import ServingBuildsReport, summarize_serving_builds
 from trellis.ops.write_health import (
     BackendHealthReport,
@@ -37,6 +41,7 @@ __all__ = [
     "CaptureHealthWarning",
     "ParameterRegistry",
     "PrecedentSyncReport",
+    "RetrievalAdoptionReport",
     "ServeAttributionReport",
     "ServingBuildsReport",
     "WriteHealthReport",
@@ -49,6 +54,7 @@ __all__ = [
     "resolve_capture_thresholds",
     "summarize_backend_health",
     "summarize_precedent_sync",
+    "summarize_retrieval_adoption",
     "summarize_serve_attribution",
     "summarize_serving_builds",
     "summarize_write_health",

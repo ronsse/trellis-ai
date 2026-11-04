@@ -74,6 +74,11 @@ from trellis.ops.precedent_sync_health import (
     precedent_sync_reasons,
     summarize_precedent_sync,
 )
+from trellis.ops.retrieval_adoption import (
+    RetrievalAdoptionReport,
+    retrieval_adoption_reasons,
+    summarize_retrieval_adoption,
+)
 from trellis.ops.serving_builds import (
     ServingBuildsReport,
     mixed_builds_reason,
@@ -1480,6 +1485,12 @@ class BackendHealthReport(TrellisModel):
     #: read from the ``PRECEDENT_REINSTATED`` events the handler already
     #: writes. See :mod:`trellis.ops.precedent_sync_health`.
     precedent_sync: PrecedentSyncReport
+    #: Whether agents retrieve at all: the share of the window's captured
+    #: sessions that were served at least one pack, read from the
+    #: ``CAPTURE_SESSION_PACKS`` joins the sweep already writes. Required, so
+    #: ``insufficient_data`` is a stated reading and never an absent section.
+    #: See :mod:`trellis.ops.retrieval_adoption`.
+    retrieval: RetrievalAdoptionReport
     #: The merged coverage of every EventLog read behind this report. When
     #: ``truncated`` is set, ``status`` is ``warn`` and ``reasons`` names
     #: it: a health verdict computed over a silently shortened window is
@@ -2083,9 +2094,15 @@ def summarize_backend_health(
     capture = summarize_capture_coverage(event_log, days=days, limit=limit)
     extraction = summarize_memory_extraction(event_log, days=days, limit=limit)
     precedent_sync = summarize_precedent_sync(event_log, days=days, limit=limit)
+    retrieval = summarize_retrieval_adoption(event_log, days=days, limit=limit)
 
     scan = merge_coverage(
-        write.scan, serve.scan, capture.scan, extraction.scan, precedent_sync.scan
+        write.scan,
+        serve.scan,
+        capture.scan,
+        extraction.scan,
+        precedent_sync.scan,
+        retrieval.scan,
     )
 
     # The write section states its own truncation so it reads correctly
@@ -2192,6 +2209,7 @@ def summarize_backend_health(
         )
 
     reasons.extend(precedent_sync_reasons(precedent_sync))
+    reasons.extend(retrieval_adoption_reasons(retrieval))
 
     return BackendHealthReport(
         window_days=days,
@@ -2200,6 +2218,7 @@ def summarize_backend_health(
         capture=capture,
         memory_extraction=extraction,
         precedent_sync=precedent_sync,
+        retrieval=retrieval,
         scan=scan,
         status="warn" if reasons else "ok",
         reasons=reasons,

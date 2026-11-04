@@ -167,6 +167,7 @@ from trellis.ops.write_health import (
 )
 from trellis.retrieve.builder_factory import (
     AxisReport,
+    _get_lessons_pack_event_enabled,
     build_pack_builder,
     describe_axes,
     format_embedder_failed_note,
@@ -186,6 +187,7 @@ from trellis.retrieve.formatters import (
     format_subgraph_as_markdown,
     index_render_overhead_tokens,
 )
+from trellis.retrieve.lessons_pack import record_lessons_pack
 from trellis.retrieve.pack_builder import RETRIEVAL_PHASES, PackBuilder
 from trellis.retrieve.sensitivity import (
     DocumentClearance,
@@ -3464,6 +3466,9 @@ def get_lessons(
         domain: Optional domain filter.
         limit: Maximum lessons to return (default 10).
         max_tokens: Maximum response size in tokens (default 2000).
+
+    With ``TRELLIS_GET_LESSONS_PACK_EVENT`` on, the reply ends with a
+    ``pack_id`` and the served ids so ``record_feedback`` can grade them.
     """
     from trellis.retrieve.precedents import list_precedents as _list_prec  # noqa: PLC0415
 
@@ -3478,7 +3483,20 @@ def get_lessons(
         clearance=current_clearance(),
     )
 
-    result = format_lessons_as_markdown(lessons, max_tokens=max_tokens)
+    served: list[dict[str, Any]] = []
+    result = format_lessons_as_markdown(
+        lessons, max_tokens=max_tokens, served_out=served
+    )
+    if served and _get_lessons_pack_event_enabled(
+        load_settings_values(registry.stores_dir)
+    ):
+        result = record_lessons_pack(
+            registry.operational.event_log,
+            served,
+            rendered=result,
+            domain=domain,
+            max_tokens=max_tokens,
+        )
     try:
         track_token_usage(
             registry.operational.event_log,
