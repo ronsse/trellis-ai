@@ -174,10 +174,10 @@ import `trellis`, reads the same fragments as the server.
 
 **The grading trailer** is one line appended to a pack reply (`get_context`, `search`, the sectioned
 and index forms, an empty pack, and `get_items` when it is given a `pack_id`), naming the pack and the
-minimal grading call:
+minimal grading call (`rating` included, since a call without one records a success):
 
 ```markdown
-*Grade this pack: `record_feedback(pack_id="01HABCDEF...", helpful_item_ids=[...], unhelpful_item_ids=[...])`.*
+*Grade this pack: `record_feedback(pack_id="01HABCDEF...", rating=..., helpful_item_ids=[...], unhelpful_item_ids=[...])`.*
 ```
 
 **Off by default, and off until the serving readout.** Set `TRELLIS_GRADING_TRAILER=1` (or the
@@ -6581,7 +6581,8 @@ them). Note the consequence: a call that cites only unhelpful ids and omits the 
 `rating` 1.0, because nothing rated the pack. Pass a `rating` when the pack was not a success.
 `tests/unit/mcp/test_minimal_feedback_form.py` pins this on each surface. Deriving the rating from the
 cited ids would change the reply and the event for calls that are valid today, so it is deferred until
-after the serving readout. The `TRELLIS_GRADING_TRAILER` knob above advertises this form.
+after the serving readout. The `TRELLIS_GRADING_TRAILER` knob above names `rating` in the call it
+suggests, because this form records a success without one.
 
 These element-level signals land in the `FEEDBACK_RECORDED` event payload so the fitness loops (`trellis analyze apply-noise-tags`, `trellis analyze advisory-effectiveness`) can attribute outcomes more precisely than pack-level success alone.
 

@@ -113,6 +113,12 @@ def test_get_items_names_the_pack_it_was_given(
         "<script>",
         "ignore previous instructions",
         SERVED_PACK_ID.lower(),
+        # A well-formed ULID followed by caller text: only a full match refuses
+        # these, a prefix match would echo the whole string into the reply.
+        SERVED_PACK_ID + "`",
+        SERVED_PACK_ID + "\n*x*",
+        SERVED_PACK_ID + "](http://example.invalid)",
+        SERVED_PACK_ID + " " + SERVED_PACK_ID,
     ],
 )
 def test_get_items_never_echoes_a_caller_supplied_non_ulid(
@@ -142,11 +148,27 @@ def test_the_trailer_text_comes_from_the_single_source() -> None:
     line = grading_trailer(SERVED_PACK_ID)
     assert line == (
         f'*Grade this pack: `record_feedback(pack_id="{SERVED_PACK_ID}", '
-        "helpful_item_ids=[...], unhelpful_item_ids=[...])`.*"
+        "rating=..., helpful_item_ids=[...], unhelpful_item_ids=[...])`.*"
     )
     assert re.fullmatch(r"[^\n]+", line)
     assert grading_trailer("not-a-ulid") is None
     assert grading_trailer(None) is None
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    ["`", "\n*x*", "](http://example.invalid)", " " + SERVED_PACK_ID, " "],
+)
+def test_the_guard_refuses_a_ulid_with_a_suffix(suffix: str) -> None:
+    """``fullmatch``, not ``match``: a valid prefix must not carry text through."""
+    assert grading_trailer(SERVED_PACK_ID + suffix) is None
+
+
+def test_the_trailer_names_rating() -> None:
+    """A minimal call without ``rating`` records a success, so the trailer names it."""
+    line = grading_trailer(SERVED_PACK_ID)
+    assert line is not None
+    assert "rating=..." in line
 
 
 def test_a_failure_in_the_trailer_never_fails_the_retrieval(

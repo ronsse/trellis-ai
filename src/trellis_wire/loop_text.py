@@ -286,14 +286,17 @@ _PACK_ID = re.compile(r"[0-9A-HJKMNP-TV-Z]{26}")
 def grading_trailer(pack_id: str | None) -> str | None:
     """One line telling the reader how to grade the pack, or ``None``.
 
-    Names the pack and the minimal grading call: ``pack_id`` plus the item ids
-    that helped and those that did not. ``None`` for anything that is not a
-    well-formed pack id, so a caller-supplied value is never echoed.
+    Names the pack and the minimal grading call: ``pack_id``, ``rating`` and
+    the item ids that helped and those that did not. ``rating`` is named
+    because a call without it records a success (``rating`` 1.0), which is the
+    wrong thing to suggest to a reader grading a pack that did not help.
+    ``None`` for anything that is not a well-formed pack id, so a
+    caller-supplied value is never echoed.
     """
     if not pack_id or _PACK_ID.fullmatch(pack_id) is None:
         return None
     return (
-        f'*Grade this pack: `record_feedback(pack_id="{pack_id}", '
+        f'*Grade this pack: `record_feedback(pack_id="{pack_id}", rating=..., '
         "helpful_item_ids=[...], unhelpful_item_ids=[...])`.*"
     )
 

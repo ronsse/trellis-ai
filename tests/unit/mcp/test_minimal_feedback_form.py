@@ -2,10 +2,11 @@
 
 A caller may send ``pack_id`` plus ``helpful_item_ids`` and/or
 ``unhelpful_item_ids`` and nothing else: no ``rating``, no ``success``. The
-reply trailer advertises exactly that call, so this pins the effect it has
-today on the MCP tool and on REST (through the SDK, which posts to
-``POST /packs/{pack_id}/feedback``): ``success`` is true, ``rating`` is 1.0,
-and the ``FEEDBACK_RECORDED`` payload has the same keys as a full call.
+reply trailer names ``rating`` because this call records a success without it;
+this pins the effect the bare call has today on the MCP tool and on REST
+(through the SDK, which posts to ``POST /packs/{pack_id}/feedback``):
+``success`` is true, ``rating`` is 1.0, and the ``FEEDBACK_RECORDED`` payload
+has the same keys as a full call.
 
 The silent ``rating`` of 1.0 on an unhelpful-only call is current behaviour
 and is pinned as such. Deriving a rating from the cited ids would change the
@@ -45,7 +46,9 @@ class TestMcp:
         assert payload["success"] is True
         assert payload["rating"] == 1.0
 
-    def test_unhelpful_ids_alone_are_enough(self, temp_registry: StoreRegistry) -> None:
+    def test_unhelpful_ids_alone_currently_record_success(
+        self, temp_registry: StoreRegistry
+    ) -> None:
         record_feedback(pack_id="pack_min", unhelpful_item_ids=["x"])
         (payload,) = _payloads(temp_registry)
         assert payload["unhelpful_item_ids"] == ["x"]
@@ -92,7 +95,7 @@ class TestRestAndSdk:
         assert payload["success"] is True
         assert payload["rating"] == 1.0
 
-    def test_unhelpful_ids_alone_are_enough(self, tmp_path: Path) -> None:
+    def test_unhelpful_ids_alone_currently_record_success(self, tmp_path: Path) -> None:
         with _sync_client(tmp_path / "stores") as (client, registry):
             client.record_feedback("pack_min", unhelpful_item_ids=["x"])
             (payload,) = _payloads(registry)

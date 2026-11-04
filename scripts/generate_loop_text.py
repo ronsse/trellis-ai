@@ -15,9 +15,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from trellis_wire import loop_text
-
 ROOT = Path(__file__).resolve().parents[1]
+
+# Render from this tree's source, not from whatever copy of ``trellis_wire`` is
+# installed: a worktree would otherwise generate (and ``--check`` against) the
+# installed package's fragments.
+sys.path.insert(0, str(ROOT / "src"))
+
+from trellis_wire import loop_text  # noqa: E402
+
 PACKAGE = ROOT / "src" / "trellis_cli"
 
 
