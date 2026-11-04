@@ -99,6 +99,21 @@ def test_distinct_sessions_boundary_is_two() -> None:
     assert _failed(_helpful_in(4, sessions=2)) is None
 
 
+def test_only_helpful_packs_count_toward_sessions() -> None:
+    # Helpful three times in one session; the target is also served in two other
+    # sessions, once judged unhelpful and once unjudged. Neither is a session.
+    packs = [
+        *_helpful_in(3, sessions=1),
+        _pack("bad", session="s-unhelpful", size=60, unhelpful=(TARGET,)),
+        _pack("quiet", session="s-unjudged", size=60),
+    ]
+
+    result = evaluate_target(TARGET, packs)
+
+    assert result.distinct_helpful_sessions == 1
+    assert result.first_failed == CRITERION_SESSIONS
+
+
 def test_sessionless_helpful_packs_never_count_as_a_session() -> None:
     packs = [_pack(f"p{i}", session=None, size=60, helpful=(TARGET,)) for i in range(4)]
 
@@ -155,7 +170,8 @@ def test_p_value_well_below_the_bound_passes_and_above_it_fails() -> None:
     thin = evaluate_target(
         TARGET, _helpful_in(3, size=20), ActivationThresholds(resamples=2000)
     )
-    assert thin.p_value == pytest.approx(1 / 2001, abs=0.002)
+    assert thin.p_value is not None
+    assert 1 / 2001 <= thin.p_value < 0.002
     assert thin.passes
 
     # Packs of two with one label: chance is 1/8, well above 0.05.
@@ -164,6 +180,15 @@ def test_p_value_well_below_the_bound_passes_and_above_it_fails() -> None:
     )
     assert small.first_failed == CRITERION_P_VALUE
     assert small.p_value == pytest.approx(0.125, abs=0.03)
+
+
+def test_p_is_never_zero_even_when_no_resample_reaches_the_observed_count() -> None:
+    # Three packs of two can put the target helpful at most three times, so no
+    # resample reaches four and P is exactly its floor.
+    rng = random.Random(0)  # noqa: S311
+    p = within_pack_permutation_p(4, [(2, 1)] * 3, resamples=2000, rng=rng)
+
+    assert p == 1 / 2001
 
 
 def test_the_p_bound_is_strict() -> None:
