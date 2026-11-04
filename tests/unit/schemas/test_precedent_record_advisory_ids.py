@@ -61,6 +61,6 @@ def test_a_named_advisory_changes_the_id_and_its_order_does_not() -> None:
     assert named("a") != named("a", "b")
 
 
-def test_only_advisory_ids_is_left_out_while_empty() -> None:
-    assert frozenset({"advisory_ids"}) == OMIT_WHEN_EMPTY_EVIDENCE
+def test_advisory_ids_and_merged_from_are_left_out_while_empty() -> None:
+    assert frozenset({"advisory_ids", "merged_from"}) == OMIT_WHEN_EMPTY_EVIDENCE
     assert "advisory_ids" in PrecedentEvidence.model_fields

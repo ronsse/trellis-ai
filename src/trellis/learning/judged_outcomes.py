@@ -91,7 +91,13 @@ PHASE_1_GATE = 500
 #: ``never_served``, so a refused session is not read as a memory retrieval
 #: missed. A deny-list: an unknown type is presumed servable, which keeps its
 #: misses visible instead of explaining them away.
-UNSERVABLE_REF_TYPES: frozenset[str] = frozenset({"session"})
+#:
+#: ``trace`` and ``precedent_pair`` are the subjects of the local-model precedent
+#: judged ops (:mod:`trellis.learning.precedent_local`). Neither is a pack item:
+#: no retrieval strategy reads the trace store or produces an item typed
+#: ``trace``, a pair is two candidate ids joined with ``|`` (candidates are
+#: event-only), and a promoted precedent is served under its own entity id.
+UNSERVABLE_REF_TYPES: frozenset[str] = frozenset({"session", "trace", "precedent_pair"})
 
 RUNG_UNSERVABLE = "unservable"
 RUNG_NEVER_SERVED = "never_served"

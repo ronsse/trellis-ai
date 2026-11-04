@@ -619,9 +619,9 @@ length-bounded; unknown fields are rejected.
 | `situation` | object | `intent_family`, `domain`, `entity_ids`, `trigger` (the error or situation that makes the lesson apply) |
 | `action` | object | `kind` (`do` or `avoid`) and `text` |
 | `because` | `string` | Why, from the trace |
-| `evidence` | object | `trace_ids`, `step_indexes`, `feedback_ids`, `pack_ids` (the last two stay empty from the deterministic tier) |
+| `evidence` | object | `trace_ids`, `step_indexes`, `feedback_ids`, `pack_ids` (the last two stay empty from the deterministic tier), `merged_from` (the candidate ids a merged record was built from; empty otherwise, and an empty list is left out of the id hash so existing ids are unchanged) |
 | `confidence` | `float` | 0.0 to 1.0 |
-| `provenance_tier` | `string` | `deterministic` (default), `local_model` or `human`; only `deterministic` is recorded for now |
+| `provenance_tier` | `string` | `deterministic` (default), `local_model` or `human`; `local_model` is recorded only by `trellis worker distill-precedents-local`, `human` is not recorded yet |
 | `distiller_version` | `string` | Version of the rules that produced it |
 | `lifecycle` | `string` | Always `candidate`; not a `LifecycleState` value |
 
