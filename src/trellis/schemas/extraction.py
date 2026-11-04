@@ -81,6 +81,17 @@ class EntityDraft(TrellisModel):
     emits an INFO acknowledging the deliberate opt-in.  Either signal
     alone still warns.  Soft enforcement only — never raises.
 
+    ``if_absent`` makes the create a placeholder: the handler writes the
+    node only when its ``entity_id`` is not already in the graph, and
+    leaves an existing node untouched (no new version, no alias write, no
+    ``ENTITY_CREATED`` event).  Use it for an entity the extractor can name
+    but not describe, such as the endpoint of an edge whose record is
+    absent from the input: a plain create is an upsert that replaces the
+    node's properties, so a name-only draft would erase what an earlier,
+    fuller run wrote.  It needs an ``entity_id`` to check, so a draft with
+    ``if_absent=True`` and no id is refused at the handler.  The real
+    record, when it arrives as an ordinary draft, replaces the placeholder.
+
     ``document_ids`` is the graph↔document link
     (``adr-planes-and-substrates`` §2.4): the ``DocumentStore`` row(s)
     this entity was sourced from.  ``EntityCreateHandler`` has accepted
@@ -100,6 +111,7 @@ class EntityDraft(TrellisModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     document_ids: list[str] | None = None
     allow_structural_leaf: bool = False
+    if_absent: bool = False
     aliases: list[AliasDraft] = Field(default_factory=list)
 
     @model_validator(mode="after")

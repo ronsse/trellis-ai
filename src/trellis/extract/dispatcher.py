@@ -367,12 +367,13 @@ class ExtractionDispatcher:
             # lose signal — even if the extractor's residue shape is
             # opaque to us.
             residue_base["original_residue"] = existing_residue
-        # ``aliases`` is left out: it exists for the ``knowledge_link_or_mint``
-        # bind, and a rejected draft binds nothing. Keeping it out keeps the
-        # forensic record the shape it had before aliases existed, knob on or off.
+        # ``aliases`` and ``if_absent`` are left out: they route the write
+        # (the ``knowledge_link_or_mint`` bind, create-if-absent), and a
+        # rejected draft writes nothing. Keeping them out keeps the forensic
+        # record the shape it had before either existed, knob on or off.
         residue_base["rejected_by_validators"] = {
             "entities": [
-                draft.model_dump(mode="json", exclude={"aliases"})
+                draft.model_dump(mode="json", exclude={"aliases", "if_absent"})
                 for draft in result.entities
             ],
             "edges": [draft.model_dump(mode="json") for draft in result.edges],

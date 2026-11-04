@@ -118,6 +118,11 @@ def result_to_batch(
         }
         if entity.entity_id is not None:
             args["entity_id"] = entity.entity_id
+        # Forwarded only when set, so a draft without it produces exactly the
+        # command it always did; ``EntityCreateHandler`` reads absence as the
+        # ordinary upsert.
+        if entity.if_absent:
+            args["if_absent"] = True
         if entity.generation_spec is not None:
             args["generation_spec"] = entity.generation_spec
         # Only forward a link the draft actually carries.  Omitting the arg

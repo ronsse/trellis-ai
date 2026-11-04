@@ -16,10 +16,12 @@ from trellis_workers.extract.query_pattern_observer import (
     QueryLogRecord,
     QueryPatternObserver,
 )
+from trellis_workers.extract.unity_catalog import UnityCatalogExtractor
 
 __all__ = [
     "DbtManifestExtractor",
     "OpenLineageExtractor",
     "QueryLogRecord",
     "QueryPatternObserver",
+    "UnityCatalogExtractor",
 ]

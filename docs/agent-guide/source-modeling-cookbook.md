@@ -404,84 +404,81 @@ Raw `QueryExecution` rows balloon. The retention rule of thumb: keep raw rows fo
 
 ## Recipe 5: Unity Catalog (Databricks metadata)
 
-Authoritative source for Databricks-platform table shape. Treat it as a *snapshot*, not a live mirror — periodic re-extraction, not query-time pulls.
+Authoritative source for Databricks-platform table shape. Treat it as a *snapshot*, not a live mirror: periodic re-extraction, not query-time pulls. `UnityCatalogExtractor` (`src/trellis_workers/extract/unity_catalog.py`, deterministic tier) implements this recipe; run it with `trellis extract refresh --type unity-catalog --path <export>`.
 
 ### The graph shape
 
 ```
-        ┌──────────────────┐
-        │ Catalog          │
-        └────────┬─────────┘
-                 │ contains
-                 ▼
-        ┌──────────────────┐
-        │ Schema           │
-        └────────┬─────────┘
-                 │ contains
-                 ▼
-        ┌──────────────────┐  lineage_to  ┌──────────────────┐
-        │ Dataset (Table)  │─────────────►│ Dataset          │
-        │ - schema_name    │              └──────────────────┘
-        │ - database_name  │
-        │ - source_system  │  owned_by    ┌──────────────────┐
-        │ - physical_uri   │─────────────►│ Team / Person    │
-        │ - columns (JSON) │              └──────────────────┘
-        └────────┬─────────┘
-                 │ described_by
-                 ▼
-        ┌──────────────────┐
-        │ Document         │  ← Markdown rendering of table schema + comments
-        └──────────────────┘
+   uc_catalog ──contains──► uc_schema ──contains──► dataset (table or view) ──contains──► uc_column
+                                                       │                                      │
+                                                       └── depends_on ──► dataset             └── depends_on ──► uc_column
+                                                          (downstream to upstream)
 ```
 
 ### Entity types
 
-| Type | When to emit |
+| Type | When it is emitted |
 |---|---|
-| `Catalog` | One per UC catalog. |
-| `Schema` | One per UC schema within a catalog. |
-| `Dataset` (or `UC_TABLE` if you prefer the namespaced shape) | One per table / view / materialized view / streaming table. |
+| `uc_catalog` | One per catalog. |
+| `uc_schema` | One per schema. |
+| `dataset` | One per table, view, materialized view or streaming table. The type OpenLineage uses, so a UC table and an OpenLineage dataset naming it can be one node, when the spellings agree byte for byte (see Stable identity, below). |
+| `uc_column` | One per column, as a **structural leaf** (`node_role="structural"` with `allow_structural_leaf=True`, the two-signal opt-in of `adr-source-modeling-discipline.md` §2.5). Structural nodes stay out of default retrieval. `include_columns=False` drops them and the column lineage; the table keeps a `column_count`. |
 
-**Do NOT emit a node per column.** Columns are properties on `Dataset` (see *Schema explosion* anti-pattern in [modeling-guide.md](modeling-guide.md)). The exception: regulated columns with their own PII / governance lifecycle — see the modeling guide's worked example #1 for the structural-node pattern.
+This deliberately differs from the earlier "no node per column" advice: column lineage needs something to attach to. The column list is not also stored as a JSON blob on the table.
 
 ### Edges
 
-- `contains`: `Catalog` → `Schema`, `Schema` → `Dataset`.
-- `lineage_to` / `lineage_from`: between `Dataset`s. Unity Catalog tracks table lineage via the `system.access.table_lineage` view; this is the same `reads_from` / `writes_to` shape as OpenLineage but already aggregated.
-- `owned_by`: `Dataset` → `Team` / `Person` (from UC ownership metadata).
-- `governed_by`: `Dataset` → `Policy` (when UC has data governance tags). Optional, only if your deployment models policies as graph nodes.
-- `described_by`: `Dataset` → `Document` (the rendered schema documentation).
+- `contains`: catalog to schema, schema to table, table to column.
+- `depends_on`: downstream to upstream, between tables and between columns, from `system.access.table_lineage` / `column_lineage` rows or a lineage-tracking response. The kind dbt uses. The edge carries `last_event_time` (the latest `event_time` seen for the pair). Both endpoints are entities of the same batch, real or placeholder (below), so the edge is never dangling and needs no `allow_dangling`.
+- Not emitted: `owned_by` (the owner is a property), `governed_by`, `described_by`.
+
+**An object the export names but does not hold is a placeholder.** A lineage row can name a table or column the export's metadata lacks, and every table, schema or column hangs from a schema and a catalog that a partial export (tables only, lineage only) may not hold either. Each gets a name-only draft on the id the real record would have, marked `stub=True` and `if_absent=True`. `if_absent` is `EntityDraft`'s create-if-absent: `entity.create` writes the node when it is missing and leaves it alone when it exists (no write, no alias, no `ENTITY_CREATED` event), where a plain create replaces the node's properties. So a tables-only run after a full export keeps the catalog's and schema's owner and description, and a lineage-only run after a metadata run keeps the table's description, owner and columns. A record the export does hold is a plain full create, which replaces a placeholder wholesale and drops `stub`: the metadata that arrives after a lineage-only run lands whole, in either run order. Every edge joins two real nodes, which is what the Bolt stores (ArcadeDB, Neo4j) require, since they refuse a dangling edge even with `allow_dangling`. The existence check and the write are two steps, not one atomic insert, so two writers racing on the same missing id can both create it; a placeholder carries no data a later real record does not replace. A row with a path or volume on either side, or no column name on a column row, is skipped and counted in the `unity_catalog_rows_skipped` log line.
+
+### Input
+
+A JSON export; the extractor never calls Databricks. One file, or a directory (every `*.json`, in name order), holding any mix of:
+
+- the `GET /api/2.1/unity-catalog/{catalogs,schemas,tables}` list responses, as the wrapper (`{"tables": [...], "next_page_token": ...}`) or a bare list;
+- rows of `system.access.table_lineage` and `system.access.column_lineage` (`source_table_full_name`, `target_table_full_name`, `source_column_name`, `target_column_name`, `event_time`) as a JSON array or one object per line;
+- a `GET /api/2.0/lineage-tracking/table-lineage` response (`upstreams[]`, `downstreams[]`, each with `tableInfo`). That response does not name the table it was requested for, so add `"table_name": "<catalog>.<schema>.<table>"` beside the two lists.
+
+Add `"namespace": "unitycatalog://<workspace-host>"` to any wrapper (or pass `UnityCatalogExtractor(namespace=...)`); a trailing `/` is dropped, and two namespaces in one export are refused. Unreadable input is a typed refusal that names a position, never the content: malformed JSON, the wrong shape, input nested too deeply to read, and a bare record that carries a table or column field (`type_text`, `position`, `table_type`, `columns` and the like) instead of the catalog list shape, which is refused as an unrecognised record rather than minted as a catalog. A record inside an explicit `catalogs` list is taken as a catalog. The `system` and `__databricks_internal` catalogs, and lineage touching them, are left out unless `include_system=True`.
 
 ### Content placement
 
 | Field | Where |
 |---|---|
-| Routing properties (`source_system="databricks"`, `database_name`, `schema_name`, `physical_uri="databricks://workspace/<catalog>/<schema>/<table>"`) | Properties on `Dataset`. **Required for query routing.** |
-| Column list (name, type, nullable, comment, tags) | JSON array as `Dataset.properties.columns`. |
-| Partition keys, clustering keys | Properties on `Dataset`. |
-| Row count, table size, last_modified | Properties — but refresh-volatile. Consider tracking the `last_seen_at` timestamp so consumers know how fresh the metric is. |
-| Table comment | Inline if short; document store + `described_by` edge if it's long-form. |
-| Sample data | **Blob store**, not graph. Per-table samples can be > 10MB; do not stuff into the graph. |
+| `full_name`, `database_name`, `schema_name`, `source_system="databricks"`, `physical_uri="databricks://<host>/<catalog>/<schema>/<table>"` | Properties on the table. |
+| `table_type`, `data_source_format`, `owner`, `storage_location`, `description` (the comment, capped at 1000 characters) | Properties on the table. |
+| `source_created_at`, `source_updated_at` (from `created_at` / `updated_at`, ISO UTC) | Properties. The draft contract has no clock slot. |
+| Column name, `type_text`, `type_name`, `position`, `nullable`, `description` | Properties on the `uc_column`. |
+| The raw `properties` map, partition and clustering keys | Not stored: the map is unbounded. |
+| Sample data | **Blob store**, not graph. |
 
 ### Stable identity
 
-```python
-entity_id = f"dataset:databricks://{workspace}/{catalog}/{schema}/{table}"
-```
+`dataset:{namespace}:{catalog}.{schema}.{table}`, with the three-part name case-folded and unquoted by `normalize_alias_raw_id` (so `Main.Sales.Orders` and `` `main`.`sales`.`orders` `` are one table to this extractor). The table's aliases are `unity_catalog` = `catalog.schema.table` plus, with a namespace, `openlineage_dataset` = `namespace/catalog.schema.table`, bound when `TRELLIS_KNOWLEDGE_LINK_OR_MINT` is on. Without a namespace the scope is the fixed string `unity_catalog`.
 
-UC tables can be renamed within a schema; rename produces a `supersedes` edge from new name to old, and both versions live in SCD-2 history of the old identity until the old name's `valid_to` is set.
+**The namespace is part of the id. Choose it before the first run.** Adding one later does not rename the existing nodes: the next run writes a second node per table under the new id, every command reports success, and `resolve_alias("unity_catalog", ...)` keeps returning the first. Pick the namespace once and keep it.
+
+**Agreement with `OpenLineageExtractor` is byte for byte, not semantic.** The two write one node only when both hold:
+
+- the OpenLineage dataset `name` is already lowercase and unquoted `catalog.schema.table` (OpenLineage keeps `name` verbatim, so `Main.Sales.Orders` or `` `main`.`sales`.`orders` `` is a second node), and
+- the OpenLineage `namespace` string is identical to this extractor's: scheme, host and port. The OpenLineage naming spec gives Unity Catalog as `unitycatalog://{host}[:{port}]`, and `unitycatalog://host` and `unitycatalog://host:443` are different strings, hence different nodes. A trailing `/` on this side is dropped, but a trailing `/` on the OpenLineage side is not.
+
+Not verified: whether a Databricks Spark OpenLineage integration emits that `unitycatalog://` namespace for Unity Catalog tables, or a storage path (`abfss://`, `s3://`, `dbfs://`) with a symlink facet. Check what your events carry before relying on the two extractors to meet; re-keying OpenLineage ids to fold case is a separate change.
+
+Where they do meet, an `entity.create` on an existing id replaces the properties, so the writer that ran last owns them.
 
 ### Curated derivations
 
-- **`DataMart` rollups**: curated `DataMart` nodes that group related `Dataset`s by business domain. Curator-maintained or LLM-generated from schema comments + table-name clustering.
-- **Quality scores**: combine UC's `expectations` results + dbt test results + freshness signals into a curated `DataQuality` node per dataset. Refreshed daily.
-- **`HotDataset`**, **`JoinPattern`**, etc. — same as the SQL query log recipe, but driven by UC's query history view rather than raw warehouse logs.
+- **`DataMart` rollups**: curated `DataMart` nodes that group related datasets by business domain.
+- **Quality scores**: combine UC's `expectations` results with dbt test results and freshness into a curated `DataQuality` node per dataset.
+- **`HotDataset`**, **`JoinPattern`**, etc.: as in the SQL query log recipe, driven by UC's query history.
 
 ### Refresh cadence
 
-Unity Catalog has no event stream — pull-only. Periodic re-extraction (`trellis extract refresh --source unity-catalog`) on a schedule. Daily is normal; faster cadences for environments where schema changes are common.
-
-Schema changes (column added, table renamed) produce `TAGS_REFRESHED` events with the structured diff, which agents can consume to invalidate cached pack content.
+Unity Catalog has no event stream, so re-extract on a schedule (`trellis extract refresh --source <name>` with `type: unity-catalog` in `sources.yaml`). Daily is normal. Schema changes produce `TAGS_REFRESHED` events with the structured diff, which agents can consume to invalidate cached pack content.
 
 ---
 

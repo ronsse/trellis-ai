@@ -36,7 +36,7 @@ from rich.markup import escape
 from trellis.core.base import utc_now
 from trellis.core.error_sanitize import sanitized_error_payload
 from trellis.core.write_config import knowledge_link_or_mint_enabled
-from trellis.errors import TrellisError
+from trellis.errors import TrellisError, ValidationError
 from trellis.extract.commands import (
     batch_draft_counts,
     reconcile_node_roles,
@@ -83,9 +83,14 @@ def _resolve_extractor(extractor_type: str) -> object:
         from trellis_workers.extract import (  # noqa: PLC0415
             DbtManifestExtractor,
             OpenLineageExtractor,
+            UnityCatalogExtractor,
         )
 
-        for ext in (DbtManifestExtractor(), OpenLineageExtractor()):
+        for ext in (
+            DbtManifestExtractor(),
+            OpenLineageExtractor(),
+            UnityCatalogExtractor(),
+        ):
             if registry.get(ext.name) is None:
                 registry.register(ext)  # type: ignore[arg-type]
     except ImportError as exc:
@@ -113,6 +118,64 @@ def _resolve_extractor(extractor_type: str) -> object:
     raise typer.BadParameter(msg)
 
 
+def _read_unity_catalog_json(path: Path) -> Any:
+    """One Unity Catalog export file: a JSON document, else one object per line."""
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        msg = f"Cannot read {path}: {type(exc).__name__}"
+        raise typer.BadParameter(msg) from None
+    if not text:
+        msg = f"Input file is empty: {path}"
+        raise typer.BadParameter(msg)
+    too_deep = f"{path} is nested too deeply to read"
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    except RecursionError:
+        raise typer.BadParameter(too_deep) from None
+    rows: list[Any] = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            msg = f"{path} is not valid JSON (line {number} does not parse)"
+            raise typer.BadParameter(msg) from None
+        except RecursionError:
+            msg = f"{too_deep} (line {number})"
+            raise typer.BadParameter(msg) from None
+    return rows
+
+
+def _read_unity_catalog_input(path: Path) -> Any:
+    """Read a Unity Catalog export: one file, or every ``*.json`` in a directory.
+
+    A directory is read in file-name order into one list of documents.
+    Anything unreadable, or readable but not a Unity Catalog export, is a
+    typed refusal (``typer.BadParameter``) that names the path and a position,
+    never the content.
+    """
+    from trellis_workers.extract.unity_catalog import check_input  # noqa: PLC0415
+
+    if path.is_dir():
+        files = sorted(p for p in path.iterdir() if p.is_file() and p.suffix == ".json")
+        if not files:
+            msg = f"No .json files in directory: {path}"
+            raise typer.BadParameter(msg)
+        raw: Any = [_read_unity_catalog_json(p) for p in files]
+    else:
+        raw = _read_unity_catalog_json(path)
+    try:
+        check_input(raw)
+    except ValidationError as exc:
+        msg = f"{path}: {exc}"
+        raise typer.BadParameter(msg) from None
+    return raw
+
+
 def _read_raw_input(path: Path, source_type: str) -> Any:
     """Parse an extractor input file based on the source type.
 
@@ -121,6 +184,8 @@ def _read_raw_input(path: Path, source_type: str) -> Any:
     documenting their accepted input shapes — they receive the parsed
     JSON when the file is JSON-shaped, otherwise the raw text.
     """
+    if source_type == "unity-catalog":
+        return _read_unity_catalog_input(path)
     text = path.read_text(encoding="utf-8").strip()
     if not text:
         msg = f"Input file is empty: {path}"

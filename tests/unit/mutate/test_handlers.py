@@ -548,6 +548,174 @@ class TestEntityCreateHandler:
         assert node["properties"]["name"] == "Test Entity"
 
 
+class TestEntityCreateIfAbsent:
+    """``if_absent`` creates a placeholder and never replaces an existing node."""
+
+    @staticmethod
+    def _command(**args: object) -> Command:
+        return Command(
+            operation=Operation.ENTITY_CREATE,
+            args={"entity_type": "concept", "name": "Real", **args},
+            requested_by="test",
+        )
+
+    @staticmethod
+    def _created_events(registry: StoreRegistry) -> int:
+        return len(
+            registry.operational.event_log.get_events(
+                event_type=EventType.ENTITY_CREATED
+            )
+        )
+
+    def test_absent_node_is_created(self, registry: StoreRegistry) -> None:
+        node_id, message = EntityCreateHandler(registry).handle(
+            self._command(entity_id="e1", if_absent=True, properties={"k": "v"})
+        )
+        assert node_id == "e1"
+        assert "left alone" not in message
+        node = registry.knowledge.graph_store.get_node("e1")
+        assert node is not None
+        assert node["properties"] == {"name": "Real", "k": "v"}
+        assert self._created_events(registry) == 1
+
+    def test_present_node_is_left_untouched(self, registry: StoreRegistry) -> None:
+        handler = EntityCreateHandler(registry)
+        graph = registry.knowledge.graph_store
+        handler.handle(
+            self._command(
+                entity_id="e1",
+                properties={"owner": "team-a", "description": "kept"},
+                document_ids=["doc-1"],
+            )
+        )
+        before_node = graph.get_node("e1")
+        before_history = graph.get_node_history("e1")
+        before_aliases = graph.get_aliases("e1")
+        assert before_aliases  # the name alias bound by the first create
+        assert self._created_events(registry) == 1
+
+        node_id, message = handler.handle(
+            Command(
+                operation=Operation.ENTITY_CREATE,
+                args={
+                    "entity_id": "e1",
+                    "entity_type": "concept",
+                    "name": "Placeholder",
+                    "properties": {"stub": True},
+                    "if_absent": True,
+                },
+                requested_by="test",
+            )
+        )
+
+        assert node_id == "e1"
+        assert "left alone" in message
+        assert graph.get_node("e1") == before_node
+        assert graph.get_node("e1")["properties"] == {  # type: ignore[index]
+            "name": "Real",
+            "owner": "team-a",
+            "description": "kept",
+        }
+        assert graph.get_node("e1")["document_ids"] == ["doc-1"]  # type: ignore[index]
+        assert graph.get_node_history("e1") == before_history
+        assert len(graph.get_node_history("e1")) == 1
+        assert graph.get_aliases("e1") == before_aliases
+        assert graph.count_nodes() == 1
+        assert self._created_events(registry) == 1
+
+    def test_skip_is_reported_through_the_executor_as_a_success(
+        self, registry: StoreRegistry
+    ) -> None:
+        executor = build_curate_executor(registry, clearance="restricted")
+        first = executor.execute(self._command(entity_id="e1"))
+        second = executor.execute(self._command(entity_id="e1", if_absent=True))
+        assert first.status is CommandStatus.SUCCESS
+        assert second.status is CommandStatus.SUCCESS
+        assert second.created_id == "e1"
+        assert "left alone" in second.message
+        assert "left alone" not in first.message
+        assert self._created_events(registry) == 1
+        executed = registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_EXECUTED
+        )
+        assert len(executed) == 2
+
+    def test_without_an_entity_id_it_is_refused(self, registry: StoreRegistry) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            EntityCreateHandler(registry).handle(self._command(if_absent=True))
+        assert excinfo.value.code == "entity_create_if_absent_needs_id"
+        assert registry.knowledge.graph_store.count_nodes() == 0
+        assert self._created_events(registry) == 0
+
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            self._command(if_absent=True)
+        )
+        assert result.status is CommandStatus.REJECTED
+
+    @pytest.mark.parametrize("args", [{}, {"if_absent": False}])
+    def test_flag_off_is_the_ordinary_upsert(
+        self, registry: StoreRegistry, args: dict[str, object]
+    ) -> None:
+        handler = EntityCreateHandler(registry)
+        graph = registry.knowledge.graph_store
+        handler.handle(self._command(entity_id="e1", properties={"owner": "team-a"}))
+        node_id, message = handler.handle(
+            self._command(entity_id="e1", properties={"owner": "team-b"}, **args)
+        )
+        assert node_id == "e1"
+        assert "left alone" not in message
+        assert graph.get_node("e1")["properties"] == {  # type: ignore[index]
+            "name": "Real",
+            "owner": "team-b",
+        }
+        assert len(graph.get_node_history("e1")) == 2
+        assert self._created_events(registry) == 2
+
+    @pytest.mark.parametrize("lifecycle_state", ["current", "deprecated"])
+    def test_it_writes_nothing_over_an_existing_precedent(
+        self, registry: StoreRegistry, lifecycle_state: str
+    ) -> None:
+        graph = registry.knowledge.graph_store
+        graph.upsert_node(
+            node_id="p1",
+            node_type="precedent",
+            properties={
+                "name": "P",
+                "lifecycle": {"state": lifecycle_state},
+            },
+        )
+        before = graph.get_node_history("p1")
+        node_id, message = EntityCreateHandler(registry).handle(
+            Command(
+                operation=Operation.ENTITY_CREATE,
+                args={
+                    "entity_id": "p1",
+                    "entity_type": "concept",
+                    "name": "Placeholder",
+                    "if_absent": True,
+                },
+                requested_by="test",
+            )
+        )
+        assert (node_id, "left alone" in message) == ("p1", True)
+        assert graph.get_node_history("p1") == before
+        assert self._created_events(registry) == 0
+
+    def test_the_precedent_refusal_still_holds_without_the_flag(
+        self, registry: StoreRegistry
+    ) -> None:
+        registry.knowledge.graph_store.upsert_node(
+            node_id="p1",
+            node_type="precedent",
+            properties={"name": "P", "lifecycle": {"state": "deprecated"}},
+        )
+        with pytest.raises(ValidationError) as excinfo:
+            EntityCreateHandler(registry).handle(
+                self._command(entity_id="p1", entity_type="precedent")
+            )
+        assert excinfo.value.code == "entity_create_over_existing_precedent"
+
+
 class TestLinkCreateHandler:
     def test_creates_link(self, registry: StoreRegistry) -> None:
         id1 = registry.knowledge.graph_store.upsert_node(
