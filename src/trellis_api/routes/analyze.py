@@ -74,6 +74,12 @@ from trellis.learning import (
     analyze_learning_observations,
     build_learning_observations_from_event_log,
 )
+from trellis.learning.intent_families import (
+    IntentFamilyError,
+    load_rule_set,
+    parse_instant,
+    summarize_intent_families,
+)
 from trellis.learning.judged_outcomes import summarize_judged_outcomes
 from trellis.retrieve.effectiveness import analyze_advisory_effectiveness
 from trellis.retrieve.evaluate import analyze_dimension_predictiveness
@@ -203,6 +209,23 @@ class TrendParams(TrellisModel):
         try:
             parse_until(value)
         except TrendError as exc:
+            raise ValueError(str(exc)) from exc
+        return value
+
+
+class IntentFamiliesParams(TrellisModel):
+    days: int = Field(default=30, ge=1, le=365)
+    # ISO date or time, UTC; ``since`` wins over ``days``, ``until`` is the end.
+    since: str | None = Field(default=None, max_length=64)
+    until: str | None = Field(default=None, max_length=64)
+    limit: int = Field(default=5000, ge=1, le=50_000)
+
+    @field_validator("since", "until")
+    @classmethod
+    def _instant_parses(cls, value: str | None) -> str | None:
+        try:
+            parse_instant(value, option="since/until")
+        except IntentFamilyError as exc:
             raise ValueError(str(exc)) from exc
         return value
 
@@ -468,6 +491,22 @@ def _run_trend(params: TrendParams, registry: StoreRegistry) -> dict[str, Any]:
     return report.model_dump(mode="json")
 
 
+def _run_intent_families(
+    params: IntentFamiliesParams, registry: StoreRegistry
+) -> dict[str, Any]:
+    # A malformed ``retrieval.intent_families`` block is a ``ConfigError``, which
+    # the app's TrellisError handler answers as 409; it never reads as the defaults.
+    report = summarize_intent_families(
+        registry.operational.event_log,
+        rule_set=load_rule_set(registry.retrieval_config),
+        days=params.days,
+        since=parse_instant(params.since, option="since"),
+        until=parse_instant(params.until, option="until"),
+        limit=params.limit,
+    )
+    return report.model_dump(mode="json")
+
+
 @dataclass(frozen=True)
 class _ReportEntry:
     # Human-readable label for the Reports tab's picker; the dict key
@@ -665,6 +704,27 @@ _REPORTS: dict[str, _ReportEntry] = {
         ),
         params_model=TrendParams,
         run=_run_trend,
+    ),
+    "intent-families": _ReportEntry(
+        title="Intent families",
+        description=(
+            "Relabels each served pack's intent under a software-work family set "
+            "(bugfix, feature, refactor, review, investigate, test, ops, docs, "
+            "data, general, or the deployment's own set) and reports, per family, "
+            "the packs, graded packs, helpful and unhelpful citations of served "
+            "items, the helpful rate with a 95% interval and the mean pack rating, "
+            "with a legacy-by-new cross-tab and the top matched rule ids. The "
+            "interval is a percentile bootstrap that resamples graded packs, not "
+            "citations (interval_method pack_bootstrap_95), because one pack's "
+            "citations are not independent. A good report has few packs in the "
+            "general fallback; two families whose intervals do not overlap are a "
+            "reason to read their packs, not a separation, and a bad report leaves "
+            "most packs in general. A family below 20 graded packs has its rates "
+            "withheld. This is a measurement: serving and learning still use the "
+            "legacy intent family. No intent text is returned."
+        ),
+        params_model=IntentFamiliesParams,
+        run=_run_intent_families,
     ),
 }
 

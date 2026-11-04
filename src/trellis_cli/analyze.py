@@ -4969,3 +4969,9 @@ def schema_evolution(
 from trellis_cli.analyze_pack_judge import register as _reg_judge  # noqa: E402
 
 _reg_judge(analyze_app)
+
+from trellis_cli.analyze_intent_families import (  # noqa: E402
+    register as _reg_intent_families,
+)
+
+_reg_intent_families(analyze_app)

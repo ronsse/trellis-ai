@@ -3720,9 +3720,10 @@ unrecognized or out-of-range query param is a 422 (`extra="forbid"` on
 every params model, so a typo'd param name is rejected rather than
 silently ignored).
 
-Eleven reports: `holdout`, `judged-outcomes`, `advisory-effectiveness`,
+Thirteen reports: `holdout`, `judged-outcomes`, `advisory-effectiveness`,
 `value`, `dimension-predictiveness`, `learning-candidates`, `domains`,
-`extractor-fallbacks`, `pack-telemetry`, `token-usage`, `cost`. Three
+`extractor-fallbacks`, `pack-telemetry`, `token-usage`, `cost`, `trend`,
+`intent-families`. Three
 families are deliberately absent, not forgotten: `replay` takes a change
 spec rather than bounded query params; `generate-advisories` and
 `apply-noise-tags` are write paths and this router requires the `admin`
@@ -4133,6 +4134,117 @@ or `--until` (JSON emits `{"status": "error", "message": ...}`), `5` when any we
 or the graph row is truncated. The route is `GET /api/v1/analyze/trend` with
 `weeks`, `until` and `limit` query params (admin scope, 60 s cache like every
 report), and the same payload as `--format json`.
+
+### `trellis analyze intent-families`
+
+**A measurement, not a change to learning.** The learning key is `(intent_family,
+item_id)`, and the live `intent_family` comes from `normalize_intent_family`: six
+data-platform keyword rows that fall back to `general_context`. A software intent such
+as "fix flaky test" lands in a data-validation family on the substring "test", and
+"review PR" lands in `general_context`. This command relabels the window's served
+packs under a software-work family set and reports whether helpfulness separates by
+family, offline and read-only. **Serving and learning still use the legacy key**: no
+code that scores, serves, tags or promotes imports the new module, its command or its
+route, or names the `intent_families` config key
+(`tests/unit/test_intent_families_import_rule.py` pins the allowed importers, one
+direction only), and changing the key is a decision for after the readout.
+
+```bash
+trellis analyze intent-families [--days N] [--since DATE] [--until DATE] [--limit N] [--format text|json|markdown]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--days` | `30` | Window length, at least `1` |
+| `--since` | `--days` before the end | Start of the window: an ISO date or timestamp (UTC); wins over `--days` |
+| `--until` | now | End of the window |
+| `--limit` | `5000` | Max events scanned per event type |
+| `--format` | `text` | `text` (a table), `json` (an `IntentFamilyReport`), or `markdown` (a page with GFM tables) |
+
+**The rules.** `trellis.learning.intent_families` holds an ordered rule list; each rule
+names a family and word-boundary keywords or phrases (matched case-insensitively, a
+phrase tolerating any whitespace between its words), and **the first rule that matches
+wins**. `latest` does not match `test`, `redeploy` counts as `ops`. No match is the
+fallback family, `general`. The shipped families are `review` (including merging a
+pull request), `bugfix` (a defect noun, a fix verb or a regression), `performance`,
+`refactor`, `investigate`, `data` (the old data-platform intents kept together), `docs`,
+`maintenance` (dependencies, bumps, upgrades), `ops` (deploy, CI, infrastructure),
+`test`, `feature`, `design` and the fallback. Past tenses and inflections ("refactored",
+"fails", "documented") land where the bare verb does. Order matters where an intent
+could land in two, and each decision is pinned in the classifier table
+(`tests/unit/learning/test_intent_families.py`): a verb naming the work (`review`,
+`fix`) outranks the object it works on, so `investigate` precedes `data` ("debug the SQL
+query" is an investigation); `regression` precedes `performance`, which precedes the
+other `bugfix` rules ("performance regression" is a bug, "optimize the planner" is
+performance); `docs` precedes `design` ("write the design doc" is a document, and so
+are "release notes" and a "pre-release checklist", while "cut the release" is `ops`);
+`implement` precedes `design` ("implement the RFC" is the work, not the plan); and a
+building verb (`add`, `write`) comes last. Nouns that are common in this codebase and
+say nothing about the work ("mutation", "audit", "new") are not keywords, and neither are
+the bare words "dependency", "upgrade", "plan", "error" and "failure", which are as often
+the object of a feature or a test as a bug or an upkeep task ("add dependency injection",
+"add error handling", "retry on failure"): only phrases that name the work count
+("update dependencies", "plan the", "errors in", "test failure"). Every match
+records the rule id, so the report can show why an intent landed where it did.
+
+A deployment replaces the shipped set in `config.yaml`:
+
+```yaml
+retrieval:
+  intent_families:
+    fallback: general          # optional; default "general"
+    rules:                     # ordered; the first match wins
+      - id: ship.deploy        # unique; lowercase letters, digits, "_", ".", "-"
+        family: ops
+        keywords: [deploy, "roll out", rollback]
+```
+
+The block replaces the defaults whole; it does not merge. **A malformed block raises
+`ConfigError`** (a CLI exit of `5`, HTTP `409`) and never reads as the shipped rules:
+a non-mapping or empty block, no `rules`, an unknown key, a rule without `id`, `family`
+or keywords, a blank or over-64-character keyword, more than 500 rules or 50 keywords in
+a rule, a repeated or reserved (`fallback`) rule id, or a name that is not a lowercase
+slug. The message names a position (`rules[3]`) or a count and never a value or a key
+you typed, since a config line can hold a credential by accident. A valid block is
+compiled once and reused for an identical block.
+
+**The report**, per new family: packs, graded packs (a rating, or feedback citing
+items, names the pack), helpful and unhelpful citations, the helpful rate, its
+interval, the mean pack rating over packs that carry one (a `feedback_id` recorded twice
+counts once) and the top matched rule ids. **Citations join as `analyze value` joins
+them**: a cited id counts only if the pack served it, an item cited both ways is
+helpful, and an id the pack never served is counted apart as `cited_not_served` (per
+family and report-wide), in no rate. The rate keeps its citation weight (total helpful
+over total judged citations), but its **interval resamples packs, not citations**
+(`interval_method: "pack_bootstrap_95"`: 2,000 resamples of the family's graded packs
+with replacement, a fixed seed, the 2.5th and 97.5th percentiles), because the citations
+of one pack are not independent; a Wilson interval over them would be several times too
+narrow. Report-wide: packs
+served, packs analysed (those carrying item rows, as in `analyze value`), sectioned
+sectioned packs (`sectioned_packs_excluded`: they carry no per-item rows and are not
+analysed), the share that fell to the fallback family, a legacy-by-new cross-tab of pack counts, and how
+many packs' stored `intent_family` stamp differs from the legacy family recomputed
+here. **A family's rates are withheld below 20 graded packs**, with the reason stated
+beside it (`withheld_reason`); an uncited item is not an unhelpful one. A good report has
+few packs in the fallback and helpful rates that differ between families; a bad one
+leaves most packs in the fallback. Read an interval as a hint about which families to
+open and read, not as a test: intervals that do not overlap are not a separation, and
+the interval does not account for comparing several families at once.
+
+**No intent text is printed**, on any format: intents are private corpus text and the
+report gets published, so it carries counts, family names and rule ids only
+(`tests/unit/learning/test_intent_families_report.py` seeds a sentinel intent and
+asserts it absent). Every `PACK_ASSEMBLED` read goes through `drop_holdout`, so a
+held-out pack and the feedback naming it are dropped; nothing is split by holdout arm
+and no session outcome is read.
+
+**Exit codes**, identical for every `--format`: `0` ok (an empty window is a report
+with `empty_reason` set, not an error), `2` on an invalid `--days`, `--since` or
+`--until` (JSON emits `{"status": "error", "message": ...}`), `5` when a scan hit
+`--limit` (the report `status` is `truncated`) or the config block is malformed. The
+route is `GET /api/v1/analyze/intent-families` with `days`, `since`, `until` and
+`limit` query params (admin scope, 60 s cache like every report), and the same
+payload as `--format json`.
 
 ### `trellis analyze replay`
 

@@ -328,3 +328,17 @@ def test_from_config_dict_does_not_mutate_input() -> None:
         "knowledge": {"graph": {"backend": "sqlite"}},
         "embeddings": {"provider": "openai"},
     }
+
+
+def test_retrieval_config_hands_out_a_copy() -> None:
+    """Changing the block a reader was handed does not change the next reader's."""
+    registry = StoreRegistry.from_config_dict(
+        {"retrieval": {"budgets": {"default": {"max_items": 7}}}}
+    )
+
+    block = registry.retrieval_config
+    block["budgets"]["default"]["max_items"] = 999
+    block["intent_families"] = {"rules": []}
+
+    assert registry.retrieval_config == {"budgets": {"default": {"max_items": 7}}}
+    assert registry._retrieval_config == {"budgets": {"default": {"max_items": 7}}}
