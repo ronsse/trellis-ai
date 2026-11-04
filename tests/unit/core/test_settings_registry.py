@@ -28,7 +28,7 @@ every surface that builds a pack (``disclosure_body_items``,
 ``excerpt_max_chars``) — pinned by :data:`_PACK_BUDGET_KNOB_NAMES`,
 bringing the total to 42. ``graph_recency_fallback`` (#961) is the 43rd,
 ``access_log`` the 44th, ``get_lessons_pack_event`` the 45th and
-``knowledge_link_or_mint`` the 46th.
+``knowledge_link_or_mint`` the 46th and ``grading_trailer`` the 47th.
 """
 
 from __future__ import annotations
@@ -133,8 +133,8 @@ class TestCatalogMembership:
             | _PACK_BUDGET_KNOB_NAMES
         )
 
-    def test_fortysix_entries_total(self) -> None:
-        assert len(SETTINGS_REGISTRY) == 46
+    def test_fortyseven_entries_total(self) -> None:
+        assert len(SETTINGS_REGISTRY) == 47
 
     def test_class_prior_mode_enum_has_no_demote_option(self) -> None:
         """A dropped mode must not linger in the registry as an allowed
@@ -393,7 +393,9 @@ class TestRiskTiersMatchThePlanPlusOneDocumentedExtension:
     how much an agent sees, in either direction, which is the same
     "caution" bar. ``knowledge_link_or_mint`` joins it as well: on, it
     writes nodes and aliases into the live graph and can change which
-    packs seed the graph axis. None of this is an oversight, so pin both tiers
+    packs seed the graph axis. ``grading_trailer`` joins it too: on, it adds a
+    line to every pack reply, which is part of a running holdout's treatment
+    environment. None of this is an oversight, so pin both tiers
     rather than let them silently drift.
     """
 
@@ -430,6 +432,7 @@ class TestRiskTiersMatchThePlanPlusOneDocumentedExtension:
             "disclosure_body_items",
             "excerpt_max_chars",
             "knowledge_link_or_mint",
+            "grading_trailer",
         }
 
     def test_minhash_seed_max_docs_is_low_risk_but_restart_required(self) -> None:

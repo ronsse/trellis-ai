@@ -11,6 +11,7 @@ from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.retrieve.file_context import MATCH_FILES_TOUCHED
 from trellis.retrieve.withholding import WithholdingSummary, format_withholding_note
 from trellis.schemas.advisory import Advisory
+from trellis_wire.loop_text import feedback_call
 
 logger = structlog.get_logger(__name__)
 
@@ -41,16 +42,10 @@ _INDEX_RENDER_RESERVE = 10
 def _record_feedback_hint(pack_id: str) -> str:
     """The ``record_feedback`` call every pack footer shows, pack id filled in.
 
-    Leads with ``rating`` and names every field the learning loop joins on,
-    so a footer-only reader (an agent that never saw the tool's docstring)
-    is steered to the same call the docstring teaches. ``success`` is
-    accepted by the tool but derived from ``rating``, so it is not offered.
+    Text from :func:`trellis_wire.loop_text.feedback_call`, the one place the
+    loop is worded.
     """
-    return (
-        'record_feedback(pack_id="' + pack_id + '", rating=..., '
-        "helpful_item_ids=[...], unhelpful_item_ids=[...], "
-        "followed_advisory_ids=[...])"
-    )
+    return feedback_call(pack_id)
 
 
 def _advisories_block(advisories: list[Advisory] | None) -> str:
