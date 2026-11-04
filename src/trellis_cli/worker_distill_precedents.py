@@ -11,11 +11,18 @@ event and writes to no document, graph or vector store: a candidate is never
 served. A candidate already recorded is a duplicate, counted and not rewritten,
 so a rerun over the same traces records nothing new.
 
-The output is counts and candidate ids. It carries no trace text.
+The output is counts and candidate ids. It carries no trace text. ``dropped``
+counts what the record schema's bounds cut without a skip: entity ids too long
+to keep and failed approaches past the list cap.
+
+:func:`distill_window` is the read-and-distill half, shared with
+``trellis curate evaluate-precedent-gate``: it never writes.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -23,10 +30,16 @@ import typer
 from rich.markup import escape
 
 from trellis.learning.pack_judge import PackJudgeError, parse_instant
-from trellis.learning.precedent_distill import DISTILLER_VERSION, distill_traces
+from trellis.learning.precedent_distill import (
+    DISTILLER_VERSION,
+    DistillTally,
+    distill_traces,
+)
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.mutate.handlers.precedent import precedent_candidate_recorded
+from trellis.schemas.precedent_record import PrecedentRecord
+from trellis.stores.registry import StoreRegistry
 from trellis_cli.exit_codes import EXIT_OK, refusal_exit_code
 from trellis_cli.output import build_console, emit_json
 from trellis_cli.stores import _get_registry
@@ -36,6 +49,49 @@ logger = structlog.get_logger(__name__)
 console = build_console()
 
 REQUESTED_BY = "cli:distill-precedents"
+
+
+@dataclass(frozen=True)
+class WindowDistill:
+    """One dry pass over a window of traces."""
+
+    tally: DistillTally
+    #: Records no ``PRECEDENT_CANDIDATE_MINED`` event names yet, in tally order.
+    new: tuple[PrecedentRecord, ...]
+    #: Records an event already names.
+    duplicates: int
+    #: Whether the window held more traces than ``limit``.
+    truncated: bool
+
+
+def distill_window(
+    registry: StoreRegistry,
+    *,
+    start: datetime | None,
+    end: datetime | None,
+    limit: int,
+    domain: str | None,
+) -> WindowDistill:
+    """Read the window's traces and distill them. Writes nothing."""
+    # One row past the limit says whether the window has more behind it.
+    rows = registry.operational.trace_store.query(
+        domain=domain, since=start, until=end, limit=limit + 1
+    )
+    tally = distill_traces(rows[:limit])
+    event_log = registry.operational.event_log
+    new: list[PrecedentRecord] = []
+    duplicates = 0
+    for record in tally.records:
+        if precedent_candidate_recorded(event_log, record.candidate_id):
+            duplicates += 1
+        else:
+            new.append(record)
+    return WindowDistill(
+        tally=tally,
+        new=tuple(new),
+        duplicates=duplicates,
+        truncated=len(rows) > limit,
+    )
 
 
 def _distill(
@@ -54,21 +110,9 @@ def _distill(
         return {"status": "error", "message": str(exc)}, 2
 
     registry = _get_registry()
-    trace_store = registry.operational.trace_store
-    event_log = registry.operational.event_log
-
-    # One row past the limit says whether the window has more behind it.
-    rows = trace_store.query(domain=domain, since=start, until=end, limit=limit + 1)
-    truncated = len(rows) > limit
-    tally = distill_traces(rows[:limit])
-
-    new = []
-    duplicates = 0
-    for record in tally.records:
-        if precedent_candidate_recorded(event_log, record.candidate_id):
-            duplicates += 1
-        else:
-            new.append(record)
+    window = distill_window(registry, start=start, end=end, limit=limit, domain=domain)
+    tally, new, truncated = window.tally, list(window.new), window.truncated
+    duplicates = window.duplicates
 
     recorded = rejected = failed = 0
     code = EXIT_OK
@@ -115,6 +159,7 @@ def _distill(
         "candidates": len(tally.records),
         "by_rule": dict(sorted(tally.by_rule.items())),
         "skipped": dict(sorted(tally.skips_by_reason.items())),
+        "dropped": dict(sorted(tally.dropped.items())),
         "duplicates": duplicates,
         done_key: done,
         "rejected": rejected,
@@ -148,6 +193,8 @@ def _render(payload: dict[str, Any]) -> None:
         console.print(f"  rule {escape(rule)}: {count}")
     for reason, count in payload["skipped"].items():
         console.print(f"  skipped {escape(reason)}: {count}")
+    for reason, count in payload["dropped"].items():
+        console.print(f"  dropped {escape(reason)}: {count}")
     if payload["rejected"] or payload["failed"]:
         console.print(
             f"[red]  {payload['rejected']} rejected, {payload['failed']} failed[/red]"
@@ -183,7 +230,8 @@ def distill_precedents_command(
     """Distill candidate precedents from traces (deterministic; dry run by default).
 
     Reports counts only: traces read, candidates by rule, skips by reason,
-    and duplicates of candidates already recorded. ``--apply`` records the new
+    what the schema's bounds cut (``dropped``), and duplicates of candidates
+    already recorded. ``--apply`` records the new
     ones. The exit code does not depend on ``--format``.
     """
     payload, code = _distill(
@@ -202,4 +250,9 @@ def register(worker_app: typer.Typer) -> None:
     worker_app.command("distill-precedents")(distill_precedents_command)
 
 
-__all__ = ["distill_precedents_command", "register"]
+__all__ = [
+    "WindowDistill",
+    "distill_precedents_command",
+    "distill_window",
+    "register",
+]

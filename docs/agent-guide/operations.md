@@ -5158,10 +5158,19 @@ candidate that would only restate the intent is skipped, and a trace whose
 records fail the schema's bounds is skipped as `invalid_record`; neither stops the
 run.
 
+Two quiet limits are counted instead of stated in text. `dropped` reports
+`entity_id_overlong` (a step's entity id longer than the schema allows is left out
+of the situation, not truncated) and `failed_approach_over_cap` (distinct failed
+approaches beyond the cap of `avoid` lines kept). When a failed approach's shown
+arguments equal the working call's after the display cut, its `avoid` text names
+the first differing key (`differs at 'key'`) so the two lines are not identical.
+An integral float compares equal to the integer (`1.0` and `1`).
+
 The JSON report carries `mode`, `traces_read`, `truncated`, `candidates`,
-`by_rule`, `skipped` (by reason), `duplicates` (already recorded), `would_record`
-(dry run) or `recorded` (`--apply`), `rejected`, `failed` and `candidate_ids`. It
-carries no trace text. The exit code does not depend on `--format`.
+`by_rule`, `skipped` (by reason), `dropped` (by reason), `duplicates` (already
+recorded), `would_record` (dry run) or `recorded` (`--apply`), `rejected`,
+`failed` and `candidate_ids`. It carries no trace text. The exit code does not
+depend on `--format`.
 
 **Candidates are never served.** `precedent.candidate` (args: `record`, a
 `PrecedentRecord`) emits one `PRECEDENT_CANDIDATE_MINED` event and writes to no
@@ -5172,6 +5181,72 @@ servable precedent from a candidate) is deferred. Only the `deterministic`
 provenance tier is recorded; a record naming `local_model` or `human` is refused
 as a policy violation. See
 [`adr-precedent-record.md`](../design/adr-precedent-record.md).
+
+### `trellis curate evaluate-precedent-gate`
+
+Count, night by night, what the two-stage precedent gate would mint and activate.
+**Report only:** it serves nothing, promotes nothing, demotes nothing, builds no
+executor, emits no event (not even on failure) and writes to no store. It exists to
+price the gate before any serving code reads it.
+
+```bash
+trellis curate evaluate-precedent-gate [--candidates PATH] [--days N] \
+  [--scan-limit N] [--trace-limit N] [--domain D] [--dry-run] [--format text|json]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--candidates` | learning-artifacts dir | `intent_learning_candidates.json`, read as `auto-promote-candidates` reads it. |
+| `--days` | 30 | Look-back window for packs, feedback and traces. |
+| `--scan-limit` | 5000 | Most events read per event type, newest first. A capped read is stated. |
+| `--trace-limit` | 500 | Most traces the dry distiller reads. |
+| `--domain` | (all) | Restrict stage 1 to one trace domain. |
+| `--dry-run` | off | Accepted for symmetry with `auto-promote-candidates`; the command writes nothing with or without it. |
+
+**Stage 1 (mint)** runs `trellis worker distill-precedents` in dry-run over the
+window's traces (the same function, not a subprocess) and reports `traces_read`,
+`would_mint`, `duplicates` of already-recorded candidates, `by_rule`, `skipped` and
+`dropped` counters.
+
+**Stage 2 (activate)** tests each promotable learning candidate, the same
+population `auto-promote-candidates` evaluates, against h >= 3 helpful citations,
+u < h, >= 2 distinct helpful sessions, a within-pack permutation P < 0.05 and a
+lift >= 1.2 over the pack baseline (see
+[`adr-precedent-record.md`](../design/adr-precedent-record.md), "Stage 2 activation
+criteria"). Beside it, the current gate's verdict from the candidates file's
+`citation_evidence`. The `stage2` block reports `evaluated`, `promotable`,
+`not_promotable`, `current_gate_pass`, `new_gate_pass`, `both`, `only_new`,
+`only_current`, `failed_at` (the first criterion each candidate missed:
+`helpful`, `unhelpful`, `sessions`, `p_value`, `lift`; the counts add up to the
+candidates that failed), `without_graded_servings`, the thresholds of both gates, a
+`differences` list saying why the two counts are not one measurement twice, and
+`targets`: candidate ids that pass at least one gate, with counts, lift and P.
+
+The two gates read different evidence. The current gate reads the candidates file's
+`citation_evidence`, which counts a citation per feedback event and counts ungraded
+packs as servings; the new gate recomputes from this window, counts a pack once and
+only packs a grader named items in, lets helpful win over unhelpful on one item, and
+judges a candidate over the graded packs of its own intent family. Candidates
+already promoted are evaluated like any other.
+
+Recorded candidates (`PRECEDENT_CANDIDATE_MINED`) are event-only and never served,
+so they have no citations: `candidates_recorded` and `candidates_with_servings`
+(expected 0 until serving reads candidates) say so plainly. `packs` reports
+`scanned`, `held_out_dropped`, `with_item_rows` and `graded` and the same for
+feedback: held-out packs and the feedback naming them reach no count
+(`drop_holdout`), and the numbers dropped are stated. `scan` states any truncated
+read and `notes` repeats it. Implicit signals (fetches, re-retrieval) feed
+nothing here.
+
+Output is counts and candidate ids only: no item text, intent or trace text. The
+exit code is `0` on a completed run and does not depend on `--format`; a
+configuration `ValueError` exits `2` with a value-free message in both formats.
+
+Proposed nightly line, next to the auto-promote report:
+
+```bash
+trellis curate evaluate-precedent-gate --dry-run --format json
+```
 
 ### `trellis worker capture-sessions`
 
