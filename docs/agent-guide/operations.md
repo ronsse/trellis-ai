@@ -4003,6 +4003,67 @@ Without `local: true` the route is not local and a pack that served a document
 labelled above `internal` is recorded as `unjudgeable: pack_egress_withheld` instead
 of being sent. See "Keeping labelled content off a hosted model" below.
 
+### `trellis analyze trend`
+
+Read-only weekly series: one row per ISO week, oldest first, composed from the
+analyze readers that already exist rather than re-derived. Each reader is run once
+per week over that week's window (start inclusive, end exclusive: the readers'
+`until` is inclusive, so each week is read up to one microsecond before the next
+week starts and an event on a boundary counts once), so a
+week-scale regression, such as subagent retrieval adoption falling across a few
+days, shows up as a row instead of hiding inside a 30-day average. Builds are
+carried alongside, so a change reads as a segment boundary.
+
+```bash
+trellis analyze trend [--weeks N] [--until YYYY-MM-DD] [--limit N] [--format text|json|markdown]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--weeks` | `8` | ISO weeks to report, `1` to `26` |
+| `--until` | now | End of the window: an ISO date (taken as midnight UTC, exclusive) or timestamp |
+| `--limit` | `5000` | Max events scanned per event type, per week |
+| `--format` | `text` | `text` (compact table), `json` (a `TrendReport`), or `markdown` (a page with YAML `title:` frontmatter and GFM tables) |
+
+The week holding `--until` is the current week and is marked `partial: true`;
+every other row covers a full Monday-to-Monday week.
+
+| Metric | Composed from |
+|--------|---------------|
+| Pack value (useful, unhelpful and unjudged token fractions) | `summarize_pack_value`; `null` below its floor of 5 attributed packs |
+| Serve attribution (attribution rate, cited share) | `summarize_serve_attribution` |
+| Judged outcomes (rung counts, `cited_share`) | `summarize_judged_outcomes`; the Phase 1 gate verdict is not restated per week |
+| Capture rejection rate | `summarize_write_health`, restricted to capture surfaces (`is_capture_surface`); the same command-level definition as the headline rate |
+| Retrieval adoption | `summarize_retrieval_adoption`; `null` below its floor of 10 sessions |
+| Follow-up retrieval | new scan: sessions with at least two `PACK_ASSEMBLED` rows over sessions with at least one, plus the `retrieval_phase` distribution; rows with no `session_id` are counted in `packs_without_session`, never dropped |
+| Precedents served | new scan: served items under `precedent://learning/`, and helpful over served among them; zero is reported as `0` |
+| Builds | `write_provenance` on each served `PACK_ASSEMBLED`: per-build `version`, `commit`, `first_seen`, `last_seen`, and per week the commits that served; a null commit stays null |
+| Graph shape | `analyze_graph_shape`, once, as of `generated_at`: semantic-edge share (every edge kind outside `PROVENANCE_EDGE_KINDS`) and isolated-node share |
+
+Two omissions are stated in the report (`omitted[]`) rather than left silent:
+`loop_health` is point-in-time (each loop's latest run and the tuner's live
+pending-proposal count cannot be rebuilt for a past week), and tag coverage has no
+reader in the library.
+
+**The holdout outcome is sealed and is not read here.** Every `PACK_ASSEMBLED` read
+goes through `drop_holdout` (via `join_pack_events_with_coverage` or the composed
+readers), nothing is split by holdout arm, and the module imports nothing from
+`trellis.analyze.holdout` and never touches `CAPTURE_SESSION_PACKS` outcome or
+covariate fields (`tests/unit/analyze/test_trend.py` pins both). The markdown page
+opens with a paragraph saying so. Treat the figures as leading indicators only.
+
+**Edge effects.** A pack graded in a later week does not join in the earlier week's
+window, so the most recent full week reads low on grading until feedback catches up.
+A session that straddles midnight on a week boundary is counted in the week of each
+of its packs. A scan that hits `--limit` marks that week `truncated: true` and lists
+a note in `truncation_notes`; the report `status` becomes `truncated`.
+
+**Exit codes**, identical for every `--format`: `0` ok, `2` on an invalid `--weeks`
+or `--until` (JSON emits `{"status": "error", "message": ...}`), `5` when any week
+or the graph row is truncated. The route is `GET /api/v1/analyze/trend` with
+`weeks`, `until` and `limit` query params (admin scope, 60 s cache like every
+report), and the same payload as `--format json`.
+
 ### `trellis analyze holdout`
 
 Read-only analysis of the pack holdout experiment (`TRELLIS_PACK_HOLDOUT_RATE`,
