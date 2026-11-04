@@ -630,6 +630,21 @@ _ALLOWED_UNREADABLE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         _PASSTHROUGH_REASON,
     ),
     (
+        "src/trellis/mutate/api_key_commands.py",
+        "build_update_command",
+        "requested_by",
+    ): (
+        1,
+        _PASSTHROUGH_REASON,
+    ),
+    # Three Command constructions in one function: the mint, then the retire
+    # (an expiry update or a revoke). All three carry the caller's own
+    # ``requested_by`` parameter through unchanged.
+    ("src/trellis/mutate/api_key_commands.py", "rotate_key", "requested_by"): (
+        3,
+        _PASSTHROUGH_REASON,
+    ),
+    (
         "src/trellis/mutate/evidence_ingest.py",
         "build_evidence_ingest_command",
         "requested_by",
@@ -648,6 +663,14 @@ _ALLOWED_UNREADABLE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         _PRINCIPAL_REASON,
     ),
     ("src/trellis_api/routes/api_keys.py", "revoke_api_key", "_actor(ctx)"): (
+        1,
+        _PRINCIPAL_REASON,
+    ),
+    ("src/trellis_api/routes/api_keys.py", "rotate_api_key", "_actor(ctx)"): (
+        1,
+        _PRINCIPAL_REASON,
+    ),
+    ("src/trellis_api/routes/api_keys.py", "set_api_key_defaults", "_actor(ctx)"): (
         1,
         _PRINCIPAL_REASON,
     ),
