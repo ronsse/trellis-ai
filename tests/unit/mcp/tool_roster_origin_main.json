@@ -407,7 +407,7 @@
       }
      ],
      "default": null,
-     "description": "Whether the task succeeded. Omit when passing ``rating``\n\u2014 it is then derived from the grade. Defaults to success only\nwhen neither is given."
+     "description": "Whether the task succeeded. Omit when passing ``rating``\n\u2014 it is then derived from the grade. With neither ``success``\nnor ``rating``, the rating is derived from the cited ids:\nthe share of them that are helpful. A call citing only\n``unhelpful_item_ids`` records 0.0, not a success."
     },
     "rating": {
      "anyOf": [
@@ -419,7 +419,7 @@
       }
      ],
      "default": null,
-     "description": "Graded usefulness of the pack, 0.0 (useless) to 1.0\n(everything served was on point)."
+     "description": "Graded usefulness of the pack, 0.0 (useless) to 1.0\n(everything served was on point). Always used as sent."
     },
     "notes": {
      "anyOf": [

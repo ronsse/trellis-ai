@@ -52,11 +52,12 @@ class AliasDraft(TrellisModel):
     Unity Catalog ``catalog.schema.table`` all take the same shape.  The
     producer chooses the key: Unity Catalog's is case-folded and unquoted
     by :func:`~trellis.schemas.well_known.normalize_alias_raw_id`, the same
-    function ``save_knowledge`` looks it up with; every other system's is
-    verbatim.  The draft only *names* the identity: ``result_to_batch`` turns
-    it into a bind-if-absent ``alias.upsert`` command when the
-    ``knowledge_link_or_mint`` write-behaviour knob is on, and the draft
-    never touches a store.
+    function ``save_knowledge`` looks it up with and ``alias.upsert`` binds
+    it through (so a draft that skipped it is still bound under the normal
+    form); every other system's is verbatim.  The draft only *names* the
+    identity: ``result_to_batch`` turns it into a bind-if-absent
+    ``alias.upsert`` command when the ``knowledge_link_or_mint``
+    write-behaviour knob is on, and the draft never touches a store.
     """
 
     source_system: str = Field(min_length=1)

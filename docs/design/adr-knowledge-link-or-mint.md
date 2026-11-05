@@ -35,9 +35,11 @@ whose own create did not land.
 same type is not duplicated. An attach writes **no caller properties**: a caller who only names a note
 must not be able to archive it (`lifecycle`), noise-tag it (`content_tags`, `content_tags_shadow`) or
 change what it is (`node_role`), and copying "whatever the node lacks" allowed all of those. The only
-write is one `entity.update`: the new evidence document id appended to `document_ids`, plus
-`evidence_ref` when the node has none. No node and no alias is written. `supersedes=` always creates,
-because it names its target.
+*property* write is one `entity.update`: the new evidence document id appended to `document_ids`, plus
+`evidence_ref` when the node has none. No node is created and no alias is bound for the note itself;
+the caller's `domain` and `relates_to` links still run, so an attach can mint a `domain:` node and add
+`appliesTo` / `relates_to` edges from the existing note. `supersedes=` always creates, because it
+names its target.
 
 **Unresolved.** One reply line, `Unresolved: N of M references (positions ...)`, with no caller text.
 
@@ -46,14 +48,24 @@ turns them into alias commands and passes the result's tier on every edge as `ex
 (upper-case stored spelling). A three-part Unity Catalog id binds under `unity_catalog` with no
 special case beyond one key function, `normalize_alias_raw_id`: Unity Catalog identifiers are
 case-insensitive and may be backtick-quoted per part, so the key is lower-cased and unquoted, on the
-bind side (`EntityRule`) and on the `relates_to` lookup alike. Every other system's ids stay verbatim.
+bind side (`EntityRule`, and `alias.upsert` itself for any command under `unity_catalog`) and on the
+`relates_to` lookup alike. Space around a dot is not part of a name. A value with an empty part
+(`.a.b`, `a..b`, an empty quoted part) is malformed and is returned as given, never rewritten: the
+alternative, collapsing an empty quoted part, would give `` ``.a.b `` the key of the verbatim `.a.b`.
+`UnityCatalogExtractor` builds its ids through the same function, so the id it mints, the alias it
+binds and the key `save_knowledge` probes agree. Every other system's ids stay verbatim.
 `AliasDraft`s stay out of the validator-rejection residue, so a knob-off ingest records what it did
 before aliases existed.
 
 **Domain mint.** The value is split with `referents.split_namespace`, the rule
 `namespace_candidates` uses: a `domain:` prefix is stripped before the slug is taken, and any other
 known namespace prefix mints nothing. `ENTITY_CREATE` on an existing id replaces its properties, so
-the mint re-reads the id immediately before writing and carries an idempotency key derived from it.
+the mint re-reads the id immediately before writing, is an `if_absent` create (an existing node is left
+alone and is linked to, not reported as minted) and carries an idempotency key derived from the id. The
+key is recorded only after a success, so it protects a retry or a serial save; `if_absent` guards a
+writer that holds no key, such as a trace. It is a read before a write in the handler, so the window
+is narrowed to that gap, not closed: two truly concurrent saves inside it can both write the same
+`minted_by` and possibly another spelling of the name.
 
 ## 3. Why the default stays off
 
