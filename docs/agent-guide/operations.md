@@ -116,15 +116,22 @@ pins that against a golden captured from `main`). On:
   linked to it with `appliesTo`. The reply gains `Domain minted: domain:<slug>`. A `domain:`
   prefix is stripped first (`domain:finance` mints `domain:finance`), and a value carrying another
   namespace prefix (`tool:x`) mints nothing. A value with no letters or digits, or a mint a policy
-  denies, also mints nothing; all of these count as unresolved. The mint carries a key derived from
-  the domain id and is checked against the graph immediately before it is written, so it never
-  replaces the properties of a `domain:<slug>` node that already exists.
+  denies, also mints nothing; all of these count as unresolved. The mint is a create-if-absent
+  (`entity.create` with `if_absent`) that also carries a key derived from the domain id, and the
+  graph is checked immediately before it is written, so it does not replace the properties of a
+  `domain:<slug>` node that already exists, including one a trace wrote a moment earlier; a node
+  that is there by the time the write runs is linked to and not reported as minted. The key
+  protects a retry or a serial save. `if_absent` is a read before a write, not an atomic store
+  operation, so two saves truly concurrent inside that gap can both write the same `minted_by` and
+  possibly another spelling of the name.
 - **A same-named note is attached to, not duplicated.** If the normalised name already resolves (via
   its `name` alias) to a current, semantic, non-namespaced node of the same `entity_type`, no node
   is created. An attach **writes no caller properties**, so naming a note cannot archive it
-  (`lifecycle`), noise-tag it (`content_tags`) or change what it is. The only write is one
-  `entity.update` that appends the new evidence document id to the node's `document_ids` and sets
-  `evidence_ref` when the node has none; nothing to add means no write. The reply starts `Entity
+  (`lifecycle`), noise-tag it (`content_tags`) or change what it is. The only *property* write is
+  one `entity.update` that appends the new evidence document id to the node's `document_ids` and
+  sets `evidence_ref` when the node has none; nothing to add means no such write. The caller's
+  `domain` and `relates_to` links still run, so an attach can still mint a `domain:<slug>` node and
+  add `appliesTo` and `relates_to` edges from the existing note. The reply starts `Entity
   exists: <id> ... attached, not created`. `supersedes=` always creates.
 - **`relates_to` resolves raw ids through external aliases.** After the existing id, slug and name
   resolution, a value is tried as a raw id under `dbt`, `openlineage_dataset`, `openlineage_job` and
@@ -143,7 +150,10 @@ pins that against a golden captured from `main`). On:
   `unique_id` under `dbt`; OpenLineage binds `namespace/name` under `openlineage_job` or
   `openlineage_dataset`; a JSON rule binds under its `alias_source_system` (a Unity Catalog
   `catalog.schema.table` id under `unity_catalog`, case-folded and unquoted by the same function the
-  lookup uses, needs no other support). A bound pair is never
+  lookup uses, needs no other support; space around a dot is ignored, and an empty part such as
+  `.a.b` is not a Unity Catalog name and is kept verbatim). `alias.upsert` applies that function to
+  any `unity_catalog` `raw_id` before it binds, whoever sent the command, so `Main.Sales.Orders`
+  bound directly is found by the same lookup; every other system's id is bound as given. A bound pair is never
   rebound, and an alias for an entity whose create did not land is refused. The REST extraction
   routes and the memory and trace ingest hooks do not bind aliases.
 
@@ -174,7 +184,7 @@ import `trellis`, reads the same fragments as the server.
 
 **The grading trailer** is one line appended to a pack reply (`get_context`, `search`, the sectioned
 and index forms, an empty pack, and `get_items` when it is given a `pack_id`), naming the pack and the
-minimal grading call (`rating` included, since a call without one records a success):
+minimal grading call (`rating` included, since a call without one has the server derive it from the cited ids):
 
 ```markdown
 *Grade this pack: `record_feedback(pack_id="01HABCDEF...", rating=..., helpful_item_ids=[...], unhelpful_item_ids=[...])`.*
@@ -6801,15 +6811,38 @@ When an agent finishes the task, it calls `record_feedback` with the copied IDs:
 
 **The minimal call.** `pack_id` plus `helpful_item_ids` and/or `unhelpful_item_ids`, with no `rating`
 and no `success`, is a valid call on the MCP tool, `POST /packs/{pack_id}/feedback` and
-`TrellisClient.record_feedback`, and always has been. With neither given, `success` is true and
-`rating` is 1.0, so the `FEEDBACK_RECORDED` payload has the same keys as a full call (the empty
-`unhelpful_item_ids` / `followed_advisory_ids` lists are left out, as in any call that does not cite
-them). Note the consequence: a call that cites only unhelpful ids and omits the rating still records
-`rating` 1.0, because nothing rated the pack. Pass a `rating` when the pack was not a success.
-`tests/unit/mcp/test_minimal_feedback_form.py` pins this on each surface. Deriving the rating from the
-cited ids would change the reply and the event for calls that are valid today, so it is deferred until
-after the serving readout. The `TRELLIS_GRADING_TRAILER` knob above names `rating` in the call it
-suggests, because this form records a success without one.
+`TrellisClient.record_feedback`. The server derives the rating as the helpful share of the named pack
+items, `len(helpful) / (len(helpful) + len(unhelpful))` over distinct ids, and `success` follows from it
+through the 0.5 threshold:
+
+| Call cites | `rating` | `success` |
+|---|---|---|
+| only `unhelpful_item_ids` | 0.0 | false |
+| one helpful, one unhelpful | 0.5 | true |
+| only `helpful_item_ids` | 1.0 | true |
+
+A derived rating carries `rating_derived: true` in the `FEEDBACK_RECORDED` payload and in the
+`pack_feedback.jsonl` row, so a reader can tell it from a grade; the key is absent when the caller
+supplied the rating or the success, and it survives `trellis admin reconcile-feedback`. The MCP reply
+names it ("Feedback recorded (negative, rating 0.00, derived from the cited ids) ..."). The REST and
+SDK responses are unchanged: `feedback` is `positive` or `negative`, and the payload is where the
+number is.
+
+- An explicit `rating` is always recorded as sent (a `rating` of 1.0 on an unhelpful-only call is the
+  caller's claim). An explicit `success` alone is recorded as sent, with `rating` 1.0 / 0.0 as before.
+  Neither is marked.
+- `followed_advisory_ids` and `ignored_item_ids` do not count in the share. An advisory is guidance the
+  agent acted on, not a verdict on a served item (it is never a member of the pack's `injected_item_ids`),
+  and ignored scores nothing yet.
+- A call naming no pack item at all (no ids, or advisory ids only) has nothing to derive from, so it
+  keeps its earlier effect: `success` true, `rating` 1.0, no marker. Refusing it would turn a call that
+  is valid today on every surface into an error.
+
+Before #1194 every such call recorded `rating` 1.0, so an unhelpful-only grade counted as a win.
+`FEEDBACK_RECORDED` rows written before then cannot be told apart from a grade of 1.0. Pass a `rating`
+whenever you can: it is the one value the server never second-guesses.
+`tests/unit/mcp/test_minimal_feedback_form.py` pins each case on each surface. The
+`TRELLIS_GRADING_TRAILER` knob above still names `rating` in the call it suggests.
 
 These element-level signals land in the `FEEDBACK_RECORDED` event payload so the fitness loops (`trellis analyze apply-noise-tags`, `trellis analyze advisory-effectiveness`) can attribute outcomes more precisely than pack-level success alone.
 

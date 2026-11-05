@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -863,3 +864,115 @@ class TestFeedbackIdScanLimitRegression:
             assert _feedback_id_in_event_log(event_log, "fb_never_written") is False
         finally:
             event_log.close()
+
+
+# ---------------------------------------------------------------------------
+# A rating derived from the cited ids (#1194)
+# ---------------------------------------------------------------------------
+
+
+class TestDerivedRating:
+    """Neither ``rating`` nor ``success`` given: the helpful share, marked."""
+
+    @pytest.mark.parametrize(
+        ("helpful", "unhelpful", "expected"),
+        [
+            (["a"], [], 1.0),
+            ([], ["x"], 0.0),
+            (["a"], ["x"], 0.5),
+            (["a", "b", "c"], ["x"], 0.75),
+            (["a", "a"], ["x"], 0.5),  # a repeated id is one verdict
+            ([], [], None),  # nothing to derive from
+        ],
+    )
+    def test_derive_rating(self, helpful, unhelpful, expected):
+        from trellis.feedback.models import derive_rating
+
+        assert derive_rating(helpful, unhelpful) == expected
+
+    def test_unhelpful_only_is_not_a_success(self):
+        fb = PackFeedback.from_agent_signal(run_id="r", unhelpful_item_ids=["x"])
+        assert fb.rating == 0.0
+        assert fb.rating_derived is True
+        assert fb.succeeded is False
+        assert fb.outcome == "failure"
+        payload = fb.to_event_payload(pack_id="p")
+        assert payload["rating"] == 0.0
+        assert payload["success"] is False
+        assert payload["rating_derived"] is True
+
+    def test_success_follows_the_derived_rating_through_the_threshold(self):
+        at = PackFeedback.from_agent_signal(
+            run_id="r", helpful_item_ids=["a"], unhelpful_item_ids=["x"]
+        )
+        below = PackFeedback.from_agent_signal(
+            run_id="r", helpful_item_ids=["a"], unhelpful_item_ids=["x", "y"]
+        )
+        assert at.rating == 0.5
+        assert at.succeeded is True
+        assert below.succeeded is False
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"rating": 0.0, "unhelpful_item_ids": ["x"]},
+            {"rating": 1.0, "unhelpful_item_ids": ["x"]},
+            {"success": True, "unhelpful_item_ids": ["x"]},
+            {"success": False, "helpful_item_ids": ["a"]},
+            {"success": True, "rating": 0.1, "helpful_item_ids": ["a"]},
+        ],
+    )
+    def test_an_explicit_grade_is_never_marked(self, kwargs):
+        fb = PackFeedback.from_agent_signal(run_id="r", **kwargs)
+        assert fb.rating_derived is False
+        assert "rating_derived" not in fb.to_event_payload()
+        assert "rating_derived" not in fb.to_dict()
+        if "rating" in kwargs:
+            assert fb.effective_rating == kwargs["rating"]
+        if "success" in kwargs:
+            assert fb.succeeded is kwargs["success"]
+
+    def test_no_pack_item_named_keeps_the_earlier_success(self):
+        for extra in (
+            {},
+            {"followed_advisory_ids": ["adv"]},
+            {"ignored_item_ids": ["i"]},
+        ):
+            fb = PackFeedback.from_agent_signal(run_id="r", **extra)
+            assert fb.succeeded is True
+            assert fb.effective_rating == 1.0
+            assert fb.rating is None
+            assert fb.rating_derived is False
+
+    def test_the_marker_survives_the_event_payload_round_trip(self):
+        fb = PackFeedback.from_agent_signal(run_id="r", unhelpful_item_ids=["x"])
+        back = PackFeedback.from_event_payload(fb.to_event_payload())
+        assert back is not None
+        assert back.rating_derived is True
+        assert back.effective_rating == 0.0
+
+    def test_the_jsonl_row_has_the_key_only_when_derived(self, tmp_path: Path):
+        derived = PackFeedback.from_agent_signal(run_id="d", unhelpful_item_ids=["x"])
+        explicit = PackFeedback.from_agent_signal(
+            run_id="e", rating=0.0, unhelpful_item_ids=["x"]
+        )
+        record_feedback(derived, log_dir=tmp_path)
+        record_feedback(explicit, log_dir=tmp_path)
+
+        rows = [
+            json.loads(line)
+            for line in (tmp_path / "pack_feedback.jsonl").read_text().splitlines()
+        ]
+        assert rows[0]["rating_derived"] is True
+        assert "rating_derived" not in rows[1]
+        loaded = load_feedback_log(tmp_path)
+        assert [fb.rating_derived for fb in loaded] == [True, False]
+
+    def test_a_row_older_than_the_field_loads_as_not_derived(self, tmp_path: Path):
+        (tmp_path / "pack_feedback.jsonl").write_text(
+            '{"run_id": "run-1", "phase": "p", "intent": "i", '
+            '"outcome": "success", "items_served": ["a"], "rating": 1.0}\n'
+        )
+        (fb,) = load_feedback_log(tmp_path)
+        assert fb.rating_derived is False
+        assert "rating_derived" not in fb.to_event_payload()

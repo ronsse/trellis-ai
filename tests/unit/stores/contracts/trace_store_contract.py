@@ -37,9 +37,10 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from trellis.core.base import utc_now
-from trellis.errors import StoreError
+from trellis.errors import StoreError, ValidationError
 from trellis.schemas.enums import OutcomeStatus, TraceSource
 from trellis.schemas.trace import Outcome, Trace, TraceContext, TraceStep
+from trellis.stores.base.trace import MAX_TRACE_PAYLOAD_DEPTH, TRACE_TOO_DEEP_CODE
 
 if TYPE_CHECKING:
     from trellis.stores.base.trace import TraceStore
@@ -60,6 +61,46 @@ def _make_trace(**kwargs: Any) -> Trace:
     }
     defaults.update(kwargs)
     return Trace(**defaults)
+
+
+#: The free-form fields of a trace, by the name a test case gives them.
+_PAYLOAD_FIELDS = ("args", "result", "metrics", "metadata")
+
+
+def _nested(levels: int) -> dict[str, Any]:
+    """A dict nesting exactly *levels* dicts, the innermost holding a scalar."""
+    value: dict[str, Any] = {"leaf": 1}
+    for _ in range(levels - 1):
+        value = {"k": value}
+    return value
+
+
+def _trace_with_payload(field: str, payload: dict[str, Any]) -> Trace:
+    """A trace carrying *payload* in the named free-form field."""
+    if field == "args":
+        return _make_trace(
+            steps=[TraceStep(step_type="tool_call", name="n", args=payload)]
+        )
+    if field == "result":
+        return _make_trace(
+            steps=[TraceStep(step_type="tool_call", name="n", result=payload)]
+        )
+    if field == "metrics":
+        return _make_trace(
+            outcome=Outcome(status=OutcomeStatus.SUCCESS, metrics=payload)
+        )
+    return _make_trace(metadata=payload)
+
+
+def _payload_of(trace: Trace, field: str) -> dict[str, Any]:
+    if field == "args":
+        return trace.steps[0].args
+    if field == "result":
+        return trace.steps[0].result
+    if field == "metrics":
+        assert trace.outcome is not None
+        return trace.outcome.metrics
+    return trace.metadata
 
 
 class TraceStoreContractTests:
@@ -483,3 +524,71 @@ class TraceStoreContractTests:
         got = store.get(trace.trace_id)
         assert got is not None
         assert got.metadata == {"foo": "bar", "n": 7, "nested": {"k": "v"}}
+
+    # ------------------------------------------------------------------
+    # nesting bound — what append accepts, query and get can read back
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("field", _PAYLOAD_FIELDS)
+    def test_a_payload_at_the_nesting_bound_appends_and_reads_back(
+        self, store: TraceStore, field: str
+    ) -> None:
+        payload = _nested(MAX_TRACE_PAYLOAD_DEPTH)
+        trace = _trace_with_payload(field, payload)
+        store.append(trace)
+        (listed,) = store.query()
+        got = store.get(trace.trace_id)
+        assert got is not None
+        assert listed.trace_id == got.trace_id == trace.trace_id
+        assert _payload_of(listed, field) == payload
+        assert _payload_of(got, field) == payload
+
+    @pytest.mark.parametrize("field", _PAYLOAD_FIELDS)
+    @pytest.mark.parametrize(
+        "levels", [MAX_TRACE_PAYLOAD_DEPTH + 1, 200, 400, 5000], ids=str
+    )
+    def test_a_payload_past_the_nesting_bound_is_refused(
+        self, store: TraceStore, field: str, levels: int
+    ) -> None:
+        """``append`` refuses what ``query`` could not read, and stores nothing.
+
+        200 levels is the depth at which, before the bound, ``append`` stored a
+        row that ``query`` then failed on; 400 and 5000 are past where the
+        writer itself fails, and must be refused the same way, not with a
+        serializer error.
+        """
+        trace = _trace_with_payload(field, _nested(levels))
+        with pytest.raises(ValidationError) as caught:
+            store.append(trace)
+        assert caught.value.code == TRACE_TOO_DEEP_CODE
+        assert str(MAX_TRACE_PAYLOAD_DEPTH) in str(caught.value)
+        assert store.count() == 0
+        assert store.query() == []
+        assert store.get(trace.trace_id) is None
+
+    def test_a_refused_deep_trace_leaves_the_other_traces_readable(
+        self, store: TraceStore
+    ) -> None:
+        kept = _make_trace()
+        store.append(kept)
+        with pytest.raises(ValidationError):
+            store.append(_trace_with_payload("result", _nested(200)))
+        assert [t.trace_id for t in store.query()] == [kept.trace_id]
+
+    def test_lists_count_as_nesting_levels(self, store: TraceStore) -> None:
+        """A list is a level like a dict: the bound holds for mixed nesting."""
+
+        def mixed(levels: int) -> dict[str, Any]:
+            inner: Any = [1]
+            for _ in range(levels - 2):
+                inner = [inner]
+            return {"k": inner}  # one dict, then levels - 1 lists
+
+        at_bound = _trace_with_payload("metadata", mixed(MAX_TRACE_PAYLOAD_DEPTH))
+        store.append(at_bound)
+        assert store.get(at_bound.trace_id) is not None
+        with pytest.raises(ValidationError):
+            store.append(
+                _trace_with_payload("metadata", mixed(MAX_TRACE_PAYLOAD_DEPTH + 1))
+            )
+        assert store.count() == 1

@@ -354,6 +354,17 @@ Output on validation error:
 {"status": "error", "message": "1 validation error for Trace\nsource\n  Input should be 'agent', 'human', 'workflow' or 'system' ..."}
 ```
 
+### Nesting limit
+
+A trace is refused at write time when `steps[].args`, `steps[].result`, `outcome.metrics` or `metadata`
+nests more than 100 levels of objects and lists (`MAX_TRACE_PAYLOAD_DEPTH`, in `trellis.stores.base.trace`).
+A flat payload counts as 1 level. The error code is `trace_too_deep`, the
+message names the field and the bound, and every surface reports it as a rejected write: MCP
+`save_experience` raises `failed to store trace`, `POST /api/v1/traces` answers 400, and
+`trellis ingest trace` exits 2 whether `--format` is `text` or `json`. If you hit it, flatten the
+payload or store the nested part as a JSON string. A trace stored before the limit existed still loads.
+The SQLite and Postgres trace stores apply the same check in `append`.
+
 ---
 
 ## Common Mistakes and Validation Errors

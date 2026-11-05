@@ -1528,6 +1528,7 @@ def _public_items(
     _require_numeric_importance_params(importance_params)
     items: list[PackItem] = []
     skipped: list[PackItem] = []
+    now = datetime.now(UTC)
     for row, base_score in scored:
         doc_id = row["doc_id"]
         metadata = row.get("metadata") or {}
@@ -1543,7 +1544,7 @@ def _public_items(
             metadata, row.get("updated_at"), row.get("created_at")
         )
         score = _apply_recency_decay(
-            score, recency.stamp, half_life_days=half_life, floor=floor
+            score, recency.stamp, now=now, half_life_days=half_life, floor=floor
         )
         items.append(
             PackItem(
@@ -1663,6 +1664,10 @@ class KeywordSearch(SearchStrategy):
         _require_numeric_importance_params(importance_params)
         items: list[PackItem] = []
         skipped: list[PackItem] = []
+        # One clock per search. Read per row, two rows the text scores tie
+        # were aged against different instants, and a slow loop iteration
+        # could reverse their order.
+        now = datetime.now(UTC)
         for doc in results:
             metadata = doc.get("metadata", {})
             # The store's own rank is not document metadata, so a bad one
@@ -1693,6 +1698,7 @@ class KeywordSearch(SearchStrategy):
             score = _apply_recency_decay(
                 score,
                 recency.stamp,
+                now=now,
                 half_life_days=half_life,
                 floor=floor,
             )
@@ -1859,6 +1865,7 @@ class SemanticSearch(SearchStrategy):
         _require_numeric_importance_params(importance_params)
         items: list[PackItem] = []
         skipped: list[PackItem] = []
+        now = datetime.now(UTC)  # one clock per search, as on the keyword axis
         for result in results:
             metadata = result.get("metadata", {})
             base_score = result.get("score", 0.0)
@@ -1895,6 +1902,7 @@ class SemanticSearch(SearchStrategy):
             score = _apply_recency_decay(
                 score,
                 recency.stamp,
+                now=now,
                 half_life_days=half_life,
                 floor=floor,
             )
@@ -2703,6 +2711,7 @@ class GraphSearch(SearchStrategy):
         _require_numeric_importance_params(importance_params)
         items: list[PackItem] = []
         skipped: list[PackItem] = []
+        now = datetime.now(UTC)  # one clock per search, as on the keyword axis
         for i, node in enumerate(scored):
             props = node.get("properties", {})
             node_type_val = node.get("node_type", "")
@@ -2743,6 +2752,7 @@ class GraphSearch(SearchStrategy):
             score = _apply_recency_decay(
                 score,
                 node.get(GRAPH_RECENCY_CLOCK_FIELD),
+                now=now,
                 half_life_days=half_life,
                 floor=floor,
             )

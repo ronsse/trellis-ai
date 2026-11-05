@@ -474,41 +474,49 @@ def _split_dotted_identifier(value: str) -> list[str] | None:
 
     A part may be backtick-quoted (``` `my.catalog` ```), in which case a dot
     inside it is part of the name and a doubled backtick is a literal one.
-    Anything after a closing quote other than a dot, or a quote left open,
+    Whitespace around a part, and around the dots between parts, is not part
+    of the name: ``Main . Sales`` splits into ``Main`` and ``Sales``, and so
+    does ``` `Main` . `Sales` ```. Anything else after a closing quote, a
+    quote left open, or an empty part (``.a.b``, ``a..b``, ``` ``.a.b ```)
     makes the whole value malformed rather than guessed at.
     """
     parts: list[str] = []
     current: list[str] = []
     quoted = False
+    closed = False  # a quoted part just ended; only space or a dot may follow
     i = 0
     while i < len(value):
         char = value[i]
         if quoted:
-            if char == "`":
-                if value[i + 1 : i + 2] == "`":
-                    current.append("`")
-                    i += 1
-                else:
-                    quoted = False
-                    if value[i + 1 : i + 2] not in ("", "."):
-                        return None
-            else:
+            if char != "`":
                 current.append(char)
+            elif value[i + 1 : i + 2] == "`":
+                current.append("`")
+                i += 1
+            else:
+                quoted = False
+                closed = True
+        elif char == ".":
+            parts.append("".join(current).strip())
+            current = []
+            closed = False
+        elif closed:
+            if not char.isspace():
+                return None
         elif char == "`":
             if "".join(current).strip():
                 return None
             current = []
             quoted = True
-        elif char == ".":
-            parts.append("".join(current))
-            current = []
         else:
             current.append(char)
         i += 1
     if quoted:
         return None
-    parts.append("".join(current))
-    return parts
+    parts.append("".join(current).strip())
+    # An empty part is refused, not kept: ``` ``.a.b ``` would otherwise
+    # normalise to ``.a.b`` and collide with that spelling verbatim.
+    return None if "" in parts else parts
 
 
 def normalize_alias_raw_id(source_system: str, raw_id: str) -> str:
@@ -516,17 +524,20 @@ def normalize_alias_raw_id(source_system: str, raw_id: str) -> str:
 
     Every source system's ids are kept verbatim except Unity Catalog's,
     whose identifiers are case-insensitive and may be backtick-quoted per
-    part. For ``unity_catalog``, ``Main.Sales.Orders`` and
-    ``` `main`.`sales`.`orders` ``` both become ``main.sales.orders``. A part is
-    quoted again in the result only when it holds a dot or a backtick, so
-    ``` `a.b`.c ``` and ``a.b.c`` stay distinct. A value that does not parse
-    (an unterminated quote) is returned unchanged.
+    part. For ``unity_catalog``, ``Main.Sales.Orders``, ``Main . Sales . Orders``
+    and ``` `main`.`sales`.`orders` ``` all become ``main.sales.orders``. A
+    part is quoted again in the result only when it holds a dot or a
+    backtick, so ``` `a.b`.c ``` and ``a.b.c`` stay distinct. A value that
+    does not parse (an unterminated quote, an empty part) is returned
+    unchanged: it is never rewritten into a well-formed key, so ``` ``.a.b ```
+    does not collide with ``.a.b``.
 
     Bind and lookup both call this, so the two cannot disagree about a key.
+    ``UnityCatalogExtractor`` builds its own ids through it as well.
     """
     if source_system != UNITY_CATALOG_SOURCE_SYSTEM:
         return raw_id
-    parts = _split_dotted_identifier(raw_id.strip())
+    parts = _split_dotted_identifier(raw_id)
     if parts is None:
         return raw_id
     folded = [part.lower() for part in parts]
