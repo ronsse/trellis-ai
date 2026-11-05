@@ -9,7 +9,7 @@ import structlog
 
 from trellis.errors import StoreError
 from trellis.schemas.trace import Trace
-from trellis.stores.base.trace import TraceStore, as_utc
+from trellis.stores.base.trace import TraceStore, as_utc, check_trace_nesting
 from trellis.stores.sqlite.base import SQLiteStoreBase
 from trellis.stores.sqlite.instant import (
     MigrationEvents,
@@ -105,6 +105,7 @@ class SQLiteTraceStore(SQLiteStoreBase, TraceStore):
     # ------------------------------------------------------------------
 
     def append(self, trace: Trace) -> str:
+        check_trace_nesting(trace)
         domain = trace.context.domain if trace.context else None
         agent_id = trace.context.agent_id if trace.context else None
         outcome_status = trace.outcome.status.value if trace.outcome else None

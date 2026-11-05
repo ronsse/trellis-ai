@@ -9,7 +9,7 @@ import structlog
 
 from trellis.errors import StoreError
 from trellis.schemas.trace import Trace
-from trellis.stores.base.trace import TraceStore, as_utc
+from trellis.stores.base.trace import TraceStore, as_utc, check_trace_nesting
 from trellis.stores.postgres.base import PostgresStoreBase
 
 logger = structlog.get_logger(__name__)
@@ -53,6 +53,7 @@ class PostgresTraceStore(PostgresStoreBase, TraceStore):
     # ------------------------------------------------------------------
 
     def append(self, trace: Trace) -> str:
+        check_trace_nesting(trace)
         import psycopg.errors  # noqa: PLC0415
 
         domain = trace.context.domain if trace.context else None

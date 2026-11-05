@@ -133,6 +133,22 @@ All notable changes to Trellis will be documented in this file.
 
 ### Fixed
 
+- **A trace that nests more than 100 levels deep is refused at `append`, so a stored trace can always be read
+  back; and `TestSessionDedup::test_an_ordinary_session_does_dedup` no longer flakes (no change to what any
+  pack serves).** A payload roughly 200 levels deep passed validation and `TraceStore.append` stored it, but
+  `query` and `get` then failed to load the row (the JSON reader stops at about 200 levels, the serializer at
+  about 255), and the failure surfaced per row far from the write. `append` now checks `steps[].args`,
+  `steps[].result`, `outcome.metrics` and `metadata` against `MAX_TRACE_PAYLOAD_DEPTH` (100, in
+  `trellis.stores.base.trace`) through `check_trace_nesting`, on the SQLite and Postgres stores alike, and
+  raises a `ValidationError` with code `trace_too_deep` that names the field and the bound and never echoes
+  the value. MCP `save_experience` raises a `failed to store trace` error, `POST /api/v1/traces` answers 400,
+  and `trellis ingest trace` exits 2 in text and json alike. The check sits on the write path, not on
+  `Trace`, so rows stored before it still load. A payload so deep that the JSON parser itself gives up now
+  gets a `trellis analyze health` hint naming the nesting bound rather than the trailing-comma one. The
+  flaky test asserted the second pack was empty, but the 30 near-identical `h-bulk-*` documents tie on every
+  axis except a per-row clock, so semantic dedup keeps a different one of them from call to call and the
+  second pack can serve a sibling the first never held. It now asserts the two packs share no item, and a
+  second test forces the tie order. Session dedup itself is unchanged.
 - **A sensitivity label can no longer be applied to an id that is not a live document, and the graph-read
   concealment pins are tightened (no change to what any pack serves).** A pack, a document read and an
   `external` key judge an id by the document row at that id, so a label written for a graph node, a
