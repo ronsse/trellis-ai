@@ -21,12 +21,15 @@ from trellis.errors import ValidationError
 from trellis.extract.commands import result_to_batch
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import CommandStatus
+from trellis.schemas import well_known as wk
 from trellis.schemas.enums import NodeRole
 from trellis.schemas.extraction import ExtractionResult
 from trellis.stores.registry import StoreRegistry
 from trellis_workers.extract.openlineage import OpenLineageExtractor
 from trellis_workers.extract.unity_catalog import (
+    DEFAULT_MAX_COLUMNS_PER_TABLE,
     INPUT_REFUSAL_CODE,
+    MAX_COLUMN_NAMES,
     UnityCatalogExtractor,
     check_input,
 )
@@ -451,7 +454,7 @@ class TestGraphShape:
             assert entities[column].if_absent is True
             assert entities[column].properties["stub"] is True
             assert entities[column].node_role is NodeRole.STRUCTURAL
-            assert entities[column].allow_structural_leaf is True
+            assert entities[column].allow_structural_leaf is False
         assert edge_set(result, "depends_on") == {(tgt, src)}
         assert (tid("main.sales.orders"), src) in edge_set(result, "contains")
         assert len(edge_set(result, "contains")) == 8  # the six of TABLES, two more
@@ -460,7 +463,9 @@ class TestGraphShape:
         entities = by_id(await extract(EVERYTHING))
         column = entities[f"uc_column:{NS}:main.sales.orders/order_id"]
         assert column.node_role is NodeRole.STRUCTURAL
-        assert column.allow_structural_leaf is True
+        # `uc_column` is not in ENTITY_TYPE_ANTI_PATTERNS: nothing to opt out of.
+        assert "uc_column" not in wk.ENTITY_TYPE_ANTI_PATTERNS
+        assert column.allow_structural_leaf is False
         assert column.properties["type_text"] == "bigint"
         assert column.properties["position"] == 0
         assert column.properties["nullable"] is False
@@ -526,6 +531,9 @@ class TestProperties:
         result = await extract({"tables": [huge]})
         for entity in result.entities:
             for key, value in entity.properties.items():
+                if key == "column_names":  # the one list: bounded, see TestColumnBounds
+                    assert all(isinstance(name, str) for name in value)
+                    continue
                 assert isinstance(value, (str, int, float, bool)), key
                 assert len(str(value)) <= 1000, key
             assert "properties" not in entity.properties
@@ -539,6 +547,167 @@ class TestProperties:
             tid("main.sales.daily_revenue")
         ].properties
         assert props.get("source_updated_at") in (None, "1969-12-31T23:59:59.999+00:00")
+
+
+# ---------------------------------------------------------------------------
+# Column bounds (adr-source-modeling-discipline.md §2.2, §5)
+# ---------------------------------------------------------------------------
+
+
+def wide_table(width: int, name: str = "wide") -> dict[str, Any]:
+    return {
+        "name": name,
+        "catalog_name": "main",
+        "schema_name": "sales",
+        "full_name": f"main.sales.{name}",
+        "columns": [
+            {"name": f"c{i:05d}", "type_text": "int", "position": i}
+            for i in range(width)
+        ],
+    }
+
+
+def column_ids(result: ExtractionResult) -> list[str]:
+    return sorted(e.entity_id for e in result.entities if e.entity_type == "uc_column")
+
+
+class TestColumnBounds:
+    async def test_the_table_carries_its_column_names_in_position_order(self) -> None:
+        props = by_id(await extract(EVERYTHING))[tid("main.sales.orders")].properties
+        assert props["column_names"] == ["order_id", "customer_id"]
+        assert props["column_count"] == 2
+
+    async def test_a_small_table_is_unchanged_by_the_cap(self) -> None:
+        # Every column of an ordinary table is a node, and nothing is counted.
+        result = await extract({"tables": [TABLES["tables"][0]]})
+        assert column_ids(result) == [
+            f"uc_column:{NS}:main.sales.orders/customer_id",
+            f"uc_column:{NS}:main.sales.orders/order_id",
+        ]
+        assert result.skipped_rows == {}
+        order_id = by_id(result)[f"uc_column:{NS}:main.sales.orders/order_id"]
+        assert order_id.properties == {
+            "name": "order_id",
+            "table_full_name": "main.sales.orders",
+            "source_system": "databricks",
+            "type_text": "bigint",
+            "type_name": "LONG",
+            "position": 0,
+            "nullable": False,
+            "description": "Primary key",
+        }
+
+    async def test_a_table_at_the_default_cap_loses_nothing(self) -> None:
+        result = await extract({"tables": [wide_table(DEFAULT_MAX_COLUMNS_PER_TABLE)]})
+        assert len(column_ids(result)) == DEFAULT_MAX_COLUMNS_PER_TABLE
+        assert result.skipped_rows == {}
+
+    async def test_columns_past_the_cap_are_counted_not_dropped_silently(self) -> None:
+        result = await extract({"tables": [wide_table(5)]}, max_columns_per_table=3)
+        assert [c.rsplit("/", 1)[1] for c in column_ids(result)] == [
+            "c00000",
+            "c00001",
+            "c00002",
+        ]
+        assert result.skipped_rows == {"columns_over_cap": 2}
+        props = by_id(result)[tid("main.sales.wide")].properties
+        assert props["column_count"] == 5  # the truth, beside the bounded node set
+        assert len(props["column_names"]) == 5  # a name costs far less than a node
+
+    async def test_the_default_cap_bounds_a_very_wide_table(self) -> None:
+        width = MAX_COLUMN_NAMES + 5
+        result = await extract({"tables": [wide_table(width)]})
+        assert len(column_ids(result)) == DEFAULT_MAX_COLUMNS_PER_TABLE
+        assert result.skipped_rows == {
+            "columns_over_cap": width - DEFAULT_MAX_COLUMNS_PER_TABLE,
+            "column_names_over_limit": 5,
+        }
+        props = by_id(result)[tid("main.sales.wide")].properties
+        assert len(props["column_names"]) == MAX_COLUMN_NAMES
+        assert props["column_count"] == width
+
+    async def test_column_names_survive_with_columns_off(self) -> None:
+        result = await extract({"tables": [wide_table(4)]}, include_columns=False)
+        assert column_ids(result) == []
+        assert result.skipped_rows == {}
+        props = by_id(result)[tid("main.sales.wide")].properties
+        assert props["column_names"] == ["c00000", "c00001", "c00002", "c00003"]
+
+    async def test_a_column_that_lineage_names_is_minted_past_the_cap(self) -> None:
+        rows = [
+            {
+                "source_table_full_name": "main.sales.wide",
+                "target_table_full_name": "main.sales.daily_revenue",
+                "source_column_name": "c00004",
+                "target_column_name": "revenue",
+            }
+        ]
+        result = await extract(
+            [{"tables": [wide_table(5)]}, rows], max_columns_per_table=2
+        )
+        entities = by_id(result)
+        column = f"uc_column:{NS}:main.sales.wide/c00004"
+        assert column in entities  # its lineage edge needs both ends
+        assert entities[column].properties["stub"] is True
+        assert result.skipped_rows == {"columns_over_cap": 3}
+
+    @pytest.mark.parametrize("bad", [0, -1])
+    def test_a_cap_below_one_is_refused(self, bad: int) -> None:
+        with pytest.raises(ValueError, match="at least 1"):
+            UnityCatalogExtractor(max_columns_per_table=bad)
+
+    async def test_the_cap_does_not_change_ids_or_order(self) -> None:
+        # A cap only chooses a prefix of the same sorted drafts.
+        full = await extract({"tables": [wide_table(6)]})
+        capped = await extract({"tables": [wide_table(6)]}, max_columns_per_table=4)
+        assert set(column_ids(capped)) <= set(column_ids(full))
+        assert len(column_ids(capped)) == 4
+
+
+class TestSkippedRows:
+    async def test_a_clean_export_reports_none(self) -> None:
+        assert (await extract(EVERYTHING)).skipped_rows == {}
+
+    async def test_skipped_rows_are_counted_by_reason(self) -> None:
+        rows = [
+            # a path on one side is not a table-to-table fact
+            {
+                "source_table_full_name": "main.sales.orders",
+                "target_table_full_name": None,
+            },
+            {
+                "source_table_full_name": None,
+                "target_table_full_name": "main.sales.orders",
+            },
+            # a column row without both column names
+            {
+                "source_table_full_name": "main.sales.orders",
+                "target_table_full_name": "main.sales.daily_revenue",
+                "source_column_name": "order_id",
+                "target_column_name": "",
+            },
+            # a table feeding itself
+            {
+                "source_table_full_name": "main.sales.orders",
+                "target_table_full_name": "main.sales.orders",
+            },
+        ]
+        api = {
+            "table_name": "main.sales.orders",
+            "upstreams": [{"notTableInfo": 1}],
+            "downstreams": [],
+        }
+        result = await extract([TABLES, rows, api])
+        assert result.skipped_rows == {
+            "column_lineage_without_two_columns": 1,
+            "lineage_item_without_tableInfo": 1,
+            "lineage_without_two_tables": 2,
+            "self_lineage": 1,
+        }
+
+    async def test_column_lineage_with_columns_off_is_counted(self) -> None:
+        result = await extract(EVERYTHING, include_columns=False)
+        assert result.skipped_rows == {"column_lineage_with_columns_off": 1}
 
 
 # ---------------------------------------------------------------------------

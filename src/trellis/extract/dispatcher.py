@@ -254,19 +254,24 @@ class ExtractionDispatcher:
     ) -> None:
         if self._event_log is None:
             return
+        payload: dict[str, Any] = {
+            "extractor_used": result.extractor_used,
+            "tier": result.tier,
+            "source_hint": source_hint,
+            "entities": len(result.entities),
+            "edges": len(result.edges),
+            "llm_calls": result.llm_calls,
+            "tokens_used": result.tokens_used,
+            "overall_confidence": result.overall_confidence,
+        }
+        if result.skipped_rows:
+            # Only when an extractor reports skips, so every other payload
+            # stays byte-identical.
+            payload["skipped_rows"] = dict(result.skipped_rows)
         self._event_log.emit(
             EventType.EXTRACTION_DISPATCHED,
             source="extraction_dispatcher",
-            payload={
-                "extractor_used": result.extractor_used,
-                "tier": result.tier,
-                "source_hint": source_hint,
-                "entities": len(result.entities),
-                "edges": len(result.edges),
-                "llm_calls": result.llm_calls,
-                "tokens_used": result.tokens_used,
-                "overall_confidence": result.overall_confidence,
-            },
+            payload=payload,
         )
 
     def _emit_fallback(

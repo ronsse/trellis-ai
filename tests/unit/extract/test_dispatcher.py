@@ -39,6 +39,7 @@ def _make_extractor(
     entities: int = 0,
     edges: int = 0,
     llm_calls: int = 0,
+    skipped_rows: dict[str, int] | None = None,
 ) -> Any:
     class _E:
         def __init__(self) -> None:
@@ -64,6 +65,7 @@ def _make_extractor(
                 extractor_used=self.name,
                 tier=self.tier.value,
                 llm_calls=llm_calls,
+                skipped_rows=skipped_rows or {},
                 provenance=ExtractionProvenance(
                     extractor_name=self.name,
                     source_hint=source_hint,
@@ -190,6 +192,34 @@ class TestTelemetry:
         assert evt.payload["tier"] == "deterministic"
         assert evt.payload["source_hint"] == "s"
         assert evt.payload["llm_calls"] == 0
+
+    async def test_skipped_rows_ride_the_dispatched_event_only_when_reported(
+        self,
+        event_log: SQLiteEventLog,
+    ) -> None:
+        reg = ExtractorRegistry()
+        reg.register(
+            _make_extractor("quiet", ExtractorTier.DETERMINISTIC, ["q"], entities=1)
+        )
+        reg.register(
+            _make_extractor(
+                "noisy",
+                ExtractorTier.DETERMINISTIC,
+                ["n"],
+                entities=1,
+                skipped_rows={"bad_row": 2},
+            )
+        )
+        d = ExtractionDispatcher(reg, event_log=event_log)
+        await d.dispatch({}, source_hint="q")
+        await d.dispatch({}, source_hint="n")
+
+        by_name = {
+            e.payload["extractor_used"]: e.payload
+            for e in event_log.get_events(event_type=EventType.EXTRACTION_DISPATCHED)
+        }
+        assert by_name["noisy"]["skipped_rows"] == {"bad_row": 2}
+        assert "skipped_rows" not in by_name["quiet"]
 
     async def test_no_emit_without_event_log(self) -> None:
         reg = ExtractorRegistry()

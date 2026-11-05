@@ -671,6 +671,35 @@ class TestEntityCreateIfAbsent:
         assert len(graph.get_node_history("e1")) == 2
         assert self._created_events(registry) == 2
 
+    @pytest.mark.parametrize("flag", ["false", "true", 0, 1])
+    def test_only_the_boolean_true_skips(
+        self, registry: StoreRegistry, flag: object
+    ) -> None:
+        """A truthy non-``True`` value (MCP passes args) is an ordinary upsert."""
+        handler = EntityCreateHandler(registry)
+        graph = registry.knowledge.graph_store
+        handler.handle(self._command(entity_id="e1", properties={"owner": "team-a"}))
+        node_id, message = handler.handle(
+            self._command(
+                entity_id="e1", properties={"owner": "team-b"}, if_absent=flag
+            )
+        )
+        assert node_id == "e1"
+        assert "left alone" not in message
+        assert graph.get_node("e1")["properties"]["owner"] == "team-b"  # type: ignore[index]
+        assert len(graph.get_node_history("e1")) == 2
+        assert self._created_events(registry) == 2
+
+    def test_a_non_true_flag_without_an_entity_id_is_not_refused(
+        self, registry: StoreRegistry
+    ) -> None:
+        node_id, message = EntityCreateHandler(registry).handle(
+            self._command(if_absent="true")
+        )
+        assert node_id is not None
+        assert "left alone" not in message
+        assert registry.knowledge.graph_store.count_nodes() == 1
+
     @pytest.mark.parametrize("lifecycle_state", ["current", "deprecated"])
     def test_it_writes_nothing_over_an_existing_precedent(
         self, registry: StoreRegistry, lifecycle_state: str
