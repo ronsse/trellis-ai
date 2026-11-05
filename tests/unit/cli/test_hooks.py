@@ -20,11 +20,18 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from tests.integration._live_server import repo_src_pythonpath
+from tests.unreadable_paths import (
+    UNREADABLE_PATH_IDS,
+    UNREADABLE_PATH_SHAPES,
+    UnreadablePathShape,
+    unreadable,
+)
 from trellis_cli import hooks
 from trellis_cli.hooks import (
     HookState,
@@ -198,18 +205,61 @@ class TestScan:
         assert facts.ungraded == [PACK_A]
 
     def test_every_pack_returning_tool_counts_as_retrieval(self, tmp_path: Path):
-        for tool in (
-            "get_context",
-            "search",
-            "get_objective_context",
-            "get_task_context",
-            "get_sectioned_context",
-        ):
+        # The roster is the hook's own set, so a tool added to it is covered; the
+        # two literals below pin that the set holds the tools #1199 added.
+        assert {"get_lessons", "get_items"} <= hooks.PACK_TOOLS
+        for tool in sorted(hooks.PACK_TOOLS):
             log = Transcript()
             log.served_pack(name=f"mcp__trellis__{tool}")
             facts = scan_transcript(log.write(tmp_path / f"{tool}.jsonl"))
             assert facts is not None
+            assert facts.retrieval_called, tool
             assert facts.ungraded == [PACK_A], tool
+
+    def test_a_lessons_footer_names_the_pack_it_served(self, tmp_path: Path):
+        # get_lessons prints the id at the end, after the lessons, not in a header.
+        log = Transcript()
+        use_id = log.use("mcp__trellis__get_lessons", {"limit": 3})
+        log.result(
+            use_id,
+            "# Lessons\n\n- do the thing\n\n"
+            f"**pack_id:** `{PACK_A}`\n\nServed ids (cite in record_feedback):\n"
+            "- `prec-1` do the thing",
+        )
+        facts = scan_transcript(log.write(tmp_path / "t.jsonl"))
+        assert facts is not None
+        assert facts.ungraded == [PACK_A]
+
+    def test_a_lessons_reply_without_the_footer_is_a_retrieval_with_nothing_to_grade(
+        self, tmp_path: Path
+    ):
+        # The footer is behind a knob that is off by default.
+        log = Transcript()
+        use_id = log.use("mcp__trellis__get_lessons")
+        log.result(use_id, "# Lessons\n\n- do the thing")
+        facts = scan_transcript(log.write(tmp_path / "t.jsonl"))
+        assert facts is not None
+        assert facts.retrieval_called
+        assert facts.ungraded == []
+
+    def test_a_footer_past_the_header_window_is_still_found(self):
+        long_reply = (
+            "# Lessons\n\n"
+            + "- a long lesson body\n" * 2000
+            + f"\n\n**pack_id:** `{PACK_A}`\n\nServed ids:\n- `prec-1`"
+        )
+        assert len(long_reply) > hooks._HEADER_SEARCH_CHARS
+        assert hooks._header_pack_id(long_reply) == PACK_A
+
+    def test_a_label_quoted_mid_line_past_the_window_is_not_a_footer(self):
+        # Only a line that starts with the label counts when reading from the end.
+        quoted = (
+            "# Lessons\n\n"
+            + "- a long lesson body\n" * 2000
+            + f"- a lesson quoting **pack_id:** `{PACK_A}` inline\n"
+        )
+        assert len(quoted) > hooks._HEADER_SEARCH_CHARS
+        assert hooks._header_pack_id(quoted) is None
 
     def test_a_tool_that_is_not_a_trellis_server_does_not_count(self, tmp_path: Path):
         log = Transcript()
@@ -296,6 +346,36 @@ class TestScan:
         assert scan_transcript(None) is None
         assert scan_transcript("") is None
 
+    def test_a_named_path_with_no_file_is_empty_when_asked(self, tmp_path: Path):
+        facts = scan_transcript(
+            tmp_path / "no" / "such" / "t.jsonl", missing_is_empty=True
+        )
+        assert facts == hooks.TranscriptFacts()
+        assert not facts.retrieval_called
+        # No path at all is still unknown: nothing was named.
+        assert scan_transcript(None, missing_is_empty=True) is None
+        assert scan_transcript("", missing_is_empty=True) is None
+
+    @pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+    def test_a_path_that_cannot_be_read_stays_unknown_when_missing_is_empty(
+        self, tmp_path: Path, shape: UnreadablePathShape
+    ):
+        # ELOOP, ENOTDIR and EACCES are not "no file yet".
+        with unreadable(shape, tmp_path / "in" / "t.jsonl") as target:
+            assert scan_transcript(target, missing_is_empty=True) is None
+
+    def test_a_directory_stays_unknown_when_missing_is_empty(self, tmp_path: Path):
+        assert scan_transcript(tmp_path, missing_is_empty=True) is None
+
+    def test_a_file_that_is_there_is_read_normally_when_missing_is_empty(
+        self, tmp_path: Path
+    ):
+        log = Transcript()
+        log.served_pack()
+        facts = scan_transcript(log.write(tmp_path / "t.jsonl"), missing_is_empty=True)
+        assert facts is not None
+        assert facts.retrieval_called
+
     def test_an_oversized_transcript_is_unknown(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -310,6 +390,143 @@ class TestScan:
         log.work(5)
         path = log.write(tmp_path / "t.jsonl")
         assert scan_transcript(path, deadline_seconds=-1.0) is None
+
+    def test_a_line_over_the_cap_is_skipped_unparsed_and_counted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A retrieval hidden in a line past the real cap: it must not be parsed.
+        huge = Transcript()
+        huge.use(CONTEXT, {"intent": "x" * (hooks.MAX_LINE_BYTES + 10)})
+        assert len(huge.lines[0].encode()) > hooks.MAX_LINE_BYTES
+        log = Transcript()
+        log.work(2)
+        log.lines += huge.lines
+        log.work(1)
+        log.served_pack(PACK_B, name="mcp__trellis__search")
+        path = log.write(tmp_path / "t.jsonl")
+
+        parsed: list[int] = []
+        real_loads = json.loads
+
+        def spy(text: Any, *args: Any, **kwargs: Any) -> Any:
+            parsed.append(len(text))
+            return real_loads(text, *args, **kwargs)
+
+        monkeypatch.setattr(hooks.json, "loads", spy)
+        facts = scan_transcript(path)
+        assert facts is not None
+        assert facts.skipped_lines == 1
+        assert max(parsed) <= hooks.MAX_LINE_BYTES
+        # The lines either side of the long one were still read.
+        assert facts.tool_uses == 4
+        assert facts.ungraded == [PACK_B]
+
+    def test_a_skipped_line_hides_what_it_held(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(hooks, "MAX_LINE_BYTES", 2048)
+        log = Transcript()
+        log.use(CONTEXT, {"intent": "x" * 4096})
+        facts = scan_transcript(log.write(tmp_path / "t.jsonl"))
+        assert facts is not None
+        assert facts.skipped_lines == 1
+        assert facts.tool_uses == 0
+        assert not facts.retrieval_called
+
+    def test_a_line_of_exactly_the_cap_is_read_and_one_byte_more_is_not(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(hooks, "MAX_LINE_BYTES", 2048)
+
+        def line_of(size: int) -> str:
+            bare = Transcript()
+            bare.use(CONTEXT, {"intent": ""})
+            padded = Transcript()
+            padded.use(CONTEXT, {"intent": "x" * (size - len(bare.lines[0].encode()))})
+            assert len(padded.lines[0].encode()) == size
+            return padded.lines[0]
+
+        exact = tmp_path / "exact.jsonl"
+        exact.write_text(line_of(2048) + "\n", encoding="utf-8")
+        facts = scan_transcript(exact)
+        assert facts is not None
+        assert (facts.skipped_lines, facts.retrieval_called) == (0, True)
+
+        over = tmp_path / "over.jsonl"
+        over.write_text(line_of(2049) + "\n", encoding="utf-8")
+        facts = scan_transcript(over)
+        assert facts is not None
+        assert (facts.skipped_lines, facts.retrieval_called) == (1, False)
+
+        # The same, with no newline at the end of the file.
+        over_unterminated = tmp_path / "over-unterminated.jsonl"
+        over_unterminated.write_text(line_of(2049), encoding="utf-8")
+        facts = scan_transcript(over_unterminated)
+        assert facts is not None
+        assert (facts.skipped_lines, facts.retrieval_called) == (1, False)
+
+        exact_unterminated = tmp_path / "exact-unterminated.jsonl"
+        exact_unterminated.write_text(line_of(2048), encoding="utf-8")
+        facts = scan_transcript(exact_unterminated)
+        assert facts is not None
+        assert (facts.skipped_lines, facts.retrieval_called) == (0, True)
+
+    def test_several_long_lines_are_each_counted_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(hooks, "MAX_LINE_BYTES", 1024)
+        log = Transcript()
+        for _ in range(3):
+            log.use("Bash", {"command": "y" * 5000})
+            log.work(1)
+        facts = scan_transcript(log.write(tmp_path / "t.jsonl"))
+        assert facts is not None
+        assert facts.skipped_lines == 3
+        assert facts.tool_uses == 3
+
+    def test_the_clock_is_read_within_a_run_of_long_lines(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Under 256 lines the line count alone would read the clock once; the
+        # byte count keeps a few large lines from outrunning the deadline.
+        monkeypatch.setattr(hooks, "_CLOCK_BYTES", 4096)
+        log = Transcript()
+        for _ in range(12):
+            log.use("Bash", {"command": "z" * 1500})
+        path = log.write(tmp_path / "t.jsonl")
+
+        def run(step: float) -> tuple[Any, int]:
+            now = [0.0]
+            calls = [0]
+
+            def tick() -> float:
+                calls[0] += 1
+                now[0] += step
+                return now[0] - step
+
+            monkeypatch.setattr(hooks, "time", SimpleNamespace(monotonic=tick))
+            return scan_transcript(path, deadline_seconds=0.8), calls[0]
+
+        # A clock that moves 0.5 s per read passes 0.8 s on the second look.
+        late, late_reads = run(0.5)
+        assert late is None
+        assert late_reads == 3
+        # A clock that stands still lets the scan finish, reading it every 4 KiB.
+        done, reads = run(0.0)
+        assert done is not None
+        assert done.tool_uses == 12
+        assert reads > 3
+
+    def test_skipping_a_long_line_stops_at_the_deadline(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(hooks, "MAX_LINE_BYTES", 1000)
+        long_line = io.BytesIO(b"x" * 5000 + b"\nnext\n")
+        assert hooks._skip_rest_of_line(long_line, time.monotonic(), 60.0) is True
+        assert long_line.read() == b"next\n"
+        long_line = io.BytesIO(b"x" * 5000 + b"\nnext\n")
+        assert hooks._skip_rest_of_line(long_line, time.monotonic(), -1.0) is False
+        assert long_line.tell() <= 1000
 
     def test_a_large_transcript_scans_quickly(self, tmp_path: Path):
         log = Transcript()
@@ -420,15 +637,67 @@ class TestPrework:
         log.write(session)
         assert decide_prework(_prompt(session), state) is not None
 
-    def test_silent_and_unmarked_when_the_transcript_is_missing(
+    def test_the_first_prompt_is_nudged_before_the_transcript_file_exists(
         self, state: HookState, session: Path
     ):
+        # Claude Code may not have written a fresh session's file yet: a named
+        # path with no file means nothing was retrieved.
+        assert not session.exists()
+        assert not session.parent.exists()
+        reply = decide_prework(_prompt(session), state)
+        assert reply == {
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": HOOK_PREWORK_NUDGE,
+            }
+        }
+        assert state.seen("prework", "sess-1")
+        # Once per session: neither another prompt before the file exists nor
+        # one after it does it again.
         assert decide_prework(_prompt(session), state) is None
+        Transcript().write(session)
+        assert decide_prework(_prompt(session), state) is None
+
+    def test_the_first_prompt_is_nudged_when_the_folder_exists_but_not_the_file(
+        self, state: HookState, session: Path
+    ):
+        session.parent.mkdir(parents=True)
+        assert decide_prework(_prompt(session), state) is not None
+
+    def test_a_retrieval_written_later_is_not_nudged_about_after_the_first(
+        self, state: HookState, session: Path
+    ):
+        assert decide_prework(_prompt(session), state) is not None
+        log = Transcript()
+        log.served_pack()
+        log.write(session)
+        assert decide_prework(_prompt(session), state) is None
+
+    def test_silent_and_unmarked_when_no_transcript_path_is_named(
+        self, state: HookState
+    ):
         assert decide_prework(_prompt(None), state) is None
+        assert decide_prework(_prompt(""), state) is None
+        assert decide_prework(_prompt(None, transcript_path=7), state) is None
         assert not state.seen("prework", "sess-1")
-        # The transcript arrives later; the nudge is still owed.
+
+    @pytest.mark.parametrize("shape", UNREADABLE_PATH_SHAPES, ids=UNREADABLE_PATH_IDS)
+    def test_silent_and_unmarked_when_the_transcript_cannot_be_read(
+        self, state: HookState, session: Path, shape: UnreadablePathShape
+    ):
+        # Present but unreadable is unknown, not "nothing retrieved yet".
+        with unreadable(shape, session) as target:
+            assert decide_prework(_prompt(target), state) is None
+        assert not state.seen("prework", "sess-1")
+        # Readable again, the nudge is still owed.
         Transcript().write(session)
         assert decide_prework(_prompt(session), state) is not None
+
+    def test_silent_and_unmarked_when_the_transcript_is_a_directory(
+        self, state: HookState, tmp_path: Path
+    ):
+        assert decide_prework(_prompt(tmp_path), state) is None
+        assert not state.seen("prework", "sess-1")
 
     def test_silent_when_it_cannot_remember_that_it_spoke(
         self, session: Path, tmp_path: Path
@@ -576,6 +845,13 @@ class TestEditGuard:
         Transcript().write(session)
         assert decide_edit_guard(_subagent_edit(session), state) is None
         assert not state.seen("edit-guard", "sess-1", "agent-1")
+
+    def test_a_missing_main_transcript_is_still_unknown_to_the_edit_guard(
+        self, state: HookState, session: Path
+    ):
+        # Only the first prompt's nudge reads a missing file as "not retrieved".
+        assert decide_edit_guard(_edit(session), state, scope="all") is None
+        assert not state.seen("edit-guard", "sess-1", "")
 
     def test_a_main_session_is_not_denied_by_default(
         self, state: HookState, session: Path
@@ -836,6 +1112,34 @@ class TestGrade:
         assert decide_grade(payload, state) is None
         # The ask was not spent: a later, ordinary stop still gets it.
         assert decide_grade(_stop(session), state) is not None
+
+    @pytest.mark.parametrize("value", ["true", "True", "TRUE", " true "])
+    def test_the_string_true_also_reads_as_active(
+        self, state: HookState, session: Path, value: str
+    ):
+        # Claude Code sends a bool. A string fails safe: a second pass taken for
+        # a first would block the model twice in a row.
+        _served_and_worked(session)
+        assert decide_grade(_stop(session, stop_hook_active=value), state) is None
+        assert decide_grade(_stop(session), state) is not None
+
+    @pytest.mark.parametrize(
+        "value", [False, "false", "False", "", None, 0, 1, "1", "yes", [], {}]
+    )
+    def test_nothing_else_reads_as_active(
+        self, state: HookState, session: Path, value: Any
+    ):
+        _served_and_worked(session)
+        payload = _stop(session, stop_hook_active=value)
+        assert decide_grade(payload, state) is not None
+
+    def test_a_stop_without_the_key_is_not_active(
+        self, state: HookState, session: Path
+    ):
+        _served_and_worked(session)
+        payload = _stop(session)
+        assert "stop_hook_active" not in payload
+        assert decide_grade(payload, state) is not None
 
     def test_a_stop_asks_for_a_trace_in_the_same_message_when_none_was_saved(
         self, state: HookState, session: Path
@@ -1172,6 +1476,19 @@ class TestAsAProcess:
             HOOK_PREWORK_NUDGE
         )
         assert time.monotonic() - started < 5.0
+
+    def test_the_first_prompt_of_a_fresh_session_is_nudged(
+        self, tmp_path: Path, session: Path
+    ):
+        # No transcript file yet, as at the first prompt of a new session.
+        assert not session.exists()
+        done = self._run_before_a_deadline(
+            ["prework"], _prompt(session), tmp_path / "state"
+        )
+        assert (done.returncode, done.stderr) == (0, "")
+        assert json.loads(done.stdout)["hookSpecificOutput"]["additionalContext"] == (
+            HOOK_PREWORK_NUDGE
+        )
 
     def test_garbage_on_stdin_exits_zero_and_prints_nothing(self, tmp_path: Path):
         done = self._run_hook_process(

@@ -19,7 +19,7 @@ from trellis.core.knobs import (
     resolve_get_context_max_tokens,
 )
 from trellis.errors import PublicReadBusyError
-from trellis.mcp.app import mcp
+from trellis.mcp.app import PACK_TOOL_TAG, mcp
 from trellis.mcp.auth import current_clearance, current_principal_id, trellis_scope
 from trellis.mcp.boundary import (
     _check_retrieval_phase,
@@ -531,7 +531,7 @@ def _sectioned_context(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(auth=trellis_scope(SCOPE_READ))
+@mcp.tool(auth=trellis_scope(SCOPE_READ), tags={PACK_TOOL_TAG})
 def get_context(
     intent: str,
     domain: str | None = None,

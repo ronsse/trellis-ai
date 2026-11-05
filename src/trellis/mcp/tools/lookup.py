@@ -12,7 +12,7 @@ from mcp.shared.exceptions import McpError
 
 from trellis.auth import SCOPE_READ
 from trellis.core.access_log import note_served_items
-from trellis.mcp.app import mcp
+from trellis.mcp.app import PACK_TOOL_TAG, mcp
 from trellis.mcp.auth import current_clearance, trellis_scope
 from trellis.mcp.boundary import (
     _exception_detail,
@@ -53,7 +53,7 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(auth=trellis_scope(SCOPE_READ))
+@mcp.tool(auth=trellis_scope(SCOPE_READ), tags={PACK_TOOL_TAG})
 def get_lessons(
     domain: str | None = None,
     limit: int = 10,
@@ -230,7 +230,7 @@ def _render_fetched_item(
     return None
 
 
-@mcp.tool(auth=trellis_scope(SCOPE_READ))
+@mcp.tool(auth=trellis_scope(SCOPE_READ), tags={PACK_TOOL_TAG})
 def get_items(
     item_ids: list[str],
     pack_id: str = "",
