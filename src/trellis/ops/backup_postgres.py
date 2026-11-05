@@ -24,7 +24,10 @@ manifest or a log.
 
 A DSN parameter this module does not know how to hand to ``pg_dump`` is refused
 by *name* (never by value) rather than dropped: a dump taken with a silently
-ignored ``sslmode`` or ``options`` would be a dump of the wrong connection.
+ignored ``sslmode`` or ``options`` would be a dump of the wrong connection. Only
+a real libpq keyword is ever named. A parse failure that quotes a name libpq
+does not know (a typo, or a fragment of a password with an unquoted space in it)
+is reported without the name, because the two look the same.
 """
 
 from __future__ import annotations
@@ -85,7 +88,7 @@ _NO_PSYCOPG = (
 _NAMED_IN_ERROR = re.compile(
     r'invalid connection option "([^"]*)"|invalid URI query parameter: "([^"]*)"'
 )
-_PARAM_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_UNRECOGNISED_PARAMETER = "connection string names a parameter libpq does not recognise"
 
 # Statuses of one dump attempt.
 DUMPED = "dumped"
@@ -106,19 +109,37 @@ class DumpResult:
     reason: str | None = None
 
 
+def _libpq_keywords() -> frozenset[str]:
+    """Every connection keyword the installed libpq knows, or none if it cannot say."""
+    try:
+        from psycopg import pq  # noqa: PLC0415
+
+        return frozenset(o.keyword.decode() for o in pq.Conninfo.get_defaults())
+    except Exception:  # advisory: no keywords means no name is ever shown
+        logger.debug("pg_keywords_unavailable")
+        return frozenset()
+
+
 def _parse_failure(exc: Exception) -> str:
     """What to say about a DSN libpq refused, without echoing any of its text.
 
     libpq's own message quotes the offending token, and for a bad
-    percent-escape that token is a slice of the password. The only part kept is a
-    parameter *name* from the two messages that carry one, and only when it is
-    shaped like a name.
+    percent-escape that token is a slice of the password. The two messages that
+    quote a parameter *name* are no safer: libpq splits a key=value list at every
+    space, so a password with an unquoted space (``password=abc def=xyz``) reports
+    ``def`` as an unknown option. A name is therefore shown only when it is a real
+    libpq keyword; any other is left out and the reason says only that one was not
+    recognised. libpq rejects a name because it is not a keyword, so in practice
+    these two messages always take the second branch; the check is what keeps that
+    true if a libpq ever quotes a keyword.
     """
     match = _NAMED_IN_ERROR.search(str(exc))
-    name = match and (match.group(1) or match.group(2))
-    if name and _PARAM_NAME.fullmatch(name):
+    if match is None:
+        return "connection string is not a postgres URI or key=value list"
+    name = match.group(1) or match.group(2)
+    if name in _libpq_keywords():
         return f"connection parameter {name!r} cannot be passed to pg_dump"
-    return "connection string is not a postgres URI or key=value list"
+    return _UNRECOGNISED_PARAMETER
 
 
 def _read_params(dsn: str) -> dict[str, str]:
@@ -184,9 +205,30 @@ def pg_env_from_dsn(dsn: str) -> dict[str, str]:
     return _env_from_params(_read_params(dsn))
 
 
+#: A secret shorter than this is redacted only as a whole token.
+_SHORT_SECRET_CHARS = 4
+
+
 def _redact(text: str, secrets: list[str]) -> str:
+    """Replace each secret in ``text`` with ``[redacted]``.
+
+    A secret of :data:`_SHORT_SECRET_CHARS` or more is replaced wherever it
+    occurs: it is long enough that a hit inside another word is a coincidence
+    worth losing, and a fragment of a longer echo (``password=<secret>``) goes with
+    it. A shorter one is replaced as a whole token only, meaning not touching a
+    word character on either side. A one-character password replaced everywhere
+    rewrites every occurrence of that letter, which leaves the error unreadable
+    (and mangles the ``[redacted]`` marker itself), so a short value is matched
+    where an echo of it would stand alone: ``password=a``, ``"a"``, ``a``. Skipping
+    short values outright was the other option; it would let a short password
+    through whenever ``pg_dump`` echoes it.
+    """
     for secret in secrets:
-        text = text.replace(secret, "[redacted]")
+        if len(secret) < _SHORT_SECRET_CHARS:
+            token = rf"(?<!\w){re.escape(secret)}(?!\w)"
+            text = re.sub(token, "[redacted]", text)
+        else:
+            text = text.replace(secret, "[redacted]")
     return text
 
 
