@@ -45,6 +45,7 @@ from trellis.core.document_write import (
 )
 from trellis.core.text_safety import contains_nul_or_lone_surrogate
 from trellis.ingest_corpus.models import is_chunk_doc_id
+from trellis.llm.egress import EgressVerdict
 from trellis.mutate.commands import CommandStatus
 from trellis.mutate.executor import MutationExecutor
 from trellis.mutate.policy_source import build_policy_gate
@@ -133,6 +134,16 @@ class TraceEmbedReport:
     #: Not part of ``status`` or the CLI exit code: a redaction honoured is
     #: the pass doing its job, not a gap in it.
     skipped_redacted: int = 0
+    #: Summaries the egress gate kept off the embedder (``egress_withheld``): a
+    #: label above ``internal`` on a deployment whose ``embeddings.local`` is not
+    #: declared true. The document is stored and has no vector row. A permanent
+    #: fact about what is stored, so the pass advances past it and it does not
+    #: make ``status`` partial, as for ``skipped_redacted``.
+    skipped_egress_withheld: int = 0
+    #: Summaries kept off the embedder because a store could not be asked for
+    #: the label (``egress_unreadable``). A fault a later pass may clear: the
+    #: cursor holds behind it and ``status`` is ``partial``.
+    skipped_egress_unreadable: int = 0
     failed: int = 0
     stopped_early: bool = False
     #: More traces remained after ``max_scan`` cut this pass. Reported, not
@@ -154,7 +165,10 @@ class TraceEmbedReport:
             # worker exists to remove.
             "status": (
                 "partial"
-                if self.failed or self.skipped_invalid or self.skipped_empty
+                if self.failed
+                or self.skipped_invalid
+                or self.skipped_empty
+                or self.skipped_egress_unreadable
                 else "ok"
             ),
             "scanned": self.scanned,
@@ -163,6 +177,8 @@ class TraceEmbedReport:
             "skipped_empty": self.skipped_empty,
             "skipped_invalid": self.skipped_invalid,
             "skipped_redacted": self.skipped_redacted,
+            "skipped_egress_withheld": self.skipped_egress_withheld,
+            "skipped_egress_unreadable": self.skipped_egress_unreadable,
             "failed": self.failed,
             "stopped_early": self.stopped_early,
             "more_remaining": self.more_remaining,
@@ -393,11 +409,10 @@ def run_trace_embed_pass(
         candidates = candidates[:limit]
     report.more_remaining = truncated
 
+    handler = TraceSummaryIngestHandler(registry, embedding_fn)
     executor = MutationExecutor(
         event_log=registry.operational.event_log,
-        handlers={
-            "evidence.ingest": TraceSummaryIngestHandler(registry, embedding_fn),
-        },
+        handlers={"evidence.ingest": handler},
         policy_gate=policy_gate,
     )
 
@@ -412,6 +427,7 @@ def run_trace_embed_pass(
         outcome = _process_one(
             trace,
             executor=executor,
+            handler=handler,
             vector_store=vector_store,
             document_store=registry.knowledge.document_store,
             dry_run=dry_run,
@@ -454,6 +470,7 @@ def _process_one(
     trace: Trace,
     *,
     executor: MutationExecutor,
+    handler: TraceSummaryIngestHandler,
     vector_store: VectorStore,
     document_store: DocumentStore,
     dry_run: bool,
@@ -534,8 +551,9 @@ def _process_one(
             created_at=trace.created_at.isoformat(),
         )
     )
+    advance = True
     if result.status is CommandStatus.SUCCESS:
-        report.embedded += 1
+        advance = _count_success(handler, report)
     elif (
         result.status is CommandStatus.REJECTED
         and result.metadata.get("rejection_reason") == TOMBSTONE_OVERWRITE_CODE
@@ -557,6 +575,27 @@ def _process_one(
             message=result.message,
         )
         return False
+    return advance
+
+
+def _count_success(
+    handler: TraceSummaryIngestHandler, report: TraceEmbedReport
+) -> bool:
+    """Count a ``SUCCESS`` as embedded or as declined by the egress gate.
+
+    ``False`` holds the cursor: a summary kept off the embedder because a store
+    could not be asked is a fault a later pass may clear, as a failure is. A
+    summary withheld for a label is a fact about what is stored, the same on
+    every retry, so the pass advances past it as it does past a redacted one.
+    """
+    withheld = handler.last_embed_withheld
+    if withheld is None:
+        report.embedded += 1
+    elif withheld is EgressVerdict.UNREADABLE:
+        report.skipped_egress_unreadable += 1
+        return False
+    else:
+        report.skipped_egress_withheld += 1
     return True
 
 
@@ -572,6 +611,8 @@ def summarize(
         total.skipped_empty += r.skipped_empty
         total.skipped_invalid += r.skipped_invalid
         total.skipped_redacted += r.skipped_redacted
+        total.skipped_egress_withheld += r.skipped_egress_withheld
+        total.skipped_egress_unreadable += r.skipped_egress_unreadable
         total.failed += r.failed
         total.failures.extend(r.failures)
     return total.to_dict()

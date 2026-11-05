@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 from tests.unit.retrieve.test_sensitivity import label
 from trellis.ingest_corpus.models import chunk_doc_id
+from trellis.llm.egress import EgressGate
 from trellis.retrieve.embed_ingest_hook import build_vector_row
 
 if TYPE_CHECKING:
@@ -171,7 +172,9 @@ def embed(text: str) -> list[float]:
 
 
 def _embed_row(registry: StoreRegistry, doc_id: str, text: str, meta: dict) -> None:
-    row = build_vector_row(doc_id, text, meta, embed)
+    row = build_vector_row(
+        doc_id, text, meta, embed, egress=EgressGate(None, local=True)
+    )
     registry.knowledge.vector_store.upsert(
         row["item_id"], row["vector"], row["metadata"]
     )

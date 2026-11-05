@@ -77,6 +77,16 @@ def _render_report(report: CorpusSyncReport) -> None:
             f"labelled={counts['extraction_skipped_labelled']} "
             f"(labelled above internal; the entities would carry no label)"
         )
+    if (
+        counts["embed_skipped_egress_withheld"]
+        or counts["embed_skipped_egress_unreadable"]
+    ):
+        console.print(
+            f"  [yellow]embedding skipped[/yellow] "
+            f"egress_withheld={counts['embed_skipped_egress_withheld']} "
+            f"egress_unreadable={counts['embed_skipped_egress_unreadable']} "
+            f"(stored without a vector; embeddings.local is not declared true)"
+        )
     for warning in report.warnings:
         detail = " ".join(
             f"{k}={v}" for k, v in warning.items() if k != "kind" and v is not None

@@ -26,6 +26,7 @@ import pytest
 
 from trellis.core.elision import format_char_count
 from trellis.errors import ConfigError
+from trellis.llm.egress import EgressGate
 from trellis.retrieve.embed_ingest_hook import (
     EMBED_INPUT_CHAR_CAP,
     EMBED_ON_INGEST_FLAG,
@@ -42,6 +43,9 @@ from trellis.retrieve.excerpts import EXCERPT_ELLIPSIS
 # every test file, not just this one.
 
 _EMBEDDING = [0.1, 0.2, 0.3]
+
+#: A gate that opens every document, for tests of row shape rather than of egress.
+_OPEN_GATE = EgressGate(None, local=True)
 
 
 def _registry(
@@ -84,6 +88,7 @@ class TestBuildVectorRow:
             "some content",
             {"domain": "backend"},
             lambda text: list(_EMBEDDING),
+            egress=_OPEN_GATE,
         )
         assert row["item_id"] == "doc-1"
         assert row["vector"] == _EMBEDDING
@@ -99,7 +104,13 @@ class TestBuildVectorRow:
             seen.append(text)
             return list(_EMBEDDING)
 
-        build_vector_row("doc-1", "x" * (EMBED_INPUT_CHAR_CAP + 500), None, embedder)
+        build_vector_row(
+            "doc-1",
+            "x" * (EMBED_INPUT_CHAR_CAP + 500),
+            None,
+            embedder,
+            egress=_OPEN_GATE,
+        )
         assert len(seen[0]) == EMBED_INPUT_CHAR_CAP
 
     def test_metadata_content_excerpt_capped(self) -> None:
@@ -108,6 +119,7 @@ class TestBuildVectorRow:
             "y" * (VECTOR_METADATA_EXCERPT_CHARS + 500),
             None,
             lambda text: list(_EMBEDDING),
+            egress=_OPEN_GATE,
         )
         assert len(row["metadata"]["content"]) <= VECTOR_METADATA_EXCERPT_CHARS
 
@@ -123,7 +135,9 @@ class TestBuildVectorRow:
             "The mutation executor validates every command before it "
             "reaches a store. " + "policy gate words " * 200
         )
-        row = build_vector_row("doc-1", content, None, lambda text: list(_EMBEDDING))
+        row = build_vector_row(
+            "doc-1", content, None, lambda text: list(_EMBEDDING), egress=_OPEN_GATE
+        )
         excerpt = row["metadata"]["content"]
 
         assert len(excerpt) <= VECTOR_METADATA_EXCERPT_CHARS
@@ -135,7 +149,11 @@ class TestBuildVectorRow:
     def test_short_content_is_stored_verbatim(self) -> None:
         """No cut, no marker — short memories are unchanged."""
         row = build_vector_row(
-            "doc-1", "a terse gotcha", None, lambda text: list(_EMBEDDING)
+            "doc-1",
+            "a terse gotcha",
+            None,
+            lambda text: list(_EMBEDDING),
+            egress=_OPEN_GATE,
         )
         assert row["metadata"]["content"] == "a terse gotcha"
 
@@ -145,6 +163,7 @@ class TestBuildVectorRow:
             "content",
             None,
             lambda text: list(_EMBEDDING),
+            egress=_OPEN_GATE,
             created_at="2026-01-01T00:00:00+00:00",
         )
         assert row["metadata"]["created_at"] == "2026-01-01T00:00:00+00:00"
@@ -155,6 +174,7 @@ class TestBuildVectorRow:
             "content",
             {"created_at": "2025-06-01T00:00:00+00:00"},
             lambda text: list(_EMBEDDING),
+            egress=_OPEN_GATE,
         )
         assert row["metadata"]["created_at"] == "2025-06-01T00:00:00+00:00"
 

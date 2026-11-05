@@ -2821,7 +2821,12 @@ def embed_traces_cmd(
     else:
         _render_embed_traces_text(payload)
 
-    if report.failed or report.skipped_empty or report.skipped_invalid:
+    if (
+        report.failed
+        or report.skipped_empty
+        or report.skipped_invalid
+        or report.skipped_egress_unreadable
+    ):
         # A pass that left traces unreachable did not do the job it was
         # scheduled to do, and a green exit would hide exactly the silent gap
         # this worker exists to close. A permanently invalid row advances the
@@ -2844,6 +2849,13 @@ def _render_embed_traces_text(payload: dict[str, Any]) -> None:
         console.print(
             f"  redacted: {payload['skipped_redacted']} trace(s) skipped "
             f"because their summary was redacted"
+        )
+    if payload["skipped_egress_withheld"] or payload["skipped_egress_unreadable"]:
+        console.print(
+            f"  egress: {payload['skipped_egress_withheld']} withheld by label "
+            f"(egress_withheld), {payload['skipped_egress_unreadable']} "
+            f"unreadable (egress_unreadable); stored without a vector because "
+            f"embeddings.local is not declared true"
         )
     console.print(
         f"  cursor: {payload['watermark_before'] or '(none)'} -> "

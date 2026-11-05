@@ -223,6 +223,31 @@ def validate_llm_routing(llm_config: Mapping[str, Any] | None) -> None:
         _validate_route(str(consumer), tier, tiers, known)
 
 
+def resolve_embedding_local(embedding_config: Any) -> bool:
+    """Whether the ``embeddings:`` block declares its embedder local.
+
+    The same declaration an LLM route makes, checked by the same helpers:
+    ``local`` must be a boolean or absent, and ``local: true`` cannot sit on a
+    hosted provider's default endpoint (``provider: openai`` with no
+    ``base_url``). Never inferred: a block that says nothing, a block that is
+    not a mapping, and a ``localhost`` ``base_url`` without ``local: true`` are
+    all cloud.
+
+    Raises :class:`LLMRoutingError` (a :class:`~trellis.errors.ConfigError`)
+    naming ``embeddings.local`` for a malformed declaration, so a bad value is
+    refused where the embedder resolves instead of reading as cloud in silence.
+    """
+    if not isinstance(embedding_config, Mapping):
+        return False
+    _validate_local("embeddings", embedding_config)
+    if embedding_config.get(LOCAL_KEY) is not True:
+        return False
+    _validate_local_endpoint(
+        "embeddings", embedding_config.get("provider"), embedding_config.get("base_url")
+    )
+    return True
+
+
 def _validate_tier(name: str, body: Any, parent_endpoint: Mapping[str, Any]) -> None:
     setting = f"llm.tiers.{name}"
     if not isinstance(body, Mapping):

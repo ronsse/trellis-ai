@@ -510,6 +510,7 @@ class TestRedactedSummaryIsNotOverwritten:
             return _process_one(
                 trace,
                 executor=MagicMock(),
+                handler=MagicMock(),
                 vector_store=registry.knowledge.vector_store,
                 document_store=registry.knowledge.document_store,
                 dry_run=dry_run,

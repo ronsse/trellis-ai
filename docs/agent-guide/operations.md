@@ -7004,7 +7004,7 @@ A runnable end-to-end demo lives at `examples/hooks_generic_workflow.py`.
 
 ## Keeping labelled content off a hosted model
 
-On the paths listed below, content labelled above `internal` (`DataClassification.sensitivity` of `confidential` or `restricted`) does not reach a chat or generate LLM route unless the route is declared local, provided the stored row still carries the label. The paths that are not listed, and a label that has been lost, are named under "What this does not cover" below. A route that says nothing is treated as cloud; a `localhost` `base_url` is not a declaration. Declare it in `config.yaml`:
+On the paths listed below, content labelled above `internal` (`DataClassification.sensitivity` of `confidential` or `restricted`) does not reach a chat or generate LLM route, or the embedder, unless that route or embedder is declared local, provided the stored row still carries the label. The paths that are not listed, and a label that has been lost, are named under "What this does not cover" below. A route that says nothing is treated as cloud; a `localhost` `base_url` is not a declaration. Declare it in `config.yaml`:
 
 ```yaml
 llm:
@@ -7039,8 +7039,40 @@ These paths ask the same predicate, `trellis.llm.egress`, and report what they s
 | Precedent mining (`trellis worker mine-precedents`) | `skipped_egress_withheld` in the JSON report (dry run and live run) and an `egress_withheld:` text line: failure traces citing a labelled evidence document are left out of what the model sees. A store that could not answer is `skipped_egress_unreadable` (an `egress_unreadable:` line), makes the run `status: partial`, and fails `--strict`. A run where every failure trace was kept back is outcome `all_withheld`; `below_min_traces_due_to_egress` is true when withheld traces put it under the minimum |
 | Session-capture distillation | `sessions_skipped_egress_withheld` in the capture report and text line: a session served a labelled document is not distilled and stays un-watermarked, so a sweep over a local route distils it. A store that could not answer is `sessions_skipped_egress_unreadable` instead (a pack event with no readable item list is withheld, not unreadable, because it never will be readable): a warning, a `partial` run, and a failed run under strict mode. `analyze health` reads both from the capture funnel |
 | Memory extraction (`save_memory`, `ingest-corpus`, `ingest-conversations`) | skipped whatever the route, because the entity names it mints land in an unlabelled graph: the `save_memory` note, and `extraction_skipped_labelled` in the sync reports |
+| Embedding of stored content (every ingest and write path, `worker embed-traces`, `admin reindex-vectors`) | an `embed.withheld` event for an inline write, a count in each batch report; see [Embedding](#embedding) |
 
 A skip never carries document text, a title or an id into a report beyond what the report already printed. Unlabelled and `internal` documents are sent as before, prompt included, with these exceptions. Three hold content back with nothing labelled: a chunk-shaped id with no parent row is withheld whatever its own label, a session whose pack event records no readable item list is withheld, and a document the store could not be asked about is held back as unreadable. The fourth is that a reconcile pair is judged only if both sides may be sent, so an unlabelled memory whose nearest stored row is labelled is not judged. A row whose stored bytes do not parse (a document's metadata, or a pack event's payload) is withheld, not unreadable, because it will not parse on a retry; a chunk whose parent row does not parse is withheld on the same ground.
+
+### Embedding
+
+A document labelled above `internal` is not sent to an embedder unless the `embeddings:` block declares it local. As for a route, nothing is inferred: a block that says nothing is cloud, and so is a `localhost` `base_url` or a `TRELLIS_EMBEDDING_FN` callable without `local: true`.
+
+```yaml
+embeddings:
+  provider: openai
+  base_url: http://localhost:11434/v1
+  model: local-embed-model
+  api_key_env: LOCAL_EMBED_KEY
+  local: true          # this endpoint keeps content on the host
+```
+
+`local` is checked as an `llm:` route's is: a boolean or absent, and `local: true` on `provider: openai` or `anthropic` with no `base_url` is refused. A malformed value is an `embeddings.local` `ConfigError` where the embedder resolves, not a silent cloud. A deployment that sets only `TRELLIS_EMBEDDING_FN` declares with `embeddings: {local: true}`. The declaration is config only: the `embeddings:` block has no environment overrides, and it is not a write-behaviour knob, so there is no environment-variable form and no `trellis admin write-config` entry. `local: true` is your statement about where the embedder sends content; Trellis cannot check it.
+
+**What a withheld document does.** It is stored as usual and gets no vector row. Keyword and graph retrieval still find it; only the semantic axis cannot. A chunk is judged by its parent's label, and a chunk-shaped id with no parent row is withheld. A document the store could not be asked about is `unreadable`, counted apart from `withheld`. Unlabelled and `internal` documents are embedded as before, and a deployment that declares `local: true` embeds exactly what it embedded before.
+
+**Where the skip is counted.** An inline write (`save_memory`, `ingest`, the evidence, precedent and redaction writers) has no report, so it emits an `embed.withheld` event keyed by document id (no content, payload `verdict` and `reason`), and `trellis analyze health` prints `Embeds kept off the embedder: N withheld by label, M unreadable` when either is non-zero; an unreadable skip also adds a warning to the health reasons. A batch job counts it in its own report:
+
+| Job | Withheld | Store could not answer |
+|---|---|---|
+| `ingest-corpus`, `ingest-conversations` | `embed_skipped_egress_withheld` and an `embedding skipped` text line | `embed_skipped_egress_unreadable` |
+| `worker embed-traces` | `skipped_egress_withheld`; the pass advances past it | `skipped_egress_unreadable`; the cursor holds, `status` is `partial` and the exit code is non-zero |
+| `admin reindex-vectors` | `skipped_egress_withheld` and a `Kept off the embedder` text line | `skipped_egress_unreadable` |
+
+`worker embed-traces --dry-run` does not ask the gate, so it still counts a labelled summary as one it would embed. `admin reindex-vectors --dry-run` does ask it.
+
+**Rolling this out.** A deployment that runs a local embedder without declaring it will stop embedding its labelled documents after upgrading, and those documents drop out of the semantic axis. Before pulling, add `local: true` to its `embeddings:` block. A deployment whose embedder is hosted, or that holds no labelled documents, sees no change in what a pack serves.
+
+**Not covered here.** The query embedding of a caller's intent at retrieval time is not stored content and is not gated. A document that already has a vector row and is later relabelled above `internal` keeps the row: nothing removes it, and `trellis admin reindex-vectors` only adds and refreshes rows, so it is not a remedy.
 
 ### What changes for a labelled document
 
@@ -7049,7 +7081,7 @@ A skip never carries document text, a title or an id into a report beyond what t
 
 ### What this does not cover
 
-- **Embedding.** Stored content, labelled content included, still goes to the configured embedder, and an operator with a hosted embedder must treat that as egress. The gate covers chat and generate routes only; gating the embedder would change which vectors exist, and so what a pack can serve.
+- **Embedding.** Covered for stored content, see [Embedding](#embedding). Not covered: the query embedding of a caller's intent, and a vector row written before its document was relabelled above `internal`.
 - **`get_items` and `get_file_context`.** The results of these MCP calls carry no pack header, so a transcript cannot name the documents they returned, and a session that read a labelled document through them is distilled as before.
 - **A labelled document that reaches a transcript, by a route the log cannot show.** Distillation is gated on the packs a session was served, read from the transcript's pack ids and their `PACK_ASSEMBLED` events. A retrieval result the parser could not read a pack id from (`pack_ids_unparsed`), a pack whose event the log no longer holds, and a labelled document pasted into a session some other way are not followed, so the session is sent as before. A pack event the log could not return, or a served document whose row could not be read, keeps the session off the route and is counted as `sessions_skipped_egress_unreadable`, a fault a later sweep may clear. A pack event that records no readable item list (read from `injected_item_ids`, `injected_items[]` and `sections[].item_ids` together, so a sectioned pack from before `injected_items[]` existed is judged by its section ids) is a permanent fact of an immutable event: it keeps the session off the route, is counted as `sessions_skipped_egress_withheld`, and does not fail strict mode. A pack that truly served nothing, `injected_item_ids: []`, is fine. A session withheld on a label is re-read and re-counted by every sweep, with no age bound, until the route is declared local or the label changes.
 - **A relabel between scan and send.** `worker enrich` and `classify shadow` read the label when they scan for candidates. A document relabelled after the scan is not re-read before the send, and a chunk's parent label cached in that run stays permitted for the rest of it.

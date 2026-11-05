@@ -37,12 +37,15 @@ from rich.markup import escape
 
 from trellis.core.reserved_doc_ids import is_trace_summary_doc_id
 from trellis.errors import StoreError, TrellisError
-from trellis.retrieve.embed_ingest_hook import build_vector_row
+from trellis.llm.egress import EgressGate, EgressVerdict
+from trellis.retrieve.embed_ingest_hook import EmbedWithheldError, build_vector_row
 from trellis_cli.exit_codes import EXIT_INTERNAL, EXIT_OK
 from trellis_cli.output import build_console
 from trellis_cli.stores import _get_registry
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from trellis.stores.base.vector import VectorStore
     from trellis.stores.registry import StoreRegistry
 
@@ -110,6 +113,54 @@ def _skip_reason(
     return None
 
 
+def _embed_doc(
+    doc: dict[str, Any],
+    content: str,
+    *,
+    embedding_fn: Callable[[str], list[float]],
+    egress: EgressGate,
+    dry_run: bool,
+    tally: dict[str, int],
+) -> dict[str, Any] | None:
+    """The vector row for one listed document, or ``None`` when none is written.
+
+    ``None`` after counting why in ``tally``: a dry run (which asks the gate but
+    not the embedder, so the count is what a live run would embed and not what it
+    would decline), a document the gate keeps off the embedder (not an error;
+    counted apart from a fault), or an embed failure.
+    """
+    doc_id = doc["doc_id"]
+    metadata = doc.get("metadata")
+    if dry_run:
+        verdict = egress.verdict(doc_id, metadata)
+        permitted = verdict is EgressVerdict.PERMITTED
+        tally["embedded" if permitted else _egress_key(verdict)] += 1
+        return None
+    try:
+        return build_vector_row(
+            doc_id,
+            content,
+            metadata,
+            embedding_fn,
+            egress=egress,
+            created_at=doc.get("created_at"),
+        )
+    except EmbedWithheldError as exc:
+        tally[_egress_key(exc.verdict)] += 1
+    # AGGREGATE: per-document embed failures are counted and logged so one
+    # unembeddable document doesn't abort the backfill; the summary surfaces
+    # the error count.
+    except Exception:
+        logger.warning("reindex_vectors_embed_failed", doc_id=doc_id, exc_info=True)
+        tally["errors"] += 1
+    return None
+
+
+def _egress_key(verdict: EgressVerdict) -> str:
+    """The summary bucket for a declined embed: ``unreadable`` or ``withheld``."""
+    return "unreadable" if verdict is EgressVerdict.UNREADABLE else "withheld"
+
+
 def run_reindex_vectors(
     registry: StoreRegistry,
     *,
@@ -126,6 +177,11 @@ def run_reindex_vectors(
     the trace-embed worker owns the first vector at those ids, and one
     written here would make it skip the trace for good. Under ``force`` a
     reserved id that already has a vector is re-embedded like any other.
+    A document the egress gate keeps off the embedder (labelled above
+    ``internal`` while ``embeddings.local`` is not declared true) is counted in
+    ``skipped_egress_withheld``, or ``skipped_egress_unreadable`` when a store
+    could not be asked, and gets no vector; it is not an error. An existing
+    vector row is never dropped here: this command only upserts.
     Per-document embed failures are counted and
     logged, never fatal — rerunning is always safe because rows are
     keyed by ``doc_id``. ``dry_run`` counts candidates without calling
@@ -154,7 +210,10 @@ def run_reindex_vectors(
         msg = f"reindex-vectors requires: {', '.join(missing)}"
         raise ValueError(msg)
 
-    scanned = embedded = errors = 0
+    # One gate per run: it carries the parent cache a chunk is judged through.
+    egress = EgressGate.for_embedder(registry, document_store)
+    scanned = 0
+    tally = dict.fromkeys(("embedded", "errors", "withheld", "unreadable"), 0)
     skipped = dict.fromkeys(("existing", "empty", "reserved"), 0)
     offset = 0
     while True:
@@ -173,46 +232,36 @@ def run_reindex_vectors(
 
         rows: list[dict[str, Any]] = []
         for doc in page:
-            doc_id = doc["doc_id"]
             content = doc.get("content") or ""
-            reason = _skip_reason(doc_id, content, vector_store, force=force)
+            reason = _skip_reason(doc["doc_id"], content, vector_store, force=force)
             if reason is not None:
                 skipped[reason] += 1
                 continue
-            if dry_run:
-                embedded += 1
-                continue
-            try:
-                rows.append(
-                    build_vector_row(
-                        doc_id,
-                        content,
-                        doc.get("metadata"),
-                        embedding_fn,
-                        created_at=doc.get("created_at"),
-                    )
-                )
-            # AGGREGATE: per-document embed failures are counted and
-            # logged so one unembeddable document doesn't abort the
-            # backfill; the summary surfaces the error count.
-            except Exception:
-                logger.warning(
-                    "reindex_vectors_embed_failed", doc_id=doc_id, exc_info=True
-                )
-                errors += 1
+            row = _embed_doc(
+                doc,
+                content,
+                embedding_fn=embedding_fn,
+                egress=egress,
+                dry_run=dry_run,
+                tally=tally,
+            )
+            if row is not None:
+                rows.append(row)
 
         if rows:
             vector_store.upsert_bulk(rows)
-            embedded += len(rows)
+            tally["embedded"] += len(rows)
 
     summary = {
         "status": "ok",
         "scanned": scanned,
-        "embedded": embedded,
+        "embedded": tally["embedded"],
         "skipped_existing": skipped["existing"],
         "skipped_empty": skipped["empty"],
         "skipped_reserved": skipped["reserved"],
-        "errors": errors,
+        "skipped_egress_withheld": tally["withheld"],
+        "skipped_egress_unreadable": tally["unreadable"],
+        "errors": tally["errors"],
         "dry_run": dry_run,
     }
     logger.info("reindex_vectors_completed", **summary)
@@ -289,4 +338,15 @@ def register(admin_app: typer.Typer) -> None:
                 f"{summary['skipped_empty']} empty, "
                 f"{summary['skipped_reserved']} reserved, {summary['errors']} errors)"
             )
+            if (
+                summary["skipped_egress_withheld"]
+                or summary["skipped_egress_unreadable"]
+            ):
+                console.print(
+                    f"[yellow]Kept off the embedder:[/yellow] "
+                    f"{summary['skipped_egress_withheld']} withheld by label "
+                    f"(egress_withheld), {summary['skipped_egress_unreadable']} "
+                    f"unreadable (egress_unreadable); "
+                    f"embeddings.local is not declared true"
+                )
         raise typer.Exit(code=EXIT_OK)

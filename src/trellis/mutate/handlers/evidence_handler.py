@@ -22,6 +22,7 @@ from trellis.core.reserved_doc_ids import (
 )
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.errors import PolicyViolationError, StoreError, ValidationError
+from trellis.llm.egress import EgressGate
 from trellis.mutate.commands import Command
 from trellis.mutate.evidence_ingest import EvidenceEmbedMode
 from trellis.mutate.sensitivity_floor import (
@@ -35,6 +36,7 @@ from trellis.stores.registry import StoreRegistry
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from trellis.llm.egress import EgressVerdict
     from trellis.schemas.classification import Sensitivity
 
 
@@ -114,6 +116,11 @@ class EvidenceIngestHandler:
         self._embedding_fn = embedding_fn
         self._empty_error_code = empty_error_code
         self._clearance = clearance
+        #: Set by the last ``strict`` embed that the egress gate declined: the
+        #: verdict, else ``None``. ``handle`` returns ``(id, message)`` only,
+        #: so a caller that counts a withheld document (the trace-embed worker)
+        #: reads it here after a ``SUCCESS``; reset at the start of each command.
+        self.last_embed_withheld: EgressVerdict | None = None
 
     def _enforce_clearance(self, doc_id: str, metadata: dict[str, Any]) -> None:
         """The save surfaces' write rules, run where the write is.
@@ -197,7 +204,62 @@ class EvidenceIngestHandler:
             return exc
         return None
 
+    def _embed_strict(
+        self,
+        doc_id: str,
+        content: str,
+        metadata: dict[str, Any],
+        evidence: dict[str, Any],
+        requested_by: str,
+    ) -> bool:
+        """Embed the stored document and upsert its vector; not fail-soft.
+
+        ``True`` when the egress gate kept the document off the embedder: it is
+        stored, has no vector row, and the verdict is left on
+        :attr:`last_embed_withheld` for a caller that counts it. That is not a
+        failure of the command. Every other failure raises.
+        """
+        from trellis.retrieve.embed_ingest_hook import (  # noqa: PLC0415
+            EmbedWithheldError,
+            build_vector_row,
+            record_embed_withheld,
+        )
+
+        vector_store = getattr(self._registry.knowledge, "vector_store", None)
+        if vector_store is None:
+            msg = "no vector store configured"
+            raise StoreError(msg, store="vector")
+        if self._embedding_fn is None:
+            msg = "no embedding function configured"
+            raise StoreError(msg, store="vector")
+        raw_created_at = evidence.get("created_at")
+        created_at = raw_created_at if isinstance(raw_created_at, str) else None
+        try:
+            row = build_vector_row(
+                doc_id,
+                content,
+                metadata,
+                self._embedding_fn,
+                egress=EgressGate.for_embedder(
+                    self._registry, self._registry.knowledge.document_store
+                ),
+                created_at=created_at,
+            )
+        except EmbedWithheldError as exc:
+            self.last_embed_withheld = exc.verdict
+            record_embed_withheld(
+                self._registry, doc_id, exc.verdict, source=requested_by
+            )
+            return True
+        vector_store.upsert(
+            item_id=row["item_id"],
+            vector=row["vector"],
+            metadata=row["metadata"],
+        )
+        return False
+
     def handle(self, command: Command) -> tuple[str | None, str]:
+        self.last_embed_withheld = None
         evidence = command.args.get("evidence")
         if not isinstance(evidence, dict):
             msg = "evidence must be a mapping"
@@ -276,30 +338,10 @@ class EvidenceIngestHandler:
                 source=command.requested_by,
             )
         elif self._embed == "strict":
-            from trellis.retrieve.embed_ingest_hook import (  # noqa: PLC0415
-                build_vector_row,
+            withheld = self._embed_strict(
+                doc_id, content, metadata, evidence, command.requested_by
             )
-
-            vector_store = getattr(self._registry.knowledge, "vector_store", None)
-            if vector_store is None:
-                msg = "no vector store configured"
-                raise StoreError(msg, store="vector")
-            if self._embedding_fn is None:
-                msg = "no embedding function configured"
-                raise StoreError(msg, store="vector")
-            raw_created_at = evidence.get("created_at")
-            created_at = raw_created_at if isinstance(raw_created_at, str) else None
-            row = build_vector_row(
-                doc_id,
-                content,
-                metadata,
-                self._embedding_fn,
-                created_at=created_at,
-            )
-            vector_store.upsert(
-                item_id=row["item_id"],
-                vector=row["vector"],
-                metadata=row["metadata"],
-            )
+            if withheld:
+                return doc_id, f"Evidence stored without a vector: {doc_id}"
 
         return doc_id, f"Evidence stored: {doc_id}"

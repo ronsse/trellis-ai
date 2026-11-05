@@ -47,6 +47,7 @@ from trellis.learning import (
 from trellis.learning.scoring import summarize_learning_candidates
 from trellis.ops import ParameterRegistry
 from trellis.ops.capture_coverage import CaptureCoverageReport
+from trellis.ops.embed_egress_health import EmbedEgressReport
 from trellis.ops.precedent_sync_health import PrecedentSyncReport
 from trellis.ops.retrieval_adoption import RetrievalAdoptionReport
 from trellis.ops.serving_builds import ServingBuildsReport
@@ -705,6 +706,20 @@ def _print_precedent_sync(sync: PrecedentSyncReport) -> None:
     )
 
 
+def _print_embed_egress(egress: EmbedEgressReport | None) -> None:
+    """Render the withheld-embed line of ``analyze health``.
+
+    Counts only; the ids behind an unreadable skip ride in ``reasons``, which
+    the caller escapes. Silent when nothing was withheld: most windows have none.
+    """
+    if egress is None or (egress.withheld == 0 and egress.unreadable == 0):
+        return
+    console.print(
+        f"  Embeds kept off the embedder: {egress.withheld} withheld by label, "
+        f"{egress.unreadable} unreadable (embeddings.local is not declared true)"
+    )
+
+
 def _print_retrieval_adoption(retrieval: RetrievalAdoptionReport) -> None:
     """Render the retrieval-adoption line of ``analyze health``.
 
@@ -992,6 +1007,7 @@ def health(
         detail = f" ({escape(extraction.reason)})" if extraction.reason else ""
         console.print(f"  Memory extraction: {extraction.state}{detail} since {since}")
     _print_precedent_sync(report.precedent_sync)
+    _print_embed_egress(report.embed_egress)
     _print_retrieval_adoption(report.retrieval)
     for reason in report.reasons:
         console.print(f"  [yellow]warn[/yellow] {escape(reason)}")

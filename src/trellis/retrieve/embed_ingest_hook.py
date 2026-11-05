@@ -18,6 +18,13 @@ Contract (mirrors the trace-extraction hook):
 * Runs **after** the document is durably stored. It only ever *reads*
   the document content; the vector row is keyed by the document's
   ``doc_id`` so the two stores stay 1:1.
+* Withholds a document labelled above ``internal`` from an embedder that
+  ``embeddings.local: true`` does not declare local
+  (:meth:`trellis.llm.egress.EgressGate.for_embedder`). The document is stored
+  as usual and gets no vector row; the skip is counted as an
+  ``EMBED_WITHHELD`` event, which ``trellis analyze health`` reads. The query
+  embedding of a caller's intent at retrieval time is not stored content and
+  is not gated.
 * Fully best-effort: any failure is logged and swallowed. A broken or
   unreachable embedder or vector store must NEVER fail the ingest — that
   includes a resolve failure (either property raising instead of
@@ -53,6 +60,7 @@ import structlog
 
 from trellis.core.write_config import EMBED_ON_INGEST_FLAG, resolve_write_behaviour
 from trellis.errors import ConfigError
+from trellis.llm.egress import EgressGate, EgressVerdict, egress_reason
 from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.schemas.classification import SHADOW_TAGS_KEY
 
@@ -67,8 +75,10 @@ __all__ = [
     "EMBED_INPUT_CHAR_CAP",
     "EMBED_ON_INGEST_FLAG",
     "VECTOR_METADATA_EXCERPT_CHARS",
+    "EmbedWithheldError",
     "build_vector_row",
     "embed_on_ingest_enabled",
+    "record_embed_withheld",
     "run_embed_on_ingest",
 ]
 
@@ -100,12 +110,66 @@ def embed_on_ingest_enabled(registry: StoreRegistry | None = None) -> bool:
     return resolve_write_behaviour(registry).embed_on_ingest
 
 
+class EmbedWithheldError(Exception):
+    """:func:`build_vector_row` declined to send a document to the embedder.
+
+    Raised before the embedder is called, so nothing left the host. ``verdict``
+    is :attr:`~trellis.llm.egress.EgressVerdict.WITHHELD` (a label above
+    ``internal``, a row that will not parse, an orphan chunk: a fact about what
+    is stored) or ``UNREADABLE`` (a store that could not answer: a later run may
+    clear it); callers count them apart. The message names the verdict only,
+    never the label or the content.
+    """
+
+    def __init__(self, verdict: EgressVerdict) -> None:
+        super().__init__(f"embedding withheld: {verdict.value}")
+        self.verdict = verdict
+
+
+def record_embed_withheld(
+    registry: StoreRegistry, doc_id: str, verdict: EgressVerdict, *, source: str
+) -> bool:
+    """Count one withheld embed as an ``EMBED_WITHHELD`` event. Never raises.
+
+    The inline write path has no report of its own, so the skip is an event
+    ``trellis analyze health`` reads. Advisory and wrapped whole: it runs on a
+    write, where one escaped exception fails the document. ``False`` means the
+    row did not land.
+    """
+    try:
+        # Deferred: ``trellis.ops`` imports the health readers, which are heavy
+        # and not needed by a process that never withholds.
+        from trellis.ops.embed_egress_health import (  # noqa: PLC0415
+            emit_embed_withheld,
+        )
+
+        return emit_embed_withheld(
+            registry.operational.event_log, doc_id, verdict, source=source
+        )
+    except Exception:
+        logger.warning("embed_withheld_record_failed", verdict=verdict.value)
+        return False
+
+
+def _document_store_or_none(registry: StoreRegistry) -> Any:
+    """The registry's document store, or ``None`` when it cannot be opened.
+
+    ``None`` leaves the gate unable to read a chunk's parent, which it reports
+    as ``UNREADABLE`` rather than guessing.
+    """
+    try:
+        return registry.knowledge.document_store
+    except Exception:
+        return None
+
+
 def build_vector_row(
     doc_id: str,
     content: str,
     metadata: dict[str, Any] | None,
     embedding_fn: Callable[[str], list[float]],
     *,
+    egress: EgressGate,
     created_at: str | None = None,
 ) -> dict[str, Any]:
     """Embed one document into a vector-store row.
@@ -124,6 +188,10 @@ def build_vector_row(
         metadata: Document metadata, passed through so retrieval-side
             importance/tag weighting sees it.
         embedding_fn: ``callable(str) -> list[float]``.
+        egress: The gate for this embedder
+            (:meth:`~trellis.llm.egress.EgressGate.for_embedder`). Required, so
+            no caller can reach the embedder without answering "may this
+            document leave the host". Asked before the embedder is called.
         created_at: Recency stamp for retrieval decay. The live hook
             omits it (embed time == ingest time); the backfill passes
             the document row's stored ``created_at`` so old documents
@@ -140,7 +208,14 @@ def build_vector_row(
     Returns:
         ``{"item_id": ..., "vector": ..., "metadata": ...}`` — the shape
         :meth:`VectorStore.upsert_bulk` accepts per row.
+
+    Raises:
+        EmbedWithheldError: ``egress`` does not permit the document. The
+            embedder was not called.
     """
+    verdict = egress.verdict(doc_id, metadata)
+    if verdict is not EgressVerdict.PERMITTED:
+        raise EmbedWithheldError(verdict)
     vector = embedding_fn(content[:EMBED_INPUT_CHAR_CAP])
     row_metadata: dict[str, Any] = {
         # Shadow tags are a measurement-only record on the document (#321).
@@ -269,7 +344,9 @@ def run_embed_on_ingest(
         ``None`` when the feature flag is off. Otherwise a summary dict:
         ``{"embedded": True, "dimensions": int}`` on success, or
         ``{"embedded": False, "reason": "..."}`` when skipped (empty
-        content, embedder/vector store unconfigured) or failed. Any
+        content, embedder/vector store unconfigured, or withheld by the
+        egress gate with ``reason`` ``egress_withheld`` or
+        ``egress_unreadable``) or failed. Any
         failure is caught and logged — it never propagates. Whether
         ``registry.embedding_fn`` or ``registry.knowledge.vector_store``
         itself fails to resolve (raises instead of returning), or the
@@ -335,7 +412,22 @@ def run_embed_on_ingest(
         return {"embedded": False, "reason": "embedder_or_vector_store_unconfigured"}
 
     try:
-        row = build_vector_row(doc_id, content, metadata, embedding_fn)
+        egress = EgressGate.for_embedder_lazy(
+            registry, lambda: _document_store_or_none(registry)
+        )
+        row = build_vector_row(doc_id, content, metadata, embedding_fn, egress=egress)
+    except EmbedWithheldError as exc:
+        # Not a failure: the document is stored and the gate said it may not
+        # reach this embedder. Counted as an event (an inline write has no
+        # report), not only logged, and told apart from an embedder fault.
+        record_embed_withheld(registry, doc_id, exc.verdict, source=source)
+        logger.info(
+            "embed_on_ingest_withheld",
+            doc_id=doc_id,
+            source=source,
+            verdict=exc.verdict.value,
+        )
+        return {"embedded": False, "reason": egress_reason(exc.verdict)}
     except Exception as exc:
         # GRACEFUL-DEGRADATION: document ingest's success contract is
         # "the document is durably stored". Embedding is a feature-

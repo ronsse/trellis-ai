@@ -65,6 +65,11 @@ from trellis.ops.capture_coverage import (
     CaptureCoverageReport,
     summarize_capture_coverage,
 )
+from trellis.ops.embed_egress_health import (
+    EmbedEgressReport,
+    embed_egress_reasons,
+    summarize_embed_egress,
+)
 from trellis.ops.memory_extraction_health import (
     MemoryExtractionHealthReport,
     summarize_memory_extraction,
@@ -1486,6 +1491,12 @@ class BackendHealthReport(TrellisModel):
     #: read from the ``PRECEDENT_REINSTATED`` events the handler already
     #: writes. See :mod:`trellis.ops.precedent_sync_health`.
     precedent_sync: PrecedentSyncReport
+    #: Writes kept off the embedder because the document is labelled above
+    #: ``internal`` and ``embeddings.local`` is not declared true, read from the
+    #: ``EMBED_WITHHELD`` events the embed path already writes. Defaulted: a
+    #: window with none is the ordinary reading. See
+    #: :mod:`trellis.ops.embed_egress_health`.
+    embed_egress: EmbedEgressReport | None = None
     #: Whether agents retrieve at all: the share of the window's captured
     #: sessions that were served at least one pack, read from the
     #: ``CAPTURE_SESSION_PACKS`` joins the sweep already writes. Required, so
@@ -2135,6 +2146,7 @@ def summarize_backend_health(
     capture = summarize_capture_coverage(event_log, days=days, limit=limit)
     extraction = summarize_memory_extraction(event_log, days=days, limit=limit)
     precedent_sync = summarize_precedent_sync(event_log, days=days, limit=limit)
+    embed_egress = summarize_embed_egress(event_log, days=days, limit=limit)
     retrieval = summarize_retrieval_adoption(event_log, days=days, limit=limit)
 
     scan = merge_coverage(
@@ -2143,6 +2155,7 @@ def summarize_backend_health(
         capture.scan,
         extraction.scan,
         precedent_sync.scan,
+        embed_egress.scan,
         retrieval.scan,
     )
 
@@ -2250,6 +2263,7 @@ def summarize_backend_health(
         )
 
     reasons.extend(precedent_sync_reasons(precedent_sync))
+    reasons.extend(embed_egress_reasons(embed_egress))
     reasons.extend(retrieval_adoption_reasons(retrieval))
 
     return BackendHealthReport(
@@ -2259,6 +2273,7 @@ def summarize_backend_health(
         capture=capture,
         memory_extraction=extraction,
         precedent_sync=precedent_sync,
+        embed_egress=embed_egress,
         retrieval=retrieval,
         scan=scan,
         status="warn" if reasons else "ok",
