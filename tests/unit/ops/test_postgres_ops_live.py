@@ -11,9 +11,11 @@ database that holds data it did not create.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -145,6 +147,63 @@ def _chain(*, fail_at: int | None = None) -> MigrationSet:
     return MigrationSet(
         [Migration("document", "postgres", v, f"add step {v}", step(v)) for v in (2, 3)]
     )
+
+
+@contextlib.contextmanager
+def _relation(dsn: str, create: str, drop: str) -> Iterator[None]:
+    """Create a relation for one test and drop it after, whatever the test does."""
+    import psycopg
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(create)
+    try:
+        yield
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute(drop)
+
+
+class TestPostgresMigrateSeesOnlyBaseTables:
+    """``pg_tables`` lists base tables of the schema; the information schema lists
+    views too, and only what the role holds a privilege on."""
+
+    def test_a_view_named_like_a_store_table_does_not_make_the_store_current(
+        self, dsn: str, tmp_path: Path
+    ) -> None:
+        registry = _registry(tmp_path, dsn)
+
+        with _relation(
+            dsn,
+            "CREATE VIEW documents AS SELECT 1 AS x",
+            "DROP VIEW IF EXISTS documents",
+        ):
+            report = run_migrate(registry, apply=False)
+
+        doc = _by_store(report)["document"]
+        assert doc.status == "absent", "a view is not the document store's table"
+        registry.close()
+
+    def test_a_graph_database_holding_only_entity_aliases_reads_unrecognized(
+        self, dsn: str, tmp_path: Path
+    ) -> None:
+        stores = tmp_path / "stores"
+        stores.mkdir(exist_ok=True)
+        registry = StoreRegistry(
+            config={"knowledge": {"graph": {"backend": "postgres", "dsn": dsn}}},
+            stores_dir=stores,
+        )
+
+        with _relation(
+            dsn,
+            "CREATE TABLE entity_aliases (x INTEGER)",
+            "DROP TABLE IF EXISTS entity_aliases",
+        ):
+            report = run_migrate(registry, apply=False)
+
+        graph = _by_store(report)["graph"]
+        assert graph.status == "unrecognized"
+        assert report.status == "error"
+        registry.close()
 
 
 class TestPostgresMigrate:
