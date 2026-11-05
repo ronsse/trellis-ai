@@ -1,6 +1,6 @@
 {
  "formatters": {
-  "fetched": "# Fetched items\n**pack_id:** `pk-1`\n\n## [document] `item-one`\nWhole body.\n\n\n*[not found: `gone`]*",
+  "fetched": "# Fetched items\n**pack_id:** `01ARZ3NDEKTSV4RRFFQ69G5FAV`\n\n## [document] `item-one`\nWhole body.\n\n\n*[not found: `gone`]*",
   "flat": "# Context for: an intent\n**pack_id:** `pk-1`\n\n## [document] `item-one`\nFirst excerpt body.\n\n## [trace] `item-two`\nSecond excerpt body.\n\n\n---\n*Cite feedback via `record_feedback(pack_id=\"pk-1\", rating=..., helpful_item_ids=[...], unhelpful_item_ids=[...], followed_advisory_ids=[...])`.*",
   "flat_empty": "# Context for: an intent\n**pack_id:** `pk-1`\n\n\n---\n*Cite feedback via `record_feedback(pack_id=\"pk-1\", rating=..., helpful_item_ids=[...], unhelpful_item_ids=[...], followed_advisory_ids=[...])`.*",
   "flat_no_pack": "# Context for: an intent\n\n## [document] `item-one`\nFirst excerpt body.\n\n## [trace] `item-two`\nSecond excerpt body.\n",
