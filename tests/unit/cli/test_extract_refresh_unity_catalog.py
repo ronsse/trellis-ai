@@ -9,7 +9,9 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from tests.cli_output import plain
 from trellis_cli.main import app
+from trellis_workers.extract.unity_catalog import DEFAULT_MAX_COLUMNS_PER_TABLE
 
 runner = CliRunner()
 
@@ -234,3 +236,165 @@ class TestRefusals:
         bad = tmp_path / "bad.json"
         bad.write_text("{")
         assert _refresh(bad, "json").exit_code == _refresh(bad, "text").exit_code
+
+
+def _wide(width: int) -> dict[str, Any]:
+    return {
+        "tables": [
+            {
+                "name": "wide",
+                "catalog_name": "main",
+                "schema_name": "sales",
+                "full_name": "main.sales.wide",
+                "columns": [
+                    {"name": f"c{i}", "type_text": "int", "position": i}
+                    for i in range(width)
+                ],
+            }
+        ]
+    }
+
+
+class TestSkippedRows:
+    @pytest.fixture(params=["json", "text"])
+    def fmt(self, request: pytest.FixtureRequest) -> str:
+        return str(request.param)
+
+    def _skipping_export(self, tmp_path: Path) -> Path:
+        # Two lineage rows that name a path, not a table, on one side.
+        export = tmp_path / "skips.json"
+        export.write_text(
+            json.dumps(
+                [
+                    _TABLES,
+                    {"source_table_full_name": "main.sales.orders"},
+                    {"target_table_full_name": "main.sales.orders"},
+                ]
+            )
+        )
+        return export
+
+    def test_skipped_rows_are_counted_by_reason(self, tmp_path: Path, fmt: str) -> None:
+        result = _refresh(self._skipping_export(tmp_path), fmt)
+        assert result.exit_code == 0, result.stdout
+        if fmt == "json":
+            data = json.loads(result.stdout.strip())
+            assert data["skipped_rows"] == {"lineage_without_two_tables": 2}
+        else:
+            assert "Skipped rows:" in plain(result.stdout)
+            assert "2 (lineage_without_two_tables=2)" in plain(result.stdout)
+
+    def test_a_skip_does_not_change_the_exit_code(self, tmp_path: Path) -> None:
+        export = self._skipping_export(tmp_path)
+        assert _refresh(export, "json").exit_code == _refresh(export, "text").exit_code
+
+    def test_a_clean_export_reports_none(self, tmp_path: Path, fmt: str) -> None:
+        export = tmp_path / "tables.json"
+        export.write_text(json.dumps(_TABLES))
+        result = _refresh(export, fmt)
+        assert result.exit_code == 0, result.stdout
+        if fmt == "json":
+            assert json.loads(result.stdout.strip())["skipped_rows"] == {}
+        else:
+            assert "Skipped rows" not in plain(result.stdout)
+
+
+class TestColumnCap:
+    @pytest.fixture(params=["json", "text"])
+    def fmt(self, request: pytest.FixtureRequest) -> str:
+        return str(request.param)
+
+    def _export(self, tmp_path: Path, width: int) -> Path:
+        export = tmp_path / "wide.json"
+        export.write_text(json.dumps(_wide(width)))
+        return export
+
+    def _run(self, path: Path, *extra: str, fmt: str = "json") -> Any:
+        return runner.invoke(
+            app,
+            [
+                *("extract", "refresh", "--type", "unity-catalog", "--path", str(path)),
+                *extra,
+                *("--format", fmt),
+            ],
+        )
+
+    def test_the_option_bounds_the_column_nodes_and_counts_the_rest(
+        self, tmp_path: Path, fmt: str
+    ) -> None:
+        result = self._run(
+            self._export(tmp_path, 5), "--max-columns-per-table", "3", fmt=fmt
+        )
+        assert result.exit_code == 0, result.stdout
+        if fmt == "json":
+            data = json.loads(result.stdout.strip())
+            # catalog, schema, table and three of the five columns
+            assert data["entities_scanned"] == 6
+            assert data["skipped_rows"] == {"columns_over_cap": 2}
+        else:
+            assert "columns_over_cap=2" in plain(result.stdout)
+
+    def test_a_small_table_keeps_every_column_by_default(self, tmp_path: Path) -> None:
+        result = self._run(self._export(tmp_path, 5))
+        data = json.loads(result.stdout.strip())
+        assert data["entities_scanned"] == 8
+        assert data["skipped_rows"] == {}
+
+    def test_the_default_is_stated_in_the_help(self) -> None:
+        result = runner.invoke(app, ["extract", "refresh", "--help"])
+        assert f"(default {DEFAULT_MAX_COLUMNS_PER_TABLE})" in plain(result.stdout)
+
+    def test_sources_yaml_entry_takes_the_option(self, tmp_path: Path) -> None:
+        export = self._export(tmp_path, 5)
+        sources = tmp_path / "sources.yaml"
+        sources.write_text(
+            "sources:\n  - name: lakehouse\n    type: unity-catalog\n"
+            f"    path: {export}\n"
+        )
+        result = runner.invoke(
+            app,
+            [
+                *("extract", "refresh", "--source", "lakehouse"),
+                *("--sources-file", str(sources), "--format", "json"),
+                *("--max-columns-per-table", "2"),
+            ],
+        )
+        assert result.exit_code == 0, result.stdout
+        assert json.loads(result.stdout.strip())["skipped_rows"] == {
+            "columns_over_cap": 3
+        }
+
+    @pytest.mark.parametrize("value", ["0", "-3"])
+    def test_a_cap_below_one_is_refused_on_both_formats(
+        self, tmp_path: Path, fmt: str, value: str
+    ) -> None:
+        result = self._run(
+            self._export(tmp_path, 2), "--max-columns-per-table", value, fmt=fmt
+        )
+        assert result.exit_code == 1, result.stdout
+        assert "at least 1" in plain(result.stdout)
+        if fmt == "json":
+            assert json.loads(result.stdout.strip())["status"] == "error"
+
+    def test_another_extractor_refuses_the_option(
+        self, tmp_path: Path, fmt: str
+    ) -> None:
+        path = tmp_path / "manifest.json"
+        path.write_text("{}")
+        result = runner.invoke(
+            app,
+            [
+                *("extract", "refresh", "--type", "dbt-manifest", "--path", str(path)),
+                *("--max-columns-per-table", "5", "--format", fmt),
+            ],
+        )
+        assert result.exit_code == 1, result.stdout
+        assert "applies only to the unity-catalog type" in plain(result.stdout)
+
+    def test_exit_code_does_not_depend_on_format(self, tmp_path: Path) -> None:
+        path = self._export(tmp_path, 2)
+        codes = {
+            fmt: self._run(path, "--max-columns-per-table", "0", fmt=fmt).exit_code
+            for fmt in ("json", "text")
+        }
+        assert codes["json"] == codes["text"]

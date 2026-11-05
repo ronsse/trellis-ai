@@ -44,6 +44,20 @@ same dataset *when* that extractor's dataset name is the lowercase, unquoted
 keeps both verbatim, so a name differing in case or quoting, or a namespace
 differing in port or trailing ``/``, is a second node.
 
+A table carries ``column_names``, its column names in position order, so an
+agent can find a table by a column with the ``contains`` operator
+(``adr-source-modeling-discipline.md`` §2.2).  Two bounds keep a very wide table
+from becoming thousands of nodes: at most ``max_columns_per_table`` column
+entities are minted from a table's own column records (default
+:data:`DEFAULT_MAX_COLUMNS_PER_TABLE`), and ``column_names`` holds at most the
+larger of that and :data:`MAX_COLUMN_NAMES` names.  ``column_count`` is always
+the full count, and every column left out is counted in the result's
+``skipped_rows``, never dropped silently.  A column that column lineage
+references is always minted, because its edge needs it.
+
+Rows the extractor reads and does not use (a lineage row without two tables,
+and the like) are counted by reason in :attr:`ExtractionResult.skipped_rows`.
+
 Unrecognised or malformed input raises a typed
 :class:`~trellis.errors.ValidationError` (code ``unity_catalog_input``) that
 names a position, never the content.
@@ -121,6 +135,14 @@ _NOT_A_CATALOG_KEYS: Final = frozenset(
 _IGNORED_DOCUMENT_KEYS: Final = frozenset(
     {"next_page_token", "namespace", "table_name"}
 )
+
+#: Column entities minted per table from the table's own column records.  The
+#: source-modeling ADR names no number; 200 keeps an ordinary table whole and
+#: bounds a several-thousand-column outlier at a small fraction of its nodes.
+DEFAULT_MAX_COLUMNS_PER_TABLE: Final = 200
+#: Floor of the names kept in a table's ``column_names``: names are strings on
+#: one node, far cheaper than nodes with their own SCD-2 history.
+MAX_COLUMN_NAMES: Final = 1000
 
 _MAX_TEXT: Final = 256
 _MAX_DESCRIPTION: Final = 1000
@@ -498,14 +520,20 @@ class UnityCatalogExtractor:
         include_columns: Emit a ``uc_column`` entity per column and column
             lineage (default).  Off, columns are counted (``column_count``)
             and column lineage is skipped.
+        max_columns_per_table: Most ``uc_column`` entities minted from one
+            table's own column records, in position order (default
+            :data:`DEFAULT_MAX_COLUMNS_PER_TABLE`).  Columns past it are counted
+            as ``columns_over_cap`` in the result; a column that column lineage
+            references is minted regardless.
 
     An object the export names but does not hold, whether through a lineage row
     or as the parent of a record, becomes a name-only ``if_absent`` placeholder
     marked ``stub`` (see the module docstring).
 
-    A column entity is a structural leaf by the two-signal opt-in of
-    ``adr-source-modeling-discipline.md`` §2.5: ``node_role="structural"``
-    (excluded from default retrieval) and ``allow_structural_leaf=True``.
+    A column entity is a structural leaf: ``node_role="structural"``, excluded
+    from default retrieval.  ``uc_column`` is not in
+    :data:`~trellis.schemas.well_known.ENTITY_TYPE_ANTI_PATTERNS`, so the
+    validator has nothing to warn about and ``allow_structural_leaf`` stays off.
     """
 
     name = "unity_catalog"
@@ -519,10 +547,15 @@ class UnityCatalogExtractor:
         namespace: str | None = None,
         include_system: bool = False,
         include_columns: bool = True,
+        max_columns_per_table: int = DEFAULT_MAX_COLUMNS_PER_TABLE,
     ) -> None:
+        if max_columns_per_table < 1:
+            msg = "max_columns_per_table must be at least 1"
+            raise ValueError(msg)
         self._namespace = _clean_namespace(namespace)
         self._include_system = include_system
         self._include_columns = include_columns
+        self._max_columns = max_columns_per_table
 
     async def extract(
         self,
@@ -541,12 +574,13 @@ class UnityCatalogExtractor:
             namespace=namespace,
             include_system=self._include_system,
             include_columns=self._include_columns,
+            max_columns=self._max_columns,
         )
         entities, edges = builder.build()
-        if state.skipped:
-            logger.info(
-                "unity_catalog_rows_skipped", **dict(sorted(state.skipped.items()))
-            )
+        # Unary + drops a reason whose count lineage brought back to zero.
+        skipped = dict(sorted((+state.skipped).items()))
+        if skipped:
+            logger.info("unity_catalog_rows_skipped", **skipped)
         logger.info(
             "unity_catalog_extracted",
             entities=len(entities),
@@ -558,6 +592,7 @@ class UnityCatalogExtractor:
             edges=edges,
             extractor_used=self.name,
             tier=self.tier.value,
+            skipped_rows=skipped,
             provenance=ExtractionProvenance(
                 extractor_name=self.name,
                 extractor_version=self.version,
@@ -576,14 +611,17 @@ class _Builder:
         namespace: str | None,
         include_system: bool,
         include_columns: bool,
+        max_columns: int,
     ) -> None:
         self._state = state
         self._namespace = namespace
         self._scope = namespace or _DEFAULT_SCOPE
         self._include_system = include_system
         self._include_columns = include_columns
+        self._max_columns = max_columns
         self._entities: dict[str, EntityDraft] = {}
         self._edges: dict[tuple[str, str, str], EdgeDraft] = {}
+        self._held: dict[_TableParts, dict[str, tuple[str, dict[str, Any]]]] = {}
 
     # -- ids ---------------------------------------------------------------
 
@@ -697,6 +735,7 @@ class _Builder:
         rec = found or {}
         key = _identity_key(*parts)
         columns = rec.get("columns")
+        names = self._column_names(parts) if isinstance(columns, list) else None
         props: dict[str, Any] = {
             "name": _text(rec.get("name")) or table,
             "full_name": key,
@@ -722,6 +761,7 @@ class _Builder:
                     "source_created_at": _iso(rec.get("created_at")),
                     "source_updated_at": _iso(rec.get("updated_at")),
                     "column_count": len(columns) if isinstance(columns, list) else None,
+                    "column_names": names,
                 }
             )
         )
@@ -781,7 +821,6 @@ class _Builder:
             name=shown,
             properties=props,
             node_role=NodeRole.STRUCTURAL,
-            allow_structural_leaf=True,
             if_absent=found is None,
         )
         self._contains(self._ensure_table(parts), cid)
@@ -803,10 +842,13 @@ class _Builder:
                 continue
             self._ensure_table(parts)
             if self._include_columns:
-                for rec in self._table_columns(parts):
-                    shown = _text(rec.get("name"))
-                    if shown:
-                        self._ensure_column(parts, _fold(shown), shown, rec)
+                named = self._named_columns(parts)
+                for folded, shown, rec in named[: self._max_columns]:
+                    self._ensure_column(parts, folded, shown, rec)
+                if len(named) > self._max_columns:
+                    self._state.skipped["columns_over_cap"] += (
+                        len(named) - self._max_columns
+                    )
 
         for (source, target), when in sorted(state.table_lineage.items()):
             if self._kept(source[0]) and self._kept(target[0]):
@@ -840,6 +882,27 @@ class _Builder:
             ),
         )
 
+    def _named_columns(
+        self, parts: _TableParts
+    ) -> list[tuple[str, str, dict[str, Any]]]:
+        """The table's named columns in position order, one per folded name."""
+        seen: set[str] = set()
+        named: list[tuple[str, str, dict[str, Any]]] = []
+        for rec in self._table_columns(parts):
+            shown = _text(rec.get("name"))
+            if shown and _fold(shown) not in seen:
+                seen.add(_fold(shown))
+                named.append((_fold(shown), shown, rec))
+        return named
+
+    def _column_names(self, parts: _TableParts) -> list[str]:
+        """``column_names`` for the table: the shown names, bounded and counted."""
+        shown = [name for _, name, _ in self._named_columns(parts)]
+        limit = max(self._max_columns, MAX_COLUMN_NAMES)
+        if len(shown) > limit:
+            self._state.skipped["column_names_over_limit"] += len(shown) - limit
+        return shown[:limit]
+
     def _table_lineage(
         self, source: _TableParts, target: _TableParts, when: str | None
     ) -> None:
@@ -863,10 +926,27 @@ class _Builder:
         if down == up:
             self._state.skipped["self_lineage"] += 1
             return
-        # A placeholder column is named by the folded name its id carries.
         for tab, name in (target, source):
-            self._ensure_column(tab, name, name, None)
+            held = self._held_column(tab, name)
+            if held is None:
+                # A placeholder column is named by the folded name its id carries.
+                self._ensure_column(tab, name, name, None)
+            elif self._column_id(tab, name) not in self._entities:
+                # Held but past the cap: mint it from its record, and it is no
+                # longer one the cap left out.
+                self._ensure_column(tab, name, *held)
+                self._state.skipped["columns_over_cap"] -= 1
         self._depends_on(down, up, when)
+
+    def _held_column(
+        self, parts: _TableParts, folded: str
+    ) -> tuple[str, dict[str, Any]] | None:
+        """The shown name and record of a column the table's export holds."""
+        if parts not in self._held:
+            self._held[parts] = {
+                key: (shown, rec) for key, shown, rec in self._named_columns(parts)
+            }
+        return self._held[parts].get(folded)
 
     def _depends_on(self, downstream: str, upstream: str, when: str | None) -> None:
         self._edges[(EDGE_DEPENDS_ON, downstream, upstream)] = EdgeDraft(

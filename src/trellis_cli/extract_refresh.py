@@ -69,12 +69,17 @@ console = build_console()
 # Registry of built-in extractor types. Plugin-loaded extractors are
 # resolved via the entry-points group ``trellis.extractors`` at runtime;
 # this mapping handles the in-tree references the CLI ships with.
-def _resolve_extractor(extractor_type: str) -> object:
+def _resolve_extractor(
+    extractor_type: str, *, max_columns_per_table: int | None = None
+) -> object:
     """Instantiate the extractor whose ``supported_sources`` claims ``extractor_type``.
 
     Built-ins live in ``trellis_workers.extract`` and ``trellis.extract``;
     third-party extractors register themselves via ``trellis.extractors``
     entry points and are discovered automatically.
+
+    ``max_columns_per_table`` is the Unity Catalog column cap; any other
+    extractor refuses it rather than ignoring it.
     """
     registry = ExtractorRegistry()
     registry.load_entry_points()
@@ -107,7 +112,15 @@ def _resolve_extractor(extractor_type: str) -> object:
 
     candidates = registry.candidates_for(extractor_type)
     if candidates:
-        return candidates[0]
+        chosen = candidates[0]
+        if max_columns_per_table is None:
+            return chosen
+        if getattr(chosen, "name", None) != "unity_catalog":
+            msg = "--max-columns-per-table applies only to the unity-catalog type."
+            raise typer.BadParameter(msg)
+        from trellis_workers.extract import UnityCatalogExtractor  # noqa: PLC0415
+
+        return UnityCatalogExtractor(max_columns_per_table=max_columns_per_table)
     available_sources = sorted(
         {s for name in registry.names() for s in registry.get(name).supported_sources}  # type: ignore[union-attr]
     )
@@ -424,6 +437,9 @@ def _run_refresh(
         "changed_entities": changed_entities,
         "unchanged_entities": unchanged_entities,
         "edges_emitted": len(result.edges),
+        # Input rows the extractor read and did not use, by reason; {} when it
+        # reports none.  Not left to a log line the default CLI never prints.
+        "skipped_rows": dict(result.skipped_rows),
         **_command_counts(results),
         "diffs": diffs,
     }
@@ -434,6 +450,7 @@ def _refresh_entry(
     entry: SourceEntry,
     *,
     sources_root: Path,
+    max_columns_per_table: int | None = None,
 ) -> tuple[dict[str, Any], list[CommandResult]]:
     """Run refresh for a single SourceEntry."""
     if entry.endpoint is not None:
@@ -456,7 +473,9 @@ def _refresh_entry(
     if not raw_path.exists():
         msg = f"Source {entry.name!r}: path {raw_path} does not exist."
         raise typer.BadParameter(msg)
-    extractor = _resolve_extractor(entry.type)
+    extractor = _resolve_extractor(
+        entry.type, max_columns_per_table=max_columns_per_table
+    )
     raw_input = _read_raw_input(raw_path, entry.type)
     registry = _get_registry()
     return _run_refresh(
@@ -513,6 +532,15 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
         "--sources-file",
         help="Path to sources.yaml registry. Defaults to ./sources.yaml.",
     ),
+    max_columns_per_table: int | None = typer.Option(
+        None,
+        "--max-columns-per-table",
+        help=(
+            "unity-catalog only: most column nodes minted per table "
+            "(default 200). Columns past it are counted in the result as "
+            "columns_over_cap."
+        ),
+    ),
     output_format: str = typer.Option(
         "text", "--format", help="Output format: text or json."
     ),
@@ -522,6 +550,14 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
     For each entity touched by the refresh, a TAGS_REFRESHED event is
     emitted into the EventLog with the structured property diff.
     """
+    if max_columns_per_table is not None and max_columns_per_table < 1:
+        _refuse(
+            output_format,
+            "--max-columns-per-table must be at least 1.",
+            soft_wrap=False,
+        )
+        raise typer.Exit(code=EXIT_INTERNAL)
+
     if (source is None) == (extractor_type is None):
         _refuse(
             output_format,
@@ -556,7 +592,9 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             raise typer.Exit(code=EXIT_INTERNAL)
         try:
             summary, results = _refresh_entry(
-                entry, sources_root=sources_path.parent.resolve()
+                entry,
+                sources_root=sources_path.parent.resolve(),
+                max_columns_per_table=max_columns_per_table,
             )
         except typer.Exit:
             raise
@@ -585,7 +623,9 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             _refuse(output_format, f"Path not found: {type_path}")
             raise typer.Exit(code=EXIT_INTERNAL)
         try:
-            extractor = _resolve_extractor(extractor_type)
+            extractor = _resolve_extractor(
+                extractor_type, max_columns_per_table=max_columns_per_table
+            )
             raw_input = _read_raw_input(type_path, extractor_type)
             registry = _get_registry()
             summary, results = _run_refresh(
@@ -631,6 +671,13 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
         console.print(f"  Changed:           {summary['changed_entities']}")
         console.print(f"  Unchanged:         {summary['unchanged_entities']}")
         console.print(f"  Edges emitted:     {summary['edges_emitted']}")
+        skipped = summary["skipped_rows"]
+        if skipped:
+            reasons = ", ".join(f"{name}={count}" for name, count in skipped.items())
+            console.print(
+                f"  Skipped rows:      {sum(skipped.values())} ({escape(reasons)})",
+                soft_wrap=True,
+            )
         _print_results(results, outcome.first_failure, width=19)
         if summary["diffs"]:
             console.print()

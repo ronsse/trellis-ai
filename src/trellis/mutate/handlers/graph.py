@@ -115,8 +115,9 @@ class EntityCreateHandler:
     that guard closes.
 
     **``if_absent`` creates a placeholder and never replaces.** With the
-    arg set, an ``entity_id`` that already names a node is left alone:
-    nothing is written (no new version, no name-alias bind, no
+    arg set to exactly ``True`` (``"true"``, ``1`` and the like take the
+    ordinary upsert path), an ``entity_id`` that already names a node is
+    left alone: nothing is written (no new version, no name-alias bind, no
     ``ENTITY_CREATED`` event) and the existing id is returned with a message
     saying so. The executor still records the command as executed, because
     the call was accepted and did what it was asked to do, which was
@@ -125,7 +126,9 @@ class EntityCreateHandler:
     check and is refused without one. A skip writes nothing, so it cannot
     bypass the precedent refusals above. The check is a read before the
     write, like every guard in this handler, so it does not order two
-    writers racing on one id; a single extraction run is one writer.
+    writers racing on one id; a single extraction run is one writer. In
+    that window a placeholder can replace a real record written
+    concurrently, and stays until the next run that holds the record.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -139,7 +142,10 @@ class EntityCreateHandler:
         caller_id = command.args.get("entity_id")
         node_role = command.args.get("node_role", "semantic")
         generation_spec = command.args.get("generation_spec")
-        if_absent = bool(command.args.get("if_absent", False))
+        # Exactly ``True``: MCP ``execute_mutation`` passes args through
+        # unchanged, so a truthy string such as ``"false"`` must not suppress
+        # a write.
+        if_absent = command.args.get("if_absent") is True
         if if_absent and caller_id is None:
             msg = (
                 "entity.create with if_absent needs an entity_id: "
@@ -442,7 +448,9 @@ class AliasUpsertHandler:
             "is_primary": command.args.get("is_primary", False),
         }
         try:
-            if command.args.get("if_absent", False):
+            # Exact, as in EntityCreateHandler: MCP passes args through, and a
+            # truthy string such as "false" must not suppress a rebind.
+            if command.args.get("if_absent") is True:
                 result = store.bind_alias_if_absent(
                     command.args["entity_id"],
                     command.args["source_system"],

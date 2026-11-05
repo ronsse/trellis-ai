@@ -203,4 +203,10 @@ class ExtractionResult(TrellisModel):
     overall_confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     provenance: ExtractionProvenance
     unparsed_residue: Any | None = None
+    #: Input rows the extractor read and did not turn into drafts (or cut at a
+    #: documented bound), counted by closed reason.  Empty for an extractor
+    #: that reports none.  The CLI refresh result and the
+    #: ``EXTRACTION_DISPATCHED`` payload carry it, so a skip is not left to a
+    #: log line the default CLI never prints.
+    skipped_rows: dict[str, int] = Field(default_factory=dict)
     judged_drafts: list[LLMJudgedDraftRecord] = Field(default_factory=list)
