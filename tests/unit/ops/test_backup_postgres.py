@@ -27,9 +27,21 @@ import yaml
 from structlog.testing import capture_logs
 
 from tests.cli_output import plain
+from trellis.core.base import utc_now
 from trellis.errors import ConfigError
 from trellis.ops import backup_postgres
-from trellis.ops.backup import backup_stores
+from trellis.ops.backup import (
+    ABSENT,
+    SKIP_POSTGRES_REASON,
+    SKIPPED,
+    STATUS_ERROR,
+    STATUS_INCOMPLETE,
+    STATUS_OK,
+    BackedUpItem,
+    BackupReport,
+    backup_stores,
+    prepare_target,
+)
 from trellis.ops.backup_postgres import (
     DUMP_FAILED,
     DUMPED,
@@ -139,11 +151,13 @@ class TestDsnToEnvironment:
         )
 
     @needs_psycopg
-    def test_an_unknown_parameter_is_refused_by_name_and_never_by_value(self) -> None:
+    def test_a_libpq_parameter_pg_dump_cannot_take_is_refused_by_name_not_value(
+        self,
+    ) -> None:
         with pytest.raises(UnsupportedDsnError) as err:
-            pg_env_from_dsn(f"postgresql://u:{SECRET}@h/db?mystery_knob=value-xyz")
+            pg_env_from_dsn(f"postgresql://u:{SECRET}@h/db?keepalives=value-xyz")
 
-        assert "mystery_knob" in str(err.value)
+        assert "keepalives" in str(err.value)
         assert SECRET not in str(err.value)
         assert "value-xyz" not in str(err.value)
 
@@ -194,13 +208,78 @@ class TestDsnToEnvironment:
         assert "h.test" not in text
 
     @needs_psycopg
-    def test_a_key_value_dsn_names_an_unknown_parameter_and_not_its_value(self) -> None:
+    def test_a_key_value_dsn_names_an_unsupported_parameter_not_its_value(
+        self,
+    ) -> None:
         with pytest.raises(UnsupportedDsnError) as err:
-            pg_env_from_dsn(f"host=h password={SECRET} mystery_knob=value-xyz")
+            pg_env_from_dsn(f"host=h password={SECRET} keepalives_idle=value-xyz")
 
-        assert "mystery_knob" in str(err.value)
+        assert "keepalives_idle" in str(err.value)
         assert SECRET not in str(err.value)
         assert "value-xyz" not in str(err.value)
+
+    @pytest.mark.parametrize(
+        "dsn",
+        [
+            # An unquoted space ends the password: libpq reads ``def`` as an option.
+            "host=h password=abc def=xyz",
+            "host=h password=abc def=xyz ghi=jkl",
+            # The same split in a URI query: an unencoded ``&`` ends the value.
+            "postgresql://u@h/db?password=abc&def=xyz",
+            # A genuine typo cannot be told from the above, so it is not named either.
+            "host=h mystery_knob=1",
+            "postgresql://u@h/db?mystery_knob=1",
+        ],
+    )
+    @needs_psycopg
+    def test_a_name_libpq_does_not_know_is_never_shown_in_the_reason(
+        self, dsn: str
+    ) -> None:
+        """libpq quotes the unknown name, and the name can be a password fragment."""
+        with pytest.raises(UnsupportedDsnError) as err:
+            pg_env_from_dsn(dsn)
+
+        text = str(err.value)
+        assert text == backup_postgres._UNRECOGNISED_PARAMETER
+        for fragment in ("def", "ghi", "abc", "xyz", "mystery_knob"):
+            assert fragment not in text, fragment
+
+    @needs_psycopg
+    def test_the_reason_for_an_unknown_name_reaches_the_dump_result_too(
+        self, fake_dump: FakePgDump, tmp_path: Path
+    ) -> None:
+        result = run_pg_dump("host=h password=abc def=xyz", tmp_path / "a.dump")
+
+        assert result.status == DUMP_FAILED
+        assert result.reason == backup_postgres._UNRECOGNISED_PARAMETER
+        assert fake_dump.calls == []
+
+    @needs_psycopg
+    def test_a_quoted_name_is_shown_only_when_it_is_a_libpq_keyword(self) -> None:
+        keyword = backup_postgres._parse_failure(
+            Exception('invalid connection option "sslmode"')
+        )
+        fragment = backup_postgres._parse_failure(
+            Exception('invalid connection option "def"')
+        )
+        uri_keyword = backup_postgres._parse_failure(
+            Exception('invalid URI query parameter: "keepalives"')
+        )
+
+        assert keyword == "connection parameter 'sslmode' cannot be passed to pg_dump"
+        assert uri_keyword.startswith("connection parameter 'keepalives'")
+        assert fragment == backup_postgres._UNRECOGNISED_PARAMETER
+
+    def test_with_no_keyword_list_no_name_is_shown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "psycopg", None)
+
+        reason = backup_postgres._parse_failure(
+            Exception('invalid connection option "sslmode"')
+        )
+
+        assert reason == backup_postgres._UNRECOGNISED_PARAMETER
 
     @needs_psycopg
     def test_every_secret_parameter_is_redacted_and_not_only_the_password(
@@ -319,10 +398,12 @@ class TestRunPgDump:
     def test_a_dsn_pg_dump_cannot_express_fails_without_running_it(
         self, fake_dump: FakePgDump, tmp_path: Path
     ) -> None:
-        result = run_pg_dump(f"postgresql://u:{SECRET}@h/db?mystery=1", tmp_path / "a")
+        result = run_pg_dump(
+            f"postgresql://u:{SECRET}@h/db?keepalives=1", tmp_path / "a"
+        )
 
         assert result.status == DUMP_FAILED
-        assert "mystery" in (result.reason or "")
+        assert "keepalives" in (result.reason or "")
         assert SECRET not in (result.reason or "")
         assert fake_dump.calls == []
 
@@ -415,6 +496,82 @@ class TestRunPgDumpChildAndLimits:
         assert result.status == DUMP_FAILED
         assert "pa?ss#x" not in (result.reason or "")
         assert "[redacted]" in (result.reason or "")
+
+    @pytest.mark.parametrize("password", ["e", "a", "r", "d", "ab", "abc"])
+    @needs_psycopg
+    def test_a_very_short_password_leaves_the_error_readable(
+        self, fake_dump: FakePgDump, tmp_path: Path, password: str
+    ) -> None:
+        """Replacing a one-letter password everywhere rewrote every such letter."""
+        fake_dump.returncode = 1
+        fake_dump.stderr = (
+            'pg_dump: error: connection to server at "db.example.test" (203.0.113.7),'
+            ' port 5432 failed: FATAL:  password authentication failed for user "u"\n'
+        )
+
+        result = run_pg_dump(
+            f"postgresql://u:{password}@h.test/db", tmp_path / "a.dump"
+        )
+
+        assert result.status == DUMP_FAILED
+        reason = result.reason or ""
+        assert "connection to server at" in reason
+        assert "password authentication failed for user" in reason
+        assert "db.example.test" in reason
+        assert "[redacted]" not in reason, "nothing in this text is the password"
+
+    @needs_psycopg
+    def test_a_very_short_password_is_still_redacted_where_it_stands_alone(
+        self, fake_dump: FakePgDump, tmp_path: Path
+    ) -> None:
+        fake_dump.returncode = 1
+        fake_dump.stderr = 'pg_dump: error: the value "a" was rejected'
+
+        result = run_pg_dump("postgresql://u:a@h.test/db", tmp_path / "a.dump")
+
+        assert result.reason == (
+            'pg_dump exited 1: pg_dump: error: the value "[redacted]" was rejected'
+        )
+
+    @needs_psycopg
+    def test_a_short_password_does_not_mangle_a_refusal_naming_a_parameter(
+        self, fake_dump: FakePgDump, tmp_path: Path
+    ) -> None:
+        result = run_pg_dump("host=h password=e keepalives=1", tmp_path / "a.dump")
+
+        assert result.status == DUMP_FAILED
+        assert "'keepalives'" in (result.reason or "")
+        assert fake_dump.calls == []
+
+    def test_a_longer_secret_is_redacted_whatever_a_short_one_does(self) -> None:
+        text = "bad e: password=Longer-Secret-9f2c and embedded xLonger-Secret-9f2cx e"
+
+        redacted = backup_postgres._redact(text, ["Longer-Secret-9f2c", "e"])
+
+        assert "Longer-Secret-9f2c" not in redacted
+        assert redacted.count("[redacted]") == 4
+        assert "bad [redacted]:" in redacted
+        assert redacted.endswith(" [redacted]")
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("the e", "the [redacted]"),
+            ("pg_dump: error", "pg_dump: error"),
+            ("exit code 1", "exit code 1"),
+            ("password=e;", "password=[redacted];"),
+            ("(e)", "([redacted])"),
+        ],
+    )
+    def test_a_one_character_secret_is_replaced_as_a_whole_token_only(
+        self, text: str, expected: str
+    ) -> None:
+        assert backup_postgres._redact(text, ["e"]) == expected
+
+    def test_a_secret_of_four_characters_is_replaced_wherever_it_occurs(self) -> None:
+        assert backup_postgres._redact("xpw-1x pw-1", ["pw-1"]) == (
+            "x[redacted]x [redacted]"
+        )
 
 
 class _Deployment:
@@ -758,3 +915,77 @@ class TestBackupCommandWithPostgres:
         )
         with pytest.raises(ConfigError, match="does not exist"):
             backup_stores(registry, tmp_path / "bk2")
+
+
+def _report(*stores: BackedUpItem) -> BackupReport:
+    return BackupReport(created_at=utc_now(), trellis={}, stores=list(stores))
+
+
+class TestSkipPostgresTurnsOffTheEmptyBackupGuard:
+    """A run that copied nothing is an ``error`` (a wrong data directory looks like
+    that), unless a Postgres store was left out on request: then it is ``ok``.
+
+    That is intended. A fresh team stack has Postgres stores, no SQLite files and a
+    host with no ``pg_dump``, and its operator dumps the database another way; the
+    flag is how they say so. The cost is stated in ``operations.md``: with the flag
+    the exit code no longer vouches that anything was copied.
+    """
+
+    ASKED = BackedUpItem(
+        "document", SKIPPED, backend="postgres", reason=SKIP_POSTGRES_REASON
+    )
+
+    def test_without_the_flag_a_run_that_copied_nothing_is_an_error(self) -> None:
+        report = _report(
+            BackedUpItem("trace", ABSENT, backend="sqlite"),
+            BackedUpItem("document", ABSENT, backend="sqlite"),
+        )
+
+        assert report.status == STATUS_ERROR
+
+    def test_a_store_skipped_on_request_is_enough_to_clear_that_guard(self) -> None:
+        report = _report(
+            BackedUpItem("trace", ABSENT, backend="sqlite"),
+            self.ASKED,
+        )
+
+        assert report.status == STATUS_OK
+
+    def test_only_a_request_clears_it_a_backend_left_out_for_another_reason_does_not(
+        self,
+    ) -> None:
+        other = BackedUpItem(
+            "graph", SKIPPED, backend="neo4j", reason="no copy tool for this backend"
+        )
+        report = _report(BackedUpItem("trace", ABSENT, backend="sqlite"), other)
+
+        assert report.status == STATUS_INCOMPLETE
+
+    def test_backup_stores_reads_ok_over_an_empty_data_directory_with_the_flag(
+        self, tmp_path: Path
+    ) -> None:
+        """The same wrong, empty stores directory, with and without the flag."""
+        stores = tmp_path / "stores"
+        stores.mkdir()
+        mixed = StoreRegistry(
+            config={
+                "knowledge": {
+                    "document": {"backend": "postgres"},
+                    "graph": {"backend": "postgres"},
+                    "vector": {"backend": "pgvector"},
+                },
+            },
+            stores_dir=stores,
+        )
+        sqlite_only = StoreRegistry(config={}, stores_dir=stores)
+
+        flagged = backup_stores(
+            mixed, prepare_target(tmp_path / "a"), skip_postgres=True
+        )
+        unflagged = backup_stores(sqlite_only, prepare_target(tmp_path / "b"))
+
+        assert not any(i.status == "copied" for i in flagged.stores)
+        assert flagged.status == STATUS_OK
+        assert unflagged.status == STATUS_ERROR
+        mixed.close()
+        sqlite_only.close()

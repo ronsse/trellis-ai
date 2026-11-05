@@ -808,6 +808,38 @@ class TestIdentity:
             ("openlineage_dataset", f"{NS}/main.sales.orders"),
         }
 
+    @pytest.mark.parametrize(
+        "record",
+        [
+            {"catalog_name": "Main", "schema_name": "Sales", "name": "Orders"},
+            {"full_name": "Main.Sales.Orders"},
+            {"full_name": "Main . Sales . Orders"},
+            {"full_name": "`Main`.`Sales`.`Orders`"},
+            {"full_name": " `Main` . Sales .`Orders` "},
+        ],
+    )
+    async def test_the_extractor_and_the_lookup_agree_on_the_key(
+        self, record: dict[str, str]
+    ) -> None:
+        """Quoted, mixed-case and spaced spellings: the id the extractor builds
+        is the key ``save_knowledge`` looks up, since both come from
+        ``normalize_alias_raw_id``."""
+        spelling = record.get("full_name") or ".".join(
+            record[k] for k in ("catalog_name", "schema_name", "name")
+        )
+        key = wk.normalize_alias_raw_id("unity_catalog", spelling)
+        assert key == "main.sales.orders"
+
+        orders = by_id(await extract({"tables": [record]}))[tid(key)]
+        assert {
+            a.raw_id for a in orders.aliases if a.source_system == "unity_catalog"
+        } == {key}
+
+    @pytest.mark.parametrize("full_name", ["Main..Orders", "Main. .Orders", "``.a.b"])
+    async def test_a_name_with_an_empty_part_is_refused(self, full_name: str) -> None:
+        with pytest.raises(ValidationError, match="names no catalog, schema and table"):
+            await extract({"tables": [{"full_name": full_name}]})
+
     @pytest.mark.parametrize("suffix", ["/", "//", " /"])
     async def test_a_trailing_slash_on_the_namespace_is_dropped(
         self, suffix: str

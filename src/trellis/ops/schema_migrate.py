@@ -21,8 +21,9 @@ The model, kept small on purpose:
   baseline, :data:`BASELINE_VERSION`, *derived from its shape*
   (:func:`detect_version`): the tables the baseline owns are there. A store
   none of whose tables exist is ``absent`` (Postgres stores share a database,
-  so a neighbour's tables do not count), and one with some but not all of them,
-  or a shape that matches nothing known, is ``unrecognized`` and never stamped.
+  so a neighbour's tables do not count), and one with some of its tables but not
+  all the baseline ones, or a shape that matches nothing known, is
+  ``unrecognized`` and never stamped.
 * A :class:`Migration` moves one ``(store, backend)`` from ``version - 1`` to
   ``version``. A :class:`MigrationSet` holds the steps and refuses a chain with
   a gap or a repeat. The shipped set is empty: this build has no migration,
@@ -109,6 +110,36 @@ BASELINE_TABLES: dict[tuple[str, str], frozenset[str]] = {
     (POSTGRES, "event_log"): frozenset({"events"}),
     (POSTGRES, "api_key"): frozenset({"trellis_api_keys"}),
 }
+
+#: Tables a store creates *beyond* its baseline markers. They are not what makes a
+#: store baseline-shaped, but they are its own: a database holding one of them and
+#: not the markers is a leftover of this store, not an empty database, so it reads
+#: ``unrecognized`` rather than ``absent``. ``tests/unit/ops/test_schema_migrate.py``
+#: opens every SQLite store fresh and requires each table it creates to be in this
+#: set or in :data:`BASELINE_TABLES`; the Postgres entries are read against the
+#: store's DDL by hand (and run in the live-infra leg).
+EXTRA_TABLES: dict[tuple[str, str], frozenset[str]] = {
+    (SQLITE, "document"): frozenset(
+        {
+            "documents_fts",
+            "documents_fts_config",
+            "documents_fts_content",
+            "documents_fts_data",
+            "documents_fts_docsize",
+            "documents_fts_idx",
+        }
+    ),
+    (SQLITE, "graph"): frozenset({"entity_aliases"}),
+    (POSTGRES, "graph"): frozenset({"entity_aliases"}),
+}
+
+
+def owned_tables(backend: str, store_type: str) -> frozenset[str] | None:
+    """Every table the store is known to create, or ``None`` for an unknown store."""
+    baseline = BASELINE_TABLES.get((backend, store_type))
+    if baseline is None:
+        return None
+    return baseline | EXTRA_TABLES.get((backend, store_type), frozenset())
 
 
 @dataclass(frozen=True)
@@ -346,9 +377,14 @@ class _PostgresDb(_Db):
 
     def inspect(self, store: str) -> tuple[frozenset[str], int | None]:
         with self._conn.cursor() as cur:
+            # ``pg_tables`` lists the base tables of the schema whatever the role
+            # may do with them. ``information_schema.tables`` lists views as well
+            # (a view called ``documents`` would read as the store) and only what
+            # the role holds a privilege on (an under-granted role would read
+            # ``absent`` for a store that is there).
             cur.execute(
-                "SELECT table_name FROM information_schema.tables"
-                " WHERE table_schema = current_schema()"
+                "SELECT tablename FROM pg_catalog.pg_tables"
+                " WHERE schemaname = current_schema()"
             )
             tables = frozenset(r[0] for r in cur.fetchall())
             version = None
@@ -414,10 +450,12 @@ def _owns_any_table(store_type: str, dialect: str, tables: frozenset[str]) -> bo
     Postgres stores share one database per plane (and a SQLite ``db_path`` can
     be shared), so "the database has no tables" is the wrong test for a store
     that has not been opened yet: its neighbours' tables are there. A store is
-    absent when *none of its own* tables exist, and unrecognized only when some
-    but not all do.
+    absent when *none of its own* tables exist, and unrecognized when some do and
+    its baseline tables are not all there. "Its own" is every table the store
+    creates (:func:`owned_tables`), not only the baseline markers: a graph database
+    holding ``entity_aliases`` alone is a leftover of the graph store.
     """
-    owned = BASELINE_TABLES.get((dialect, store_type))
+    owned = owned_tables(dialect, store_type)
     if owned is None:
         return bool(tables)
     return not owned.isdisjoint(tables)

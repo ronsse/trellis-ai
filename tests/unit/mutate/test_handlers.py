@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -588,6 +589,82 @@ class TestAliasUpsertIfAbsent:
         alias = bound.knowledge.graph_store.resolve_alias("sys", "r1")
         assert alias is not None
         assert alias["entity_id"] == "e1"
+
+
+class TestAliasUpsertNormalisesUnityCatalogIds:
+    """``save_knowledge`` looks a Unity Catalog id up by its normal form, so a
+    bind under that system has to store the normal form whoever sent it."""
+
+    @staticmethod
+    def _bind(
+        registry: StoreRegistry,
+        entity_id: str,
+        source_system: str,
+        raw_id: str,
+        **kw: object,
+    ) -> None:
+        AliasUpsertHandler(registry).handle(
+            Command(
+                operation=Operation.ALIAS_UPSERT,
+                args={
+                    "entity_id": entity_id,
+                    "source_system": source_system,
+                    "raw_id": raw_id,
+                    **kw,
+                },
+                requested_by="test",
+            )
+        )
+
+    @pytest.fixture
+    def graph(self, registry: StoreRegistry) -> Any:
+        graph = registry.knowledge.graph_store
+        graph.upsert_node("t1", "table", {"name": "orders"})
+        graph.upsert_node("t2", "table", {"name": "other"})
+        return graph
+
+    @pytest.mark.parametrize("if_absent", [True, False])
+    @pytest.mark.parametrize(
+        "raw",
+        ["Main.Sales.Orders", "`Main`.`Sales`.`Orders`", " Main . Sales . Orders "],
+    )
+    def test_a_verbatim_spelling_is_found_by_the_normal_form(
+        self, registry: StoreRegistry, graph: Any, raw: str, if_absent: bool
+    ) -> None:
+        self._bind(registry, "t1", "unity_catalog", raw, if_absent=if_absent)
+        hit = graph.resolve_alias("unity_catalog", "main.sales.orders")
+        assert hit is not None
+        assert hit["entity_id"] == "t1"
+        assert graph.resolve_alias("unity_catalog", raw) is None  # nothing verbatim
+
+    def test_two_spellings_are_one_binding_and_the_first_wins(
+        self, registry: StoreRegistry, graph: Any
+    ) -> None:
+        self._bind(registry, "t1", "unity_catalog", "Main.Sales.Orders", if_absent=True)
+        self._bind(registry, "t2", "unity_catalog", "main.sales.orders", if_absent=True)
+        hit = graph.resolve_alias("unity_catalog", "main.sales.orders")
+        assert hit is not None
+        assert hit["entity_id"] == "t1"
+
+    def test_an_already_normal_id_binds_unchanged(
+        self, registry: StoreRegistry, graph: Any
+    ) -> None:
+        self._bind(registry, "t1", "unity_catalog", "`my.cat`.sales.orders")
+        assert graph.resolve_alias("unity_catalog", "`my.cat`.sales.orders") is not None
+
+    def test_a_malformed_id_binds_verbatim(
+        self, registry: StoreRegistry, graph: Any
+    ) -> None:
+        self._bind(registry, "t1", "unity_catalog", "``.a.b")
+        assert graph.resolve_alias("unity_catalog", "``.a.b") is not None
+        assert graph.resolve_alias("unity_catalog", ".a.b") is None
+
+    def test_every_other_system_binds_verbatim(
+        self, registry: StoreRegistry, graph: Any
+    ) -> None:
+        self._bind(registry, "t1", "dbt", "model.Shop.Orders")
+        assert graph.resolve_alias("dbt", "model.Shop.Orders") is not None
+        assert graph.resolve_alias("dbt", "model.shop.orders") is None
 
 
 class TestEntityCreateIfAbsent:
