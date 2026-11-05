@@ -116,15 +116,22 @@ pins that against a golden captured from `main`). On:
   linked to it with `appliesTo`. The reply gains `Domain minted: domain:<slug>`. A `domain:`
   prefix is stripped first (`domain:finance` mints `domain:finance`), and a value carrying another
   namespace prefix (`tool:x`) mints nothing. A value with no letters or digits, or a mint a policy
-  denies, also mints nothing; all of these count as unresolved. The mint carries a key derived from
-  the domain id and is checked against the graph immediately before it is written, so it never
-  replaces the properties of a `domain:<slug>` node that already exists.
+  denies, also mints nothing; all of these count as unresolved. The mint is a create-if-absent
+  (`entity.create` with `if_absent`) that also carries a key derived from the domain id, and the
+  graph is checked immediately before it is written, so it does not replace the properties of a
+  `domain:<slug>` node that already exists, including one a trace wrote a moment earlier; a node
+  that is there by the time the write runs is linked to and not reported as minted. The key
+  protects a retry or a serial save. `if_absent` is a read before a write, not an atomic store
+  operation, so two saves truly concurrent inside that gap can both write the same `minted_by` and
+  possibly another spelling of the name.
 - **A same-named note is attached to, not duplicated.** If the normalised name already resolves (via
   its `name` alias) to a current, semantic, non-namespaced node of the same `entity_type`, no node
   is created. An attach **writes no caller properties**, so naming a note cannot archive it
-  (`lifecycle`), noise-tag it (`content_tags`) or change what it is. The only write is one
-  `entity.update` that appends the new evidence document id to the node's `document_ids` and sets
-  `evidence_ref` when the node has none; nothing to add means no write. The reply starts `Entity
+  (`lifecycle`), noise-tag it (`content_tags`) or change what it is. The only *property* write is
+  one `entity.update` that appends the new evidence document id to the node's `document_ids` and
+  sets `evidence_ref` when the node has none; nothing to add means no such write. The caller's
+  `domain` and `relates_to` links still run, so an attach can still mint a `domain:<slug>` node and
+  add `appliesTo` and `relates_to` edges from the existing note. The reply starts `Entity
   exists: <id> ... attached, not created`. `supersedes=` always creates.
 - **`relates_to` resolves raw ids through external aliases.** After the existing id, slug and name
   resolution, a value is tried as a raw id under `dbt`, `openlineage_dataset`, `openlineage_job` and
@@ -143,7 +150,10 @@ pins that against a golden captured from `main`). On:
   `unique_id` under `dbt`; OpenLineage binds `namespace/name` under `openlineage_job` or
   `openlineage_dataset`; a JSON rule binds under its `alias_source_system` (a Unity Catalog
   `catalog.schema.table` id under `unity_catalog`, case-folded and unquoted by the same function the
-  lookup uses, needs no other support). A bound pair is never
+  lookup uses, needs no other support; space around a dot is ignored, and an empty part such as
+  `.a.b` is not a Unity Catalog name and is kept verbatim). `alias.upsert` applies that function to
+  any `unity_catalog` `raw_id` before it binds, whoever sent the command, so `Main.Sales.Orders`
+  bound directly is found by the same lookup; every other system's id is bound as given. A bound pair is never
   rebound, and an alias for an entity whose create did not land is refused. The REST extraction
   routes and the memory and trace ingest hooks do not bind aliases.
 

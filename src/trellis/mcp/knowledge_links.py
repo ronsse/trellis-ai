@@ -52,6 +52,7 @@ from trellis.extract.referents import (
 )
 from trellis.extract.trace import normalize_slug
 from trellis.mutate import Command, CommandResult, CommandStatus, Operation
+from trellis.mutate.handlers.graph import ENTITY_LEFT_ALONE_MESSAGE
 from trellis.mutate.retention import CURRENT_STATE
 from trellis.schemas.classification import lifecycle_state_of
 from trellis.schemas.well_known import (
@@ -601,11 +602,17 @@ def _mint_domain(
     would resurrect it.
 
     ``ENTITY_CREATE`` on an existing id replaces that node's properties, so
-    the existence check runs immediately before the write and the command
-    carries a key derived from the id: a second mint of the same domain
-    (a retry, or another save racing this one) is answered DUPLICATE
-    instead of overwriting what the first one, or a trace, has since put on
-    the node.
+    the mint is guarded twice.  The command carries ``if_absent``, which makes
+    the handler leave an existing node alone (``Entity left alone``, answered
+    as a success that wrote nothing, and not reported here as a mint), and a
+    key derived from the id, which answers a second mint of the same domain
+    DUPLICATE.  The key protects a retry or a serial save, since it is
+    recorded only after a mint succeeds.  ``if_absent`` is the guard for a
+    writer that holds no key, such as a trace.  It is a read before a write
+    inside the handler, not an atomic store operation, so it narrows the
+    window to that one gap rather than closing it: two saves truly concurrent
+    inside it can both write (the same ``minted_by``, possibly another
+    spelling of the name), and a trace landing inside it is still replaced.
     """
     spec = _domain_mint_spec(value)
     if spec is None:
@@ -622,6 +629,7 @@ def _mint_domain(
                 "entity_type": CONCEPT,
                 "name": name,
                 "properties": {MINTED_BY_KEY: requested_by},
+                "if_absent": True,
             },
             target_type=CONCEPT,
             requested_by=requested_by,
@@ -629,6 +637,9 @@ def _mint_domain(
         )
     )
     if result.status == CommandStatus.SUCCESS:
+        if result.message.startswith(ENTITY_LEFT_ALONE_MESSAGE):
+            # A node landed after the check above; link to it, claim nothing.
+            return domain_id, []
         return domain_id, [f"Domain minted: {domain_id}"]
     if (
         result.status == CommandStatus.DUPLICATE

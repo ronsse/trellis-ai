@@ -494,6 +494,57 @@ class TestMintNeverReplacesAnExistingNode:
         ]
         assert len(created) == 1
 
+    def test_a_node_that_lands_in_the_window_is_not_overwritten(
+        self, knob_on: None, temp_registry: StoreRegistry
+    ) -> None:
+        """The window the idempotency key cannot cover: the other writer is a
+        trace (or a save in flight), so no mint key exists for it to hit."""
+        graph = _graph(temp_registry)
+        graph.upsert_node(
+            "domain:finance", CONCEPT, {"name": "Finance", "from_trace": "t-1"}
+        )
+        before = graph.get_node("domain:finance")
+
+        target, lines = _mint_domain(
+            self._executor(temp_registry),
+            self._RacingGraph(graph),
+            "FINANCE",
+            requested_by="mcp:save_knowledge",
+        )
+
+        assert target == "domain:finance"  # linked to, not claimed as minted
+        assert lines == []
+        assert graph.get_node("domain:finance") == before
+        events = temp_registry.operational.event_log.get_events(limit=1000)
+        assert [
+            e
+            for e in events
+            if e.event_type == EventType.ENTITY_CREATED
+            and e.entity_id == "domain:finance"
+        ] == []
+
+    def test_the_mint_is_a_create_if_absent(
+        self, knob_on: None, temp_registry: StoreRegistry
+    ) -> None:
+        seen: list[Command] = []
+        executor = self._executor(temp_registry)
+        real_execute = executor.execute
+
+        def spy(command: Command, *args: Any, **kwargs: Any) -> Any:
+            seen.append(command)
+            return real_execute(command, *args, **kwargs)
+
+        executor.execute = spy  # type: ignore[method-assign]
+        _mint_domain(
+            executor,
+            _graph(temp_registry),
+            "Finance",
+            requested_by="mcp:save_knowledge",
+        )
+
+        assert [c.args.get("if_absent") for c in seen] == [True]
+        assert seen[0].operation == Operation.ENTITY_CREATE
+
 
 class TestUnityCatalogLookup:
     @pytest.fixture
