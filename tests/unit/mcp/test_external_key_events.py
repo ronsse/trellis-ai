@@ -22,6 +22,7 @@ from tests.unit.retrieve.public_corpus import (
     QUERY,
     build_world,
 )
+from trellis.retrieve.pack_builder import PackBuilder
 from trellis.stores.base.event_log import EventType
 
 if TYPE_CHECKING:
@@ -157,10 +158,54 @@ class TestSessionDedup:
         assert public <= after
 
     def test_an_ordinary_session_does_dedup(self, world) -> None:
-        """The control: the same two calls by an ordinary key do thin the second."""
+        """The control: the same two calls by an ordinary key do thin the second.
+
+        Asserts that the second pack repeats nothing from the first, not that it
+        is empty. The thirty ``h-bulk-*`` documents are near-identical and tie on
+        every axis but the age each row gets from its own clock reading, so
+        semantic dedup keeps one of them per call and which one can differ
+        between two identical calls. Semantic dedup runs before session dedup, so
+        a second call that keeps a sibling the first did not serve rightly serves
+        it: session dedup is by item id. The first pack is not cut by a budget
+        (nothing is rejected as ``max_items``), so this is a tie, not a cutoff.
+        """
         with as_http(ORDINARY):
-            assert _ids(get_context(QUERY, session_id="s"))
-            assert _ids(get_context(QUERY, session_id="s")) == []
+            first = _ids(get_context(QUERY, session_id="s"))
+            second = _ids(get_context(QUERY, session_id="s"))
+        assert first
+        assert set(first).isdisjoint(second)
+
+    def test_a_changed_tie_order_still_repeats_nothing(
+        self, world, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The case that made the control above flaky, forced instead of awaited.
+
+        The tied ``h-bulk-*`` documents rank by a clock read per row, so on a slow
+        run the second call keeps a different one. Here the one the first pack
+        served is ranked just below its siblings on the second call, and the
+        second pack may then serve a sibling, but never anything from the first.
+        """
+        original = PackBuilder._semantic_dedup_tracked
+        served_bulk: set[str] = set()
+
+        def reordered(items, config):  # type: ignore[no-untyped-def]
+            nudged = [
+                i.model_copy(update={"relevance_score": i.relevance_score - 1e-9})
+                if i.item_id in served_bulk
+                else i
+                for i in items
+            ]
+            return original(nudged, config)
+
+        monkeypatch.setattr(
+            PackBuilder, "_semantic_dedup_tracked", staticmethod(reordered)
+        )
+        with as_http(ORDINARY):
+            first = _ids(get_context(QUERY, session_id="s"))
+            served_bulk.update(i for i in first if i.startswith("h-bulk-"))
+            second = _ids(get_context(QUERY, session_id="s"))
+        assert served_bulk, "the first pack should hold one of the tied documents"
+        assert set(first).isdisjoint(second)
 
     def test_a_repeat_in_an_external_session_is_not_thinned(self, world) -> None:
         with as_http(EXTERNAL):
