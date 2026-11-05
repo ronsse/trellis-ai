@@ -115,7 +115,7 @@ def collect_surfaces(registry: StoreRegistry) -> dict[str, Any]:
             sections, "an intent", pack_id="pk-1"
         ),
         "fetched": format_fetched_items_as_markdown(
-            fetched, not_found=["gone"], pack_id="pk-1"
+            fetched, not_found=["gone"], pack_id="01ARZ3NDEKTSV4RRFFQ69G5FAV"
         )[0],
         "sdk_flat": sdk_format_pack(items, "an intent", pack_id="pk-1"),
         "sdk_flat_empty": sdk_format_pack([], "an intent", pack_id="pk-1"),

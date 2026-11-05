@@ -34,6 +34,34 @@ SUCCESS_RATING_THRESHOLD = 0.5
 _SUCCESS_OUTCOMES = frozenset({"success", "completed"})
 
 
+def derive_rating(
+    helpful_item_ids: Sequence[str], unhelpful_item_ids: Sequence[str]
+) -> float | None:
+    """The helpful share of the pack items a grade names, or ``None``.
+
+    What :meth:`PackFeedback.from_agent_signal` records as the rating when a
+    caller sent neither ``rating`` nor ``success`` (#1194): distinct helpful
+    ids over distinct helpful plus distinct unhelpful ids. A call naming only
+    unhelpful ids is ``0.0``, only helpful ids ``1.0``, one of each ``0.5``.
+    Repeating an id within a list does not weight it.
+
+    Only pack items count. ``followed_advisory_ids`` and ``ignored_item_ids``
+    are not passed in: an advisory is guidance the agent acted on, not a
+    verdict on a served item (``CITED_ID_KEYS`` leaves it out for the same
+    reason), and ignored is a claim that scores nothing yet.
+
+    ``None`` when no item is named, because there is nothing to derive from.
+    The caller then keeps the behaviour that predates this function (a
+    success) and does not mark the rating as derived.
+    """
+    helpful = len(set(helpful_item_ids))
+    unhelpful = len(set(unhelpful_item_ids))
+    named = helpful + unhelpful
+    if named == 0:
+        return None
+    return helpful / named
+
+
 @dataclass(frozen=True, slots=True)
 class PackFeedback:
     """Feedback signal for a single context pack delivery.
@@ -59,13 +87,23 @@ class PackFeedback:
     relevance_scores: dict[str, float] = field(default_factory=dict)  # item_id → score
     # Graded quality of the delivery, 0.0 to 1.0.  ``None`` means "not
     # graded" and :meth:`to_event_payload` derives 1.0/0.0 from the
-    # outcome — what boolean-only callers effectively sent before.  It is
+    # outcome — what boolean-only callers effectively sent before.  (A
+    # call naming items with neither ``rating`` nor ``success`` is graded
+    # by :meth:`from_agent_signal`, which sets ``rating_derived``.)  It is
     # a first-class field rather than a ``metadata`` key because the
     # fitness loops read ``payload["rating"]`` at the top level and
     # reconciliation replays JSONL rows through ``to_event_payload``; a
     # rating hidden in ``metadata`` would not survive that round trip in
     # a form those consumers can see.
     rating: float | None = None
+    # ``True`` when ``rating`` was computed by :meth:`from_agent_signal`
+    # from the helpful and unhelpful ids because the caller sent neither
+    # ``rating`` nor ``success`` (#1194). It is a first-class field for
+    # the reason ``rating`` is: it must survive the JSONL round trip
+    # through ``reconcile-feedback`` to the event a reader sees. It is
+    # written only when true, so a row whose rating the caller supplied
+    # looks exactly as it did before the field existed.
+    rating_derived: bool = False
     # Attribution the agent supplies alongside ``items_referenced``.
     # "Actively unhelpful" is a stronger claim than "not referenced" (see
     # :meth:`to_event_payload`) and a followed advisory is not a pack item
@@ -135,6 +173,14 @@ class PackFeedback:
 
         Two decisions worth stating outright:
 
+        * **``rating`` is derived from the cited ids when neither it nor
+          ``success`` is given** (#1194). It is the helpful share of the
+          named pack items (:func:`derive_rating`), ``rating_derived`` is
+          set, and ``success`` then follows from it as below. A call naming
+          only unhelpful ids is a ``0.0``, not a win. A call naming no pack
+          item at all has nothing to derive from and keeps the earlier
+          behaviour: success, ``rating_derived`` unset. An explicit
+          ``rating`` or ``success`` is always used as sent.
         * **``success`` is derived from ``rating`` when not given.**
           Every consumer reads ``payload["success"]`` first and only
           falls back to ``rating``, so a graded call that also shipped a
@@ -156,8 +202,10 @@ class PackFeedback:
             run_id: Feedback ``run_id`` (the trace or pack the signal
                 belongs to).
             success: Explicit outcome claim, or ``None`` to derive it.
-            rating: Graded usefulness, 0.0 to 1.0. ``None`` means
-                ungraded and ``to_event_payload`` falls back to 1.0/0.0.
+            rating: Graded usefulness, 0.0 to 1.0. ``None`` with no
+                ``success`` either derives it from the cited item ids;
+                with ``success`` alone ``to_event_payload`` falls back to
+                1.0/0.0.
             helpful_item_ids: Items the agent actually used.
             unhelpful_item_ids: Items the agent found to be noise.
             ignored_item_ids: Items the agent was shown and did not use —
@@ -173,6 +221,13 @@ class PackFeedback:
             notes: Free text; the only thing that stays in ``metadata``
                 because no consumer reads it structurally.
         """
+        rating_derived = False
+        if rating is None and success is None:
+            derived = derive_rating(helpful_item_ids, unhelpful_item_ids)
+            if derived is not None:
+                rating = derived
+                rating_derived = True
+
         if success is None:
             succeeded = (
                 rating >= SUCCESS_RATING_THRESHOLD if rating is not None else True
@@ -196,6 +251,7 @@ class PackFeedback:
             items_served=[],
             items_referenced=list(helpful_item_ids),
             rating=rating,
+            rating_derived=rating_derived,
             unhelpful_item_ids=list(unhelpful_item_ids),
             followed_advisory_ids=list(followed_advisory_ids),
             ignored_item_ids=list(ignored_item_ids),
@@ -203,8 +259,16 @@ class PackFeedback:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to a plain dict (suitable for JSON serialization)."""
-        return asdict(self)
+        """Serialize to a plain dict (suitable for JSON serialization).
+
+        ``rating_derived`` is left out unless true, the way
+        :meth:`to_event_payload` leaves it out, so a row whose rating the
+        caller supplied has the keys it had before the field existed.
+        """
+        data = asdict(self)
+        if not self.rating_derived:
+            del data["rating_derived"]
+        return data
 
     def to_event_payload(self, *, pack_id: str | None = None) -> dict[str, Any]:
         """Shape this feedback as a ``FEEDBACK_RECORDED`` event payload.
@@ -228,6 +292,11 @@ class PackFeedback:
           1.0/0.0 from ``success`` so the key is never missing — consumers
           read it as ``payload.get("rating", 0.0)`` and an absent key is
           indistinguishable from a genuine 0.0 grade.
+        * ``rating_derived: true`` is emitted only when
+          :meth:`from_agent_signal` computed ``rating`` from the cited ids.
+          Absent means the caller supplied the rating (or the success the
+          1.0/0.0 fallback above came from), so a reader can tell a grade
+          from a derivation.
         * ``unhelpful_item_ids`` / ``followed_advisory_ids`` /
           ``ignored_item_ids`` are emitted only when populated, keeping
           the payload free of empty lists the way ``pack_id`` /
@@ -264,6 +333,8 @@ class PackFeedback:
             payload["followed_advisory_ids"] = list(self.followed_advisory_ids)
         if self.ignored_item_ids:
             payload["ignored_item_ids"] = list(self.ignored_item_ids)
+        if self.rating_derived:
+            payload["rating_derived"] = True
         if pack_id is not None:
             payload["pack_id"] = pack_id
         if self.agent_id is not None:
@@ -331,6 +402,7 @@ class PackFeedback:
             items_referenced=_coerce_str_list(payload.get("helpful_item_ids")),
             relevance_scores=_coerce_score_map(payload.get("relevance_scores")),
             rating=_coerce_rating(payload.get("rating")),
+            rating_derived=payload.get("rating_derived") is True,
             unhelpful_item_ids=_coerce_str_list(payload.get("unhelpful_item_ids")),
             followed_advisory_ids=_coerce_str_list(
                 payload.get("followed_advisory_ids")

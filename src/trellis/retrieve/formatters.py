@@ -11,7 +11,7 @@ from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.retrieve.file_context import MATCH_FILES_TOUCHED
 from trellis.retrieve.withholding import WithholdingSummary, format_withholding_note
 from trellis.schemas.advisory import Advisory
-from trellis_wire.loop_text import feedback_call
+from trellis_wire.loop_text import feedback_call, is_pack_id
 
 logger = structlog.get_logger(__name__)
 
@@ -397,7 +397,8 @@ def format_fetched_items_as_markdown(
             entity / trace), and ``body`` (pre-rendered markdown).
         not_found: Ids that resolved to nothing in any store.
         max_tokens: Maximum token budget for the response.
-        pack_id: Originating pack, when the caller supplied one.
+        pack_id: Originating pack, when the caller supplied one. Echoed in
+            the header only when it is a well-formed pack id (a ULID).
 
     Returns:
         ``(markdown, served_item_ids, omitted_item_ids)`` — the id lists
@@ -405,7 +406,11 @@ def format_fetched_items_as_markdown(
         attributable to the pack.
     """
     lines = ["# Fetched items"]
-    if pack_id:
+    # ``get_items`` takes the id from the caller, so it is echoed only when
+    # it has the shape of one the builder minted: a value holding a newline
+    # or a link would otherwise render as markdown in the reply (#1194).
+    # A malformed id is left out, not refused; the fetch still works.
+    if is_pack_id(pack_id):
         lines.append(f"**pack_id:** `{pack_id}`")
     lines.append("")
     token_budget = max_tokens - _estimate_tokens(lines[0]) - 10  # reserve overhead

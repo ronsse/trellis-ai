@@ -655,8 +655,8 @@ _SPECS: tuple[SettingSpec, ...] = (
             "Adds a line to every pack reply, which is part of the "
             "treatment environment of a running holdout. Leave off until "
             "the serving freeze lifts and the readout is in. A minimal "
-            "record_feedback call without a rating records a success "
-            "(rating 1.0), so the trailer names rating."
+            "record_feedback call without a rating has the server derive "
+            "one from the cited ids, so the trailer names rating."
         ),
         group="ops",
         settings_live=True,

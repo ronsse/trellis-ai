@@ -6350,7 +6350,18 @@ paths:
 
         (``event_log_in_sync``) so callers can detect soft-failed emissions
 
-        rather than silently treating a JSONL-only write as fully recorded.'
+        rather than silently treating a JSONL-only write as fully recorded.
+
+
+        A body with neither ``rating`` nor ``success`` that cites items is
+
+        graded by the helpful share of the cited ids (a body citing only
+
+        ``unhelpful_item_ids`` records ``0.0``), and the event carries
+
+        ``rating_derived: true``. An explicit ``rating`` or ``success`` is
+
+        always recorded as sent.'
       operationId: pack_feedback_api_v1_packs__pack_id__feedback_post
       parameters:
       - in: path
