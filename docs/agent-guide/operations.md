@@ -116,15 +116,22 @@ pins that against a golden captured from `main`). On:
   linked to it with `appliesTo`. The reply gains `Domain minted: domain:<slug>`. A `domain:`
   prefix is stripped first (`domain:finance` mints `domain:finance`), and a value carrying another
   namespace prefix (`tool:x`) mints nothing. A value with no letters or digits, or a mint a policy
-  denies, also mints nothing; all of these count as unresolved. The mint carries a key derived from
-  the domain id and is checked against the graph immediately before it is written, so it never
-  replaces the properties of a `domain:<slug>` node that already exists.
+  denies, also mints nothing; all of these count as unresolved. The mint is a create-if-absent
+  (`entity.create` with `if_absent`) that also carries a key derived from the domain id, and the
+  graph is checked immediately before it is written, so it does not replace the properties of a
+  `domain:<slug>` node that already exists, including one a trace wrote a moment earlier; a node
+  that is there by the time the write runs is linked to and not reported as minted. The key
+  protects a retry or a serial save. `if_absent` is a read before a write, not an atomic store
+  operation, so two saves truly concurrent inside that gap can both write the same `minted_by` and
+  possibly another spelling of the name.
 - **A same-named note is attached to, not duplicated.** If the normalised name already resolves (via
   its `name` alias) to a current, semantic, non-namespaced node of the same `entity_type`, no node
   is created. An attach **writes no caller properties**, so naming a note cannot archive it
-  (`lifecycle`), noise-tag it (`content_tags`) or change what it is. The only write is one
-  `entity.update` that appends the new evidence document id to the node's `document_ids` and sets
-  `evidence_ref` when the node has none; nothing to add means no write. The reply starts `Entity
+  (`lifecycle`), noise-tag it (`content_tags`) or change what it is. The only *property* write is
+  one `entity.update` that appends the new evidence document id to the node's `document_ids` and
+  sets `evidence_ref` when the node has none; nothing to add means no such write. The caller's
+  `domain` and `relates_to` links still run, so an attach can still mint a `domain:<slug>` node and
+  add `appliesTo` and `relates_to` edges from the existing note. The reply starts `Entity
   exists: <id> ... attached, not created`. `supersedes=` always creates.
 - **`relates_to` resolves raw ids through external aliases.** After the existing id, slug and name
   resolution, a value is tried as a raw id under `dbt`, `openlineage_dataset`, `openlineage_job` and
@@ -143,7 +150,10 @@ pins that against a golden captured from `main`). On:
   `unique_id` under `dbt`; OpenLineage binds `namespace/name` under `openlineage_job` or
   `openlineage_dataset`; a JSON rule binds under its `alias_source_system` (a Unity Catalog
   `catalog.schema.table` id under `unity_catalog`, case-folded and unquoted by the same function the
-  lookup uses, needs no other support). A bound pair is never
+  lookup uses, needs no other support; space around a dot is ignored, and an empty part such as
+  `.a.b` is not a Unity Catalog name and is kept verbatim). `alias.upsert` applies that function to
+  any `unity_catalog` `raw_id` before it binds, whoever sent the command, so `Main.Sales.Orders`
+  bound directly is found by the same lookup; every other system's id is bound as given. A bound pair is never
   rebound, and an alias for an entity whose create did not land is refused. The REST extraction
   routes and the memory and trace ingest hooks do not bind aliases.
 
@@ -174,7 +184,7 @@ import `trellis`, reads the same fragments as the server.
 
 **The grading trailer** is one line appended to a pack reply (`get_context`, `search`, the sectioned
 and index forms, an empty pack, and `get_items` when it is given a `pack_id`), naming the pack and the
-minimal grading call (`rating` included, since a call without one records a success):
+minimal grading call (`rating` included, since a call without one has the server derive it from the cited ids):
 
 ```markdown
 *Grade this pack: `record_feedback(pack_id="01HABCDEF...", rating=..., helpful_item_ids=[...], unhelpful_item_ids=[...])`.*
@@ -306,7 +316,7 @@ trellis admin backup --output DIR [--skip-postgres] [--format text|json]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--output` | (required) | A new directory, or an existing empty one. A non-empty directory or a file is refused (exit 2) before any store is read, so two backups never mix. |
-| `--skip-postgres` | off | Leave the `postgres` and `pgvector` stores out on purpose, for a host with no `pg_dump` (for example the API container). Each is reported `skipped` with reason `skip_postgres_flag`, no DSN is read and no dump runs. The choice does not make the run `incomplete` or an error; anything else left uncopied (a neo4j graph, a non-empty local blob directory) still does. |
+| `--skip-postgres` | off | Leave the `postgres` and `pgvector` stores out on purpose, for a host with no `pg_dump` (for example the API container). Each is reported `skipped` with reason `skip_postgres_flag`, no DSN is read and no dump runs. The choice does not make the run `incomplete` or an error; anything else left uncopied (a neo4j graph, a non-empty local blob directory) still does. **It also turns off the check that a run which copied nothing is an error** (see Exit codes): with the flag, a run where every SQLite store file is missing, such as one pointed at the wrong `data_dir`, still exits `0` as long as a Postgres store was skipped. That is intended, since a fresh team stack has Postgres stores and no SQLite files, but it means `0` no longer says that anything was copied; read `status` per store in the manifest. |
 | `--format` | `text` | Output format. The exit code does not depend on it. |
 
 **Do not copy the `.db` files with `cp`.** The SQLite stores run in WAL mode: a write is acknowledged once it is in the `-wal` file, and the main file lags behind until a checkpoint. A `cp` of the main file while a server runs drops those writes, and the copy still passes `PRAGMA integrity_check`, so nothing flags the loss. `admin backup` copies each store with SQLite's online backup API (`sqlite3.Connection.backup`), which reads one consistent snapshot of that store and is safe beside a running writer. Each copy is a single self-contained file with no `-wal` / `-shm` beside it.
@@ -328,14 +338,14 @@ trellis admin backup --output DIR [--skip-postgres] [--format text|json]
 **Postgres stores (`postgres` and `pgvector` backends).** Each distinct database is dumped once with `pg_dump --format=custom` to `OUTPUT/postgres/postgres-<planes>.dump`, where `<planes>` names the planes whose stores share that DSN (so the knowledge plane's document, graph and vector stores are one `postgres-knowledge.dump`, and a separate operational database is `postgres-operational.dump`). Restore a dump with `pg_restore` (see below), not by copying it into the data directory. `pg_dump` must be on `PATH` and at least as new as the server.
 
 - **The connection string never appears on a command line, in the output, in a log line or in the manifest.** It is read from the store's `dsn` or its plane's environment variable (`TRELLIS_KNOWLEDGE_PG_DSN`, `TRELLIS_OPERATIONAL_PG_DSN`), split into the libpq environment variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`, `PGPASSWORD`, and the others a URL or keyword string can carry) and handed to `pg_dump` through its environment; the process arguments hold only the tool, `--format=custom`, `--no-password` and `--file`. Error text from `pg_dump` is stripped of the password before it is shown. A DSN that carries a parameter the command does not translate is refused by parameter name, never by value.
-- **The DSN is read by libpq's own parser** (`psycopg.conninfo.conninfo_to_dict`), so it means to the dump what it means to a connection: an unencoded `?` or `#` in a password, quoting and escapes in a `key=value` list and a multi-host URI all resolve the same way. This needs `psycopg` (`pip install "trellis-ai[cloud]"`), which the Postgres stores need anyway; without it the dump is `failed` with that reason. libpq's own parse errors quote part of the string, so none of that text is shown. Every secret-bearing parameter (`password`, `sslpassword`) is removed from `pg_dump`'s error text.
+- **The DSN is read by libpq's own parser** (`psycopg.conninfo.conninfo_to_dict`), so it means to the dump what it means to a connection: an unencoded `?` or `#` in a password, quoting and escapes in a `key=value` list and a multi-host URI all resolve the same way. This needs `psycopg` (`pip install "trellis-ai[cloud]"`), which the Postgres stores need anyway; without it the dump is `failed` with that reason. libpq's own parse errors quote part of the string, so none of that text is shown. A parameter libpq does not recognise is reported without its name: libpq splits a `key=value` list at every space, so a password with an unquoted space reads as an unknown option, and its name would be a piece of the password. Only a real libpq keyword that `pg_dump` cannot take (for example `keepalives`) is named. Every secret-bearing parameter (`password`, `sslpassword`) is removed from `pg_dump`'s error text; a secret shorter than 4 characters is removed only where it stands alone (`password=a`, `"a"`), so a one-character password does not turn every `a` in the error into `[redacted]`.
 - **The child's environment holds no inherited `PG*` variable.** It is this process's environment minus every variable starting `PG`, plus the ones the DSN names, so a stray `PGHOSTADDR`, `PGSERVICE`, `PGPASSFILE` or `PGOPTIONS` cannot redirect or reconfigure the dump. This process's own environment is not changed.
 - **A dump is bounded.** One that runs past an hour is killed, its partial file removed, and the store is `failed` with reason `timeout`.
 - **A missing `pg_dump` is its own status, `tool_missing`,** reported per store with the install hint. It is not `skipped` and it is not folded into `failed`, so a host that simply lacks the tool reads differently from a dump that broke. A Postgres store with no DSN configured, or whose dump fails (server unreachable, bad credentials, version mismatch), is `failed`; a partial file is removed.
 - The dump is `pg_dump`'s own single-transaction snapshot of that database, so a database is consistent with itself; two databases are dumped one after the other, as the SQLite stores are.
 - A backup run from a host that lacks the SQLite files (for example one that only reaches the Postgres server) reports those stores as `absent`; it is not an error to omit them there.
 
-**Exit codes.** `0` only when every configured store was copied or dumped and its SQLite copy passed `integrity_check`. `5` when a store failed (`status: error`), when a dump tool is missing (`status: error`), when something was skipped (`status: incomplete`), or when no store file or dump was produced at all (a wrong data directory looks like this). `2` when `--output` is refused. A backup that left data out never exits `0`.
+**Exit codes.** `0` only when every configured store was copied or dumped and its SQLite copy passed `integrity_check`. `5` when a store failed (`status: error`), when a dump tool is missing (`status: error`), when something was skipped (`status: incomplete`), or when no store file or dump was produced at all (a wrong data directory looks like this; `--skip-postgres` turns that last check off, as the option table says). `2` when `--output` is refused. A backup that left data out never exits `0`.
 
 **The stores are copied one after another**, so the set is not a single instant. Each store is internally consistent; documents and events written between the first and last copy may not line up across stores. Stop the writers (the API, the MCP server, the capture sweep) first if the stores must agree with each other.
 
@@ -439,7 +449,7 @@ trellis admin migrate [--apply] [--format text|json] [--no-meta-trace]
 
 **The record.** A table `trellis_schema_migrations` (columns `store`, `version`, `description`, `applied_at`; primary key `(store, version)`) is created in the store's own database by the first `--apply`, and each step's DDL and its version row commit in one transaction, so a failed step leaves the store at the version it had. It lives in the database, so it travels with a backup. A store without a record is read from its table shape: if it has the baseline tables it is version 1, shown as "from shape" (`recorded: false`). A shape that matches no known version is `unrecognized`, refused and never stamped.
 
-**Which stores.** Every SQLite store and every Postgres store (`postgres`, `pgvector`, and the Postgres key, trace, document, graph and event-log stores) in the resolved config. A backend this command does not version (a local blob directory, `neo4j`, `arcadedb`, `s3`) is `unsupported` and is not a failure. A SQLite store with no file yet is `absent`: the report creates no file, and neither does `--apply`. A Postgres store is `absent` when none of its own baseline tables exist; the stores of one plane share a database, so another store's tables do not count against it, while some but not all of its own tables is `unrecognized`. A Postgres report runs in a read-only transaction, so even a bug in the report cannot write.
+**Which stores.** Every SQLite store and every Postgres store (`postgres`, `pgvector`, and the Postgres key, trace, document, graph and event-log stores) in the resolved config. A backend this command does not version (a local blob directory, `neo4j`, `arcadedb`, `s3`) is `unsupported` and is not a failure. A SQLite store with no file yet is `absent`: the report creates no file, and neither does `--apply`. A store is `absent` when none of the tables it creates exist; the stores of one plane share a database, so another store's tables do not count against it. Any table of its own without all of its baseline tables is `unrecognized`, including a leftover that is not a baseline table (a graph database holding only `entity_aliases`, for example). The Postgres inspect reads `pg_catalog.pg_tables` for the current schema, so a view with a store's table name is not mistaken for the store, and a role that lacks privileges on a table still sees it. A Postgres report runs in a read-only transaction, so even a bug in the report cannot write.
 
 **What a run states, per store.** `current` (at the target), `pending` (report mode: steps would run; listed by version), `stamped` (the baseline was recorded), `applied` (one or more steps ran), `absent`, `unsupported`, `unrecognized` and `failed` (the store could not be read, or a step raised; the reason is shown with credentials removed). A build with no step beyond the baseline has nothing `pending`; `--apply` then only stamps the baseline. A second `--apply` changes nothing.
 
@@ -6799,15 +6809,38 @@ When an agent finishes the task, it calls `record_feedback` with the copied IDs:
 
 **The minimal call.** `pack_id` plus `helpful_item_ids` and/or `unhelpful_item_ids`, with no `rating`
 and no `success`, is a valid call on the MCP tool, `POST /packs/{pack_id}/feedback` and
-`TrellisClient.record_feedback`, and always has been. With neither given, `success` is true and
-`rating` is 1.0, so the `FEEDBACK_RECORDED` payload has the same keys as a full call (the empty
-`unhelpful_item_ids` / `followed_advisory_ids` lists are left out, as in any call that does not cite
-them). Note the consequence: a call that cites only unhelpful ids and omits the rating still records
-`rating` 1.0, because nothing rated the pack. Pass a `rating` when the pack was not a success.
-`tests/unit/mcp/test_minimal_feedback_form.py` pins this on each surface. Deriving the rating from the
-cited ids would change the reply and the event for calls that are valid today, so it is deferred until
-after the serving readout. The `TRELLIS_GRADING_TRAILER` knob above names `rating` in the call it
-suggests, because this form records a success without one.
+`TrellisClient.record_feedback`. The server derives the rating as the helpful share of the named pack
+items, `len(helpful) / (len(helpful) + len(unhelpful))` over distinct ids, and `success` follows from it
+through the 0.5 threshold:
+
+| Call cites | `rating` | `success` |
+|---|---|---|
+| only `unhelpful_item_ids` | 0.0 | false |
+| one helpful, one unhelpful | 0.5 | true |
+| only `helpful_item_ids` | 1.0 | true |
+
+A derived rating carries `rating_derived: true` in the `FEEDBACK_RECORDED` payload and in the
+`pack_feedback.jsonl` row, so a reader can tell it from a grade; the key is absent when the caller
+supplied the rating or the success, and it survives `trellis admin reconcile-feedback`. The MCP reply
+names it ("Feedback recorded (negative, rating 0.00, derived from the cited ids) ..."). The REST and
+SDK responses are unchanged: `feedback` is `positive` or `negative`, and the payload is where the
+number is.
+
+- An explicit `rating` is always recorded as sent (a `rating` of 1.0 on an unhelpful-only call is the
+  caller's claim). An explicit `success` alone is recorded as sent, with `rating` 1.0 / 0.0 as before.
+  Neither is marked.
+- `followed_advisory_ids` and `ignored_item_ids` do not count in the share. An advisory is guidance the
+  agent acted on, not a verdict on a served item (it is never a member of the pack's `injected_item_ids`),
+  and ignored scores nothing yet.
+- A call naming no pack item at all (no ids, or advisory ids only) has nothing to derive from, so it
+  keeps its earlier effect: `success` true, `rating` 1.0, no marker. Refusing it would turn a call that
+  is valid today on every surface into an error.
+
+Before #1194 every such call recorded `rating` 1.0, so an unhelpful-only grade counted as a win.
+`FEEDBACK_RECORDED` rows written before then cannot be told apart from a grade of 1.0. Pass a `rating`
+whenever you can: it is the one value the server never second-guesses.
+`tests/unit/mcp/test_minimal_feedback_form.py` pins each case on each surface. The
+`TRELLIS_GRADING_TRAILER` knob above still names `rating` in the call it suggests.
 
 These element-level signals land in the `FEEDBACK_RECORDED` event payload so the fitness loops (`trellis analyze apply-noise-tags`, `trellis analyze advisory-effectiveness`) can attribute outcomes more precisely than pack-level success alone.
 

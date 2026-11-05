@@ -451,10 +451,12 @@ def record_feedback(
         pack_id: Pack ID for pack-level feedback (optional but preferred
             when feedback follows a context retrieval).
         success: Whether the task succeeded. Omit when passing ``rating``
-            — it is then derived from the grade. Defaults to success only
-            when neither is given.
+            — it is then derived from the grade. With neither ``success``
+            nor ``rating``, the rating is derived from the cited ids:
+            the share of them that are helpful. A call citing only
+            ``unhelpful_item_ids`` records 0.0, not a success.
         rating: Graded usefulness of the pack, 0.0 (useless) to 1.0
-            (everything served was on point).
+            (everything served was on point). Always used as sent.
         notes: Optional notes about what worked or didn't.
         helpful_item_ids: IDs of pack items that were actually useful.
         unhelpful_item_ids: IDs of pack items that were noise.
@@ -566,7 +568,8 @@ def record_feedback(
     target = f"pack: {pack_id}" if has_pack else f"trace: {trace_id}"
     status = "positive" if feedback.succeeded else "negative"
     graded = feedback.effective_rating
-    message = f"Feedback recorded ({status}, rating {graded:.2f}) for {target}"
+    derived = ", derived from the cited ids" if feedback.rating_derived else ""
+    message = f"Feedback recorded ({status}, rating {graded:.2f}{derived}) for {target}"
     if not result.event_log_in_sync:
         message += (
             " — event log unavailable, audit row kept;"

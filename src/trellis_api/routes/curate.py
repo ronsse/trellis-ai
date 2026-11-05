@@ -484,6 +484,12 @@ def pack_feedback(pack_id: str, req: PackFeedbackRequest) -> PackFeedbackRespons
     EventLog. The response surfaces whether that event reached the log
     (``event_log_in_sync``) so callers can detect soft-failed emissions
     rather than silently treating a JSONL-only write as fully recorded.
+
+    A body with neither ``rating`` nor ``success`` that cites items is
+    graded by the helpful share of the cited ids (a body citing only
+    ``unhelpful_item_ids`` records ``0.0``), and the event carries
+    ``rating_derived: true``. An explicit ``rating`` or ``success`` is
+    always recorded as sent.
     """
     registry = get_registry()
     stores_dir = registry.stores_dir

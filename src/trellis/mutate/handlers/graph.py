@@ -23,6 +23,7 @@ from trellis.schemas.well_known import (
     HAS_OBSERVATION,
     MEASUREMENT,
     OBSERVATION,
+    normalize_alias_raw_id,
     normalize_entity_name,
 )
 from trellis.stores.base.event_log import EventType
@@ -30,6 +31,12 @@ from trellis.stores.base.graph import AliasBindResult, AliasBindStatus, GraphSto
 from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
+
+#: What ``entity.create`` with ``if_absent`` answers when the id already names
+#: a node and nothing was written. A caller that must not claim a create it did
+#: not make tells the two apart by this prefix (``save_knowledge``'s domain
+#: mint), so the handler and its readers share one spelling.
+ENTITY_LEFT_ALONE_MESSAGE = "Entity left alone, already exists (if_absent)"
 
 
 def _bind_entity_name_alias(
@@ -165,7 +172,7 @@ class EntityCreateHandler:
         )
         if if_absent and existing_node is not None:
             name = command.args["name"]
-            return (caller_id, f"Entity left alone, already exists (if_absent): {name}")
+            return (caller_id, f"{ENTITY_LEFT_ALONE_MESSAGE}: {name}")
         if existing_node is not None and existing_node["node_type"] == "precedent":
             supplied_entity_type = command.args["entity_type"]
             if supplied_entity_type != "precedent":
@@ -426,7 +433,17 @@ class EntityUpdateHandler:
 
 
 class AliasUpsertHandler:
-    """Bind or explicitly rebind an alias through the governed pipeline."""
+    """Bind or explicitly rebind an alias through the governed pipeline.
+
+    **A Unity Catalog ``raw_id`` is bound under its normal form.** Under
+    ``source_system == "unity_catalog"`` the id is passed through
+    :func:`~trellis.schemas.well_known.normalize_alias_raw_id` first, whoever
+    sent it, because ``save_knowledge`` looks that system's ids up by the
+    normal form only: ``Main.Sales.Orders`` bound verbatim would be a row no
+    lookup finds. A normalised id is unchanged by a second pass, so a draft
+    that already carries one binds exactly as before. Every other system's id
+    is bound verbatim. The command's own args are not rewritten.
+    """
 
     def __init__(self, registry: StoreRegistry) -> None:
         self._registry = registry
@@ -448,13 +465,16 @@ class AliasUpsertHandler:
             "is_primary": command.args.get("is_primary", False),
         }
         try:
+            raw_id = normalize_alias_raw_id(
+                command.args["source_system"], command.args["raw_id"]
+            )
             # Exact, as in EntityCreateHandler: MCP passes args through, and a
             # truthy string such as "false" must not suppress a rebind.
             if command.args.get("if_absent") is True:
                 result = store.bind_alias_if_absent(
                     command.args["entity_id"],
                     command.args["source_system"],
-                    command.args["raw_id"],
+                    raw_id,
                     stale_owner_name_key=command.args.get("stale_owner_name_key"),
                     **kwargs,
                 )
@@ -463,7 +483,7 @@ class AliasUpsertHandler:
             alias_id = store.upsert_alias(
                 command.args["entity_id"],
                 command.args["source_system"],
-                command.args["raw_id"],
+                raw_id,
                 **kwargs,
             )
         except Exception as exc:

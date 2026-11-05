@@ -371,13 +371,16 @@ class PackFeedbackRequest(WireRequestModel):
     #: ``rating``, so shipping a defaulted ``True`` alongside
     #: ``rating=0.3`` would have the loops read a mediocre pack as a
     #: plain win. ``None`` means "derive it from the rating" —
-    #: :data:`trellis.feedback.models.SUCCESS_RATING_THRESHOLD`.
+    #: :data:`trellis.feedback.models.SUCCESS_RATING_THRESHOLD`. With
+    #: ``rating`` omitted too, the server derives the rating from the cited
+    #: ids (the helpful share) instead of recording a success (#1194).
     success: bool | None = None
     helpful_item_ids: list[str] = Field(default_factory=list)
     unhelpful_item_ids: list[str] = Field(default_factory=list)
     followed_advisory_ids: list[str] = Field(default_factory=list)
     target_id: str | None = None  # trace/entity the pack supported, if any
-    #: Explicit 0.0-1.0 score; defaults from ``success``. Bounded here
+    #: Explicit 0.0-1.0 score; defaults from ``success``, or from the cited
+    #: ids when ``success`` is omitted too. Always used as sent. Bounded here
     #: because it lands at ``payload["rating"]``, the key the fitness
     #: loops threshold against — the MCP surface enforces the same range.
     rating: float | None = Field(default=None, ge=0.0, le=1.0)

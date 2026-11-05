@@ -26,6 +26,7 @@ from trellis.ops.schema_migrate import (
     Migration,
     MigrationSet,
     detect_version,
+    owned_tables,
     run_migrate,
 )
 from trellis.stores.registry import _PLANE_OF, StoreRegistry
@@ -107,6 +108,18 @@ class TestBaselineShapes:
             tables = frozenset(tables_of(db_path(registry, store_type)))
             assert BASELINE_TABLES[("sqlite", store_type)] <= tables, store_type
             assert detect_version(store_type, "sqlite", tables) == BASELINE_VERSION
+
+    def test_every_table_a_fresh_sqlite_store_creates_is_one_it_is_known_to_own(
+        self, registry: StoreRegistry
+    ) -> None:
+        """``absent`` means none of a store's own tables exist, so a table the store
+        creates but the roster does not name is a leftover that would read absent."""
+        open_every_store(registry)
+        for store_type in SQLITE_STORES:
+            created = tables_of(db_path(registry, store_type)) - {VERSION_TABLE}
+            owned = owned_tables("sqlite", store_type)
+            assert owned is not None, store_type
+            assert created <= owned, (store_type, sorted(created - owned))
 
     def test_every_sqlite_store_type_has_a_baseline_entry(self) -> None:
         missing = [t for t in SQLITE_STORES if ("sqlite", t) not in BASELINE_TABLES]
@@ -252,6 +265,29 @@ class TestApply:
         assert graph.status == "unrecognized"
         assert report.status == "error"
         assert VERSION_TABLE not in tables_of(foreign)
+
+    def test_a_graph_file_whose_only_leftover_is_entity_aliases_is_unrecognized(
+        self, registry: StoreRegistry
+    ) -> None:
+        """``entity_aliases`` alone is not an empty graph database: some build made it
+        and the nodes and edges are gone. Reading it ``absent`` hid that."""
+        foreign = db_path(registry, "graph").with_name("leftover.db")
+        conn = sqlite3.connect(foreign)
+        conn.execute("CREATE TABLE entity_aliases (x INTEGER)")
+        conn.commit()
+        conn.close()
+        reg = StoreRegistry(
+            config={
+                "knowledge": {"graph": {"backend": "sqlite", "db_path": str(foreign)}}
+            },
+            stores_dir=registry.stores_dir,
+        )
+
+        report = run_migrate(reg, apply=True)
+
+        assert by_store(report)["graph"].status == "unrecognized"
+        assert report.status == "error"
+        assert VERSION_TABLE not in tables_of(foreign), "never stamped"
 
     def test_a_file_holding_only_another_stores_tables_reads_absent_not_unrecognized(
         self, registry: StoreRegistry
@@ -483,6 +519,102 @@ class TestAbsentIsPerStoreOnASharedDatabase:
         assert states["vector"].status == "absent"
         assert report.status == "error"
         assert ("graph", 1) not in knowledge.stamped
+
+    def test_a_knowledge_database_with_only_entity_aliases_reads_graph_unrecognized(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        knowledge = FakePostgres({"entity_aliases"})  # the graph's, and not a marker
+        operational = FakePostgres(set())
+
+        report = run_against(
+            monkeypatch,
+            {"knowledge": knowledge, "operational": operational},
+            apply=True,
+        )
+
+        states = by_store(report)
+        assert states["graph"].status == "unrecognized"
+        assert states["document"].status == "absent"
+        assert states["vector"].status == "absent"
+        assert report.status == "error"
+        assert knowledge.stamped == []
+
+
+class FakeCatalogConnection:
+    """A psycopg connection that answers the two catalog queries the way Postgres does.
+
+    The database holds one base table the role cannot read (``edges``), one it can
+    (``nodes``) and a view (``documents``). ``information_schema.tables`` lists the
+    view and leaves out what the role holds no privilege on; ``pg_tables`` lists
+    base tables only, whatever the role may do with them.
+    """
+
+    BASE_TABLES = ("nodes", "edges")
+    GRANTED = ("nodes",)
+    VIEWS = ("documents",)
+
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+        self.rolled_back = False
+        self._rows: list[tuple[str]] = []
+
+    def cursor(self) -> FakeCatalogConnection:
+        return self
+
+    def __enter__(self) -> FakeCatalogConnection:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def execute(self, sql: str, _params: Any = None) -> None:
+        self.queries.append(sql)
+        if "information_schema.tables" in sql:
+            self._rows = [(n,) for n in (*self.GRANTED, *self.VIEWS)]
+        elif "pg_catalog.pg_tables" in sql:
+            self._rows = [(n,) for n in self.BASE_TABLES]
+        else:
+            self._rows = []
+
+    def fetchall(self) -> list[tuple[str]]:
+        return self._rows
+
+    def rollback(self) -> None:
+        self.rolled_back = True
+
+
+class TestPostgresInspectReadsBaseTablesOnly:
+    """The inspect asks ``pg_catalog.pg_tables``, scoped to the current schema.
+
+    The fake models the difference between the catalogs; the same two cases run
+    against a real server in ``test_postgres_ops_live.py``, which CI's live-infra
+    leg runs.
+    """
+
+    @staticmethod
+    def inspect() -> tuple[FakeCatalogConnection, frozenset[str]]:
+        conn = FakeCatalogConnection()
+        db = object.__new__(schema_migrate._PostgresDb)
+        db._conn = conn
+        tables, version = db.inspect("graph")
+        assert version is None
+        return conn, tables
+
+    def test_it_reads_pg_tables_and_not_the_information_schema(self) -> None:
+        conn, _tables = self.inspect()
+
+        assert len(conn.queries) == 1
+        sql = conn.queries[0]
+        assert "pg_catalog.pg_tables" in sql
+        assert "information_schema" not in sql
+        assert "schemaname = current_schema()" in sql
+        assert conn.rolled_back, "the read transaction is ended"
+
+    def test_a_view_is_not_a_table_and_an_unreadable_table_is_still_one(self) -> None:
+        _conn, tables = self.inspect()
+
+        assert tables == frozenset({"nodes", "edges"})
+        assert "documents" not in tables, "a view must not make a store look present"
 
 
 class TestPostgresReportIsReadOnly:
