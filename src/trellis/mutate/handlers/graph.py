@@ -448,7 +448,9 @@ class AliasUpsertHandler:
             "is_primary": command.args.get("is_primary", False),
         }
         try:
-            if command.args.get("if_absent", False):
+            # Exact, as in EntityCreateHandler: MCP passes args through, and a
+            # truthy string such as "false" must not suppress a rebind.
+            if command.args.get("if_absent") is True:
                 result = store.bind_alias_if_absent(
                     command.args["entity_id"],
                     command.args["source_system"],

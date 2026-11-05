@@ -577,10 +577,10 @@ class UnityCatalogExtractor:
             max_columns=self._max_columns,
         )
         entities, edges = builder.build()
-        if state.skipped:
-            logger.info(
-                "unity_catalog_rows_skipped", **dict(sorted(state.skipped.items()))
-            )
+        # Unary + drops a reason whose count lineage brought back to zero.
+        skipped = dict(sorted((+state.skipped).items()))
+        if skipped:
+            logger.info("unity_catalog_rows_skipped", **skipped)
         logger.info(
             "unity_catalog_extracted",
             entities=len(entities),
@@ -592,7 +592,7 @@ class UnityCatalogExtractor:
             edges=edges,
             extractor_used=self.name,
             tier=self.tier.value,
-            skipped_rows=dict(sorted(state.skipped.items())),
+            skipped_rows=skipped,
             provenance=ExtractionProvenance(
                 extractor_name=self.name,
                 extractor_version=self.version,
@@ -621,6 +621,7 @@ class _Builder:
         self._max_columns = max_columns
         self._entities: dict[str, EntityDraft] = {}
         self._edges: dict[tuple[str, str, str], EdgeDraft] = {}
+        self._held: dict[_TableParts, dict[str, tuple[str, dict[str, Any]]]] = {}
 
     # -- ids ---------------------------------------------------------------
 
@@ -925,10 +926,27 @@ class _Builder:
         if down == up:
             self._state.skipped["self_lineage"] += 1
             return
-        # A placeholder column is named by the folded name its id carries.
         for tab, name in (target, source):
-            self._ensure_column(tab, name, name, None)
+            held = self._held_column(tab, name)
+            if held is None:
+                # A placeholder column is named by the folded name its id carries.
+                self._ensure_column(tab, name, name, None)
+            elif self._column_id(tab, name) not in self._entities:
+                # Held but past the cap: mint it from its record, and it is no
+                # longer one the cap left out.
+                self._ensure_column(tab, name, *held)
+                self._state.skipped["columns_over_cap"] -= 1
         self._depends_on(down, up, when)
+
+    def _held_column(
+        self, parts: _TableParts, folded: str
+    ) -> tuple[str, dict[str, Any]] | None:
+        """The shown name and record of a column the table's export holds."""
+        if parts not in self._held:
+            self._held[parts] = {
+                key: (shown, rec) for key, shown, rec in self._named_columns(parts)
+            }
+        return self._held[parts].get(folded)
 
     def _depends_on(self, downstream: str, upstream: str, when: str | None) -> None:
         self._edges[(EDGE_DEPENDS_ON, downstream, upstream)] = EdgeDraft(

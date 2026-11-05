@@ -648,8 +648,46 @@ class TestColumnBounds:
         entities = by_id(result)
         column = f"uc_column:{NS}:main.sales.wide/c00004"
         assert column in entities  # its lineage edge needs both ends
-        assert entities[column].properties["stub"] is True
-        assert result.skipped_rows == {"columns_over_cap": 3}
+        # The export holds it, so it is minted from its record, not as a stub.
+        assert "stub" not in entities[column].properties
+        assert entities[column].properties["type_text"] == "int"
+        assert entities[column].if_absent is False
+        # c00002 and c00003 stay left out; c00004 came back through lineage.
+        assert result.skipped_rows == {"columns_over_cap": 2}
+
+    async def test_a_held_column_past_the_cap_keeps_its_shown_name(self) -> None:
+        table = wide_table(3)
+        table["columns"][2]["name"] = "Revenue_USD"
+        rows = [
+            {
+                "source_table_full_name": "main.sales.wide",
+                "target_table_full_name": "main.sales.daily_revenue",
+                "source_column_name": "REVENUE_usd",
+                "target_column_name": "revenue",
+            }
+        ]
+        result = await extract([{"tables": [table]}, rows], max_columns_per_table=1)
+        column = by_id(result)[f"uc_column:{NS}:main.sales.wide/revenue_usd"]
+        assert column.name == "Revenue_USD"
+        assert column.properties["position"] == 2
+        # The target table is not in the export, so its column stays a placeholder.
+        target = by_id(result)[f"uc_column:{NS}:main.sales.daily_revenue/revenue"]
+        assert target.properties["stub"] is True
+
+    async def test_every_overflow_column_lineage_names_leaves_the_count(self) -> None:
+        rows = [
+            {
+                "source_table_full_name": "main.sales.wide",
+                "target_table_full_name": "main.sales.daily_revenue",
+                "source_column_name": f"c{i:05d}",
+                "target_column_name": f"t{i}",
+            }
+            for i in (1, 2)
+        ]
+        result = await extract(
+            [{"tables": [wide_table(3)]}, rows], max_columns_per_table=1
+        )
+        assert "columns_over_cap" not in result.skipped_rows
 
     @pytest.mark.parametrize("bad", [0, -1])
     def test_a_cap_below_one_is_refused(self, bad: int) -> None:

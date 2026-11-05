@@ -17,6 +17,7 @@ from trellis.mutate.commands import (
     Operation,
 )
 from trellis.mutate.handlers import (
+    AliasUpsertHandler,
     EntityCreateHandler,
     FeedbackRecordHandler,
     LabelAddHandler,
@@ -546,6 +547,47 @@ class TestEntityCreateHandler:
         assert node is not None
         assert node["node_type"] == "concept"
         assert node["properties"]["name"] == "Test Entity"
+
+
+class TestAliasUpsertIfAbsent:
+    """Only the boolean ``True`` makes ``alias.upsert`` a bind-if-absent."""
+
+    @staticmethod
+    def _bind(registry: StoreRegistry, entity_id: str, **args: object) -> str:
+        _, message = AliasUpsertHandler(registry).handle(
+            Command(
+                operation=Operation.ALIAS_UPSERT,
+                args={
+                    "entity_id": entity_id,
+                    "source_system": "sys",
+                    "raw_id": "r1",
+                    **args,
+                },
+                requested_by="test",
+            )
+        )
+        return message
+
+    @pytest.fixture
+    def bound(self, registry: StoreRegistry) -> StoreRegistry:
+        graph = registry.knowledge.graph_store
+        for node_id in ("e1", "e2"):
+            graph.upsert_node(node_id, "concept", {"name": node_id})
+        self._bind(registry, "e1")
+        return registry
+
+    @pytest.mark.parametrize("flag", ["false", "true", 0, 1])
+    def test_a_non_true_flag_rebinds(self, bound: StoreRegistry, flag: object) -> None:
+        assert self._bind(bound, "e2", if_absent=flag) == "Alias upserted"
+        alias = bound.knowledge.graph_store.resolve_alias("sys", "r1")
+        assert alias is not None
+        assert alias["entity_id"] == "e2"
+
+    def test_true_leaves_the_existing_binding(self, bound: StoreRegistry) -> None:
+        assert self._bind(bound, "e2", if_absent=True).startswith("Alias bind outcome")
+        alias = bound.knowledge.graph_store.resolve_alias("sys", "r1")
+        assert alias is not None
+        assert alias["entity_id"] == "e1"
 
 
 class TestEntityCreateIfAbsent:
