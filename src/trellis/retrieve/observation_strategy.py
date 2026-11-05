@@ -198,6 +198,7 @@ class ObservationSearch(SearchStrategy):
             allowed_types.add(MEASUREMENT)
 
         items: list[PackItem] = []
+        now = datetime.now(UTC)  # one clock per search, as on the keyword axis
         for node in nodes:
             canonical_type = canonicalize_entity_type(node.get("node_type", ""))
             if canonical_type not in allowed_types:
@@ -233,6 +234,7 @@ class ObservationSearch(SearchStrategy):
             score = _apply_recency_decay(
                 base_score,
                 observed_at.isoformat() if observed_at else None,
+                now=now,
                 half_life_days=half_life,
                 floor=floor,
             )
