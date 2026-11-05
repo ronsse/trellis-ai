@@ -95,7 +95,7 @@ Which hook does what:
 
 | Hook (event) | What it does | When it stays silent |
 |---|---|---|
-| Pre-work nudge (`UserPromptSubmit`, `SubagentStart`) | Once per session, says to call `get_context` before reading files. | The session has already retrieved from Trellis, or has already been nudged. |
+| Pre-work nudge (`UserPromptSubmit`, `SubagentStart`) | Once per session, says to call `get_context` before reading files. | The session has already retrieved from Trellis, or has already been nudged. A first prompt is nudged even before Claude Code has written the transcript file. |
 | First-edit soft deny (`PreToolUse` on `Edit`, `Write`, `MultiEdit`, `NotebookEdit`) | Declines the first edit of a session that has not retrieved yet and says why; the retry goes through. On for subagents by default (`--edit-deny subagents`), `all` adds the main session, `off` removes it. | The session has retrieved, or has already been told once. |
 | Grading ask (`Stop`, `SubagentStop`) | Once per served pack, asks the agent to call `record_feedback` naming `helpful_item_ids` / `unhelpful_item_ids`, and to save a trace if none was saved. | Fewer tool uses than `--grading-threshold` (default 10), no pack served, or a pack already graded with item ids. |
 
