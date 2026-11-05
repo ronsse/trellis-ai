@@ -184,7 +184,7 @@ import `trellis`, reads the same fragments as the server.
 
 **The grading trailer** is one line appended to a pack reply (`get_context`, `search`, the sectioned
 and index forms, an empty pack, and `get_items` when it is given a `pack_id`), naming the pack and the
-minimal grading call (`rating` included, since a call without one records a success):
+minimal grading call (`rating` included, since a call without one has the server derive it from the cited ids):
 
 ```markdown
 *Grade this pack: `record_feedback(pack_id="01HABCDEF...", rating=..., helpful_item_ids=[...], unhelpful_item_ids=[...])`.*
@@ -6809,15 +6809,38 @@ When an agent finishes the task, it calls `record_feedback` with the copied IDs:
 
 **The minimal call.** `pack_id` plus `helpful_item_ids` and/or `unhelpful_item_ids`, with no `rating`
 and no `success`, is a valid call on the MCP tool, `POST /packs/{pack_id}/feedback` and
-`TrellisClient.record_feedback`, and always has been. With neither given, `success` is true and
-`rating` is 1.0, so the `FEEDBACK_RECORDED` payload has the same keys as a full call (the empty
-`unhelpful_item_ids` / `followed_advisory_ids` lists are left out, as in any call that does not cite
-them). Note the consequence: a call that cites only unhelpful ids and omits the rating still records
-`rating` 1.0, because nothing rated the pack. Pass a `rating` when the pack was not a success.
-`tests/unit/mcp/test_minimal_feedback_form.py` pins this on each surface. Deriving the rating from the
-cited ids would change the reply and the event for calls that are valid today, so it is deferred until
-after the serving readout. The `TRELLIS_GRADING_TRAILER` knob above names `rating` in the call it
-suggests, because this form records a success without one.
+`TrellisClient.record_feedback`. The server derives the rating as the helpful share of the named pack
+items, `len(helpful) / (len(helpful) + len(unhelpful))` over distinct ids, and `success` follows from it
+through the 0.5 threshold:
+
+| Call cites | `rating` | `success` |
+|---|---|---|
+| only `unhelpful_item_ids` | 0.0 | false |
+| one helpful, one unhelpful | 0.5 | true |
+| only `helpful_item_ids` | 1.0 | true |
+
+A derived rating carries `rating_derived: true` in the `FEEDBACK_RECORDED` payload and in the
+`pack_feedback.jsonl` row, so a reader can tell it from a grade; the key is absent when the caller
+supplied the rating or the success, and it survives `trellis admin reconcile-feedback`. The MCP reply
+names it ("Feedback recorded (negative, rating 0.00, derived from the cited ids) ..."). The REST and
+SDK responses are unchanged: `feedback` is `positive` or `negative`, and the payload is where the
+number is.
+
+- An explicit `rating` is always recorded as sent (a `rating` of 1.0 on an unhelpful-only call is the
+  caller's claim). An explicit `success` alone is recorded as sent, with `rating` 1.0 / 0.0 as before.
+  Neither is marked.
+- `followed_advisory_ids` and `ignored_item_ids` do not count in the share. An advisory is guidance the
+  agent acted on, not a verdict on a served item (it is never a member of the pack's `injected_item_ids`),
+  and ignored scores nothing yet.
+- A call naming no pack item at all (no ids, or advisory ids only) has nothing to derive from, so it
+  keeps its earlier effect: `success` true, `rating` 1.0, no marker. Refusing it would turn a call that
+  is valid today on every surface into an error.
+
+Before #1194 every such call recorded `rating` 1.0, so an unhelpful-only grade counted as a win.
+`FEEDBACK_RECORDED` rows written before then cannot be told apart from a grade of 1.0. Pass a `rating`
+whenever you can: it is the one value the server never second-guesses.
+`tests/unit/mcp/test_minimal_feedback_form.py` pins each case on each surface. The
+`TRELLIS_GRADING_TRAILER` knob above still names `rating` in the call it suggests.
 
 These element-level signals land in the `FEEDBACK_RECORDED` event payload so the fitness loops (`trellis analyze apply-noise-tags`, `trellis analyze advisory-effectiveness`) can attribute outcomes more precisely than pack-level success alone.
 

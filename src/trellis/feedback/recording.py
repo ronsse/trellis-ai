@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -304,7 +304,7 @@ def record_feedback(
     log_path = Path(log_dir) / "pack_feedback.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    entry = asdict(feedback)
+    entry = feedback.to_dict()
     with log_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, default=str) + "\n")
 
@@ -764,6 +764,9 @@ def load_feedback_log(log_dir: Path | str) -> list[PackFeedback]:
                 # key — without it a replay would overwrite a real 0.3
                 # with a derived 1.0 at the key consumers read.
                 "rating": data.get("rating", metadata.get("rating")),
+                # Only ever written as true; absent on every row whose
+                # rating the caller supplied, and on rows older than #1194.
+                "rating_derived": data.get("rating_derived") is True,
                 "unhelpful_item_ids": data.get("unhelpful_item_ids", []),
                 "followed_advisory_ids": data.get("followed_advisory_ids", []),
                 "ignored_item_ids": data.get("ignored_item_ids", []),
