@@ -513,6 +513,67 @@ class TestNormalizeAliasRawId:
     def test_a_malformed_value_is_returned_unchanged(self, raw: str) -> None:
         assert wk.normalize_alias_raw_id("unity_catalog", raw) == raw
 
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "Main . Sales . Orders",
+            " Main .Sales. Orders ",
+            "Main\t.\nSales .Orders",
+            "`Main` . `Sales` . `Orders`",
+            "`Main`  .Sales. `Orders`  ",
+            "  `Main`.Sales.Orders",
+        ],
+    )
+    def test_space_around_the_dots_is_not_part_of_a_name(self, raw: str) -> None:
+        assert wk.normalize_alias_raw_id("unity_catalog", raw) == "main.sales.orders"
+
+    def test_a_dot_inside_quotes_survives_the_spacing_around_it(self) -> None:
+        raw = "`My.Cat` . sales . orders"
+        assert (
+            wk.normalize_alias_raw_id("unity_catalog", raw) == "`my.cat`.sales.orders"
+        )
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "``.a.b",
+            "a.``.b",
+            "a.b.``",
+            "` `.a.b",
+            ".a.b",
+            "a..b",
+            "a.b.",
+            "a. .b",
+            "",
+            "   ",
+        ],
+    )
+    def test_an_empty_part_is_refused_not_collapsed(self, raw: str) -> None:
+        # Refused means treated as malformed: returned as given, never rewritten
+        # into a key another spelling owns.
+        assert wk.normalize_alias_raw_id("unity_catalog", raw) == raw
+
+    def test_an_empty_quoted_part_does_not_collide_with_the_bare_spelling(self) -> None:
+        quoted = wk.normalize_alias_raw_id("unity_catalog", "``.a.b")
+        bare = wk.normalize_alias_raw_id("unity_catalog", ".a.b")
+        assert quoted != bare
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "Main.Sales.Orders",
+            " Main . Sales . Orders ",
+            "`My.Cat`.`Sa``les`.Orders",
+            "`a` . `b`",
+            "``.a.b",
+            "`open.quote",
+            "Single",
+        ],
+    )
+    def test_normalising_twice_changes_nothing(self, raw: str) -> None:
+        once = wk.normalize_alias_raw_id("unity_catalog", raw)
+        assert wk.normalize_alias_raw_id("unity_catalog", once) == once
+
     @pytest.mark.parametrize("system", ["dbt", "openlineage_dataset", "name", "x"])
     def test_every_other_system_is_verbatim(self, system: str) -> None:
         raw = " `Model`.Shop.Orders "

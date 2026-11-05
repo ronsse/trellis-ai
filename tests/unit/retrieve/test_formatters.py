@@ -871,9 +871,33 @@ class TestFormatFetchedItems:
 
     def test_surfaces_pack_id_when_given(self) -> None:
         result, _, _ = format_fetched_items_as_markdown(
-            [self._item("a", "alpha")], pack_id="pack-9"
+            [self._item("a", "alpha")], pack_id="01ARZ3NDEKTSV4RRFFQ69G5FAV"
         )
-        assert "**pack_id:** `pack-9`" in result
+        assert "**pack_id:** `01ARZ3NDEKTSV4RRFFQ69G5FAV`" in result
+
+    @pytest.mark.parametrize(
+        "pack_id",
+        [
+            "pack-9",
+            "01ARZ3NDEKTSV4RRFFQ69G5FA",  # one character short
+            "01ARZ3NDEKTSV4RRFFQ69G5FAVV",  # one character long
+            "01arz3ndektsv4rrffq69g5fav",  # Crockford ULIDs are upper case
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV\n## injected heading",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV`[link](https://example.test)",
+            "[x](https://example.test)",
+        ],
+    )
+    def test_a_malformed_pack_id_is_left_out_not_echoed(self, pack_id: str) -> None:
+        result, served, _ = format_fetched_items_as_markdown(
+            [self._item("a", "alpha")], pack_id=pack_id
+        )
+        assert "pack_id" not in result
+        assert "injected" not in result
+        assert "example.test" not in result
+        assert "pack-9" not in result
+        # The fetch itself is untouched.
+        assert "alpha" in result
+        assert served == ["a"]
 
     def test_empty_input_renders_header_only(self) -> None:
         result, served, omitted = format_fetched_items_as_markdown([])

@@ -381,7 +381,10 @@ class TestRealClient:
 
         try:
             took = asyncio.run(main())
-            assert max(took) < 1.0, took
+            # A hung emit would hold a call for the whole 30 s wait. The bound sits
+            # far below that and far above a loaded runner's first call, which
+            # took 1.66 s once while the client warmed up.
+            assert max(took) < 10.0, took
         finally:
             release.set()
         by_route = {r.payload["route"]: r.payload for r in _rows(empty)}

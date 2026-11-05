@@ -463,7 +463,8 @@ default; see [operations.md](operations.md)). `(source_system, raw_id)` is kept 
 system but Unity Catalog, so a dbt `unique_id`, an OpenLineage `namespace/name` and a three-part
 Unity Catalog `catalog.schema.table` all take the same shape. A JSON rule binding under
 `unity_catalog` stores the id lower-cased and unquoted (`normalize_alias_raw_id`), because those
-identifiers are case-insensitive; `save_knowledge` looks it up with the same function. A draft's
+identifiers are case-insensitive; `save_knowledge` looks it up with the same function, and
+`alias.upsert` applies it to any `unity_catalog` id it is sent. A draft's
 `aliases` are left out of the `unparsed_residue["rejected_by_validators"]` dump, so that record has
 the shape it had before aliases existed. A draft without an `entity_id` binds nothing. `EntityRule` (JSON rules) gains
 `alias_source_system`: when set, the matched `id_field` value is bound under that system. The wire

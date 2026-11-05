@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 import textwrap
+from typing import TypeGuard
 
 #: Column the shipped markdown is wrapped at.
 _WRAP_WIDTH = 75
@@ -283,17 +284,27 @@ def sdk_feedback_call(pack_id: str) -> str:
 _PACK_ID = re.compile(r"[0-9A-HJKMNP-TV-Z]{26}")
 
 
+def is_pack_id(value: str | None) -> TypeGuard[str]:
+    """Whether ``value`` has the shape of a pack id the builder mints (a ULID).
+
+    The one test for "safe to echo": a value that passes carries no newline,
+    backtick or link syntax. ``get_items`` and the trailers take the id from
+    the caller and use this before printing it.
+    """
+    return value is not None and _PACK_ID.fullmatch(value) is not None
+
+
 def grading_trailer(pack_id: str | None) -> str | None:
     """One line telling the reader how to grade the pack, or ``None``.
 
     Names the pack and the minimal grading call: ``pack_id``, ``rating`` and
     the item ids that helped and those that did not. ``rating`` is named
-    because a call without it records a success (``rating`` 1.0), which is the
-    wrong thing to suggest to a reader grading a pack that did not help.
+    because a call without it has the server derive one from the cited ids
+    (the helpful share), a weaker grade than the one the reader holds.
     ``None`` for anything that is not a well-formed pack id, so a
     caller-supplied value is never echoed.
     """
-    if not pack_id or _PACK_ID.fullmatch(pack_id) is None:
+    if not is_pack_id(pack_id):
         return None
     return (
         f'*Grade this pack: `record_feedback(pack_id="{pack_id}", rating=..., '
@@ -347,7 +358,7 @@ def hook_grading_ask(pack_id: str | None, *, ask_trace: bool = False) -> str | N
     twice. ``None`` for anything that is not a well-formed pack id, so no
     transcript text is ever echoed into a reply.
     """
-    if not pack_id or _PACK_ID.fullmatch(pack_id) is None:
+    if not is_pack_id(pack_id):
         return None
     parts = [
         (
@@ -377,6 +388,7 @@ __all__ = [
     "feedback_call",
     "grading_trailer",
     "hook_grading_ask",
+    "is_pack_id",
     "loop_skill",
     "mcp_instructions",
     "sdk_feedback_call",
