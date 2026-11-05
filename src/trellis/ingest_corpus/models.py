@@ -257,6 +257,14 @@ class CorpusSyncReport:
     #: Documents the ``--extract`` pass left alone because they are labelled
     #: above ``internal``: the entities it would mint carry no label.
     extraction_skipped_labelled: int = 0
+    #: Documents and chunks stored without a vector row because the egress gate
+    #: kept them off the embedder (``egress_withheld``): labelled above
+    #: ``internal`` while ``embeddings.local`` is not declared true. Keyword and
+    #: graph retrieval still find them. A fact about what is stored.
+    embed_skipped_egress_withheld: int = 0
+    #: Stored without a vector row because a store could not be asked for the
+    #: label (``egress_unreadable``). A fault a later sync may clear.
+    embed_skipped_egress_unreadable: int = 0
 
     def counts(self) -> dict[str, int]:
         by_action = {"new": 0, "update": 0, "skip": 0, "move": 0}
@@ -275,6 +283,8 @@ class CorpusSyncReport:
             "entities_extracted": self.entities_extracted,
             "edges_extracted": self.edges_extracted,
             "extraction_skipped_labelled": self.extraction_skipped_labelled,
+            "embed_skipped_egress_withheld": self.embed_skipped_egress_withheld,
+            "embed_skipped_egress_unreadable": self.embed_skipped_egress_unreadable,
             "warnings": len(self.warnings),
         }
 

@@ -23,6 +23,7 @@ from tests.unit.retrieve.test_sensitivity import label
 from trellis.auth import generate_api_key
 from trellis.core.vector_metadata import vector_metadata_diverges
 from trellis.ingest_corpus.models import chunk_doc_id
+from trellis.llm.egress import EgressGate
 from trellis.mcp.supersession import supersede_document
 from trellis.mutate import build_curate_executor
 from trellis.retrieve.embed_ingest_hook import (
@@ -817,7 +818,11 @@ class TestVectorsRowTakesItsDocumentsIdentity:
         """Honest writers are untouched: byte for byte, key order included."""
         registry.knowledge.document_store.put(item_id, LONG, doc_metadata)
         honest = build_vector_row(
-            item_id, LONG, doc_metadata, lambda _t: _vector(registry)
+            item_id,
+            LONG,
+            doc_metadata,
+            lambda _t: _vector(registry),
+            egress=EgressGate(None, local=True),
         )["metadata"]
         stored = self._post(client, registry, item_id, honest)
         assert json.dumps(stored) == json.dumps(honest)

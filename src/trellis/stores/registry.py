@@ -2065,6 +2065,12 @@ class StoreRegistry:
         the config block is never consulted, so a path that fails to resolve
         raises rather than falling back to it.
 
+        ``embeddings.local: true`` declares the embedder local (see
+        :attr:`embedding_local`). It is read first, so a malformed value raises
+        :class:`ConfigError` here rather than being taken as cloud, and it is
+        the only thing that lets a document labelled above ``internal`` reach
+        the embedder. Neither ``base_url`` nor ``TRELLIS_EMBEDDING_FN`` implies it.
+
         Returns ``None`` when no embedding is configured at all (no env
         var, ``embeddings.provider`` absent, ``null``, or ``""``), and
         also when the whole ``embeddings:`` block is not a mapping (a
@@ -2090,6 +2096,10 @@ class StoreRegistry:
         """
         if self._embedding_fn_cache is not _UNSET:
             return self._embedding_fn_cache  # type: ignore[return-value]
+
+        # A malformed ``embeddings.local`` is refused here, as a bad provider
+        # is, rather than reading as cloud in silence.
+        self.embedding_local  # noqa: B018
 
         resolved: Callable[[str], list[float]] | None = None
 
@@ -2167,6 +2177,28 @@ class StoreRegistry:
         # Assigned only after resolution returns, so a raise leaves _UNSET.
         self._embedding_fn_cache = resolved
         return resolved
+
+    @property
+    def embedding_local(self) -> bool:
+        """Whether ``embeddings.local: true`` declares the embedder local.
+
+        Never inferred: an embedder that says nothing is cloud, whatever its
+        ``base_url`` or ``TRELLIS_EMBEDDING_FN`` says, because only the
+        operator knows where a callable sends its input. The declaration is
+        read from the ``embeddings:`` block whichever knob supplied the
+        callable, so a deployment that sets only ``TRELLIS_EMBEDDING_FN`` still
+        declares with ``embeddings: {local: true}``. Stored content labelled
+        above ``internal`` reaches the embedder only when this is ``True``
+        (:meth:`trellis.llm.egress.EgressGate.for_embedder`).
+
+        Raises :class:`~trellis.errors.ConfigError` (setting ``embeddings.local``)
+        for a value that is not a boolean, and for ``local: true`` on a hosted
+        provider's default endpoint; see
+        :func:`trellis.llm.routing.resolve_embedding_local`.
+        """
+        from trellis.llm.routing import resolve_embedding_local  # noqa: PLC0415
+
+        return resolve_embedding_local(self._embedding_config)
 
     def embedding_source_label(self) -> str | None:
         """Which knob :attr:`embedding_fn` would read from, for display only.

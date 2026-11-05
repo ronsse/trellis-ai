@@ -84,6 +84,7 @@ import pytest
 
 from trellis.ingest_corpus.models import chunk_doc_id, corpus_doc_id
 from trellis.ingest_corpus.sync import sync_corpus
+from trellis.llm.egress import EgressGate
 from trellis.retrieve.embed_ingest_hook import build_vector_row
 from trellis.schemas.enums import TraceSource
 from trellis.schemas.trace import Trace, TraceContext
@@ -94,6 +95,9 @@ from trellis_workers.trace_embed.render import build_trace_metadata
 
 #: The two metadata keys ``resolve_recency_stamp`` reads out of the bag.
 CLOCK_KEYS = ("updated_at", "created_at")
+
+#: A gate that opens every document: these tests are about the clock, not egress.
+_OPEN_GATE = EgressGate(None, local=True)
 
 
 def _embed(text: str) -> list[float]:
@@ -119,6 +123,7 @@ class TestDerivedRowsPropagateTheSourceClock:
             "body text",
             {"created_at": "2024-02-03T10:00:00+00:00"},
             _embed,
+            egress=_OPEN_GATE,
         )
         assert row["metadata"]["created_at"] == "2024-02-03T10:00:00+00:00"
 
@@ -134,13 +139,19 @@ class TestDerivedRowsPropagateTheSourceClock:
             "body text",
             {"created_at": "2024-02-03T10:00:00+00:00"},
             _embed,
+            egress=_OPEN_GATE,
             created_at="2026-09-12T00:00:00+00:00",
         )
         assert row["metadata"]["created_at"] == "2024-02-03T10:00:00+00:00"
 
     def test_a_bag_with_no_clock_falls_back_to_the_row_clock(self) -> None:
         row = build_vector_row(
-            "doc-1", "body text", {}, _embed, created_at="2026-09-12T00:00:00+00:00"
+            "doc-1",
+            "body text",
+            {},
+            _embed,
+            egress=_OPEN_GATE,
+            created_at="2026-09-12T00:00:00+00:00",
         )
         assert row["metadata"]["created_at"] == "2026-09-12T00:00:00+00:00"
 

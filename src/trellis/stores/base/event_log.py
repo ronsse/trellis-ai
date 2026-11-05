@@ -388,6 +388,30 @@ class EventType(StrEnum):
     #: surfaced in ``trellis analyze health``.
     MEMORY_EXTRACTION_STATE = "memory_extraction.state"
 
+    #: Emitted by the embed-on-write path when it withholds a stored document
+    #: from the embedder because the document is labelled above ``internal``
+    #: and ``embeddings.local`` is not declared true, or because the label
+    #: could not be read. The document is stored as usual and gets no vector
+    #: row; keyword and graph retrieval still find it. One row per withheld
+    #: write, keyed by the document id (``entity_id``), so a count is a count
+    #: of writes, not of distinct documents.
+    #:
+    #: An event rather than a log line or a new probe: a skip that reaches
+    #: only the default-WARNING log is invisible, and an inline write has no
+    #: report of its own to carry a count (the batch jobs count under
+    #: ``egress_withheld`` in theirs). Fail-soft: a broken event log must not
+    #: fail the write.
+    #:
+    #: Payload schema (all keys always present): ``{verdict, reason}``.
+    #: ``verdict`` is ``"withheld"`` (a permanent fact about what is stored,
+    #: holding on a retry) or ``"unreadable"`` (a store that could not answer,
+    #: which a retry may clear); they are counted apart. ``reason`` is
+    #: ``"egress_withheld"`` or ``"egress_unreadable"``. Never document
+    #: content, a label value or a message. Read by
+    #: :mod:`trellis.ops.embed_egress_health` and surfaced in
+    #: ``trellis analyze health``.
+    EMBED_WITHHELD = "embed.withheld"
+
     # Empirical-observation ingestion — see adr-observation-entity-type.md
     # and Item 1 Phase 1 of plan-self-improvement-program.md. Emitted by
     # the ObservationHandler / MeasurementHandler when a new Observation

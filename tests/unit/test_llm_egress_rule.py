@@ -76,7 +76,13 @@ _SRC = Path(__file__).resolve().parents[2] / "src"
 
 #: Calls that answer "may this content reach this route?".
 _PREDICATE_NAMES = frozenset(
-    {"may_reach_route", "permits", "permits_metadata", "stored_verdict"}
+    {
+        "may_reach_route",
+        "permits",
+        "permits_metadata",
+        "stored_verdict",
+        "cited_verdict",
+    }
 )
 
 #: The module that defines the predicate; it may build gates however it likes.

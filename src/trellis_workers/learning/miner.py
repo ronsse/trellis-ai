@@ -538,17 +538,10 @@ class PrecedentMiner:
         kept: list[Trace] = []
         withheld = unreadable = 0
         for trace in traces:
-            verdicts = set()
-            for ref in trace.evidence_used:
-                if not ref.evidence_id:
-                    continue
-                verdict = gate.stored_verdict(ref.evidence_id)
-                verdicts.add(verdict)
-                if verdict is EgressVerdict.WITHHELD:
-                    break
-            if EgressVerdict.WITHHELD in verdicts:
+            verdict = gate.cited_verdict(ref.evidence_id for ref in trace.evidence_used)
+            if verdict is EgressVerdict.WITHHELD:
                 withheld += 1
-            elif EgressVerdict.UNREADABLE in verdicts:
+            elif verdict is EgressVerdict.UNREADABLE:
                 unreadable += 1
             else:
                 kept.append(trace)

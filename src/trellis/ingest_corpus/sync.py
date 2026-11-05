@@ -86,7 +86,11 @@ from trellis.ingest_corpus.models import (
     is_chunk_doc_id,
 )
 from trellis.ingest_corpus.walker import walk_corpus
-from trellis.llm.egress import may_reach_route
+from trellis.llm.egress import (
+    EGRESS_UNREADABLE_REASON,
+    EGRESS_WITHHELD_REASON,
+    may_reach_route,
+)
 from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
 from trellis.schemas.classification import sensitivity_of
 from trellis.schemas.document_metadata import DocumentMetadata
@@ -660,8 +664,11 @@ def _apply_record(
             relpath=outcome.relpath,
         )
     if not spans:
-        run_embed_on_ingest(
-            registry, outcome.doc_id, text, metadata, source=requested_by
+        _count_embed_outcome(
+            report,
+            run_embed_on_ingest(
+                registry, outcome.doc_id, text, metadata, source=requested_by
+            ),
         )
     else:
         # A document that has just *become* chunked keeps the whole-document
@@ -979,8 +986,11 @@ def _write_chunks(
             # the key mirror above is not enough. Metadata-only refreshes
             # deliberately don't — same convention as the document ingest
             # paths — which is why the mirror is what they are counted on.
-            run_embed_on_ingest(
-                registry, cid, chunk_content, metadata, source=requested_by
+            _count_embed_outcome(
+                report,
+                run_embed_on_ingest(
+                    registry, cid, chunk_content, metadata, source=requested_by
+                ),
             )
         else:
             mirror.metadata_only_writes += 1
@@ -990,6 +1000,24 @@ def _write_chunks(
                 mirror.rows_absent += 1
         written += 1
     return written
+
+
+def _count_embed_outcome(
+    report: CorpusSyncReport, outcome: dict[str, Any] | None
+) -> None:
+    """Count an embed the egress gate declined in the sync's own report.
+
+    ``run_embed_on_ingest`` is fail-soft and answers with a summary dict, so the
+    skip would otherwise surface only as an ``EMBED_WITHHELD`` event. The report
+    is what the operator running the sync reads; a withheld document is a fact
+    about what is stored and an unreadable one a fault, so they are counted
+    apart.
+    """
+    reason = outcome.get("reason") if outcome else None
+    if reason == EGRESS_WITHHELD_REASON:
+        report.embed_skipped_egress_withheld += 1
+    elif reason == EGRESS_UNREADABLE_REASON:
+        report.embed_skipped_egress_unreadable += 1
 
 
 def _prune_vanished(
