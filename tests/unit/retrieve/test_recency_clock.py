@@ -20,6 +20,7 @@ These tests pin three things:
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -722,3 +723,67 @@ class TestTheWireContractIsPinnedByLiteral:
         assert RECENCY_CLOCK_SOURCE == "source"
         assert RECENCY_CLOCK_ROW == "row"
         assert RECENCY_CLOCK_NONE == "none"
+
+
+class TestOneClockPerSearch:
+    """Rows whose text scores tie are ordered by age alone, so every row of one
+    search is aged against the same instant.
+
+    Each row used to read the clock itself, so a slow iteration between two
+    rows aged the second one more. A golden reply test caught it when two
+    documents written a moment apart came back in the opposite order on a
+    loaded runner. The stepping clock below makes that slow iteration a day.
+    """
+
+    @pytest.fixture
+    def stepping_clock(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ticks = itertools.count(1)
+
+        class SteppingClock(datetime):
+            @classmethod
+            def now(cls, tz: Any = None) -> SteppingClock:
+                instant = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(days=next(ticks))
+                return cls.fromtimestamp(instant.timestamp(), tz=tz or UTC)
+
+        monkeypatch.setattr("trellis.retrieve.strategies.datetime", SteppingClock)
+
+    def test_keyword_axis_ranks_the_newer_of_two_tied_rows_first(
+        self, stepping_clock: None
+    ) -> None:
+        store = MagicMock()
+        store.search.return_value = [
+            {
+                "doc_id": "older",
+                "content": "tied",
+                "metadata": {},
+                "rank": -0.8,
+                "created_at": "2025-12-01T00:00:00+00:00",
+            },
+            {
+                "doc_id": "newer",
+                "content": "tied",
+                "metadata": {},
+                "rank": -0.8,
+                "created_at": "2025-12-01T00:00:01+00:00",
+            },
+        ]
+        items = KeywordSearch(store).search("tied")
+        assert [item.item_id for item in items] == ["newer", "older"]
+
+    def test_semantic_axis_ranks_the_newer_of_two_tied_rows_first(
+        self, stepping_clock: None
+    ) -> None:
+        store = MagicMock()
+        store.query.return_value = [
+            {
+                "item_id": item_id,
+                "score": 0.8,
+                "metadata": {"content": "tied", "created_at": stamp},
+            }
+            for item_id, stamp in (
+                ("older", "2025-12-01T00:00:00+00:00"),
+                ("newer", "2025-12-01T00:00:01+00:00"),
+            )
+        ]
+        items = SemanticSearch(store, lambda _text: [0.0] * _DIMS).search("tied")
+        assert [item.item_id for item in items] == ["newer", "older"]

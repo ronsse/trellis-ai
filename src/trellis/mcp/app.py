@@ -34,6 +34,15 @@ from trellis_wire.loop_text import mcp_instructions
 #
 # The text lives in ``trellis_wire.loop_text``, beside every other statement of
 # the loop, so the surfaces are edited in one file.
+
+#: Tag on a tool whose reply can carry a ``**pack_id:**`` line, so a client can
+#: grade what the call served. The packaged Claude Code hooks
+#: (``trellis_cli.hooks.PACK_TOOLS``) keep a literal copy of these names, to
+#: start without importing this server; ``tests/unit/mcp/test_hook_text_claims.py``
+#: compares the copy to the tools carrying this tag, so a tagged tool the hooks
+#: do not know fails it. Tag every tool whose reply can print a pack id.
+PACK_TOOL_TAG = "returns-pack"
+
 mcp = FastMCP(
     "trellis",
     instructions=mcp_instructions(),

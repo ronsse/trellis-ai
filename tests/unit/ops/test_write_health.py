@@ -22,6 +22,7 @@ from trellis.ops.write_health import (
     _COLLISION_RATE_WARN,
     _MIN_ATTEMPTS_FOR_COLLISION_RATE,
     _REPEAT_COLLISION_WARN,
+    _TOO_DEEP_HINT,
     RECOVERY_WINDOW_SECONDS,
     NoopReason,
     RejectionKind,
@@ -257,6 +258,60 @@ class TestHints:
         rows = [{"kind": "type", "loc": "steps.0.result", "msg": ""}]
         (hint,) = hints_for_trace_rejections(rows)
         assert '{"summary"' in hint
+
+
+class TestJsonInvalidHints:
+    """A ``json_invalid`` row has two causes, and each gets its own hint.
+
+    The JSON parser stops at a nesting depth of its own (about 200 levels),
+    so a payload that deep reaches the rejection log as ``json_invalid`` too.
+    "Strict JSON, no trailing commas" would send that caller looking for a
+    comma that is not missing.
+    """
+
+    @staticmethod
+    def _deep_json(levels: int) -> str:
+        nested = '{"a":' * levels + "1" + "}" * levels
+        return (
+            '{"source": "agent", "intent": "x", "context": {}, '
+            f'"metadata": {nested}}}'
+        )
+
+    def test_a_payload_the_json_parser_gives_up_on_names_the_nesting_bound(
+        self,
+    ) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            Trace.model_validate_json(self._deep_json(300))
+        rows = classify_rejection(excinfo.value)
+        # Read the parser's own words, not our constant, so a changed phrase
+        # fails here rather than silently falling back to the comma hint.
+        assert rows[0]["kind"] == "json_invalid"
+        assert "recursion limit exceeded" in rows[0]["msg"]
+
+        assert hints_for_trace_rejections(rows) == [_TOO_DEEP_HINT]
+        assert "strict JSON" not in _TOO_DEEP_HINT
+
+    def test_an_ordinary_json_error_still_gets_the_strict_json_hint(self) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            Trace.model_validate_json('{"source": "agent",}')
+        rows = classify_rejection(excinfo.value)
+        assert rows[0]["kind"] == "json_invalid"
+
+        (hint,) = hints_for_trace_rejections(rows)
+        assert "strict JSON" in hint
+        assert hint != _TOO_DEEP_HINT
+
+    def test_the_two_causes_in_one_batch_each_keep_their_hint(self) -> None:
+        with pytest.raises(ValidationError) as deep:
+            Trace.model_validate_json(self._deep_json(300))
+        with pytest.raises(ValidationError) as comma:
+            Trace.model_validate_json('{"source": "agent",}')
+        rows = classify_rejection(deep.value) + classify_rejection(comma.value)
+
+        hints = hints_for_trace_rejections(rows)
+        assert hints[0] == _TOO_DEEP_HINT
+        assert len(hints) == 2
+        assert "strict JSON" in hints[1]
 
 
 class TestResolveTraceLoc:

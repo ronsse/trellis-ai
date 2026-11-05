@@ -26,7 +26,10 @@ network, no Trellis config. It reads that file as a bounded stream, and it
 fails open. Any exception, unreadable input or oversized transcript exits 0
 with no output, because a hook that breaks a session is worse than a loop that
 stays open. (Exit code 2 blocks in Claude Code, so the argument parser never
-exits 2 either.)
+exits 2 either.) One case is not unknown: a transcript path that is named but
+whose file does not exist yet, at ``UserPromptSubmit``, is a session that has
+retrieved nothing, so ``prework`` nudges. A file that exists but cannot be read
+stays unknown.
 
 Hook input fields used, from the Claude Code hooks reference: ``session_id``,
 ``transcript_path``, ``hook_event_name``, ``tool_name`` (``PreToolUse``),
@@ -84,7 +87,13 @@ DEFAULT_EDIT_SCOPE = "subagents"
 EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 EDIT_MATCHER = "Edit|Write|MultiEdit|NotebookEdit"
 
-#: Trellis tools whose reply carries a ``**pack_id:**`` header.
+#: Trellis tools whose reply can carry a ``**pack_id:**`` line: the header of a
+#: pack, the footer ``get_lessons`` prints behind ``TRELLIS_GET_LESSONS_PACK_EVENT``
+#: and the pack id ``get_items`` echoes. A literal copy, because this module must
+#: start without importing the MCP server (and its dependencies); the server
+#: marks each such tool with ``trellis.mcp.app.PACK_TOOL_TAG`` and
+#: ``tests/unit/mcp/test_hook_text_claims.py`` fails when this set and the tagged
+#: tools differ, so a new pack-returning tool cannot be missed here unnoticed.
 PACK_TOOLS = frozenset(
     {
         "get_context",
@@ -92,6 +101,8 @@ PACK_TOOLS = frozenset(
         "get_objective_context",
         "get_task_context",
         "get_sectioned_context",
+        "get_lessons",
+        "get_items",
     }
 )
 _FEEDBACK_TOOL = "record_feedback"
@@ -106,10 +117,24 @@ _ATTRIBUTION_KEYS = ("helpful_item_ids", "unhelpful_item_ids")
 #: scan that runs past the deadline gives up the same way.
 MAX_TRANSCRIPT_BYTES = 256 * 1024 * 1024
 SCAN_DEADLINE_SECONDS = 0.8
+#: A line longer than this is skipped unparsed and counted in
+#: :attr:`TranscriptFacts.skipped_lines`. Without it a single line (a tool result
+#: that dumped a large file, say) is read and parsed whole, and the deadline,
+#: checked between lines, cannot interrupt that. The lines the hooks read are a
+#: ``tool_use`` of a Trellis tool and the reply to a retrieval, both well under
+#: this.
+MAX_LINE_BYTES = 1024 * 1024
+#: The clock is read at least this often by bytes, as well as every 256 lines, so
+#: a run of long lines cannot outrun the deadline.
+_CLOCK_BYTES = 4 * 1024 * 1024
+_CLOCK_LINES = 256
 _MAX_STDIN_BYTES = 4 * 1024 * 1024
 
 #: The pack header every retrieval reply prints. A pack id is a ULID.
 _PACK_HEADER = re.compile(r"\*\*pack_id:\*\* `([0-9A-HJKMNP-TV-Z]{26})`")
+#: ``get_lessons`` prints the same label as a footer on a line of its own, so a
+#: reply longer than the header window is also read from its end.
+_PACK_FOOTER = re.compile(r"^\*\*pack_id:\*\* `([0-9A-HJKMNP-TV-Z]{26})`", re.MULTILINE)
 _HEADER_SEARCH_CHARS = 16384
 _SAFE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
@@ -137,6 +162,8 @@ class TranscriptFacts:
     saved_trace: bool = False
     #: Pack ids served and not yet named by attributed feedback, oldest first.
     ungraded: list[str] = field(default_factory=list)
+    #: Lines longer than :data:`MAX_LINE_BYTES`, skipped without being parsed.
+    skipped_lines: int = 0
 
 
 #: ``mcp``, the server, the tool: the three segments of an MCP tool name.
@@ -204,9 +231,21 @@ def _result_text(content: Any) -> str:
 
 
 def _header_pack_id(content: Any) -> str | None:
-    """The pack id a retrieval reply's header names, or ``None`` (an empty pack)."""
-    found = _PACK_HEADER.search(_result_text(content)[:_HEADER_SEARCH_CHARS])
-    return found.group(1) if found else None
+    """The pack id a retrieval reply names, or ``None`` (an empty pack).
+
+    A pack prints it in a header near the top. ``get_lessons`` prints it in a
+    footer, so a reply too long for the header window is also read from its end,
+    where only a line that starts with the label counts.
+    """
+    text = _result_text(content)
+    found = _PACK_HEADER.search(text[:_HEADER_SEARCH_CHARS])
+    if found:
+        return found.group(1)
+    if len(text) > _HEADER_SEARCH_CHARS:
+        footers = list(_PACK_FOOTER.finditer(text[-_HEADER_SEARCH_CHARS:]))
+        if footers:
+            return footers[-1].group(1)
+    return None
 
 
 class _Scan:
@@ -299,12 +338,27 @@ def _open_nonblocking(path: str | os.PathLike[str], flags: int) -> int:
     return os.open(path, flags | _O_NONBLOCK)
 
 
-def scan_transcript(
+def _skip_rest_of_line(handle: Any, started: float, deadline_seconds: float) -> bool:
+    """Read past the end of an over-long line without keeping it.
+
+    Returns ``False`` when the deadline passes first. Each read is at most
+    :data:`MAX_LINE_BYTES`, so memory stays bounded however long the line is.
+    """
+    while True:
+        chunk = handle.readline(MAX_LINE_BYTES)
+        if not chunk or chunk.endswith(b"\n"):
+            return True
+        if time.monotonic() - started > deadline_seconds:
+            return False
+
+
+def scan_transcript(  # noqa: PLR0911, PLR0912 - one return per fail-open guard
     path: str | os.PathLike[str] | None,
     *,
     stop_at_retrieval: bool = False,
     include_sidechain: bool = False,
     deadline_seconds: float = SCAN_DEADLINE_SECONDS,
+    missing_is_empty: bool = False,
 ) -> TranscriptFacts | None:
     """Stream a transcript JSONL file and report what it says about the loop.
 
@@ -312,7 +366,16 @@ def scan_transcript(
     (a named pipe would block the read), larger than
     :data:`MAX_TRANSCRIPT_BYTES` or slower to read than ``deadline_seconds``:
     the answer is then unknown, and an unknown answer never produces output. A
-    line that is not valid JSON (a truncated last line, say) is skipped.
+    line that is not valid JSON (a truncated last line, say) is skipped, and so
+    is a line longer than :data:`MAX_LINE_BYTES`, which is never parsed and is
+    counted in :attr:`TranscriptFacts.skipped_lines`.
+
+    ``missing_is_empty`` reads a path that is named but has no file (``ENOENT``
+    only) as an empty transcript, facts with nothing in them, instead of
+    unknown. Claude Code may not have written a fresh session's file when its
+    first prompt arrives; a file that is there but cannot be read (permissions,
+    a loop, a parent that is a file, I/O) stays unknown. No path at all is
+    unknown either way.
 
     ``include_sidechain`` keeps entries marked ``isSidechain``. A main-session
     scan leaves them out, so a subagent's retrieval cannot satisfy its parent;
@@ -333,9 +396,25 @@ def scan_transcript(
         if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_TRANSCRIPT_BYTES:
             return None
         with open(source, "rb", opener=_open_nonblocking) as handle:
-            for number, line in enumerate(handle):
-                if number % 256 == 0 and time.monotonic() - started > deadline_seconds:
-                    return None
+            lines_seen = 0
+            unclocked = 0
+            while True:
+                # One byte past the cap tells a line of exactly the cap from a
+                # longer one without reading the longer one whole.
+                line = handle.readline(MAX_LINE_BYTES + 1)
+                if not line:
+                    break
+                if lines_seen % _CLOCK_LINES == 0 or unclocked >= _CLOCK_BYTES:
+                    unclocked = 0
+                    if time.monotonic() - started > deadline_seconds:
+                        return None
+                lines_seen += 1
+                unclocked += len(line)
+                if len(line) > MAX_LINE_BYTES and not line.endswith(b"\n"):
+                    scan.facts.skipped_lines += 1
+                    if not _skip_rest_of_line(handle, started, deadline_seconds):
+                        return None
+                    continue
                 wanted = b'"tool_use"' in line or (
                     b'"tool_result"' in line
                     and any(use_id in line for use_id in scan.pending_ids)
@@ -357,6 +436,8 @@ def scan_transcript(
                 for block in content:
                     if isinstance(block, dict) and scan.block(block):
                         return scan.finish()
+    except FileNotFoundError:
+        return TranscriptFacts() if missing_is_empty else None
     except OSError:
         return None
     return scan.finish()
@@ -475,7 +556,13 @@ def decide_prework(  # noqa: PLR0911 - one return per fail-open guard
         return None
     if state.seen("prework", session):
         return None
-    facts = scan_transcript(_text(payload, "transcript_path"), stop_at_retrieval=True)
+    # A named transcript that is not there yet is a session with no retrieval:
+    # the first prompt of a fresh session is nudged, not left to prompt two.
+    facts = scan_transcript(
+        _text(payload, "transcript_path"),
+        stop_at_retrieval=True,
+        missing_is_empty=True,
+    )
     if facts is None or facts.retrieval_called:
         return None
     if not state.claim("prework", session):
@@ -527,6 +614,19 @@ def decide_edit_guard(
     }
 
 
+def _stop_hook_active(payload: dict[str, Any]) -> bool:
+    """True when this ``Stop`` follows a block from a stop hook.
+
+    Claude Code sends a bool. The string ``"true"`` (any case) counts too, and
+    that is the fail-safe reading: mistaking a second pass for a first would
+    block the model twice in a row, a loop, while mistaking a first pass for a
+    second skips one ask. Every other value (``1``, ``"yes"``, ``None``, an
+    absent key) reads as not active, as before.
+    """
+    value = payload.get("stop_hook_active")
+    return value is True or (isinstance(value, str) and value.strip().lower() == "true")
+
+
 def decide_grade(  # noqa: PLR0911 - one return per fail-open guard
     payload: dict[str, Any],
     state: HookState,
@@ -537,7 +637,7 @@ def decide_grade(  # noqa: PLR0911 - one return per fail-open guard
     from trellis_wire.loop_text import hook_grading_ask  # noqa: PLC0415
 
     # A second pass: the model already saw the ask. Never block twice in a row.
-    if payload.get("stop_hook_active") is True:
+    if _stop_hook_active(payload):
         return None
     session = _text(payload, "session_id")
     event = payload.get("hook_event_name")

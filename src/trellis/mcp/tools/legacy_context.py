@@ -9,7 +9,7 @@ from typing import Any
 
 from trellis.auth import SCOPE_READ
 from trellis.core.knobs import resolve_search_max_tokens
-from trellis.mcp.app import mcp
+from trellis.mcp.app import PACK_TOOL_TAG, mcp
 from trellis.mcp.auth import trellis_scope
 from trellis.mcp.boundary import _raise_invalid_params
 from trellis.mcp.tools.context import _flat_context, _sectioned_context
@@ -21,7 +21,7 @@ from trellis.stores.settings_store import load_settings_values
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(auth=trellis_scope(SCOPE_READ))
+@mcp.tool(auth=trellis_scope(SCOPE_READ), tags={PACK_TOOL_TAG})
 def search(
     query: str,
     limit: int = 10,
@@ -85,7 +85,7 @@ def search(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(auth=trellis_scope(SCOPE_READ))
+@mcp.tool(auth=trellis_scope(SCOPE_READ), tags={PACK_TOOL_TAG})
 def get_objective_context(
     intent: str,
     domain: str = "",
@@ -163,7 +163,7 @@ def get_objective_context(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(auth=trellis_scope(SCOPE_READ))
+@mcp.tool(auth=trellis_scope(SCOPE_READ), tags={PACK_TOOL_TAG})
 def get_task_context(
     intent: str,
     entity_ids: list[str] | None = None,
@@ -247,7 +247,7 @@ def get_task_context(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(auth=trellis_scope(SCOPE_READ))
+@mcp.tool(auth=trellis_scope(SCOPE_READ), tags={PACK_TOOL_TAG})
 def get_sectioned_context(
     intent: str,
     sections: list[dict[str, Any]],

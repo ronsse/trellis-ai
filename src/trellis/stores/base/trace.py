@@ -4,8 +4,26 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
+from trellis.errors import ValidationError
 from trellis.schemas.trace import Trace
+
+#: How many levels a trace's free-form payload may nest: ``steps[].args``,
+#: ``steps[].result``, ``outcome.metrics`` and ``metadata``. A field counts its
+#: own dict or list as level 1, so ``{"a": {"b": 1}}`` is 2 deep.
+#:
+#: The bound exists because a store keeps a trace as JSON and reads it back with
+#: a parser that gives up past 200 levels of the whole document (measured on
+#: pydantic-core's ``model_validate_json``). The writer has no such limit up to
+#: about 250 levels, so a trace nested between the two was accepted by ``append``
+#: and then failed every ``query`` and ``get`` that reached its row. The payload
+#: sits at most three levels down (trace, ``steps``, step), so 100 stays well
+#: inside that limit, and no real trace comes near it: tool output and agent
+#: state nest in single digits to low tens.
+MAX_TRACE_PAYLOAD_DEPTH = 100
+
+TRACE_TOO_DEEP_CODE = "trace_too_deep"
 
 
 def as_utc(moment: datetime) -> datetime:
@@ -31,6 +49,56 @@ def as_utc(moment: datetime) -> datetime:
         return datetime.max.replace(tzinfo=UTC)
 
 
+def _nests_deeper_than(value: Any, limit: int) -> bool:
+    """Whether *value* nests more than *limit* levels of dict or list.
+
+    Iterative, so a payload nested far past the interpreter's recursion limit
+    is measured rather than crashing the measurement, and it stops at the first
+    level over *limit*, so it also ends on a structure that contains itself.
+    """
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, dict):
+            children: Any = node.values()
+        elif isinstance(node, (list, tuple)):
+            children = node
+        else:
+            continue
+        if depth + 1 > limit:
+            return True
+        stack.extend((child, depth + 1) for child in children)
+    return False
+
+
+def check_trace_nesting(trace: Trace) -> None:
+    """Refuse a trace whose payload nests deeper than the store can read back.
+
+    Every :class:`TraceStore` calls this first in ``append``, before it writes
+    anything. It sits on the write path rather than on :class:`Trace` because a
+    check on the schema also runs when a stored row is read, and a row written
+    before the bound existed must still load.
+
+    Raises :class:`~trellis.errors.ValidationError` with code
+    ``trace_too_deep``, which the mutation executor reports as a rejection. The
+    message names the field and the bound, never the value.
+    """
+    fields: list[tuple[str, Any]] = []
+    for index, step in enumerate(trace.steps):
+        fields.append((f"steps[{index}].args", step.args))
+        fields.append((f"steps[{index}].result", step.result))
+    if trace.outcome is not None:
+        fields.append(("outcome.metrics", trace.outcome.metrics))
+    fields.append(("metadata", trace.metadata))
+    for path, value in fields:
+        if _nests_deeper_than(value, MAX_TRACE_PAYLOAD_DEPTH):
+            msg = (
+                f"trace {path} nests more than {MAX_TRACE_PAYLOAD_DEPTH} levels "
+                "deep; flatten it, or store the nested part as a JSON string"
+            )
+            raise ValidationError(msg, errors=[msg], code=TRACE_TOO_DEEP_CODE)
+
+
 class TraceStore(ABC):
     """Abstract interface for immutable trace storage."""
 
@@ -38,7 +106,9 @@ class TraceStore(ABC):
     def append(self, trace: Trace) -> str:
         """Store a trace (immutable).
 
-        Returns trace_id. Raises if trace_id already exists.
+        Returns trace_id. Raises if trace_id already exists. Every backend
+        calls :func:`check_trace_nesting` before writing, so a trace it could
+        not read back is refused instead of stored.
         """
 
     @abstractmethod

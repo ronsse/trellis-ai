@@ -102,6 +102,7 @@ from trellis.stores.base.event_log import (
     resolve_scan_window,
     scan_events,
 )
+from trellis.stores.base.trace import MAX_TRACE_PAYLOAD_DEPTH
 
 if TYPE_CHECKING:
     from trellis.stores.registry import StoreRegistry
@@ -706,6 +707,16 @@ _HINT_BUILDERS: dict[str, Callable[[_LocTarget], str]] = {
 }
 
 
+#: What pydantic's JSON parser says when a document nests past its limit.
+_JSON_TOO_DEEP = "recursion limit exceeded"
+
+_TOO_DEEP_HINT = (
+    "a field of the trace nests too deep: keep step args and result, outcome "
+    f"metrics and metadata under {MAX_TRACE_PAYLOAD_DEPTH} levels, or store the "
+    "nested part as a JSON string"
+)
+
+
 def _hint_for_rejection(kind: str, loc: str) -> str | None:
     """One hint for one taxonomy row, or ``None`` when nothing is derivable."""
     if kind == "json_invalid":
@@ -746,7 +757,12 @@ def hints_for_trace_rejections(rows: list[dict[str, str]]) -> list[str]:
     """
     hints: list[str] = []
     for row in rows:
-        hint = _hint_for_rejection(row["kind"], row["loc"])
+        if row["kind"] == "json_invalid" and _JSON_TOO_DEEP in row.get("msg", ""):
+            # The parser's own depth limit, not a typo: "strict JSON" would send
+            # the caller to look for a comma that is not missing.
+            hint: str | None = _TOO_DEEP_HINT
+        else:
+            hint = _hint_for_rejection(row["kind"], row["loc"])
         if hint and hint not in hints:
             hints.append(hint)
     return hints
