@@ -179,7 +179,10 @@ def _split_full_name(full_name: str, expected: int) -> tuple[str, ...] | None:
     if "`" in key:  # a part holding a dot, which Unity Catalog does not allow
         return None
     parts = tuple(key.split("."))
-    return parts if len(parts) == expected and all(parts) else None
+    # A value the normaliser could not parse comes back unchanged, so a blank
+    # part (``a. .b``) is refused here rather than read as a name.
+    ok = len(parts) == expected and all(part.strip() for part in parts)
+    return parts if ok else None
 
 
 def _fold(value: Any) -> str:
