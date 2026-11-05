@@ -501,6 +501,7 @@ class TestRedactedSummaryIsNotOverwritten:
         """
         from unittest.mock import MagicMock
 
+        from trellis.llm.egress import EgressGate
         from trellis_workers.trace_embed.worker import TraceEmbedReport, _process_one
 
         traces = seed_traces(registry, 2)
@@ -511,6 +512,10 @@ class TestRedactedSummaryIsNotOverwritten:
                 trace,
                 executor=MagicMock(),
                 handler=MagicMock(),
+                egress=EgressGate.for_embedder(
+                    registry, registry.knowledge.document_store
+                ),
+                registry=registry,
                 vector_store=registry.knowledge.vector_store,
                 document_store=registry.knowledge.document_store,
                 dry_run=dry_run,

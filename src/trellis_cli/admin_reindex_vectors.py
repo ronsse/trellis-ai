@@ -35,7 +35,10 @@ import structlog
 import typer
 from rich.markup import escape
 
-from trellis.core.reserved_doc_ids import is_trace_summary_doc_id
+from trellis.core.reserved_doc_ids import (
+    TRACE_SUMMARY_DOC_ID_PREFIX,
+    is_trace_summary_doc_id,
+)
 from trellis.errors import StoreError, TrellisError
 from trellis.llm.egress import EgressGate, EgressVerdict
 from trellis.retrieve.embed_ingest_hook import EmbedWithheldError, build_vector_row
@@ -46,6 +49,7 @@ from trellis_cli.stores import _get_registry
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from trellis.stores.base.trace import TraceStore
     from trellis.stores.base.vector import VectorStore
     from trellis.stores.registry import StoreRegistry
 
@@ -113,12 +117,61 @@ def _skip_reason(
     return None
 
 
+def _cited_verdict(
+    doc_id: str,
+    egress: EgressGate,
+    open_trace_store: Callable[[], TraceStore],
+) -> EgressVerdict:
+    """What the documents a trace summary's trace cites say, else ``PERMITTED``.
+
+    A ``trace-summary:`` document carries no label of its own: it is derived
+    from a trace, so (as in ``worker embed-traces``) it is judged by the
+    documents that trace cites. A trace that cannot be loaded is ``UNREADABLE``:
+    nothing says what it cited, so nothing says the summary may be sent. Any
+    other id, and any id on a gate that is local, is ``PERMITTED`` without a
+    read; the trace store is not opened for either.
+    """
+    if egress.local or not is_trace_summary_doc_id(doc_id):
+        return EgressVerdict.PERMITTED
+    try:
+        trace = open_trace_store().get(doc_id[len(TRACE_SUMMARY_DOC_ID_PREFIX) :])
+    # GRACEFUL-DEGRADATION: fail closed. A trace store that cannot answer must
+    # not read as permission; the count says it was a fault, not a label.
+    except Exception:
+        return EgressVerdict.UNREADABLE
+    if trace is None:
+        return EgressVerdict.UNREADABLE
+    return egress.cited_verdict(ref.evidence_id for ref in trace.evidence_used)
+
+
+def _egress_verdict(
+    doc: dict[str, Any],
+    egress: EgressGate,
+    open_trace_store: Callable[[], TraceStore],
+) -> EgressVerdict:
+    """Whether the listed document may be sent: its own label, and a summary's trace's.
+
+    Both are asked and ``WITHHELD`` wins over ``UNREADABLE``, as in mining.
+    """
+    doc_id = doc["doc_id"]
+    own = egress.verdict(doc_id, doc.get("metadata"))
+    if own is EgressVerdict.WITHHELD:
+        return own
+    verdicts = {own, _cited_verdict(doc_id, egress, open_trace_store)}
+    if EgressVerdict.WITHHELD in verdicts:
+        return EgressVerdict.WITHHELD
+    if EgressVerdict.UNREADABLE in verdicts:
+        return EgressVerdict.UNREADABLE
+    return EgressVerdict.PERMITTED
+
+
 def _embed_doc(
     doc: dict[str, Any],
     content: str,
     *,
     embedding_fn: Callable[[str], list[float]],
     egress: EgressGate,
+    open_trace_store: Callable[[], TraceStore],
     dry_run: bool,
     tally: dict[str, int],
 ) -> dict[str, Any] | None:
@@ -131,10 +184,13 @@ def _embed_doc(
     """
     doc_id = doc["doc_id"]
     metadata = doc.get("metadata")
+    verdict = _egress_verdict(doc, egress, open_trace_store)
     if dry_run:
-        verdict = egress.verdict(doc_id, metadata)
         permitted = verdict is EgressVerdict.PERMITTED
         tally["embedded" if permitted else _egress_key(verdict)] += 1
+        return None
+    if verdict is not EgressVerdict.PERMITTED:
+        tally[_egress_key(verdict)] += 1
         return None
     try:
         return build_vector_row(
@@ -180,7 +236,10 @@ def run_reindex_vectors(
     A document the egress gate keeps off the embedder (labelled above
     ``internal`` while ``embeddings.local`` is not declared true) is counted in
     ``skipped_egress_withheld``, or ``skipped_egress_unreadable`` when a store
-    could not be asked, and gets no vector; it is not an error. An existing
+    could not be asked, and gets no vector; it is not an error. A
+    ``trace-summary:`` document is judged by the documents its trace cites, as
+    ``worker embed-traces`` judges it, and is unreadable when that trace cannot
+    be loaded. An existing
     vector row is never dropped here: this command only upserts.
     Per-document embed failures are counted and
     logged, never fatal — rerunning is always safe because rows are
@@ -212,6 +271,10 @@ def run_reindex_vectors(
 
     # One gate per run: it carries the parent cache a chunk is judged through.
     egress = EgressGate.for_embedder(registry, document_store)
+
+    def open_trace_store() -> TraceStore:
+        return registry.operational.trace_store
+
     scanned = 0
     tally = dict.fromkeys(("embedded", "errors", "withheld", "unreadable"), 0)
     skipped = dict.fromkeys(("existing", "empty", "reserved"), 0)
@@ -242,6 +305,7 @@ def run_reindex_vectors(
                 content,
                 embedding_fn=embedding_fn,
                 egress=egress,
+                open_trace_store=open_trace_store,
                 dry_run=dry_run,
                 tally=tally,
             )
@@ -342,11 +406,20 @@ def register(admin_app: typer.Typer) -> None:
                 summary["skipped_egress_withheld"]
                 or summary["skipped_egress_unreadable"]
             ):
+                console.print("[yellow]Kept off the embedder:[/yellow]")
+            if summary["skipped_egress_withheld"]:
                 console.print(
-                    f"[yellow]Kept off the embedder:[/yellow] "
-                    f"{summary['skipped_egress_withheld']} withheld by label "
-                    f"(egress_withheld), {summary['skipped_egress_unreadable']} "
-                    f"unreadable (egress_unreadable); "
-                    f"embeddings.local is not declared true"
+                    f"  {summary['skipped_egress_withheld']} withheld "
+                    f"(egress_withheld): labelled above internal, or an orphan "
+                    f"chunk or unparseable row, while embeddings.local is not "
+                    f"declared true",
+                    soft_wrap=True,
+                )
+            if summary["skipped_egress_unreadable"]:
+                console.print(
+                    f"  {summary['skipped_egress_unreadable']} unreadable "
+                    f"(egress_unreadable): a store could not be asked, or a trace "
+                    f"summary's trace could not be loaded; a later run may clear it",
+                    soft_wrap=True,
                 )
         raise typer.Exit(code=EXIT_OK)

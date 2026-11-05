@@ -31,6 +31,7 @@ import pytest
 
 from trellis.classify.feedback import apply_noise_tags
 from trellis.core.vector_metadata import vector_metadata_diverges
+from trellis.llm.egress import EgressGate
 from trellis.retrieve.embed_ingest_hook import build_vector_row
 from trellis.retrieve.noise import (
     DEFAULT_SIGNAL_QUALITY_SPEC,
@@ -87,7 +88,9 @@ def _ingest_and_embed(
         metadata["content_tags"] = {"signal_quality": signal_quality}
     content = f"{INTENT} for {doc_id}"
     doc_store.put(doc_id, content, metadata)
-    row = build_vector_row(doc_id, content, metadata, _embedding_fn)
+    row = build_vector_row(
+        doc_id, content, metadata, _embedding_fn, egress=EgressGate(None, local=True)
+    )
     vector_store.upsert(row["item_id"], row["vector"], row["metadata"])
 
 

@@ -16,7 +16,8 @@ content to an LLM or an embedder goes through one of them:
 * :func:`may_reach_route` takes a label and a locality.
 * :class:`EgressGate` takes a stored document (id plus metadata through
   :meth:`~EgressGate.permits`, or just the id through
-  :meth:`~EgressGate.stored_verdict`), so a chunk is judged by its parent's
+  :meth:`~EgressGate.stored_verdict`; content that cites documents through
+  :meth:`~EgressGate.cited_verdict`), so a chunk is judged by its parent's
   label as the retrieval gate judges it, and fails closed: a label that cannot
   be read, a parent that cannot be fetched, or a chunk-shaped id whose parent
   row is absent, answers "no" (retrieval judges that last case by the chunk's
@@ -47,8 +48,12 @@ names: one above ``internal`` withholds the whole trace or session, and one a
 store could not be asked about keeps it off the route as ``UNREADABLE``, which
 the job reports apart from a label. Neither carries a label of its own, so a
 trace or session that names no stored document reads as unlabelled and is sent
-as before. There are no exempt senders: every site that sends stored content
-to a model or an embedder is rostered in the tripwires below.
+as before. That holds for an embedder as for an LLM: a trace summary is embedded
+only if the documents its trace cites may be (``worker embed-traces``, and
+``admin reindex-vectors`` over a ``trace-summary:`` id), and the summary's own
+metadata, which sets no label, is not what decides it. There are no exempt
+senders: every site that sends stored content to a model or an embedder is
+rostered in the tripwires below.
 
 ``tests/unit/test_llm_egress_rule.py`` and ``tests/unit/test_embed_egress_rule.py``
 roster the call sites and require each to reference this module; they are
@@ -64,7 +69,7 @@ This module reads labels; it does not edit them and sits outside
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -319,6 +324,26 @@ class EgressGate:
             # kind of closed.
             return failed_read_verdict(exc)
         return self.verdict(doc_id, metadata)
+
+    def cited_verdict(self, doc_ids: Iterable[str]) -> EgressVerdict:
+        """Whether content that cites the stored documents ``doc_ids`` may be sent.
+
+        For content that names documents without being one, a trace's
+        ``evidence_used``: it is judged by every document it cites, each through
+        :meth:`stored_verdict`. One ``WITHHELD`` citation withholds it whatever
+        else failed to read; otherwise one ``UNREADABLE`` citation makes it
+        unreadable. An empty id is skipped, and content that cites nothing is
+        ``PERMITTED``. A local gate answers before it reads anything.
+        """
+        unreadable = False
+        for doc_id in doc_ids:
+            if not doc_id:
+                continue
+            verdict = self.stored_verdict(doc_id)
+            if verdict is EgressVerdict.WITHHELD:
+                return verdict
+            unreadable = unreadable or verdict is EgressVerdict.UNREADABLE
+        return EgressVerdict.UNREADABLE if unreadable else EgressVerdict.PERMITTED
 
     def verdict(self, doc_id: str, metadata: Mapping[str, Any] | None) -> EgressVerdict:
         """Whether the document ``doc_id`` carrying ``metadata`` may be sent.

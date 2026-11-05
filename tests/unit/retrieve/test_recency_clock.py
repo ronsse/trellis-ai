@@ -393,6 +393,7 @@ class TestSemanticAxisResidual:
         # Why the residual is reachable rather than theoretical: the embed
         # hook's own stamp is a ``setdefault``, so a document carrying a
         # garbage ``created_at`` keeps it.
+        from trellis.llm.egress import EgressGate
         from trellis.retrieve.embed_ingest_hook import build_vector_row
 
         row = build_vector_row(
@@ -400,6 +401,7 @@ class TestSemanticAxisResidual:
             "x",
             {"created_at": "last tuesday"},
             _embed,
+            egress=EgressGate(None, local=True),
             created_at=datetime.now(UTC).isoformat(),
         )
         assert row["metadata"]["created_at"] == "last tuesday"

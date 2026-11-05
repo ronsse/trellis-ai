@@ -2850,12 +2850,21 @@ def _render_embed_traces_text(payload: dict[str, Any]) -> None:
             f"  redacted: {payload['skipped_redacted']} trace(s) skipped "
             f"because their summary was redacted"
         )
-    if payload["skipped_egress_withheld"] or payload["skipped_egress_unreadable"]:
+    if payload["skipped_egress_withheld"]:
         console.print(
-            f"  egress: {payload['skipped_egress_withheld']} withheld by label "
-            f"(egress_withheld), {payload['skipped_egress_unreadable']} "
-            f"unreadable (egress_unreadable); stored without a vector because "
-            f"embeddings.local is not declared true"
+            f"  egress: {payload['skipped_egress_withheld']} withheld "
+            f"(egress_withheld): a trace cites a document labelled above "
+            f"internal, or an orphan chunk, while embeddings.local is not "
+            f"declared true; the cursor moved past it",
+            soft_wrap=True,
+        )
+    if payload["skipped_egress_unreadable"]:
+        console.print(
+            f"  egress: {payload['skipped_egress_unreadable']} unreadable "
+            f"(egress_unreadable): a store could not be asked for the label of "
+            f"a document a trace cites; the cursor is held and the next pass "
+            f"retries",
+            soft_wrap=True,
         )
     console.print(
         f"  cursor: {payload['watermark_before'] or '(none)'} -> "

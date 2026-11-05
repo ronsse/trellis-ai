@@ -276,11 +276,18 @@ class TestTruncationAtStrategySites:
         a no-op over it: a cut not made at embed time is never made at all,
         and the size note never fires (#310).
         """
+        from trellis.llm.egress import EgressGate
         from trellis.retrieve.embed_ingest_hook import build_vector_row
         from trellis.retrieve.strategies import SemanticSearch
 
         content = _LONG_PROSE * 3
-        row = build_vector_row("d1", content, None, lambda _t: [0.1, 0.2])
+        row = build_vector_row(
+            "d1",
+            content,
+            None,
+            lambda _t: [0.1, 0.2],
+            egress=EgressGate(None, local=True),
+        )
         store = MagicMock()
         store.query.return_value = [
             {"item_id": row["item_id"], "score": 0.9, "metadata": row["metadata"]}

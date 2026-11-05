@@ -15,6 +15,7 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
+from tests.unit.workers.trace_embed.conftest import make_trace
 from trellis.errors import ConfigError
 from trellis.stores.registry import _KnowledgePlane
 from trellis_cli.admin import admin_app
@@ -178,6 +179,11 @@ class TestReindexVectorsLeavesReservedIdsToTheWorker:
         self, cli_env
     ) -> None:
         self._seed_reserved()
+        # A summary is judged by the documents its trace cites, so the trace it
+        # was derived from has to exist for the row to be judged at all.
+        _get_registry().operational.trace_store.append(
+            make_trace(1, intent="Investigate widget-0001")
+        )
         vector_store = _get_registry().knowledge.vector_store
         vector_store.upsert(self.RESERVED, [9.0, 9.0, 9.0], {"content": "stale"})
 
