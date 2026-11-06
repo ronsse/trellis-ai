@@ -45,6 +45,7 @@ from trellis.core.pack_holdout import (
     HOLDOUT_SECTIONS_KEY,
     is_held_out,
 )
+from trellis.core.precedent_document import is_promoted_precedent_document
 from trellis.core.variants import VARIANTS_KEY, active_variants
 from trellis.learning.scoring import normalize_intent_family
 from trellis.meta.agents import META_AGENT_PREFIX
@@ -92,6 +93,10 @@ from trellis.retrieve.parent_verdicts import (
     partition_by_parent_archived,
     partition_by_parent_signal_quality,
 )
+from trellis.retrieve.precedents import (
+    PRECEDENT_WITHHELD_UNREADABLE,
+    PrecedentClearance,
+)
 from trellis.retrieve.public_pack import (
     project_for_public,
     readable_stored_copy,
@@ -100,6 +105,7 @@ from trellis.retrieve.public_rank import PublicRead, public_read_slot
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.sensitivity import (
     SENSITIVITY_REJECTION_REASON,
+    SENSITIVITY_UNREADABLE_REJECTION_REASON,
     CandidateIndex,
     conceal_unreadable_successors,
     concealed_ids_metadata,
@@ -145,6 +151,7 @@ from trellis.schemas.well_known import ACTIVITY
 from trellis.stores.advisory_store import AdvisoryStore
 from trellis.stores.base.document import DocumentStore
 from trellis.stores.base.event_log import EventLog, EventType
+from trellis.stores.base.graph import GraphStore
 
 logger = structlog.get_logger()
 
@@ -832,6 +839,7 @@ class PackBuilder:
         class_prior_config: ClassPriorConfig | None = None,
         document_store: DocumentStore | None = None,
         excerpt_max_chars: int = EXCERPT_MAX_CHARS,
+        graph_store: GraphStore | None = None,
     ) -> None:
         if not 0.0 <= holdout_rate <= 1.0:
             msg = f"holdout_rate must be in [0.0, 1.0]; got {holdout_rate!r}"
@@ -924,6 +932,10 @@ class PackBuilder:
         #: same "no verdict, serve the chunk" outcome a store that simply
         #: lacks the row produces.
         self._document_store = document_store
+        #: Where a promoted precedent's ``source_item_id`` is read from (its
+        #: graph node), for :meth:`_apply_precedent_source_gate`. ``None`` leaves
+        #: that gate judging a precedent by its own row only.
+        self._graph_store = graph_store
         #: The cut :func:`~trellis.retrieve.excerpts.truncate_excerpt` makes
         #: of a stored document's text, the same one the keyword axis was
         #: built with (:func:`build_strategies` ``excerpt_max_chars``). Only
@@ -1292,6 +1304,12 @@ class PackBuilder:
             all_items, clearance, parent_verdict_cache
         )
         rejected.extend(self._reject(over_clearance, SENSITIVITY_REJECTION_REASON))
+        # A promoted precedent is judged by its source's label as well as its
+        # own (#1080), at this seam so every strategy is covered.
+        all_items, precedent_withheld = self._apply_precedent_source_gate(
+            all_items, clearance
+        )
+        rejected.extend(precedent_withheld)
         # A loser kept above still carries its stored ``superseded_by``: drop
         # an id the caller cannot read from the served copy (#1029).
         all_items = conceal_unreadable_successors(
@@ -1735,6 +1753,12 @@ class PackBuilder:
             all_items, clearance, parent_verdict_cache
         )
         rejected.extend(self._reject(over_clearance, SENSITIVITY_REJECTION_REASON))
+        # A promoted precedent is judged by its source's label as well as its
+        # own (#1080), at this seam so every strategy is covered.
+        all_items, precedent_withheld = self._apply_precedent_source_gate(
+            all_items, clearance
+        )
+        rejected.extend(precedent_withheld)
         # A kept loser's stored ``superseded_by`` is dropped when the caller
         # cannot read the successor — see build() (#1029).
         all_items = conceal_unreadable_successors(
@@ -4029,6 +4053,46 @@ class PackBuilder:
         malformed_row_skips[strategy_name] = malformed_row_skips.get(
             strategy_name, 0
         ) + len(skipped)
+
+    def _apply_precedent_source_gate(
+        self, items: list[PackItem], clearance: Sensitivity
+    ) -> tuple[list[PackItem], list[RejectedItem]]:
+        """Withhold a promoted precedent the caller cannot read the source of.
+
+        :class:`~trellis.retrieve.precedents.PrecedentClearance` is the one
+        predicate the listings, the by-id reads and search ask as well (#1080).
+        A precedent whose source (or own row) is above ``clearance`` is rejected
+        under :data:`SENSITIVITY_REJECTION_REASON`, and one whose lookup failed
+        under :data:`SENSITIVITY_UNREADABLE_REJECTION_REASON`, so an outage is
+        counted apart from a label that said no. Nothing is rewritten. A
+        ``restricted`` caller, a builder with no document store, and a pool with
+        no precedent in it pass through untouched.
+        """
+        if clearance == "restricted" or self._document_store is None:
+            return items, []
+        if not any(is_promoted_precedent_document(i.item_id) for i in items):
+            return items, []
+        gate = PrecedentClearance(self._document_store, clearance, self._graph_store)
+        kept: list[PackItem] = []
+        labelled: list[PackItem] = []
+        unreadable: list[PackItem] = []
+        for item in items:
+            reason = (
+                gate.verdict_of(item.item_id)
+                if is_promoted_precedent_document(item.item_id)
+                else None
+            )
+            if reason is None:
+                kept.append(item)
+            elif reason == PRECEDENT_WITHHELD_UNREADABLE:
+                unreadable.append(item)
+            else:
+                labelled.append(item)
+        rejected = self._reject(labelled, SENSITIVITY_REJECTION_REASON)
+        rejected.extend(
+            self._reject(unreadable, SENSITIVITY_UNREADABLE_REJECTION_REASON)
+        )
+        return kept, rejected
 
     @staticmethod
     def _reject(

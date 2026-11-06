@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from trellis.auth import SCOPE_ADMIN, SCOPE_EXTERNAL, clearance_of
 from trellis.feedback.attribution import is_sectioned_payload
 from trellis.feedback.pack_rows import has_served_rows
+from trellis.retrieve.precedents import PrecedentClearance
 from trellis.retrieve.public_rank import PublicRead, public_keyword_rows
 from trellis.retrieve.sensitivity import (
     DocumentClearance,
@@ -449,9 +450,11 @@ def get_document(
     """Get a single document with full content and metadata.
 
     A document labelled above the caller's clearance answers 404, exactly
-    as a missing one does. ``document.label`` says how the row is labelled
-    (``sensitivity``, ``stored``, ``corrupt``, ``external_readable``), for a public-only
-    caller too, whose ``metadata`` carries no label. A document whose
+    as a missing one does, and so does a promoted precedent whose source is
+    labelled above it (its text is never rewritten). ``document.label`` says how
+    the row is labelled (``sensitivity``, ``stored``, ``corrupt``,
+    ``external_readable``), for a public-only caller too, whose ``metadata``
+    carries no label. A document whose
     ``lifecycle.superseded_by``, ``supersedes_doc_id`` or ``updates_doc_id``
     names a document the caller may not read is served without that id.
     """
@@ -464,6 +467,11 @@ def get_document(
     gate = DocumentClearance(store, clearance)
     doc = read_document_row(store, doc_id, clearance)
     if doc is not None and not gate.permits(doc_id, doc.get("metadata")):
+        doc = None
+    # A promoted precedent is judged by its source's label as well as its own
+    # (#1080): the same predicate the listings, search and the pack ask.
+    precedents = PrecedentClearance(store, clearance, registry.knowledge.graph_store)
+    if doc is not None and precedents.verdict_of(doc_id) is not None:
         doc = None
     if doc is None:
         raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}")

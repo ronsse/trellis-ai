@@ -238,6 +238,7 @@ def build_pack_builder(
         # chunks (trellis.retrieve.parent_verdicts). Every surface that
         # goes through this factory gets the lookup wired in.
         document_store=registry.knowledge.document_store,
+        graph_store=registry.knowledge.graph_store,
         # The same cut the keyword axis was built with, for the public-only
         # path, which re-reads each item's text from the stored document.
         excerpt_max_chars=excerpt_max_chars,

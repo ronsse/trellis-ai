@@ -43,6 +43,12 @@ PRECEDENT_ENTITY_ID_PREFIX = "precedent://learning/"
 #: shared by every surface that refuses one so they cannot disagree.
 RESERVED_DOCUMENT_ID_CODE = "reserved_document_id"
 
+#: The node property a promotion stamps with its own statement about the source
+#: text it wrote (``source_labelled``, ``source_redacted``, ...). Serving trusts
+#: it to exempt a precedent from its source's label, so ``entity.update`` refuses
+#: a caller-set value (#1080).
+SOURCE_EXCERPT_STATUS_KEY = "source_excerpt_status"
+
 
 def reserved_document_id_message(field: str, doc_id: str) -> str:
     """The refusal text for a caller-chosen ``doc_id`` in the reserved namespace.
@@ -68,6 +74,7 @@ def is_promoted_precedent_document(doc_id: object) -> bool:
 __all__ = [
     "PRECEDENT_ENTITY_ID_PREFIX",
     "RESERVED_DOCUMENT_ID_CODE",
+    "SOURCE_EXCERPT_STATUS_KEY",
     "is_promoted_precedent_document",
     "reserved_document_id_message",
 ]

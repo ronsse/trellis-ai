@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
@@ -305,7 +305,7 @@ def list_precedents(
     gate = (
         None
         if clearance == "restricted"
-        else _ListingClearance(document_store, clearance)
+        else PrecedentClearance(document_store, clearance, graph_store)
     )
     nodes: dict[str, dict[str, Any] | None] = {}
 
@@ -406,21 +406,101 @@ def _holds_nothing_of_source(
     return source not in text
 
 
-class _ListingClearance:
-    """What a caller at ``clearance`` may be served from a precedent listing.
+#: A precedent withheld because its source (or its own row) is above the
+#: caller's clearance: the label said no.
+PRECEDENT_WITHHELD_LABELLED = "labelled"
 
-    One instance per listing. Each id is judged once, in a batch per fetch
-    window (:meth:`barred_events`), and the verdict is kept for the pointer
-    concealment that follows (:func:`_conceal_source_pointers`), so a listing
-    reads each document once however many rows name it.
+#: A precedent withheld because the lookup that would have judged it failed (a
+#: store that raised). Fails closed, and is counted apart from a label that said
+#: no so an outage does not read as a labelled corpus.
+PRECEDENT_WITHHELD_UNREADABLE = "unreadable"
+
+
+class _FaultRecordingStore:
+    """A document store that remembers which ids it failed to read.
+
+    ``readable_ids`` fails closed on a store error and logs it, which leaves "the
+    label said no" and "the store could not answer" looking alike in its result.
+    This wraps the store handed to it and notes each id whose ``get`` raised, so
+    the caller can tell the two apart without changing ``readable_ids``.
+    """
+
+    def __init__(self, inner: DocumentStore) -> None:
+        self._inner = inner
+        self.faulted: set[str] = set()
+
+    def get(self, doc_id: str) -> dict[str, Any] | None:
+        try:
+            return self._inner.get(doc_id)
+        except Exception:
+            self.faulted.add(doc_id)
+            raise
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def _node_holds_nothing_of_source(node: dict[str, Any], source: str) -> bool:
+    """Whether ``node``'s own text holds nothing of ``source``.
+
+    :func:`_holds_nothing_of_source` for a caller with the node and no event
+    (a by-id read, a search hit, a pack item): the node reads ``source_labelled``
+    and the source id is in neither its name nor its description. The node's
+    text is what those surfaces serve, so there is no older event to compare.
+    """
+    # Deferred: ``trellis.learning`` imports the retrieve package.
+    from trellis.learning.scoring import SOURCE_EXCERPT_LABELLED  # noqa: PLC0415
+
+    props = node.get("properties") or {}
+    if props.get("source_excerpt_status") != SOURCE_EXCERPT_LABELLED:
+        return False
+    name = props.get("name")
+    description = props.get("description")
+    text = "\n".join(v for v in (name, description) if isinstance(v, str))
+    return source not in text
+
+
+class PrecedentClearance:
+    """What a caller at ``clearance`` may be served of a promoted precedent.
+
+    The one predicate every route asks (#1080), so the listing, the by-id reads,
+    search and the pack cannot disagree about a precedent. A precedent carries no
+    label, so it is judged by two others, resolved when it is served: its own
+    document row (stored at its entity id) and the document named by its
+    ``source_item_id``, unless it holds nothing of that source
+    (:func:`_holds_nothing_of_source`). A caller who cannot read either does not
+    get the precedent; its text is never rewritten.
+
+    One instance per request. Each id is judged once, in a batch per fetch window
+    for the listing (:meth:`barred_events`) or per precedent for a node or id
+    (:meth:`verdict_of`), and the verdict is kept for the pointer concealment that
+    follows (:func:`_conceal_source_pointers`).
+
+    A lookup that fails withholds (:data:`PRECEDENT_WITHHELD_UNREADABLE`) and is
+    counted apart from a label that said no (:attr:`counts`).
     """
 
     def __init__(
-        self, document_store: DocumentStore | None, clearance: Sensitivity
+        self,
+        document_store: DocumentStore | None,
+        clearance: Sensitivity,
+        graph_store: GraphStore | None = None,
     ) -> None:
         self._store = document_store
         self._clearance = clearance
+        self._graph = graph_store
         self._verdicts: dict[str, bool] = {}
+        self._faulted: set[str] = set()
+        self._served: dict[str, str | None] = {}
+        self._reasons: dict[str, str] = {}
+
+    @property
+    def counts(self) -> dict[str, int]:
+        """How many distinct precedents were withheld, by why."""
+        out = {PRECEDENT_WITHHELD_LABELLED: 0, PRECEDENT_WITHHELD_UNREADABLE: 0}
+        for reason in self._reasons.values():
+            out[reason] += 1
+        return out
 
     def judge(self, ids: Iterable[str]) -> None:
         """Record whether the caller may read each id not yet judged, in one call."""
@@ -428,9 +508,17 @@ class _ListingClearance:
         if not fresh:
             return
         readable: set[str] = set()
-        if self._store is not None:
+        if self._store is None:
+            self._faulted.update(fresh)
+        else:
+            recording = _FaultRecordingStore(self._store)
             try:
-                readable = set(readable_ids(self._store, fresh, self._clearance))
+                # The recorder forwards every call, so it stands in for the store.
+                readable = set(
+                    readable_ids(
+                        cast("DocumentStore", recording), fresh, self._clearance
+                    )
+                )
             except Exception as exc:  # advisory step; fails closed
                 # GRACEFUL-DEGRADATION: an outage must not read as permission, so
                 # an id the judgement could not answer for is unreadable.
@@ -438,12 +526,58 @@ class _ListingClearance:
                     "precedent_listing_clearance_failed",
                     error_type=type(exc).__name__,
                 )
+                self._faulted.update(fresh)
+            self._faulted.update(i for i in fresh if self._read_faulted(i, recording))
         for item_id in fresh:
             self._verdicts[item_id] = item_id in readable
+        failed = [i for i in fresh if i not in readable and i in self._faulted]
+        if failed:
+            logger.warning("precedent_source_lookup_failed", count=len(failed))
+
+    @staticmethod
+    def _read_faulted(item_id: str, recording: _FaultRecordingStore) -> bool:
+        """Whether reading ``item_id`` (or, for a chunk, its parent) raised."""
+        from trellis.ingest_corpus.models import chunk_parent_id  # noqa: PLC0415
+
+        parent = chunk_parent_id(item_id)
+        return item_id in recording.faulted or (
+            parent is not None and parent in recording.faulted
+        )
 
     def may_read(self, item_id: str) -> bool:
         """The recorded verdict; an id never judged is unreadable."""
         return self._verdicts.get(item_id, False)
+
+    def _why_unreadable(self, item_id: str) -> str:
+        if item_id in self._faulted:
+            return PRECEDENT_WITHHELD_UNREADABLE
+        return PRECEDENT_WITHHELD_LABELLED
+
+    def _bar_reason(
+        self, entity_id: str | None, source: str | None, *, exempt: bool
+    ) -> str | None:
+        """Why a precedent may not be served, or ``None`` when it may."""
+        own = self._own_row_reason(entity_id)
+        if own is not None:
+            return own
+        if source is not None and not exempt and not self.may_read(source):
+            return self._why_unreadable(source)
+        return None
+
+    def _own_row_reason(self, entity_id: str | None) -> str | None:
+        if not entity_id:
+            return None
+        if self._store is None:
+            # No store to ask whether a row exists: a learning promotion has one
+            # by construction, a trace precedent has none.
+            return (
+                PRECEDENT_WITHHELD_UNREADABLE
+                if is_promoted_precedent_document(entity_id)
+                else None
+            )
+        if self.may_read(entity_id):
+            return None
+        return self._why_unreadable(entity_id)
 
     def barred_events(
         self,
@@ -468,25 +602,67 @@ class _ListingClearance:
             if source is not None:
                 wanted.append(source)
         self.judge(wanted)
-        return frozenset(
-            e.event_id
-            for e, source, exempt in planned
-            if self._own_row_unreadable(e.entity_id)
-            or (source is not None and not exempt and not self.may_read(source))
-        )
+        barred: set[str] = set()
+        for e, source, exempt in planned:
+            reason = self._bar_reason(e.entity_id, source, exempt=exempt)
+            if reason is not None:
+                barred.add(e.event_id)
+                self._reasons[e.event_id] = reason
+        return frozenset(barred)
 
-    def _own_row_unreadable(self, entity_id: str | None) -> bool:
-        if not entity_id:
-            return False
-        if self._store is None:
-            # No store to ask whether a row exists: a learning promotion has one
-            # by construction, a trace precedent has none.
-            return is_promoted_precedent_document(entity_id)
-        return not self.may_read(entity_id)
+    def verdict_of(
+        self, entity_id: str, node: dict[str, Any] | None = None
+    ) -> str | None:
+        """Why ``entity_id`` may not be served to this caller, or ``None``.
+
+        For a route that holds a graph node (``node``) or only an id: a by-id
+        read, a search hit, a pack item. :data:`PRECEDENT_WITHHELD_LABELLED` when
+        its own row or its source is above the clearance, and
+        :data:`PRECEDENT_WITHHELD_UNREADABLE` when the lookup that would have
+        said failed. An id that is not a promoted precedent (not in the reserved
+        namespace and, when a node is given, not typed ``precedent``) is
+        ``None`` without a read. ``restricted`` reads nothing.
+        """
+        if self._clearance == "restricted":
+            return None
+        if entity_id not in self._served:
+            reason = self._verdict(entity_id, node)
+            self._served[entity_id] = reason
+            if reason is not None:
+                self._reasons[entity_id] = reason
+        return self._served[entity_id]
+
+    def _verdict(self, entity_id: str, node: dict[str, Any] | None) -> str | None:
+        in_namespace = is_promoted_precedent_document(entity_id)
+        if node is None:
+            if not in_namespace:
+                return None
+            if self._graph is not None:
+                try:
+                    node = self._graph.get_node(entity_id)
+                except Exception as exc:  # advisory step; fails closed
+                    # GRACEFUL-DEGRADATION: with no node the source cannot be
+                    # named, and an outage must not read as permission.
+                    logger.warning(
+                        "precedent_source_lookup_failed",
+                        count=1,
+                        error_type=type(exc).__name__,
+                    )
+                    return PRECEDENT_WITHHELD_UNREADABLE
+        elif not in_namespace and node.get("node_type") != "precedent":
+            return None
+        source = _source_id_of({}, node)
+        exempt = (
+            source is not None
+            and node is not None
+            and _node_holds_nothing_of_source(node, source)
+        )
+        self.judge([entity_id, *([source] if source else [])])
+        return self._bar_reason(entity_id, source, exempt=exempt)
 
 
 def _conceal_source_pointers(
-    rows: list[dict[str, Any]], gate: _ListingClearance | None
+    rows: list[dict[str, Any]], gate: PrecedentClearance | None
 ) -> list[dict[str, Any]]:
     """``rows`` with each unreadable ``payload.source_item_id`` left out.
 
