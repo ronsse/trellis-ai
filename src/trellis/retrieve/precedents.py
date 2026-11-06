@@ -620,8 +620,10 @@ class PrecedentClearance:
         its own row or its source is above the clearance, and
         :data:`PRECEDENT_WITHHELD_UNREADABLE` when the lookup that would have
         said failed. An id that is not a promoted precedent (not in the reserved
-        namespace and, when a node is given, not typed ``precedent``) is
-        ``None`` without a read. ``restricted`` reads nothing.
+        namespace, the one place a promotion stores text taken from its source)
+        is ``None`` without a read; a node outside it keeps the pointer
+        concealment of :func:`~trellis.retrieve.sensitivity.conceal_node_pointers`.
+        ``restricted`` reads nothing.
         """
         if self._clearance == "restricted":
             return None
@@ -633,24 +635,20 @@ class PrecedentClearance:
         return self._served[entity_id]
 
     def _verdict(self, entity_id: str, node: dict[str, Any] | None) -> str | None:
-        in_namespace = is_promoted_precedent_document(entity_id)
-        if node is None:
-            if not in_namespace:
-                return None
-            if self._graph is not None:
-                try:
-                    node = self._graph.get_node(entity_id)
-                except Exception as exc:  # advisory step; fails closed
-                    # GRACEFUL-DEGRADATION: with no node the source cannot be
-                    # named, and an outage must not read as permission.
-                    logger.warning(
-                        "precedent_source_lookup_failed",
-                        count=1,
-                        error_type=type(exc).__name__,
-                    )
-                    return PRECEDENT_WITHHELD_UNREADABLE
-        elif not in_namespace and node.get("node_type") != "precedent":
+        if not is_promoted_precedent_document(entity_id):
             return None
+        if node is None and self._graph is not None:
+            try:
+                node = self._graph.get_node(entity_id)
+            except Exception as exc:  # advisory step; fails closed
+                # GRACEFUL-DEGRADATION: with no node the source cannot be
+                # named, and an outage must not read as permission.
+                logger.warning(
+                    "precedent_source_lookup_failed",
+                    count=1,
+                    error_type=type(exc).__name__,
+                )
+                return PRECEDENT_WITHHELD_UNREADABLE
         source = _source_id_of({}, node)
         exempt = (
             source is not None
