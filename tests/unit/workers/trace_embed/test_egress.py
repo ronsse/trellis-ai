@@ -24,6 +24,8 @@ from tests.unit.retrieve.test_sensitivity import label
 from trellis.core.document_write import is_redaction_tombstone, put_document
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.llm.egress import EgressGate, EgressVerdict
+from trellis.mutate.commands import Command, Operation
+from trellis.mutate.handlers.classification import ClassificationSetHandler
 from trellis.ops.write_health import summarize_backend_health
 from trellis.retrieve.builder_factory import build_pack_builder
 from trellis.schemas.classification import DATA_CLASSIFICATION_KEY
@@ -773,6 +775,34 @@ def test_a_label_someone_else_set_on_a_summary_is_still_not_lowered(
     row = registry.knowledge.document_store.get(summary_id)
     assert row is not None
     assert row["metadata"][DATA_CLASSIFICATION_KEY]["sensitivity"] == "restricted"
+
+
+def test_a_person_raising_a_stamped_summary_is_not_lowered_by_a_rescan(
+    registry, watermark_path, recorder
+) -> None:
+    """``classification.set`` appends ``caller`` to the stamp's classifiers.
+
+    The label is no longer the handler's own once anyone else has touched it,
+    so a rescan must refuse the rewrite rather than restore the cited label.
+    """
+    _store_document(registry, "doc-a", "confidential")
+    trace = _append_citing(registry, 1, "doc-a")
+    run_trace_embed_pass(registry, watermark_path=watermark_path)
+    summary_id = trace_summary_doc_id(trace.trace_id)
+    ClassificationSetHandler(registry).handle(
+        Command(
+            operation=Operation.CLASSIFICATION_SET,
+            args={"doc_id": summary_id, "sensitivity": "restricted"},
+            requested_by="test",
+        )
+    )
+
+    report = run_trace_embed_pass(
+        registry, watermark_path=watermark_path, reset_watermark=True
+    )
+
+    assert report.failed == 1
+    assert _stored_label(registry, trace)["sensitivity"] == "restricted"
 
 
 def test_a_local_embedder_still_holds_a_summary_whose_citation_cannot_be_read(

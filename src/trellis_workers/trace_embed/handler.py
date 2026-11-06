@@ -94,7 +94,7 @@ def _is_cited_stamp(metadata: object) -> bool:
     if not isinstance(record, Mapping):
         return False
     classified_by = record.get("classified_by")
-    return isinstance(classified_by, list) and CITED_LABEL_CLASSIFIER in classified_by
+    return classified_by == [CITED_LABEL_CLASSIFIER]
 
 
 def build_trace_summary_command(
