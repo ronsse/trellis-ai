@@ -105,7 +105,7 @@ logger = structlog.get_logger(__name__)
 SENSITIVITY_REJECTION_REASON = "sensitivity"
 
 #: ``RejectedItem.reason`` for a promoted precedent whose *source* could not be
-#: looked up (:mod:`trellis.retrieve.precedent_source`), as opposed to one whose
+#: looked up (:mod:`trellis.retrieve.precedents`), as opposed to one whose
 #: source label said no (:data:`SENSITIVITY_REJECTION_REASON`). Both withhold and
 #: both conceal their ids from a below-``restricted`` caller; they are counted
 #: apart so an outage in the source store does not read as a labelled corpus.

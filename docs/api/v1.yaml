@@ -4728,11 +4728,15 @@ paths:
 
         A document labelled above the caller''s clearance answers 404, exactly
 
-        as a missing one does. ``document.label`` says how the row is labelled
+        as a missing one does, and so does a promoted precedent whose source is
 
-        (``sensitivity``, ``stored``, ``corrupt``, ``external_readable``), for a public-only
+        labelled above it (its text is never rewritten). ``document.label`` says how
 
-        caller too, whose ``metadata`` carries no label. A document whose
+        the row is labelled (``sensitivity``, ``stored``, ``corrupt``,
+
+        ``external_readable``), for a public-only caller too, whose ``metadata``
+
+        carries no label. A document whose
 
         ``lifecycle.superseded_by``, ``supersedes_doc_id`` or ``updates_doc_id``
 
@@ -5037,7 +5041,16 @@ paths:
 
         its ``evidence_ref`` reads null, and a property pointer is removed, when it
 
-        names such a document.'
+        names such a document.
+
+
+        A promoted precedent is the exception: it is judged by its own document row
+
+        and by its source''s label, and left out when the caller may not read either
+
+        (404 for the entity, absent from the neighbourhood with the edges that touch
+
+        it). Its text is never rewritten.'
       operationId: get_entity_api_v1_entities__entity_id__get
       parameters:
       - in: path
@@ -6638,7 +6651,13 @@ paths:
 
         (:func:`trellis.retrieve.precedents.is_miner_candidate_event`) is a
 
-        candidate, not a promotion, and is skipped for the same reason.'
+        candidate, not a promotion, and is skipped for the same reason. A precedent
+
+        the caller may not read (its own row or its source above the caller''s
+
+        clearance, or a lookup that failed) is skipped too, so the options match what
+
+        ``GET /precedents`` serves that caller.'
       operationId: list_precedent_domains_api_v1_precedents_domains_get
       responses:
         '200':
