@@ -7,6 +7,10 @@ from typing import TYPE_CHECKING, Any, cast
 import structlog
 
 from trellis.core.error_sanitize import describe_validation_error
+from trellis.core.precedent_document import (
+    SOURCE_EXCERPT_STATUS_KEY,
+    is_promoted_precedent_document,
+)
 from trellis.errors import NotFoundError, StoreError, ValidationError
 from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
 from trellis.mutate.commands import Command
@@ -418,6 +422,7 @@ class EntityUpdateHandler:
         supplied_properties: dict[str, Any] = dict(raw_properties)
         supplied_entity_type = command.args.get("entity_type")
         touches_lifecycle = LIFECYCLE_KEY in supplied_properties
+        touches_excerpt_status = SOURCE_EXCERPT_STATUS_KEY in supplied_properties
 
         # Read the existing node only when one of the two precedent guards
         # below could actually need it, so the common case -- a property
@@ -425,7 +430,7 @@ class EntityUpdateHandler:
         # stays the single read ``_rewrite_current_node`` does internally.
         existing_node = (
             store.get_node(entity_id)
-            if (supplied_entity_type or touches_lifecycle)
+            if (supplied_entity_type or touches_lifecycle or touches_excerpt_status)
             else None
         )
         is_existing_precedent = (
@@ -459,6 +464,23 @@ class EntityUpdateHandler:
             )
             raise ValidationError(
                 msg, errors=[msg], code="precedent_lifecycle_via_entity_update"
+            )
+
+        if touches_excerpt_status and (
+            is_existing_precedent
+            or supplied_entity_type == "precedent"
+            or is_promoted_precedent_document(entity_id)
+        ):
+            # The stamp is the promotion's own statement about the text it
+            # wrote; serving reads it to exempt a precedent from its source's
+            # label (#1080). A caller-set value would forge that exemption.
+            msg = (
+                f"entity.update refuses a write to properties."
+                f"{SOURCE_EXCERPT_STATUS_KEY} on precedent {entity_id}: the "
+                "promotion writes it, and a serve-time check trusts it"
+            )
+            raise ValidationError(
+                msg, errors=[msg], code="precedent_excerpt_status_via_entity_update"
             )
 
         def update(existing: dict[str, Any]) -> dict[str, Any]:

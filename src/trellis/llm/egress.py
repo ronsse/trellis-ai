@@ -70,11 +70,16 @@ This module reads labels; it does not edit them and sits outside
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
+from trellis.core.reserved_doc_ids import (
+    TRACE_SUMMARY_DOC_ID_PREFIX,
+    is_trace_summary_doc_id,
+)
 from trellis.llm.routing import LLMRoutingError
 from trellis.schemas.classification import sensitivity_of, sensitivity_rank
 from trellis.schemas.pack import PackItem
@@ -83,6 +88,7 @@ if TYPE_CHECKING:
     from trellis.llm.routing import LLMConsumer
     from trellis.schemas.classification import Sensitivity
     from trellis.stores.base.document import DocumentStore
+    from trellis.stores.base.trace import TraceStore
     from trellis.stores.registry import StoreRegistry
 
 __all__ = [
@@ -90,9 +96,11 @@ __all__ = [
     "EGRESS_WITHHELD_REASON",
     "EgressGate",
     "EgressVerdict",
+    "SummaryJudgement",
     "egress_reason",
     "failed_read_verdict",
     "may_reach_route",
+    "strictest_verdict",
 ]
 
 #: The named reason a report, event or note gives for an egress skip.
@@ -130,6 +138,36 @@ class EgressVerdict(StrEnum):
 
 def _verdict(permitted: bool) -> EgressVerdict:
     return EgressVerdict.PERMITTED if permitted else EgressVerdict.WITHHELD
+
+
+@dataclass(frozen=True)
+class SummaryJudgement:
+    """What :meth:`EgressGate.judge_summary` found out about a trace summary.
+
+    ``verdict`` is :meth:`EgressGate.summary_verdict`'s answer. ``inherited`` is
+    the strictest label above ``internal`` among the documents the trace cites,
+    ``restricted`` when the trace or a citation could not be read, and ``None``
+    when nothing cited is labelled above ``internal``.
+    """
+
+    verdict: EgressVerdict
+    inherited: Sensitivity | None
+
+
+def strictest_verdict(*verdicts: EgressVerdict) -> EgressVerdict:
+    """The verdict that keeps content off the route most firmly.
+
+    ``WITHHELD`` wins over ``UNREADABLE``, which wins over ``PERMITTED``: a
+    permanent fact about what is stored is not hidden behind a fault a retry
+    might clear, whichever question (a document's own label, the documents it
+    cites) raised which. The one place the order is written, so no sender
+    can disagree about it.
+    """
+    if EgressVerdict.WITHHELD in verdicts:
+        return EgressVerdict.WITHHELD
+    if EgressVerdict.UNREADABLE in verdicts:
+        return EgressVerdict.UNREADABLE
+    return EgressVerdict.PERMITTED
 
 
 def egress_reason(verdict: EgressVerdict) -> str:
@@ -186,7 +224,7 @@ class EgressGate:
         self.local = local is True
         self._documents = document_store
         self._clearance: Any = None
-        if not self.local and document_store is not None:
+        if document_store is not None:
             # Deferred: ``trellis.retrieve`` is a heavy package and
             # ``trellis.ingest_corpus`` imports back into it, so a
             # module-level import here would couple every sender to it.
@@ -309,21 +347,65 @@ class EgressGate:
         a label. A row whose own bytes cannot be parsed is ``WITHHELD``: it will
         not parse on a retry either. A local gate answers before it reads anything.
         """
-        if self.local:
-            return EgressVerdict.PERMITTED
+        return self._stored(doc_id, with_level=False)[0]
+
+    def _stored(
+        self, doc_id: str, *, with_level: bool
+    ) -> tuple[EgressVerdict, Sensitivity | None]:
+        """One read of the row under ``doc_id``: its verdict and, if asked, its level.
+
+        The verdict is :meth:`stored_verdict`'s. The level is the label the row
+        serves under (:meth:`_level`), read from the same row so the two cannot
+        disagree; it is asked for by a summary's label (:meth:`judge_summary`),
+        which a local route needs as much as a cloud one. So a local gate that
+        is asked for the level reads the row, and a read that fails holds even
+        there: a label that cannot be read is not a label of ``internal``.
+        """
+        if self.local and not with_level:
+            return EgressVerdict.PERMITTED, None
         if self._documents is None:
             # A gate with no store to ask cannot say a stored row is unlabelled,
             # and "no row" must not read as "no label". Not ``WITHHELD``: the
             # row was never consulted, and a gate built with a store can answer.
-            return EgressVerdict.UNREADABLE
+            return EgressVerdict.UNREADABLE, "restricted"
         try:
             row = self._documents.get(doc_id)
             metadata = row.get("metadata") if row else None
         except Exception as exc:
             # GRACEFUL-DEGRADATION: fail closed, as in ``permits``, and say which
             # kind of closed.
-            return failed_read_verdict(exc)
-        return self.verdict(doc_id, metadata)
+            return failed_read_verdict(exc), "restricted"
+        verdict = self.verdict(doc_id, metadata)
+        if not with_level:
+            return verdict, None
+        return verdict, self._level(doc_id, metadata, verdict)
+
+    def _level(
+        self,
+        doc_id: str,
+        metadata: Mapping[str, Any] | None,
+        verdict: EgressVerdict,
+    ) -> Sensitivity:
+        """The label ``doc_id`` serves under: its own, raised to its parent's.
+
+        ``restricted`` for a label that cannot be read, and for a document this
+        gate withheld whose label does not say why (an unparseable row, a chunk
+        with no parent): content that cannot be judged is not judged
+        ``internal``. A clearance goes through the parent cache the verdict
+        has just filled, so a chunk costs no second parent read.
+        """
+        if self._clearance is None:
+            return "restricted"
+        try:
+            level: Sensitivity = self._clearance.sensitivity(doc_id, metadata)
+        except Exception:
+            # GRACEFUL-DEGRADATION: fail closed, as in ``permits``.
+            return "restricted"
+        if verdict is EgressVerdict.PERMITTED:
+            return level
+        # Refused for a reason its label may not carry: keep a label above the
+        # ceiling, read anything at or below it as the strictest.
+        return "restricted" if may_reach_route(level, local=False) else level
 
     def cited_verdict(self, doc_ids: Iterable[str]) -> EgressVerdict:
         """Whether content that cites the stored documents ``doc_ids`` may be sent.
@@ -335,15 +417,106 @@ class EgressGate:
         unreadable. An empty id is skipped, and content that cites nothing is
         ``PERMITTED``. A local gate answers before it reads anything.
         """
+        return self._cited(doc_ids, with_level=False)[0]
+
+    def _cited(
+        self, doc_ids: Iterable[str], *, with_level: bool
+    ) -> tuple[EgressVerdict, Sensitivity | None]:
+        """:meth:`cited_verdict`, and the strictest label above ``internal`` cited.
+
+        The level is ``None`` when no citation is labelled above ``internal``
+        (an unlabelled or ``public`` one never lowers anything), and
+        ``restricted`` when a citation could not be read.
+        """
         unreadable = False
+        withheld = False
+        strictest: Sensitivity | None = None
         for doc_id in doc_ids:
             if not doc_id:
                 continue
-            verdict = self.stored_verdict(doc_id)
-            if verdict is EgressVerdict.WITHHELD:
-                return verdict
+            verdict, level = self._stored(doc_id, with_level=with_level)
+            withheld = withheld or verdict is EgressVerdict.WITHHELD
             unreadable = unreadable or verdict is EgressVerdict.UNREADABLE
-        return EgressVerdict.UNREADABLE if unreadable else EgressVerdict.PERMITTED
+            if level is not None and sensitivity_rank(level) > sensitivity_rank(
+                strictest or _EGRESS_CEILING
+            ):
+                strictest = level
+        if withheld:
+            return EgressVerdict.WITHHELD, strictest
+        return (
+            EgressVerdict.UNREADABLE if unreadable else EgressVerdict.PERMITTED
+        ), strictest
+
+    def summary_verdict(
+        self,
+        doc_id: str,
+        metadata: Mapping[str, Any] | None,
+        open_trace_store: Callable[[], TraceStore],
+    ) -> EgressVerdict:
+        """The verdict for embedding ``doc_id``: its label, and a summary's cited ones.
+
+        A ``trace-summary:`` document is derived from a trace and carries no
+        label of its own, so it is judged by the documents that trace cites
+        (:meth:`cited_verdict`) as well as by its own metadata
+        (:meth:`verdict`), and the strictest of the two stands
+        (:func:`strictest_verdict`). The one question both the trace-embed
+        worker's write and ``admin reindex-vectors`` ask, so they cannot
+        disagree about a summary.
+
+        A trace that cannot be loaded is ``UNREADABLE``: nothing says what it
+        cited, so nothing says the summary may be sent. Any other id, and any
+        id on a local gate, is judged by :meth:`verdict` alone and never opens
+        the trace store. Never raises.
+        """
+        return self._judge_summary(
+            doc_id, metadata, open_trace_store, with_level=False
+        ).verdict
+
+    def judge_summary(
+        self,
+        doc_id: str,
+        metadata: Mapping[str, Any] | None,
+        open_trace_store: Callable[[], TraceStore],
+    ) -> SummaryJudgement:
+        """:meth:`summary_verdict`, and the label the summary inherits.
+
+        For the one writer that stores the summary: what a summary of cited
+        documents may be served to is the strictest of theirs, and it reads them
+        once for both answers, so the verdict and the label cannot disagree.
+        Unlike :meth:`summary_verdict` it reads the trace and its citations on a
+        local gate too, because serving clearance does not depend on the route,
+        and it holds (``UNREADABLE``) when they cannot be read. Never raises.
+        """
+        return self._judge_summary(doc_id, metadata, open_trace_store, with_level=True)
+
+    def _judge_summary(
+        self,
+        doc_id: str,
+        metadata: Mapping[str, Any] | None,
+        open_trace_store: Callable[[], TraceStore],
+        *,
+        with_level: bool,
+    ) -> SummaryJudgement:
+        own = self.verdict(doc_id, metadata)
+        if not is_trace_summary_doc_id(doc_id):
+            return SummaryJudgement(own, None)
+        if not with_level and (own is EgressVerdict.WITHHELD or self.local):
+            return SummaryJudgement(own, None)
+        try:
+            trace = open_trace_store().get(doc_id[len(TRACE_SUMMARY_DOC_ID_PREFIX) :])
+        # GRACEFUL-DEGRADATION: fail closed. A trace store that cannot answer
+        # must not read as permission; the count says it was a fault, not a label.
+        except Exception:
+            trace = None
+        if trace is None:
+            return SummaryJudgement(
+                strictest_verdict(own, EgressVerdict.UNREADABLE),
+                "restricted" if with_level else None,
+            )
+        cited, level = self._cited(
+            (ref.evidence_id for ref in trace.evidence_used), with_level=with_level
+        )
+        return SummaryJudgement(strictest_verdict(own, cited), level)
 
     def verdict(self, doc_id: str, metadata: Mapping[str, Any] | None) -> EgressVerdict:
         """Whether the document ``doc_id`` carrying ``metadata`` may be sent.

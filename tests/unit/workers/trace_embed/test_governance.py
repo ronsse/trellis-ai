@@ -30,7 +30,7 @@ from trellis_workers.trace_embed import (
 )
 from trellis_workers.trace_embed.handler import REQUESTED_BY
 
-from .conftest import seed_traces
+from .conftest import append_trace_named, seed_traces
 
 
 def _executed_events(registry):
@@ -88,6 +88,7 @@ class TestGovernedWrite:
         self, registry, recorder
     ) -> None:
         """The behaviour that key would have blocked, exercised directly."""
+        append_trace_named(registry, "x")
         executor = MutationExecutor(
             event_log=registry.operational.event_log,
             handlers={
@@ -111,6 +112,7 @@ class TestFailuresAreLoud:
         recorder.fail_after = 0
         recorder.texts = ["already used"]
         recorder.fail_after = 1
+        append_trace_named(registry, "x")
         executor = MutationExecutor(
             event_log=registry.operational.event_log,
             handlers={

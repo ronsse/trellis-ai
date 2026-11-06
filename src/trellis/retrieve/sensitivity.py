@@ -104,6 +104,18 @@ logger = structlog.get_logger(__name__)
 #: withholding report (:mod:`trellis.retrieve.withholding`) can name it.
 SENSITIVITY_REJECTION_REASON = "sensitivity"
 
+#: ``RejectedItem.reason`` for a promoted precedent whose *source* could not be
+#: looked up (:mod:`trellis.retrieve.precedents`), as opposed to one whose
+#: source label said no (:data:`SENSITIVITY_REJECTION_REASON`). Both withhold and
+#: both conceal their ids from a below-``restricted`` caller; they are counted
+#: apart so an outage in the source store does not read as a labelled corpus.
+SENSITIVITY_UNREADABLE_REJECTION_REASON = "sensitivity_unreadable"
+
+#: Every reason this gate rejects under, so an id concealment cannot miss one.
+SENSITIVITY_REJECTION_REASONS = frozenset(
+    {SENSITIVITY_REJECTION_REASON, SENSITIVITY_UNREADABLE_REJECTION_REASON}
+)
+
 #: ``Pack.metadata`` / ``SectionedPack.metadata`` key holding the ids a surface
 #: must not name to a below-``restricted`` caller: the ids this gate withheld,
 #: and every other rejected candidate the caller may not read
@@ -1003,7 +1015,7 @@ def refuse_overwrite(
 def withheld_ids(rejected: Iterable[RejectedItem]) -> list[str]:
     """The ids this gate withheld, from the build's ``rejected`` rows."""
     return sorted(
-        {r.item_id for r in rejected if r.reason == SENSITIVITY_REJECTION_REASON}
+        {r.item_id for r in rejected if r.reason in SENSITIVITY_REJECTION_REASONS}
     )
 
 
@@ -1062,7 +1074,7 @@ def conceal_withheld_ids(
             "rejected_items": [
                 row
                 for row in report.get("rejected_items") or []
-                if row.get("reason") != SENSITIVITY_REJECTION_REASON
+                if row.get("reason") not in SENSITIVITY_REJECTION_REASONS
                 and row.get("item_id") not in hidden
             ],
         }
@@ -1222,6 +1234,8 @@ def stamp_sensitivity(
 __all__ = [
     "EVIDENCE_POINTER_PATHS",
     "SENSITIVITY_REJECTION_REASON",
+    "SENSITIVITY_REJECTION_REASONS",
+    "SENSITIVITY_UNREADABLE_REJECTION_REASON",
     "SENSITIVITY_WITHHELD_IDS_KEY",
     "CandidateIndex",
     "DocumentClearance",

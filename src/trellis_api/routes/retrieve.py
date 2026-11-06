@@ -11,9 +11,14 @@ from pydantic import ValidationError
 
 from trellis.core.error_sanitize import describe_validation_error
 from trellis.core.knobs import resolve_rest_pack_max_items, resolve_rest_pack_max_tokens
+from trellis.core.precedent_document import is_promoted_precedent_document
 from trellis.retrieve.builder_factory import build_pack_builder, describe_axes
 from trellis.retrieve.pack_builder import PackBuilder
-from trellis.retrieve.precedents import is_miner_candidate_event, is_withheld_precedent
+from trellis.retrieve.precedents import (
+    PrecedentClearance,
+    is_miner_candidate_event,
+    is_withheld_precedent,
+)
 from trellis.retrieve.precedents import list_precedents as _list_precedents
 from trellis.retrieve.public_pack import public_search_page
 from trellis.retrieve.sensitivity import (
@@ -27,7 +32,7 @@ from trellis.retrieve.sensitivity import (
 )
 from trellis.schemas.pack import PackBudget, SectionRequest
 from trellis.schemas.trace import Trace
-from trellis.stores.base.event_log import EventType, scan_events
+from trellis.stores.base.event_log import Event, EventType, scan_events
 from trellis.stores.base.graph import NODE_SEARCH_SORTS
 from trellis.stores.settings_store import load_settings_values
 from trellis_api.app import get_registry
@@ -82,6 +87,25 @@ def _build_pack_builder(registry: Any) -> PackBuilder:
 # resolves through the knob rather than silently taking the DTO's literal
 # default. The SDK (``trellis_sdk.client``/``async_client``) always sends both
 # keys explicitly on every call, so it is unaffected either way.
+
+
+def _without_unreadable_precedents(
+    registry: Any, rows: list[dict[str, Any]], clearance: Sensitivity
+) -> list[dict[str, Any]]:
+    """``rows`` without a promoted precedent the caller may not read (#1080).
+
+    The one predicate the listings, the by-id reads and the pack share
+    (:class:`~trellis.retrieve.precedents.PrecedentClearance`). A row outside the
+    precedent namespace is never touched; ``restricted`` reads nothing.
+    """
+    if clearance == "restricted" or not any(
+        is_promoted_precedent_document(r.get("doc_id", "")) for r in rows
+    ):
+        return rows
+    gate = PrecedentClearance(
+        registry.knowledge.document_store, clearance, registry.knowledge.graph_store
+    )
+    return [r for r in rows if gate.verdict_of(r.get("doc_id", "")) is None]
 
 
 # Chunk rows are excluded from this route by default (#396) — the sibling
@@ -175,6 +199,9 @@ def search(
             for r in results
             if readable.permits(r.get("doc_id", ""), r.get("metadata"))
         ]
+    # A promoted precedent is judged by its source's label as well as its own
+    # (#1080): left out here, never rewritten.
+    results = _without_unreadable_precedents(registry, results, readable.clearance)
     results = conceal_document_rows(
         results, registry.knowledge.document_store, readable.clearance
     )
@@ -477,21 +504,49 @@ def get_entity(
     caller may not read is served without that id. An edge is served whole too:
     its ``evidence_ref`` reads null, and a property pointer is removed, when it
     names such a document.
+
+    A promoted precedent is the exception: it is judged by its own document row
+    and by its source's label, and left out when the caller may not read either
+    (404 for the entity, absent from the neighbourhood with the edges that touch
+    it). Its text is never rewritten.
     """
     registry = get_registry()
+    clearance = request_clearance(ctx)
     node = registry.knowledge.graph_store.get_node(entity_id)
-    if node is None:
+    # A promoted precedent is judged by its source's label as well as its own
+    # (#1080). One predicate for the entity and every neighbour: a withheld
+    # entity answers 404 exactly as a missing one does, a withheld neighbour and
+    # each edge that touches it are left out.
+    precedents = PrecedentClearance(
+        registry.knowledge.document_store, clearance, registry.knowledge.graph_store
+    )
+    if node is None or precedents.verdict_of(entity_id, node) is not None:
         raise HTTPException(status_code=404, detail=f"Entity not found: {entity_id}")
 
     subgraph = registry.knowledge.graph_store.get_subgraph(
         seed_ids=[entity_id], depth=depth
     )
+    withheld = {
+        n["node_id"]
+        for n in subgraph["nodes"]
+        if precedents.verdict_of(n["node_id"], n) is not None
+    }
+    if withheld:
+        subgraph = {
+            **subgraph,
+            "nodes": [n for n in subgraph["nodes"] if n["node_id"] not in withheld],
+            "edges": [
+                e
+                for e in subgraph["edges"]
+                if e["source_id"] not in withheld and e["target_id"] not in withheld
+            ],
+        }
     # One judgement over the entity, the subgraph's nodes and its edges together.
     nodes, edges = conceal_graph_pointers(
         [node, *subgraph["nodes"]],
         subgraph["edges"],
         registry.knowledge.document_store,
-        request_clearance(ctx),
+        clearance,
     )
     node, *neighbours = nodes
     return {
@@ -645,7 +700,9 @@ def list_precedents(
     summary="Count promoted precedents per domain",
     dependencies=NOT_FOR_PUBLIC_CALLERS,
 )
-def list_precedent_domains() -> dict[str, Any]:
+def list_precedent_domains(
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> dict[str, Any]:
     """Count promoted precedents per ``domain``, for a domain filter's options.
 
     Unlike the ``domain`` dropdown built from one fetched page of
@@ -662,19 +719,42 @@ def list_precedent_domains() -> dict[str, Any]:
     entirely by precedents the listing it feeds never actually shows. A row
     the precedent miner wrote
     (:func:`trellis.retrieve.precedents.is_miner_candidate_event`) is a
-    candidate, not a promotion, and is skipped for the same reason.
+    candidate, not a promotion, and is skipped for the same reason. A precedent
+    the caller may not read (its own row or its source above the caller's
+    clearance, or a lookup that failed) is skipped too, so the options match what
+    ``GET /precedents`` serves that caller.
     """
     registry = get_registry()
     event_log = registry.operational.event_log
     graph_store = registry.knowledge.graph_store
+    clearance = request_clearance(ctx)
     scan = scan_events(event_log, event_type=EventType.PRECEDENT_PROMOTED)
-    counts: dict[str, int] = {}
+    listed = []
     for event in scan.events:
         if is_miner_candidate_event(event):
             continue
         if event.entity_id is not None and is_withheld_precedent(
             graph_store, event.entity_id
         ):
+            continue
+        listed.append(event)
+    barred: frozenset[str] = frozenset()
+    if clearance != "restricted":
+        nodes: dict[str, dict[str, Any] | None] = {}
+
+        def node_of(e: Event) -> dict[str, Any] | None:
+            if not e.entity_id:
+                return None
+            if e.entity_id not in nodes:
+                nodes[e.entity_id] = graph_store.get_node(e.entity_id)
+            return nodes[e.entity_id]
+
+        barred = PrecedentClearance(
+            registry.knowledge.document_store, clearance, graph_store
+        ).barred_events(listed, node_of)
+    counts: dict[str, int] = {}
+    for event in listed:
+        if event.event_id in barred:
             continue
         domain = event.payload.get("domain")
         if domain:

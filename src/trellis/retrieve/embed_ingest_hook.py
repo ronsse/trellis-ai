@@ -66,6 +66,7 @@ from trellis.schemas.classification import SHADOW_TAGS_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from datetime import timedelta
 
     from trellis.stores.registry import StoreRegistry
 
@@ -127,14 +128,21 @@ class EmbedWithheldError(Exception):
 
 
 def record_embed_withheld(
-    registry: StoreRegistry, doc_id: str, verdict: EgressVerdict, *, source: str
+    registry: StoreRegistry,
+    doc_id: str,
+    verdict: EgressVerdict,
+    *,
+    source: str,
+    once_within: timedelta | None = None,
 ) -> bool:
     """Count one withheld embed as an ``EMBED_WITHHELD`` event. Never raises.
 
     The inline write path has no report of its own, so the skip is an event
     ``trellis analyze health`` reads. Advisory and wrapped whole: it runs on a
     write, where one escaped exception fails the document. ``False`` means the
-    row did not land.
+    skip is not counted. ``once_within`` is for a caller that meets the same
+    document on every pass (see
+    :func:`~trellis.ops.embed_egress_health.emit_embed_withheld`).
     """
     try:
         # Deferred: ``trellis.ops`` imports the health readers, which are heavy
@@ -144,7 +152,11 @@ def record_embed_withheld(
         )
 
         return emit_embed_withheld(
-            registry.operational.event_log, doc_id, verdict, source=source
+            registry.operational.event_log,
+            doc_id,
+            verdict,
+            source=source,
+            once_within=once_within,
         )
     except Exception:
         logger.warning("embed_withheld_record_failed", verdict=verdict.value)
