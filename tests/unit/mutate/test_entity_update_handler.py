@@ -1197,3 +1197,117 @@ class TestLifecycleStateReadersAgree:
 
         assert _current_lifecycle_state(node) == "current"
         assert _precedent_lifecycle_state(node) == "current"
+
+
+class TestExcerptStatusIsReserved:
+    """``source_excerpt_status`` is the promotion's statement, not a caller's.
+
+    Serving reads it to exempt a precedent from its source's label (#1080), so a
+    caller-set ``source_labelled`` would forge that exemption.
+    """
+
+    @pytest.mark.parametrize(
+        "properties",
+        [
+            {"source_excerpt_status": "source_labelled"},
+            [["source_excerpt_status", "source_labelled"]],
+        ],
+    )
+    def test_an_existing_precedent_refuses_a_caller_set_status(
+        self, registry: StoreRegistry, properties: Any
+    ) -> None:
+        node_id = _create_node(
+            registry,
+            node_type="precedent",
+            properties={"name": "Pooling", "source_excerpt_status": "source_included"},
+        )
+
+        with pytest.raises(ValidationError) as exc_info:
+            EntityUpdateHandler(registry).handle(
+                Command(
+                    operation=Operation.ENTITY_UPDATE,
+                    args={"entity_id": node_id, "properties": properties},
+                )
+            )
+
+        assert exc_info.value.code == "precedent_excerpt_status_via_entity_update"
+        node = registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        assert node["properties"]["source_excerpt_status"] == "source_included"
+
+    def test_a_retype_to_precedent_in_the_same_call_is_refused(
+        self, registry: StoreRegistry
+    ) -> None:
+        node_id = _create_node(registry)
+
+        with pytest.raises(ValidationError) as exc_info:
+            EntityUpdateHandler(registry).handle(
+                Command(
+                    operation=Operation.ENTITY_UPDATE,
+                    args={
+                        "entity_id": node_id,
+                        "entity_type": "precedent",
+                        "properties": {"source_excerpt_status": "source_labelled"},
+                    },
+                )
+            )
+
+        assert exc_info.value.code == "precedent_excerpt_status_via_entity_update"
+
+    def test_a_node_in_the_precedent_namespace_is_refused(
+        self, registry: StoreRegistry
+    ) -> None:
+        node_id = _create_node(registry, node_id="precedent://learning/forged")
+
+        with pytest.raises(ValidationError) as exc_info:
+            EntityUpdateHandler(registry).handle(
+                Command(
+                    operation=Operation.ENTITY_UPDATE,
+                    args={
+                        "entity_id": node_id,
+                        "properties": {"source_excerpt_status": "source_labelled"},
+                    },
+                )
+            )
+
+        assert exc_info.value.code == "precedent_excerpt_status_via_entity_update"
+
+    def test_an_ordinary_node_keeps_the_property_as_any_other(
+        self, registry: StoreRegistry
+    ) -> None:
+        node_id = _create_node(registry)
+
+        EntityUpdateHandler(registry).handle(
+            Command(
+                operation=Operation.ENTITY_UPDATE,
+                args={
+                    "entity_id": node_id,
+                    "properties": {"source_excerpt_status": "anything"},
+                },
+            )
+        )
+
+        node = registry.knowledge.graph_store.get_node(node_id)
+        assert node is not None
+        assert node["properties"]["source_excerpt_status"] == "anything"
+
+    def test_the_governed_path_rejects_it_with_the_reason(
+        self, registry: StoreRegistry
+    ) -> None:
+        node_id = _create_node(registry, node_type="precedent")
+
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            Command(
+                operation=Operation.ENTITY_UPDATE,
+                args={
+                    "entity_id": node_id,
+                    "properties": {"source_excerpt_status": "source_labelled"},
+                },
+            )
+        )
+
+        assert result.status == CommandStatus.REJECTED
+        assert (
+            result.metadata["rejection_reason"]
+            == "precedent_excerpt_status_via_entity_update"
+        )
