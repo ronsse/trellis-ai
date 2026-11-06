@@ -993,6 +993,9 @@ def test_the_conditional_exit_helper_roster_is_exactly_the_private_may_exiters()
         # Refuses a bad argument combination through ``_refuse_usage`` and
         # returns when the selection is valid (#968).
         "curate_advisory": ["_validate_selection"],
+        # Refuses a --unity-catalog-scope that names nothing through ``_fail``
+        # (same exit on both formats) and returns the scope otherwise.
+        "ingest": ["_explicit_scope_or_fail"],
         "ingest_corpus": ["_parse_tags"],
         "policy": ["_exit_if_degraded", "_refuse_stale"],
         "stores": ["_get_registry"],
