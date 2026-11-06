@@ -40,10 +40,18 @@ only the semantic axis cannot. ``last_embed_withheld`` carries the verdict for
 the worker to count: ``WITHHELD`` (a label) advances its cursor, ``UNREADABLE``
 (a store could not be asked) holds it, and the next pass writes the same
 document again and tries the embed again.
+
+**A summary inherits the strictest label of the documents it cites.** An
+unlabelled document reads ``internal``, so a summary stored with no label would
+serve the digest of a ``confidential`` document to a caller cleared only to
+``internal``. The handler stamps the label in before the write
+(:meth:`TraceSummaryIngestHandler._label_for_write`), from the same read of the
+citations that decides the embed.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from trellis.llm.egress import EgressGate, EgressVerdict
@@ -51,10 +59,17 @@ from trellis.mutate.commands import Command, Operation
 from trellis.mutate.handlers import EvidenceIngestHandler
 from trellis.ops.embed_egress_health import UNREADABLE_REEMIT_AFTER
 from trellis.retrieve.embed_ingest_hook import record_embed_withheld
+from trellis.schemas.classification import (
+    DATA_CLASSIFICATION_KEY,
+    DataClassification,
+    sensitivity_of,
+    sensitivity_rank,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from trellis.llm.egress import SummaryJudgement
     from trellis.stores.base.trace import TraceStore
     from trellis.stores.registry import StoreRegistry
 
@@ -63,6 +78,23 @@ __all__ = ["TraceSummaryIngestHandler", "build_trace_summary_command"]
 #: ``Command.requested_by`` for every write this worker makes — the
 #: ``<surface>:<verb>`` convention from :class:`Command`.
 REQUESTED_BY = "worker:embed-traces"
+
+#: The ``classified_by`` of the label a summary inherits from the documents it
+#: cites. It marks the label as derived, so a rewrite may replace it
+#: (:meth:`TraceSummaryIngestHandler._enforce_clearance`); a label anyone else set
+#: carries another name and is never replaced.
+CITED_LABEL_CLASSIFIER = "trace-summary:cited"
+
+
+def _is_cited_stamp(metadata: object) -> bool:
+    """Whether ``metadata`` carries the label this handler derived from citations."""
+    if not isinstance(metadata, Mapping):
+        return False
+    record = metadata.get(DATA_CLASSIFICATION_KEY)
+    if not isinstance(record, Mapping):
+        return False
+    classified_by = record.get("classified_by")
+    return isinstance(classified_by, list) and CITED_LABEL_CLASSIFIER in classified_by
 
 
 def build_trace_summary_command(
@@ -111,6 +143,58 @@ class TraceSummaryIngestHandler(EvidenceIngestHandler):
             embedding_fn=embedding_fn,
             empty_error_code="trace_summary_empty",
         )
+        #: What :meth:`_label_for_write` found out about the command in hand,
+        #: for :meth:`_embed_strict`; set at the start of each command's write.
+        self._judgement: SummaryJudgement | None = None
+
+    def _judge(self, doc_id: str, metadata: dict[str, Any]) -> SummaryJudgement:
+        """The summary's verdict and inherited label, from one read of its citations."""
+        egress = EgressGate.for_embedder(
+            self._registry, self._registry.knowledge.document_store
+        )
+
+        def open_trace_store() -> TraceStore:
+            return self._registry.operational.trace_store
+
+        return egress.judge_summary(doc_id, metadata, open_trace_store)
+
+    def _label_for_write(self, doc_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
+        """Stamp the summary with the strictest label among the documents it cites.
+
+        A summary is rendered from a trace that cites documents, and an
+        unlabelled document reads ``internal``, so without this a caller cleared
+        only to ``internal`` is served the digest of a ``confidential`` one. The
+        label is derived from this write's own read of the citations
+        (:meth:`_judge`, which :meth:`_embed_strict` reuses), never from the
+        stored row, so a rewrite replaces it: a relabel up or down, or a citation
+        that stopped being unreadable, leaves the label the citations now give.
+        Nothing is added when no citation is labelled above ``internal``.
+        """
+        self._judgement = self._judge(doc_id, metadata)
+        inherited = self._judgement.inherited
+        if inherited is None or sensitivity_rank(inherited) <= sensitivity_rank(
+            sensitivity_of(metadata)
+        ):
+            return metadata
+        record = DataClassification(
+            sensitivity=inherited, classified_by=[CITED_LABEL_CLASSIFIER]
+        )
+        return {**metadata, DATA_CLASSIFICATION_KEY: record.model_dump(mode="json")}
+
+    def _enforce_clearance(self, doc_id: str, metadata: dict[str, Any]) -> None:
+        """The core write rules, except for replacing this handler's own stamp.
+
+        The overwrite rule refuses a write that lowers the stored label. The
+        label :meth:`_label_for_write` stamped last time is derived, and this
+        write derived its own from the citations as they are now, so a stamp
+        that no longer applies must be able to go. A label anyone else set is
+        still refused as before; this handler's clearance is ``restricted``, so
+        no label it writes is above it.
+        """
+        stored = self._registry.knowledge.document_store.get(doc_id)
+        if stored is not None and _is_cited_stamp(stored.get("metadata")):
+            return
+        super()._enforce_clearance(doc_id, metadata)
 
     def _embed_strict(
         self,
@@ -126,15 +210,14 @@ class TraceSummaryIngestHandler(EvidenceIngestHandler):
         stored and findable by keyword and graph search; only its vector is
         missing. ``True`` for a decline, with the verdict on
         :attr:`last_embed_withheld`; anything else is the core strict embed.
+
+        The verdict is the one :meth:`_label_for_write` read before the write,
+        not a fresh one over the stamped row: a stamp reads as the summary's own
+        label, which would withhold it, and so would turn a citation that could
+        not be read into a decline that advances the cursor and is never retried.
         """
-        egress = EgressGate.for_embedder(
-            self._registry, self._registry.knowledge.document_store
-        )
-
-        def open_trace_store() -> TraceStore:
-            return self._registry.operational.trace_store
-
-        verdict = egress.summary_verdict(doc_id, metadata, open_trace_store)
+        judgement = self._judgement or self._judge(doc_id, metadata)
+        verdict = judgement.verdict
         if verdict is EgressVerdict.PERMITTED:
             return super()._embed_strict(
                 doc_id, content, metadata, evidence, requested_by

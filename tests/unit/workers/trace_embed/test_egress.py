@@ -25,10 +25,13 @@ from trellis.core.document_write import is_redaction_tombstone, put_document
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.llm.egress import EgressGate, EgressVerdict
 from trellis.ops.write_health import summarize_backend_health
+from trellis.retrieve.builder_factory import build_pack_builder
+from trellis.schemas.classification import DATA_CLASSIFICATION_KEY
 from trellis.schemas.trace import EvidenceRef
 from trellis.stores.base.event_log import EventType
 from trellis_workers.trace_embed import run_trace_embed_pass, trace_summary_doc_id
 from trellis_workers.trace_embed import worker as worker_mod
+from trellis_workers.trace_embed.handler import CITED_LABEL_CLASSIFIER
 
 from .conftest import make_trace, seed_traces
 
@@ -529,3 +532,260 @@ def test_a_dry_run_counts_a_redacted_summary_as_redacted(
     assert report.skipped_redacted == 1
     assert report.skipped_egress_withheld == 0
     assert report.embedded == 0
+
+
+# --- a summary inherits the strictest label it cites -------------------------
+#
+# An unlabelled document reads ``internal``, so a summary stored with no label
+# would hand the digest of a ``confidential`` document to a caller cleared only
+# to ``internal``. The embedder gate keeps the vector off a cloud route; serving
+# clearance is a separate question, answered by the stored label.
+
+
+def _stored_label(registry, trace):
+    """The summary's stored ``data_classification`` record, else ``None``."""
+    row = registry.knowledge.document_store.get(trace_summary_doc_id(trace.trace_id))
+    assert row is not None
+    return row["metadata"].get(DATA_CLASSIFICATION_KEY)
+
+
+def _served_ids(registry, trace, clearance: str):
+    """``(served ids, rejected ids)`` for a pack asked for the trace's own intent."""
+    pack = build_pack_builder(registry, surface="cli.retrieve").build(
+        trace.intent, clearance=clearance
+    )
+    return (
+        {item.item_id for item in pack.items},
+        {
+            item.item_id
+            for item in pack.retrieval_report.rejected_items
+            if item.reason == "sensitivity"
+        },
+    )
+
+
+@pytest.mark.parametrize("local", [False, True], ids=["cloud", "local"])
+def test_a_summary_of_a_confidential_document_is_withheld_from_an_internal_caller(
+    registry, watermark_path, recorder, local
+) -> None:
+    """The serving probe: stored, found, and withheld below the cited label.
+
+    Both routes: a declared-local embedder embeds the summary, and serving
+    clearance does not depend on where the vector was computed.
+    """
+    _store_document(registry, "secret-doc", "confidential")
+    trace = _append_citing(registry, 1, "secret-doc")
+    registry._embedding_config = {"local": True} if local else None
+
+    run_trace_embed_pass(registry, watermark_path=watermark_path)
+
+    summary_id = trace_summary_doc_id(trace.trace_id)
+    stored = _stored_label(registry, trace)
+    assert stored is not None
+    assert stored["sensitivity"] == "confidential"
+    assert stored["classified_by"] == [CITED_LABEL_CLASSIFIER]
+    served, rejected = _served_ids(registry, trace, "internal")
+    assert summary_id not in served
+    assert summary_id in rejected
+    served, rejected = _served_ids(registry, trace, "confidential")
+    assert summary_id in served
+    assert summary_id not in rejected
+
+
+@pytest.mark.parametrize(
+    ("cited", "expected"),
+    [
+        (["confidential"], "confidential"),
+        (["restricted"], "restricted"),
+        (["internal", "confidential", "public"], "confidential"),
+        (["confidential", "restricted", "internal"], "restricted"),
+    ],
+)
+def test_a_summary_takes_the_strictest_label_among_its_citations(
+    registry, watermark_path, recorder, cited, expected
+) -> None:
+    for i, level in enumerate(cited):
+        _store_document(registry, f"doc-{i}", level)
+    trace = _append_citing(registry, 1, *(f"doc-{i}" for i in range(len(cited))))
+
+    run_trace_embed_pass(registry, watermark_path=watermark_path)
+
+    stored = _stored_label(registry, trace)
+    assert stored is not None
+    assert stored["sensitivity"] == expected
+
+
+@pytest.mark.parametrize("level", ["public", "internal", None])
+def test_a_summary_citing_nothing_above_internal_gains_no_label_key(
+    registry, watermark_path, recorder, level
+) -> None:
+    _store_document(registry, "doc-a", level)
+    cites = _append_citing(registry, 1, "doc-a", "entity-with-no-document")
+    nothing = _append_citing(registry, 2)
+
+    run_trace_embed_pass(registry, watermark_path=watermark_path)
+
+    for trace in (cites, nothing):
+        row = registry.knowledge.document_store.get(
+            trace_summary_doc_id(trace.trace_id)
+        )
+        assert row is not None
+        assert DATA_CLASSIFICATION_KEY not in row["metadata"]
+        assert _vectors(registry, [trace]) == 1
+
+
+def test_the_stored_stamp_withholds_the_summary_without_asking_the_trace(
+    registry, watermark_path, recorder
+) -> None:
+    """The own-label check withholds a stamped summary on its own."""
+    _store_document(registry, "doc-a", "confidential")
+    trace = _append_citing(registry, 1, "doc-a")
+    run_trace_embed_pass(registry, watermark_path=watermark_path)
+    summary_id = trace_summary_doc_id(trace.trace_id)
+    row = registry.knowledge.document_store.get(summary_id)
+    assert row is not None
+
+    def never() -> object:
+        msg = "the trace store was opened"
+        raise AssertionError(msg)
+
+    gate = EgressGate.for_embedder(registry, registry.knowledge.document_store)
+    verdict = gate.summary_verdict(summary_id, row["metadata"], never)  # type: ignore[arg-type]
+
+    assert verdict is EgressVerdict.WITHHELD
+
+
+def test_a_stamped_summary_is_counted_once(registry, watermark_path, recorder) -> None:
+    """The stamp reads as the summary's own label; the verdict is not recounted."""
+    _store_document(registry, "doc-a", "confidential")
+    _append_citing(registry, 1, "doc-a")
+
+    report = run_trace_embed_pass(registry, watermark_path=watermark_path)
+
+    assert report.skipped_egress_withheld == 1
+    assert report.skipped_egress_unreadable == 0
+    assert len(_withheld_events(registry)) == 1
+    assert recorder.texts == []
+
+
+def test_an_unreadable_citation_stamps_restricted_and_still_holds_the_cursor(
+    registry, watermark_path, recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stamp is the strictest reading; the verdict stays a fault to retry."""
+    trace = _append_citing(registry, 1, "unreadable-doc")
+    _raise_for(monkeypatch, registry, "unreadable-doc")
+
+    first = run_trace_embed_pass(registry, watermark_path=watermark_path)
+
+    stored = _stored_label(registry, trace)
+    assert stored is not None
+    assert stored["sensitivity"] == "restricted"
+    assert first.skipped_egress_unreadable == 1
+    assert first.skipped_egress_withheld == 0
+    assert first.watermark_after is None
+    _, rejected = _served_ids(registry, trace, "internal")
+    assert trace_summary_doc_id(trace.trace_id) in rejected
+
+
+@pytest.mark.parametrize("cleared_to", [None, "internal", "confidential"])
+def test_the_stamp_is_recomputed_when_an_unreadable_citation_is_retried(
+    registry, watermark_path, recorder, monkeypatch: pytest.MonkeyPatch, cleared_to
+) -> None:
+    """A label does not outlive its cause, and a stricter guess does not stick.
+
+    The first pass could not read the citation and stamped ``restricted``. The
+    retry reads it: unlabelled leaves no label, ``confidential`` replaces the
+    stricter stamp with the real one. Neither is refused as a lowered label.
+    """
+    trace = _append_citing(registry, 1, "doc-a")
+    _raise_for(monkeypatch, registry, "doc-a")
+    run_trace_embed_pass(registry, watermark_path=watermark_path)
+    first = _stored_label(registry, trace)
+    assert first is not None
+    assert first["sensitivity"] == "restricted"
+
+    monkeypatch.undo()
+    if cleared_to:
+        _store_document(registry, "doc-a", cleared_to)
+    second = run_trace_embed_pass(registry, watermark_path=watermark_path)
+
+    assert second.failed == 0
+    stored = _stored_label(registry, trace)
+    if cleared_to == "confidential":
+        assert stored is not None
+        assert stored["sensitivity"] == "confidential"
+        assert second.skipped_egress_withheld == 1
+        assert _vectors(registry, [trace]) == 0
+    else:
+        assert stored is None
+        assert second.embedded == 1
+        assert _vectors(registry, [trace]) == 1
+
+
+def test_the_stamp_follows_the_citation_through_relabels_on_a_rescan(
+    registry, watermark_path, recorder
+) -> None:
+    """Up, down and away: each rewrite leaves what the citations now say."""
+    _store_document(registry, "doc-a", "restricted")
+    trace = _append_citing(registry, 1, "doc-a")
+    run_trace_embed_pass(registry, watermark_path=watermark_path)
+    assert (_stored_label(registry, trace) or {}).get("sensitivity") == "restricted"
+
+    def rescan():
+        return run_trace_embed_pass(
+            registry, watermark_path=watermark_path, reset_watermark=True
+        )
+
+    # Down: a weaker label replaces the stricter one rather than being refused.
+    _store_document(registry, "doc-a", "confidential")
+    assert rescan().failed == 0
+    assert (_stored_label(registry, trace) or {}).get("sensitivity") == "confidential"
+
+    # Up again: the stricter label wins over the weaker one stored.
+    _store_document(registry, "doc-a", "restricted")
+    assert rescan().failed == 0
+    assert (_stored_label(registry, trace) or {}).get("sensitivity") == "restricted"
+
+    # Away: once nothing cited is above internal, no label remains.
+    _store_document(registry, "doc-a", "internal")
+    done = rescan()
+    assert done.failed == 0
+    assert done.embedded == 1
+    assert _stored_label(registry, trace) is None
+    served, _ = _served_ids(registry, trace, "internal")
+    assert trace_summary_doc_id(trace.trace_id) in served
+
+
+def test_a_label_someone_else_set_on_a_summary_is_still_not_lowered(
+    registry, watermark_path, recorder
+) -> None:
+    """Only the stamp this handler derived may be replaced by a rewrite."""
+    _store_document(registry, "doc-a", "internal")
+    trace = _append_citing(registry, 1, "doc-a")
+    summary_id = trace_summary_doc_id(trace.trace_id)
+    registry.knowledge.document_store.put(
+        summary_id, "summary", {**label("restricted")}
+    )
+
+    report = run_trace_embed_pass(registry, watermark_path=watermark_path)
+
+    assert report.failed == 1
+    row = registry.knowledge.document_store.get(summary_id)
+    assert row is not None
+    assert row["metadata"][DATA_CLASSIFICATION_KEY]["sensitivity"] == "restricted"
+
+
+def test_a_local_embedder_still_holds_a_summary_whose_citation_cannot_be_read(
+    registry, watermark_path, recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The label is read on every route, so a failed read is not skipped locally."""
+    registry._embedding_config = {"local": True}
+    trace = _append_citing(registry, 1, "unreadable-doc")
+    _raise_for(monkeypatch, registry, "unreadable-doc")
+
+    report = run_trace_embed_pass(registry, watermark_path=watermark_path)
+
+    assert report.skipped_egress_unreadable == 1
+    assert report.watermark_after is None
+    assert _vectors(registry, [trace]) == 0
+    assert (_stored_label(registry, trace) or {}).get("sensitivity") == "restricted"

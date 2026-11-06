@@ -78,7 +78,7 @@ _GATE_BUILDING_FUNCTIONS = frozenset(
         ("trellis/retrieve/embed_ingest_hook.py", "run_embed_on_ingest"),
         ("trellis/mutate/handlers/evidence_handler.py", "_embed_strict"),
         ("trellis_cli/admin_reindex_vectors.py", "run_reindex_vectors"),
-        ("trellis_workers/trace_embed/handler.py", "_embed_strict"),
+        ("trellis_workers/trace_embed/handler.py", "_judge"),
         ("trellis_workers/trace_embed/worker.py", "run_trace_embed_pass"),
     }
 )

@@ -122,6 +122,19 @@ class EvidenceIngestHandler:
         #: reads it here after a ``SUCCESS``; reset at the start of each command.
         self.last_embed_withheld: EgressVerdict | None = None
 
+    def _label_for_write(
+        self,
+        doc_id: str,  # noqa: ARG002
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        """The metadata to write for ``doc_id``; a label it inherits is stamped here.
+
+        Runs after the write-time classifiers and before the clearance rules,
+        so a label added here is checked like any other. The core writer
+        inherits nothing and returns ``metadata`` as it came.
+        """
+        return metadata
+
     def _enforce_clearance(self, doc_id: str, metadata: dict[str, Any]) -> None:
         """The save surfaces' write rules, run where the write is.
 
@@ -308,6 +321,7 @@ class EvidenceIngestHandler:
             doc_id=doc_id,
             registry=self._registry,
         )
+        metadata = self._label_for_write(doc_id, metadata)
         self._enforce_clearance(doc_id, metadata)
         # Through the seam even though both embed modes below rebuild the
         # whole row: ``run_embed_on_ingest`` is gated on
