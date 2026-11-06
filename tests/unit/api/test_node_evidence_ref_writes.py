@@ -525,3 +525,38 @@ class TestAnUpsertThatLeavesTheKeyOutKeepsThePointer:
             ]
             == HELD
         )
+
+    def test_a_measurement_recorded_over_the_id_keeps_it(self, client, registry):
+        """``measurement.record`` replaces the bag and has no pointer of its own."""
+        headers = _headers(registry)
+        accepted, message = _write(client, headers, "entity.create", HELD)
+        assert accepted, message
+        resp = client.post(
+            "/api/v1/commands/batch",
+            json={
+                "commands": [
+                    {
+                        "operation": "measurement.record",
+                        "args": {
+                            "measurement": {
+                                "measurement_id": NODE_ID,
+                                "subject_entity_id": "subject-1",
+                                "subject_entity_type": "service",
+                                "metric_name": "p99_ms",
+                                "metric_value": 120.0,
+                                "observer_agent_id": "agent-1",
+                            }
+                        },
+                    }
+                ],
+                "strategy": "continue_on_error",
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        props = registry.knowledge.graph_store.get_node(NODE_ID)["properties"]
+        assert props["metric_name"] == "p99_ms"
+        assert props["evidence_ref"] == HELD
+        accepted, _ = _write(client, headers, "entity.update", OTHER)
+        assert not accepted
+        assert self._held(registry) == HELD

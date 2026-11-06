@@ -6320,8 +6320,8 @@ above its own clearance, and cannot touch a document it may not read.**
   different `evidence_ref` is refused. Recording one again with no
   `evidence_ref` keeps the pointer the node holds.
 - **An upsert that leaves `evidence_ref` out keeps the one the node holds.**
-  `entity.create` over an existing id and `observation.record` of an existing
-  observation id replace the node's property bag, so without this a call that
+  `entity.create` over an existing id and `observation.record` or
+  `measurement.record` of an existing id replace the node's property bag, so without this a call that
   merely omitted the key would clear the pointer and a later `entity.update`
   could set any readable document in its place. The stored pointer is carried
   into the new version when the command leaves the key out (a stored `null` or

@@ -131,8 +131,9 @@ def _carry_held_evidence_ref(
 ) -> None:
     """Copy the stored ``evidence_ref`` into ``properties`` when they leave it out.
 
-    For the two writers that replace a node's whole bag (``entity.create`` over
-    an existing id, ``observation.record`` of an existing id). A stored value
+    For the writers that replace a node's whole bag (``entity.create`` over an
+    existing id, ``observation.record`` and ``measurement.record`` of an
+    existing id). A stored value
     that is empty or ``None`` is not held and is not copied.
     """
     if EVIDENCE_REF_KEY in properties or stored_properties is None:
@@ -859,6 +860,15 @@ class MeasurementRecordHandler:
             props["unit"] = meas.unit
         if meas.metadata is not None:
             props["metadata"] = meas.metadata
+        # A Measurement has no evidence_ref of its own, so re-recording an id that
+        # holds one would clear it; it is carried forward instead.
+        existing_measurement = store.get_node(meas.measurement_id)
+        _carry_held_evidence_ref(
+            props,
+            existing_measurement.get("properties")
+            if existing_measurement is not None
+            else None,
+        )
 
         node_id = store.upsert_node(
             node_id=meas.measurement_id,
