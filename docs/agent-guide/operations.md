@@ -1722,7 +1722,7 @@ Import OpenLineage events into the knowledge graph.
 trellis ingest openlineage <events-path> [--format text|json]
 ```
 
-Reads a JSON array or newline-delimited JSON file of OpenLineage events. Creates dataset and job entities with `reads_from` and `writes_to` edges. Writes no documents, so neither ingest flag applies.
+Reads a JSON array or newline-delimited JSON file of OpenLineage events. Creates dataset and job entities with `reads_from` and `writes_to` edges. Writes no documents, so neither ingest flag applies. A dataset that carries a Unity Catalog identity (a `unity-catalog` `TABLE` symlink, as openlineage-spark 1.51.0 or later emits on Databricks, or a `unitycatalog://` namespace) is written as a placeholder at the Unity Catalog table's id instead of its storage-path id; the command has no flag for the symlink scope, which is the default `unity_catalog` (see [Recipe 5](source-modeling-cookbook.md#stable-identity)). Names that cannot be read as `catalog.schema.table` are counted in the extraction result's `skipped_rows` (carried on the `EXTRACTION_DISPATCHED` event; `trellis extract refresh` prints them).
 
 **JSON output:**
 

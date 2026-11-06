@@ -33,6 +33,7 @@ from trellis_workers.extract.unity_catalog import (
     UnityCatalogExtractor,
     check_input,
 )
+from trellis_workers.extract.unity_catalog_identity import normalize_scope
 
 NS = "unitycatalog://dbc-0000.example.net"
 
@@ -851,18 +852,27 @@ class TestIdentity:
         plain = await extract(TABLES)
         assert drafts(by_option) == drafts(plain) == drafts(in_document)
 
-    async def test_namespaces_differing_only_in_a_trailing_slash_are_one(self) -> None:
-        raw = [{"namespace": NS, **CATALOGS}, {"namespace": NS + "/", **TABLES}]
+    async def test_namespaces_differing_in_case_port_or_slash_are_one(self) -> None:
+        raw = [
+            {"namespace": NS, **CATALOGS},
+            {
+                "namespace": NS.upper().replace("UNITYCATALOG", "UnityCatalog")
+                + ":443/",
+                **TABLES,
+            },
+        ]
         check_input(raw)
         result = await UnityCatalogExtractor().extract(raw)
         assert tid("main.sales.orders") in by_id(result)
 
-    async def test_a_port_is_part_of_the_namespace_and_so_of_the_id(self) -> None:
-        # OpenLineage's spec allows `unitycatalog://{host}[:{port}]`; the two
-        # spellings are two namespaces, hence two ids, for one workspace.
-        with_port = await UnityCatalogExtractor(namespace=NS + ":443").extract(TABLES)
-        assert tid("main.sales.orders", NS + ":443") in by_id(with_port)
-        assert tid("main.sales.orders") not in by_id(with_port)
+    async def test_the_https_port_is_dropped_and_any_other_is_kept(self) -> None:
+        # The OpenLineage naming spec allows `unitycatalog://{host}[:{port}]`;
+        # `:443` is the HTTPS default, so it names the same workspace as no port.
+        with_443 = await UnityCatalogExtractor(namespace=NS + ":443").extract(TABLES)
+        assert tid("main.sales.orders") in by_id(with_443)
+        other = await UnityCatalogExtractor(namespace=NS + ":8443").extract(TABLES)
+        assert tid("main.sales.orders", NS + ":8443") in by_id(other)
+        assert tid("main.sales.orders") not in by_id(other)
 
     async def test_agrees_with_openlineage_on_one_table(self) -> None:
         event = {
@@ -1235,3 +1245,256 @@ class TestDeterminism:
         result = await extract(rows[::-1] if flip else rows)
         edge = next(e for e in result.edges if e.edge_kind == "depends_on")
         assert edge.properties["last_event_time"] == "2024-02-01T00:00:00.000+00:00"
+
+
+# ---------------------------------------------------------------------------
+# Meeting OpenLineage datasets
+# ---------------------------------------------------------------------------
+
+JOB = "job:databricks:build_revenue"
+#: No namespace: the scope an OpenLineage ``unity-catalog`` symlink uses by default.
+BARE = "unity_catalog"
+STORAGE = ("abfss://Lake@account.dfs.core.windows.net", "/Tables/Orders")
+
+
+def storage_dataset(table: str, *, namespace: str = "unity-catalog") -> dict[str, Any]:
+    """A dataset as openlineage-spark 1.51+ emits it on Databricks: the storage
+    location is the dataset's own name, the table only a symlink."""
+    return {
+        "namespace": STORAGE[0],
+        "name": STORAGE[1],
+        "facets": {
+            "symlinks": {
+                "identifiers": [
+                    {"namespace": namespace, "name": table, "type": "TABLE"}
+                ]
+            }
+        },
+    }
+
+
+def lineage_event(*inputs: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "job": {"namespace": "databricks", "name": "build_revenue"},
+        "inputs": list(inputs),
+        "outputs": [],
+    }
+
+
+async def uc_ids(**options: Any) -> set[str]:
+    """The dataset ids a Unity Catalog extractor with ``options`` mints for TABLES."""
+    result = await UnityCatalogExtractor(**options).extract(TABLES)
+    return {e.entity_id for e in result.entities if e.entity_type == "dataset"}
+
+
+class TestScope:
+    @pytest.mark.parametrize(
+        ("given", "expected"),
+        [
+            ("unitycatalog://host", "unitycatalog://host"),
+            ("unitycatalog://host/", "unitycatalog://host"),
+            (" unitycatalog://host// ", "unitycatalog://host"),
+            ("UnityCatalog://Host.Example.NET", "unitycatalog://host.example.net"),
+            ("unitycatalog://host:443", "unitycatalog://host"),
+            ("unitycatalog://HOST:443/", "unitycatalog://host"),
+            ("unitycatalog://host:8443", "unitycatalog://host:8443"),
+            ("unitycatalog://host:1443", "unitycatalog://host:1443"),
+            ("unitycatalog://host/Path/", "unitycatalog://host/Path"),
+            ("unity_catalog", "unity_catalog"),
+            ("https://Host:443/", "https://Host:443"),
+            ("", None),
+            ("  /", None),
+            ("unitycatalog://", None),
+            ("unitycatalog:///", None),
+            (None, None),
+            (3, None),
+        ],
+    )
+    def test_normalize_scope(self, given: Any, expected: str | None) -> None:
+        assert normalize_scope(given) == expected
+
+    async def test_the_extractor_reads_its_scope_through_the_helper(self) -> None:
+        spelled = "UnityCatalog://DBC-0000.example.net:443/"
+        assert await uc_ids(namespace=spelled) == await uc_ids(namespace=NS)
+
+
+class TestOpenLineageMeetsTheCatalog:
+    @pytest.mark.parametrize(
+        "spelling",
+        ["main.sales.orders", "Main.Sales.Orders", "`main`.`sales`.`orders`"],
+    )
+    async def test_a_databricks_symlink_lands_on_the_catalogs_node(
+        self, spelling: str
+    ) -> None:
+        ol = await OpenLineageExtractor().extract(
+            [lineage_event(storage_dataset(spelling))]
+        )
+        edge = next(e for e in ol.edges if e.edge_kind == "reads_from")
+        assert edge.source_id == JOB
+        assert edge.target_id == tid("main.sales.orders", BARE)
+        assert edge.target_id in await uc_ids()  # byte for byte, no namespace set
+        assert edge.target_id in {e.entity_id for e in ol.entities}
+
+    async def test_a_namespaced_catalog_meets_a_scoped_extractor(self) -> None:
+        event = lineage_event(storage_dataset("Main.Sales.Orders"))
+        scoped = await OpenLineageExtractor(unity_catalog_scope=NS + "/").extract(
+            [event]
+        )
+        edge = next(e for e in scoped.edges if e.edge_kind == "reads_from")
+        assert edge.target_id == tid("main.sales.orders", NS)
+        assert edge.target_id in await uc_ids(namespace=NS)
+
+        # Without the scope the two disagree: the id carries the scope.
+        unscoped = await OpenLineageExtractor().extract([event])
+        assert next(e.target_id for e in unscoped.edges) not in await uc_ids(
+            namespace=NS
+        )
+
+    @pytest.mark.parametrize(
+        "ol_namespace",
+        [
+            "unitycatalog://dbc-0000.example.net",
+            "unitycatalog://DBC-0000.example.net:443/",
+            "UnityCatalog://dbc-0000.EXAMPLE.net:443",
+        ],
+    )
+    async def test_a_unitycatalog_primary_id_meets_the_catalog(
+        self, ol_namespace: str
+    ) -> None:
+        event = lineage_event({"namespace": ol_namespace, "name": "Main.Sales.Orders"})
+        ol = await OpenLineageExtractor().extract([event])
+        edge = next(e for e in ol.edges if e.edge_kind == "reads_from")
+        assert edge.target_id == tid("main.sales.orders")
+        assert edge.target_id in await uc_ids(
+            namespace="unitycatalog://dbc-0000.example.net"
+        )
+        assert edge.target_id in await uc_ids(namespace=NS)
+
+    async def test_the_placeholder_has_the_shape_of_the_catalogs_own(self) -> None:
+        """Same type, keys and values as the catalog's placeholder for a table it
+        can name but not describe, whichever extractor wrote it."""
+        event = lineage_event({"namespace": NS, "name": "main.sales.orders"})
+        ol = await OpenLineageExtractor().extract([event])
+        mine = by_id(ol)[tid("main.sales.orders")]
+        uc = await extract(
+            LINEAGE_ONLY
+        )  # names `orders` in lineage, never describes it
+        theirs = by_id(uc)[tid("main.sales.orders")]
+        assert theirs.properties["stub"] is True
+        assert (mine.entity_type, mine.if_absent) == (theirs.entity_type, True)
+        assert mine.properties == theirs.properties
+        assert mine.properties["physical_uri"] == (
+            "databricks://dbc-0000.example.net/main/sales/orders"
+        )
+
+    async def test_the_old_agreement_still_holds_for_a_matching_spelling(self) -> None:
+        # The case the extractors agreed on before OpenLineage read symlinks.
+        event = lineage_event({"namespace": NS, "name": "main.sales.orders"})
+        ol = await OpenLineageExtractor().extract([event])
+        assert tid("main.sales.orders") in by_id(ol)
+        assert tid("main.sales.orders") in await uc_ids(namespace=NS)
+
+
+class TestOpenLineageAndCatalogInOneStore:
+    """Both write orders through the executor into a real SQLite graph store."""
+
+    @staticmethod
+    async def _runs() -> tuple[ExtractionResult, ExtractionResult]:
+        uc = await UnityCatalogExtractor().extract(
+            [CATALOGS, SCHEMAS, TABLES], source_hint="unity-catalog"
+        )
+        ol = await OpenLineageExtractor().extract(
+            [lineage_event(storage_dataset("Main.Sales.Orders"))], source_hint="ol"
+        )
+        return uc, ol
+
+    @BOTH_MODES
+    async def test_the_catalog_first_keeps_its_metadata_and_gains_the_edge(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lom: bool
+    ) -> None:
+        store = Store(tmp_path, monkeypatch, lom=lom)
+        uc, ol = await self._runs()
+        orders = tid("main.sales.orders", BARE)
+
+        store.write(uc)
+        before = (store.props(orders), len(store.graph.get_node_history(orders)))
+        store.write(ol)
+
+        # Nothing the catalog wrote was touched: same properties, no new version.
+        assert (
+            store.props(orders),
+            len(store.graph.get_node_history(orders)),
+        ) == before
+        assert store.props(orders)["description"] == "One row per order"
+        assert "stub" not in store.props(orders)
+        edges = store.graph.get_edges(JOB, direction="outgoing", edge_type="reads_from")
+        assert [e["target_id"] for e in edges] == [orders]
+        assert store.graph.get_node(f"dataset:{STORAGE[0]}:{STORAGE[1]}") is None
+
+    @BOTH_MODES
+    async def test_openlineage_first_leaves_a_placeholder_the_catalog_replaces(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lom: bool
+    ) -> None:
+        store = Store(tmp_path, monkeypatch, lom=lom)
+        uc, ol = await self._runs()
+        orders = tid("main.sales.orders", BARE)
+
+        store.write(ol)
+        assert store.props(orders)["stub"] is True
+        assert "description" not in store.props(orders)
+
+        store.write(uc)
+        assert "stub" not in store.props(orders)
+        assert store.props(orders)["description"] == "One row per order"
+        assert store.props(orders)["table_type"] == "MANAGED"
+        edges = store.graph.get_edges(JOB, direction="outgoing", edge_type="reads_from")
+        assert [e["target_id"] for e in edges] == [orders]
+        # One node for the table, not a storage-path twin beside it.
+        datasets = [
+            n["node_id"] for n in store.graph.query(node_type="dataset", limit=100)
+        ]
+        assert sorted(datasets) == [
+            tid("main.sales.daily_revenue", BARE),
+            orders,
+        ]
+
+    @pytest.mark.parametrize("catalog_first", [True, False])
+    async def test_an_if_absent_write_on_an_existing_node_still_binds_its_aliases(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, catalog_first: bool
+    ) -> None:
+        """With link-or-mint on the storage alias lands on the table either way;
+        off, no extractor binds an alias (it is the knob's, not this change's)."""
+        storage_key = f"{STORAGE[0]}/{STORAGE[1]}"
+        (tmp_path / "on").mkdir()
+        (tmp_path / "off").mkdir()
+        on = Store(tmp_path / "on", monkeypatch, lom=True)
+        uc, ol = await self._runs()
+        for result in (uc, ol) if catalog_first else (ol, uc):
+            on.write(result)
+        hit = on.graph.resolve_alias("openlineage_dataset", storage_key)
+        assert hit is not None
+        assert hit["entity_id"] == tid("main.sales.orders", BARE)
+        assert on.graph.resolve_alias("unity_catalog", "main.sales.orders") is not None
+
+        off = Store(tmp_path / "off", monkeypatch, lom=False)
+        for result in (uc, ol):
+            off.write(result)
+        assert off.graph.resolve_alias("openlineage_dataset", storage_key) is None
+
+    @BOTH_MODES
+    async def test_a_second_run_changes_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lom: bool
+    ) -> None:
+        store = Store(tmp_path, monkeypatch, lom=lom)
+        uc, ol = await self._runs()
+        store.write(ol)
+        store.write(uc)
+        first = store.snapshot()
+        store.write(ol)
+        store.write(ol)
+        # A job is rewritten by every run, as before this change; no dataset is.
+        assert [row for row in store.snapshot() if row[0].startswith("dataset:")] == [
+            row for row in first if row[0].startswith("dataset:")
+        ]
+        edges = store.graph.get_edges(JOB, direction="outgoing", edge_type="reads_from")
+        assert len(edges) == 1

@@ -272,6 +272,260 @@ class TestOpenLineageExtractor:
 
 
 # ---------------------------------------------------------------------------
+# OpenLineageExtractor: datasets that name a Unity Catalog table
+#
+# openlineage-spark 1.51.0+ on Databricks puts the storage location in the
+# dataset's own namespace and name and the table only in a ``unity-catalog``
+# symlink; other producers emit ``unitycatalog://<host>`` as the dataset's own
+# namespace.  Every name below is invented.
+# ---------------------------------------------------------------------------
+
+_STORAGE_NS = "s3://Example-Bucket"
+_STORAGE_NAME = "/Warehouse/Orders"
+_UC_ORDERS = "dataset:unity_catalog:main.sales.orders"
+
+
+def _symlink(
+    name: str, *, namespace: str = "unity-catalog", kind: str = "TABLE"
+) -> dict:
+    return {"namespace": namespace, "name": name, "type": kind}
+
+
+def _dataset(
+    namespace: str = _STORAGE_NS,
+    name: str = _STORAGE_NAME,
+    *,
+    symlinks: list[dict] | None = None,
+) -> dict:
+    ds: dict = {"namespace": namespace, "name": name}
+    if symlinks is not None:
+        ds["facets"] = {
+            "schema": {"fields": [{"name": "order_id", "type": "long"}]},
+            "symlinks": {"identifiers": symlinks},
+        }
+    return ds
+
+
+def _event(inputs: list[dict] | None = None, outputs: list[dict] | None = None) -> dict:
+    return {
+        "job": {"namespace": "databricks", "name": "build_revenue"},
+        "inputs": inputs or [],
+        "outputs": outputs or [],
+    }
+
+
+def _targets(result, kind: str) -> set[str]:
+    return {e.target_id for e in result.edges if e.edge_kind == kind}
+
+
+class TestOpenLineageUnityCatalog:
+    @pytest.mark.parametrize(
+        "spelling",
+        ["main.sales.orders", "Main.Sales.Orders", "`main`.`sales`.`orders`"],
+    )
+    async def test_a_storage_dataset_with_a_symlink_lands_on_the_table(
+        self, spelling: str
+    ) -> None:
+        event = _event(
+            inputs=[_dataset(symlinks=[_symlink(spelling)])],
+            outputs=[
+                _dataset(
+                    "s3://example-bucket",
+                    "/w/out",
+                    symlinks=[_symlink("main.sales.daily_revenue")],
+                )
+            ],
+        )
+        result = await OpenLineageExtractor().extract([event])
+
+        assert _targets(result, "reads_from") == {_UC_ORDERS}
+        assert _targets(result, "writes_to") == {
+            "dataset:unity_catalog:main.sales.daily_revenue"
+        }
+        # Not the storage-path node.
+        assert f"dataset:{_STORAGE_NS}:{_STORAGE_NAME}" not in {
+            e.entity_id for e in result.entities
+        }
+        assert result.skipped_rows == {}
+
+    async def test_the_placeholder_is_name_only_and_carries_the_storage_alias(
+        self,
+    ) -> None:
+        event = _event(inputs=[_dataset(symlinks=[_symlink("Main.Sales.Orders")])])
+        result = await OpenLineageExtractor().extract([event])
+
+        table = next(e for e in result.entities if e.entity_id == _UC_ORDERS)
+        assert table.entity_type == "dataset"
+        assert table.if_absent is True
+        assert table.name == "orders"
+        assert table.properties == {
+            "name": "orders",
+            "full_name": "main.sales.orders",
+            "database_name": "main",
+            "schema_name": "sales",
+            "source_system": "databricks",
+            "stub": True,
+        }, "no facets, no namespace, no OpenLineage physical_uri"
+        assert [(a.source_system, a.raw_id) for a in table.aliases] == [
+            ("openlineage_dataset", f"{_STORAGE_NS}/{_STORAGE_NAME}")
+        ]
+
+    async def test_two_storage_identities_of_one_table_are_one_entity(self) -> None:
+        link = [_symlink("main.sales.orders")]
+        event = _event(
+            inputs=[
+                _dataset(symlinks=link),
+                _dataset(_STORAGE_NS, "/Moved", symlinks=link),
+            ]
+        )
+        result = await OpenLineageExtractor().extract([event])
+
+        tables = [e for e in result.entities if e.entity_type == "dataset"]
+        assert [t.entity_id for t in tables] == [_UC_ORDERS]
+        assert [a.raw_id for a in tables[0].aliases] == [
+            f"{_STORAGE_NS}/{_STORAGE_NAME}",
+            f"{_STORAGE_NS}//Moved",
+        ]
+
+    @pytest.mark.parametrize("kind", ["table", "Table", " TABLE "])
+    async def test_the_symlink_type_is_case_insensitive(self, kind: str) -> None:
+        event = _event(
+            inputs=[_dataset(symlinks=[_symlink("main.sales.orders", kind=kind)])]
+        )
+        result = await OpenLineageExtractor().extract([event])
+        assert _targets(result, "reads_from") == {_UC_ORDERS}
+
+    @pytest.mark.parametrize("kind", ["VOLUME", "", None])
+    async def test_a_symlink_that_is_not_a_table_is_not_an_identity(self, kind) -> None:
+        link = _symlink("main.sales.orders", kind=kind)
+        event = _event(inputs=[_dataset(symlinks=[link])])
+        result = await OpenLineageExtractor().extract([event])
+        assert _targets(result, "reads_from") == {
+            f"dataset:{_STORAGE_NS}:{_STORAGE_NAME}"
+        }
+        assert result.skipped_rows == {}
+
+    async def test_a_symlink_in_another_namespace_is_ignored(self) -> None:
+        link = _symlink("main.sales.orders", namespace="hive")
+        result = await OpenLineageExtractor().extract(
+            [_event(inputs=[_dataset(symlinks=[link])])]
+        )
+        assert _targets(result, "reads_from") == {
+            f"dataset:{_STORAGE_NS}:{_STORAGE_NAME}"
+        }
+
+    async def test_the_scope_of_a_symlink_is_configurable(self) -> None:
+        event = _event(inputs=[_dataset(symlinks=[_symlink("main.sales.orders")])])
+        for given, scope in (
+            ("unitycatalog://Host:443/", "unitycatalog://host"),
+            ("custom", "custom"),
+            (None, "unity_catalog"),
+            ("  ", "unity_catalog"),
+        ):
+            result = await OpenLineageExtractor(unity_catalog_scope=given).extract(
+                [event]
+            )
+            assert _targets(result, "reads_from") == {
+                f"dataset:{scope}:main.sales.orders"
+            }
+
+    async def test_a_unitycatalog_namespace_is_its_own_scope(self) -> None:
+        event = _event(
+            inputs=[
+                _dataset("UnityCatalog://Host.Example.net:443/", "Main.Sales.Orders")
+            ],
+            outputs=[
+                _dataset(
+                    _STORAGE_NS,
+                    _STORAGE_NAME,
+                    symlinks=[
+                        _symlink(
+                            "main.sales.daily",
+                            namespace="unitycatalog://other.example.net",
+                        )
+                    ],
+                )
+            ],
+        )
+        result = await OpenLineageExtractor(unity_catalog_scope="ignored").extract(
+            [event]
+        )
+        assert _targets(result, "reads_from") == {
+            "dataset:unitycatalog://host.example.net:main.sales.orders"
+        }
+        assert _targets(result, "writes_to") == {
+            "dataset:unitycatalog://other.example.net:main.sales.daily"
+        }
+
+    async def test_a_dataset_with_no_unity_catalog_identity_is_untouched(self) -> None:
+        """Storage paths are case-sensitive: the id is exactly the OpenLineage pair."""
+        ds = _dataset(
+            _STORAGE_NS,
+            _STORAGE_NAME,
+            symlinks=[_symlink("hive_db.Orders", namespace="hive")],
+        )
+        result = await OpenLineageExtractor().extract([_event(inputs=[ds])])
+
+        did = f"dataset:{_STORAGE_NS}:{_STORAGE_NAME}"
+        assert _targets(result, "reads_from") == {did}
+        entity = next(e for e in result.entities if e.entity_id == did)
+        assert entity.if_absent is False
+        assert entity.properties["facets"] == ds["facets"]
+        assert entity.properties["physical_uri"] == f"{_STORAGE_NS}/{_STORAGE_NAME}"
+        assert [a.raw_id for a in entity.aliases] == [f"{_STORAGE_NS}/{_STORAGE_NAME}"]
+
+    async def test_an_unparseable_name_is_counted_and_falls_back(self) -> None:
+        event = _event(
+            inputs=[
+                _dataset(symlinks=[_symlink("main.sales")]),
+                _dataset(_STORAGE_NS, "/Other", symlinks=[_symlink("a..b")]),
+                _dataset("unitycatalog://host", "main.sales"),
+            ]
+        )
+        result = await OpenLineageExtractor().extract([event])
+
+        assert _targets(result, "reads_from") == {
+            f"dataset:{_STORAGE_NS}:{_STORAGE_NAME}",
+            f"dataset:{_STORAGE_NS}:/Other",
+            "dataset:unitycatalog://host:main.sales",
+        }
+        assert result.skipped_rows == {
+            "uc_primary_unparsed": 1,
+            "uc_symlink_unparsed": 2,
+        }
+
+    async def test_an_unparseable_primary_still_uses_a_good_symlink(self) -> None:
+        ds = _dataset(
+            "unitycatalog://host", "orders", symlinks=[_symlink("main.sales.orders")]
+        )
+        result = await OpenLineageExtractor().extract([_event(inputs=[ds])])
+        assert _targets(result, "reads_from") == {_UC_ORDERS}
+        assert result.skipped_rows == {"uc_primary_unparsed": 1}
+
+    @pytest.mark.parametrize(
+        "facets",
+        [
+            {"symlinks": None},
+            {"symlinks": "x"},
+            {"symlinks": {"identifiers": "x"}},
+            {
+                "symlinks": {
+                    "identifiers": [None, 3, "x", {}, {"namespace": 1, "name": 2}]
+                }
+            },
+            "x",
+        ],
+    )
+    async def test_malformed_symlink_facets_are_ignored(self, facets) -> None:
+        ds = {"namespace": _STORAGE_NS, "name": _STORAGE_NAME, "facets": facets}
+        result = await OpenLineageExtractor().extract([_event(inputs=[ds])])
+        assert _targets(result, "reads_from") == {
+            f"dataset:{_STORAGE_NS}:{_STORAGE_NAME}"
+        }
+        assert result.skipped_rows == {}
+
+
+# ---------------------------------------------------------------------------
 # Cross-database routing properties contract (B1)
 #
 # Both reference extractors are expected to populate the canonical routing
