@@ -55,7 +55,10 @@ def create_curate_handlers(
 
     ``clearance`` is the caller's document clearance; the handlers that decide
     a document's label (``evidence.ingest``, ``classification.set``) refuse
-    against it. The default is trusted-local, which clears everything.
+    against it, and the graph writers that keep an ``evidence_ref``
+    (``entity.create``, ``entity.update``, ``observation.record``) read the
+    document it names at that clearance. The default is trusted-local, which
+    clears everything.
     """
     return {
         Operation.EVIDENCE_INGEST: EvidenceIngestHandler(
@@ -77,11 +80,13 @@ def create_curate_handlers(
         Operation.LABEL_ADD: LabelAddHandler(registry),
         Operation.LABEL_REMOVE: LabelRemoveHandler(registry),
         Operation.FEEDBACK_RECORD: FeedbackRecordHandler(registry),
-        Operation.ENTITY_CREATE: EntityCreateHandler(registry),
-        Operation.ENTITY_UPDATE: EntityUpdateHandler(registry),
+        Operation.ENTITY_CREATE: EntityCreateHandler(registry, clearance=clearance),
+        Operation.ENTITY_UPDATE: EntityUpdateHandler(registry, clearance=clearance),
         Operation.ALIAS_UPSERT: AliasUpsertHandler(registry),
         Operation.LINK_CREATE: LinkCreateHandler(registry),
-        Operation.OBSERVATION_RECORD: ObservationRecordHandler(registry),
+        Operation.OBSERVATION_RECORD: ObservationRecordHandler(
+            registry, clearance=clearance
+        ),
         Operation.MEASUREMENT_RECORD: MeasurementRecordHandler(registry),
         Operation.REDACTION_APPLY: RedactionApplyHandler(registry),
         Operation.RETENTION_PRUNE: RetentionPruneHandler(registry),

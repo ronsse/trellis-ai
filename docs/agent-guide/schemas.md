@@ -487,7 +487,7 @@ See [`adr-observation-entity-type.md`](../design/adr-observation-entity-type.md)
 | `content` | `string` | **Yes** | -- | Observation text / narrative description |
 | `confidence` | `float` | **Yes** | -- | Producer confidence in `[0.0, 1.0]` |
 | `observed_at` | `datetime` | No | UTC now | When the observation was made |
-| `evidence_ref` | `string` or `null` | No | `null` | Pointer to supporting evidence (`trace_id`, `document_id`, URN) |
+| `evidence_ref` | `string` or `null` | No | `null` | The id of a stored document the writer may read (#1057). A value naming no readable document is refused (`node_evidence_ref_unreadable`), and an observation id that already holds one keeps it. See [operations.md](operations.md#sensitivity-clearance) |
 | `metadata` | `dict` or `null` | No | `null` | Open bag for `kind` / `value` / `window_*` / `sample_size` / `method` etc. |
 
 ```json

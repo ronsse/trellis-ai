@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
@@ -10,6 +10,7 @@ from trellis.core.error_sanitize import describe_validation_error
 from trellis.errors import NotFoundError, StoreError, ValidationError
 from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
 from trellis.mutate.commands import Command
+from trellis.mutate.evidence_pointer_keys import node_evidence_ref_refusal
 from trellis.mutate.handlers._common import (
     _current_lifecycle_state,
     _rewrite_current_node,
@@ -30,6 +31,11 @@ from trellis.stores.base.event_log import EventType
 from trellis.stores.base.graph import AliasBindResult, AliasBindStatus, GraphStore
 from trellis.stores.registry import StoreRegistry
 
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from trellis.schemas.classification import Sensitivity
+
 logger = structlog.get_logger(__name__)
 
 #: What ``entity.create`` with ``if_absent`` answers when the id already names
@@ -37,6 +43,35 @@ logger = structlog.get_logger(__name__)
 #: not make tells the two apart by this prefix (``save_knowledge``'s domain
 #: mint), so the handler and its readers share one spelling.
 ENTITY_LEFT_ALONE_MESSAGE = "Entity left alone, already exists (if_absent)"
+
+
+def _refuse_node_evidence_ref(
+    registry: StoreRegistry,
+    properties: Mapping[str, Any],
+    *,
+    stored_properties: Mapping[str, Any] | None,
+    clearance: Sensitivity,
+    writer: str,
+) -> None:
+    """Raise a typed rejection when ``properties`` carries a refused ``evidence_ref``.
+
+    The one place the three graph writers that keep the field (``entity.create``,
+    ``entity.update``, ``observation.record``) apply
+    :func:`~trellis.mutate.evidence_pointer_keys.node_evidence_ref_refusal`, so
+    they cannot disagree. Runs before the write, so a refusal leaves no node
+    version, no alias and no event.
+    """
+    refusal = node_evidence_ref_refusal(
+        properties,
+        stored_properties=stored_properties,
+        document_store=registry.knowledge.document_store,
+        clearance=clearance,
+        writer=writer,
+    )
+    if refusal is not None:
+        raise ValidationError(
+            refusal.message, errors=[refusal.message], code=refusal.code
+        )
 
 
 def _bind_entity_name_alias(
@@ -138,8 +173,11 @@ class EntityCreateHandler:
     concurrently, and stays until the next run that holds the record.
     """
 
-    def __init__(self, registry: StoreRegistry) -> None:
+    def __init__(
+        self, registry: StoreRegistry, *, clearance: Sensitivity = "restricted"
+    ) -> None:
         self._registry = registry
+        self._clearance = clearance
 
     def handle(self, command: Command) -> tuple[str | None, str]:
         props: dict[str, Any] = dict(command.args.get("properties", {}))
@@ -202,6 +240,20 @@ class EntityCreateHandler:
                 raise ValidationError(
                     msg, errors=[msg], code="entity_create_over_existing_precedent"
                 )
+
+        # A caller-supplied ``evidence_ref`` names the document another item is
+        # superseded by: it must exist, be readable at the caller's clearance,
+        # and not replace one the node already holds. Judged after the skip
+        # above (a left-alone node writes nothing) and before any write.
+        _refuse_node_evidence_ref(
+            self._registry,
+            props,
+            stored_properties=(
+                existing_node.get("properties") if existing_node is not None else None
+            ),
+            clearance=self._clearance,
+            writer="entity.create",
+        )
 
         # ``document_ids`` is the first-class graph↔document link (Phase 4 of
         # ADR planes-and-substrates). Threading it here gives the pointer a
@@ -319,8 +371,11 @@ class EntityUpdateHandler:
     second, independent guard for the same end state.
     """
 
-    def __init__(self, registry: StoreRegistry) -> None:
+    def __init__(
+        self, registry: StoreRegistry, *, clearance: Sensitivity = "restricted"
+    ) -> None:
         self._registry = registry
+        self._clearance = clearance
 
     def handle(self, command: Command) -> tuple[str | None, str]:
         entity_id = command.args["entity_id"]
@@ -383,6 +438,15 @@ class EntityUpdateHandler:
             )
 
         def update(existing: dict[str, Any]) -> dict[str, Any]:
+            # Judged against the version being replaced, so a retry after a
+            # concurrent write compares with the row it would overwrite.
+            _refuse_node_evidence_ref(
+                self._registry,
+                supplied_properties,
+                stored_properties=existing["properties"],
+                clearance=self._clearance,
+                writer="entity.update",
+            )
             # Partial update: merge caller-supplied properties onto the
             # existing bag, then let an explicit ``name`` win.
             props: dict[str, Any] = dict(existing["properties"])
@@ -621,8 +685,11 @@ class ObservationRecordHandler:
     the observation node.
     """
 
-    def __init__(self, registry: StoreRegistry) -> None:
+    def __init__(
+        self, registry: StoreRegistry, *, clearance: Sensitivity = "restricted"
+    ) -> None:
         self._registry = registry
+        self._clearance = clearance
 
     def handle(self, command: Command) -> tuple[str | None, str]:
         raw = command.args["observation"]
@@ -654,6 +721,20 @@ class ObservationRecordHandler:
             "observed_at": obs.observed_at.isoformat(),
         }
         if obs.evidence_ref is not None:
+            # Re-recording an id replaces the node, so the stored pointer is
+            # the one a different value would overwrite.
+            existing_observation = store.get_node(obs.observation_id)
+            _refuse_node_evidence_ref(
+                self._registry,
+                {"evidence_ref": obs.evidence_ref},
+                stored_properties=(
+                    existing_observation.get("properties")
+                    if existing_observation is not None
+                    else None
+                ),
+                clearance=self._clearance,
+                writer="observation.record",
+            )
             props["evidence_ref"] = obs.evidence_ref
         if obs.metadata is not None:
             props["metadata"] = obs.metadata

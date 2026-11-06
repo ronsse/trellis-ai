@@ -6235,11 +6235,36 @@ above its own clearance, and cannot touch a document it may not read.**
   and an `evidence_ref` makes the row the successor another item's
   `superseded_by` resolves to. At a stored document the keys are not refused: the
   document's own `lifecycle` and `evidence_ref` are written over them. These two
-  keys are the only metadata refused at such an id; every other key is stored as
-  sent. Only a row that carries one of these keys costs the first pass a
+  keys are the only metadata refused at an id that names nothing at all (neither
+  a stored document nor a current graph node); there every other key is stored
+  as sent. Only a row that carries one of these keys costs the first pass a
   document read. The write drops them again, without an error, if the document
   has been deleted by the time the row is mirrored, so a delete between the two
   reads cannot let them through.
+- **A row at a graph node's id repeats the node or leaves the key out (#1057).**
+  An id that names a current graph node and no stored document makes the row a
+  second copy of the node. The pack builder keeps the higher-scoring copy of an
+  id and judges that copy's metadata (a `structural` `node_role` drops it, an
+  `activity` `node_type` with a meta `agent_id` drops it, `document_form` feeds
+  the class-prior gate, `content` is the text served), so a forged value would
+  decide what is withheld or shown for a node the caller did not write. For such
+  an id, `node_role`, `node_type`, `agent_id`, `document_form`, the flat
+  `content_type`, `excerpt` and `content` must each equal what the node says of
+  itself or be left out; one that differs, or that the node does not carry, is a
+  422 naming the row, the key and the id (`vectors[i].metadata.<key> must match
+  the graph node '<id>', or be left out`), never either value, and the whole
+  batch stores nothing. "What the node says of itself" is its `node_role` (a node
+  with none reads as `semantic`) and `node_type` columns, its own `agent_id`,
+  `document_form` and `content_type` properties, and, for `content` and
+  `excerpt`, the text the graph axis serves for it: its `description`, else its
+  `name`, else its `title`, compared exactly (no trimming or truncation). A row
+  that repeats the node, or carries none of those keys, is stored as sent, so an
+  honest writer's row is unchanged. An id that names a stored document keeps the
+  rule above (the row takes the document's identity); an id that names neither a
+  document nor a node is stored as sent. On a graph-backed vector store (ArcadeDB,
+  Neo4j) the vector attaches to a node, and a node made only to hold a vector is
+  judged like any other, since the store keeps no marker for it; refusing a
+  collision between a document id and such a node is not part of this rule.
 - For a chunk id (`<parent>#chunk-<digits>`) a written row's `parent_doc_id` is
   the chunk document's own, else the parent the id names, over whatever the row
   supplied; for any other id it is kept as supplied. Serving trusts a row's
@@ -6259,9 +6284,43 @@ above its own clearance, and cannot touch a document it may not read.**
 - The credentialed write routes `POST /api/v1/links`, `/entities`, `/feedback`,
   `/traces`, `/observations` and `/measurements` build their executor at the
   key's clearance, as `/documents` and `/evidence` do, instead of at
-  `restricted`. None of those operations names a document, so the floor has
-  nothing to refuse on them today; the clearance is threaded so a later rule
-  that does cannot be bypassed by a route that forgot it.
+  `restricted`. `link.create`, `feedback.record`, trace ingest and
+  `measurement.record` name no document, so the floor has nothing to refuse on
+  them today; the clearance is threaded so a later rule that does cannot be
+  bypassed by a route that forgot it. `entity.create`, `entity.update` and
+  `observation.record` do name one, through `evidence_ref` (next bullet).
+- **A graph node's `evidence_ref` names a document the caller may read, and a node
+  keeps the one it has (#1057).** `evidence_ref` on a node is the document the
+  pack builder resolves another item's `superseded_by` to, so `entity.create`,
+  `entity.update` and `observation.record` apply one rule on every door that
+  reaches them: `POST /api/v1/commands/batch`, MCP `execute_mutation`,
+  `POST /api/v1/entities`, `POST /api/v1/observations` and MCP
+  `record_observation`. A refusal is a `REJECTED` command with a typed
+  `error_code` (REST 400 on `/observations`, `status: "rejected"` from the MCP
+  tools), written before any node version, alias or domain event, and it never
+  echoes the stored value:
+  - `node_evidence_ref_unreadable`: the value names no document, or one above the
+    caller's clearance. Both get the same words (the value is echoed back,
+    truncated to 120 characters), so a refusal does not tell a key that a
+    document it may not read exists; this holds for a trusted-local caller too,
+    for whom "above clearance" cannot occur and only a missing document is
+    refused. `null` is accepted where the node holds none: it points nowhere.
+    Save the document first (MCP `save_knowledge(evidence_ref=...)` checks this).
+  - `node_evidence_ref_not_a_string`: the value is not a non-empty string.
+  - `node_evidence_ref_changed`: the node already holds an `evidence_ref` and the
+    value differs (`null` and `""` included). Sending the stored value again is
+    accepted whether or not its document still exists, so a read-modify-write
+    that echoes the node back is not refused, and `entity.update` on a node that
+    holds one leaves it in place when the key is absent. `entity.create` over an
+    existing node is judged the same way, against the node it would replace.
+
+  An observation is judged against its own id's node: `observation.record` with
+  an `evidence_ref` that names no readable document is now refused where it
+  was previously stored as sent, and re-recording an observation id with a
+  different `evidence_ref` is refused. Recording one again with no
+  `evidence_ref` still replaces the node and drops the pointer. A caller that
+  never sends `evidence_ref`, or sends a readable document id once, stores the
+  row it always stored.
 - **Accepted posture: the 409 tells a key the document exists.** An
   `evidence.ingest` overwrite refusal (`POST /api/v1/evidence`,
   `POST /api/v1/documents`, `POST /api/v1/commands/batch`) and the
@@ -6656,7 +6715,7 @@ All three now route through the same one retrieval path as `get_context` and are
 
 | Tool | Args | Returns |
 |------|------|---------|
-| `record_observation` | `subject_entity_id`, `subject_entity_type`, `observer_agent_id`, `content`, `confidence`, `evidence_ref?`, `metadata?` | JSON `{"status": "ok", "observation_id": ...}`. Lands an `Observation` node with a `hasObservation` edge from the subject — see [schemas.md → Observation](schemas.md#observation). Routed through the governed pipeline (`observation.record`). |
+| `record_observation` | `subject_entity_id`, `subject_entity_type`, `observer_agent_id`, `content`, `confidence`, `evidence_ref?`, `metadata?` | JSON `{"status": "ok", "observation_id": ...}`. Lands an `Observation` node with a `hasObservation` edge from the subject — see [schemas.md → Observation](schemas.md#observation). Routed through the governed pipeline (`observation.record`); an `evidence_ref` must name a document the key may read, else `{"status": "rejected", ...}` (see "A graph node's `evidence_ref` names a document" under Sensitivity clearance). |
 | `query_observations` | `subject_entity_id?`, `observer_agent_id?`, `limit?` | JSON `{"status": "ok", "observations": [...]}` — each entry is the Observation property dict plus `node_id` and `node_type`. |
 | `execute_mutation` | `operation`, `args`, `idempotency_key?`, `actor?` | JSON `CommandResult`. MCP parity with `POST /commands/batch` for a single command; same five-stage governed pipeline, so policy gates and audit events apply identically. One difference: for `trace.ingest` the server sets `metadata.project` before ingest and targets the command at the trace (`target_type: "trace"`, the trace's id), as for `save_experience` ([trace-format.md § Project stamp](trace-format.md#project-stamp)). `operation` accepts the wire value (`"link.create"`) or the enum key (`"LINK_CREATE"`). Any operation outside `NON_DESTRUCTIVE_OPERATIONS` (entity merge, redaction, retention prune, alias rebind, link/label removal, schedule/settings/classify-rule writes) is refused before a `Command` is built unless the caller holds `admin`: over HTTP transport this reads the FastMCP access token's scopes; on stdio, the trusted local transport, it is allowed unconditionally. The refusal is the tool's normal error reply (`POLICY_DENIED`), not a fabricated success. `actor` stays a caller-chosen audit label; `admin` does not verify it. |
 

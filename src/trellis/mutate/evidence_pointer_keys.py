@@ -25,6 +25,14 @@ keys. The rule sits at the agent-facing doors instead, in two strengths:
   tombstone a redaction leaves, which blocks later writes to the id.
 
 ``POST /evidence`` needs neither: it never stores the body's own ``metadata``.
+
+**A graph node's ``evidence_ref``** (:func:`node_evidence_ref_refusal`) reaches
+the same place from the other side: a node that carries one is the item another
+item's ``superseded_by`` resolves to. ``entity.create``, ``entity.update`` and
+``observation.record`` keep the field, since they are its governed writers, but
+a value a caller supplies must name a document that exists and that the caller
+may read, and a node that already holds one keeps it: a different value is
+refused, the unchanged value (a read-back node sent again) is accepted.
 """
 
 from __future__ import annotations
@@ -75,11 +83,30 @@ _NULL_ONLY_FIELDS: Final[frozenset[str]] = frozenset(
 _DEFAULT_CLASSIFICATION_VERSION: Final[str] = Lifecycle().classification_version
 
 
+#: ``ValidationError.code`` of a node ``evidence_ref`` refusal, one per reason.
+NODE_EVIDENCE_REF_UNREADABLE: Final[str] = "node_evidence_ref_unreadable"
+NODE_EVIDENCE_REF_CHANGED: Final[str] = "node_evidence_ref_changed"
+NODE_EVIDENCE_REF_NOT_A_STRING: Final[str] = "node_evidence_ref_not_a_string"
+
+#: Longest caller-supplied id a refusal message echoes back. The message becomes
+#: the immutable ``mutation.rejected`` audit event, so a value is never copied
+#: into it whole.
+_ECHO_LIMIT: Final[int] = 120
+
+
 @dataclass(frozen=True)
 class PointerKeyRefusal:
     """Why a document write was refused: the offending key and the message."""
 
     key: str
+    message: str
+
+
+@dataclass(frozen=True)
+class NodeEvidenceRefRefusal:
+    """Why a graph node's ``evidence_ref`` was refused: the audit code and message."""
+
+    code: str
     message: str
 
 
@@ -143,6 +170,71 @@ def pointer_key_refusal(
     return None
 
 
+def node_evidence_ref_refusal(
+    properties: Mapping[str, Any],
+    *,
+    stored_properties: Mapping[str, Any] | None,
+    document_store: DocumentStore,
+    clearance: Sensitivity,
+    writer: str,
+) -> NodeEvidenceRefRefusal | None:
+    """The refusal for the ``evidence_ref`` a node write carries, or ``None``.
+
+    ``properties`` is the property bag the command writes (``entity.create``'s
+    or ``entity.update``'s ``properties``, or the one key an observation sets);
+    ``stored_properties`` is the node's current bag, or ``None`` for a node the
+    write creates. ``writer`` names the command, for the message. A bag without
+    the key is no verdict. With it:
+
+    * A node that already holds an ``evidence_ref`` keeps it. The same value is
+      accepted whether or not its document still exists (a node read back and
+      sent again must keep working); any other value, ``null`` included, is
+      refused.
+    * On a node that holds none, a value must be a non-empty string naming a
+      document the caller may read under ``clearance``. A document that does not
+      exist and one above the caller's clearance are refused with the same
+      message, so a refusal does not tell a key that a document it may not read
+      exists. ``null`` is accepted there: it points nowhere.
+
+    Neither refusal carries the stored value.
+    """
+    if EVIDENCE_REF_KEY not in properties:
+        return None
+    value = properties[EVIDENCE_REF_KEY]
+    stored = (
+        stored_properties.get(EVIDENCE_REF_KEY)
+        if stored_properties is not None
+        else None
+    )
+    refusal: NodeEvidenceRefRefusal | None = None
+    if stored not in (None, ""):
+        if value != stored:
+            refusal = NodeEvidenceRefRefusal(
+                NODE_EVIDENCE_REF_CHANGED,
+                f"{writer} may not change a node's evidence_ref once it is set: "
+                "it names the document another item is superseded by, so a node "
+                "keeps the one it has. Sending the stored value again is "
+                "accepted. Nothing was written",
+            )
+    elif value is not None:
+        if not isinstance(value, str) or not value:
+            refusal = NodeEvidenceRefRefusal(
+                NODE_EVIDENCE_REF_NOT_A_STRING,
+                f"{writer} needs evidence_ref to be the id of a document, a "
+                "non-empty string. Nothing was written",
+            )
+        elif visible_document(document_store, value, clearance=clearance) is None:
+            refusal = NodeEvidenceRefRefusal(
+                NODE_EVIDENCE_REF_UNREADABLE,
+                f"{writer} evidence_ref {value[:_ECHO_LIMIT]!r} does not name a "
+                "document this credential can read: a node's evidence_ref is "
+                "the document another item is superseded by, so it must exist. "
+                "Save the document first (MCP save_knowledge(evidence_ref=...) "
+                "checks this). Nothing was written",
+            )
+    return refusal
+
+
 def evidence_ingest_pointer_refusal(
     command: Command,
     *,
@@ -179,8 +271,13 @@ def evidence_ingest_pointer_refusal(
 __all__ = [
     "DOCUMENT_POINTER_REFUSALS",
     "LIFECYCLE_RESTORE_NOTE",
+    "NODE_EVIDENCE_REF_CHANGED",
+    "NODE_EVIDENCE_REF_NOT_A_STRING",
+    "NODE_EVIDENCE_REF_UNREADABLE",
     "POINTER_KEYS",
+    "NodeEvidenceRefRefusal",
     "PointerKeyRefusal",
     "evidence_ingest_pointer_refusal",
+    "node_evidence_ref_refusal",
     "pointer_key_refusal",
 ]
