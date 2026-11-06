@@ -61,8 +61,9 @@ def record_observation(
         observer_agent_id: Which agent (human or automated) produced this.
         content: Narrative description of the observation.
         confidence: Producer confidence in ``[0.0, 1.0]``.
-        evidence_ref: Optional pointer to supporting evidence
-            (e.g., a trace_id / document_id / URN).
+        evidence_ref: Optional id of a stored document, readable with
+            this key, that supports the observation. An id naming none is
+            refused, and an observation id keeps the one it has.
         metadata: Optional bag for conventional keys (kind, window_start,
             window_end, sample_size, method, …). See ADR §2.3.
 

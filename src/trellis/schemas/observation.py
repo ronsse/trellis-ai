@@ -74,9 +74,11 @@ class Observation(TrellisModel):
     """When the observation was made (defaults to now, UTC)."""
 
     evidence_ref: str | None = None
-    """Optional pointer to supporting evidence (e.g., a ``trace_id``,
-    ``document_id``, or other URN). Free-form by design; the consuming
-    surface decides how to resolve."""
+    """Optional id of a stored document, readable by the writer, that supports
+    the observation. ``observation.record`` refuses an id that names none, and
+    an observation id that already holds one keeps it (a re-record that leaves
+    it out carries it forward). It is the document another item's
+    ``superseded_by`` resolves to, so it is not free-form."""
 
     metadata: dict[str, Any] = Field(default_factory=dict)
     """Open bag for the conventional keys documented in

@@ -16,6 +16,7 @@ from trellis.mutate.handlers._common import (
     _rewrite_current_node,
 )
 from trellis.mutate.retention import CURRENT_STATE
+from trellis.retrieve.lifecycle import EVIDENCE_REF_KEY
 from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.schemas.measurement import Measurement
 from trellis.schemas.observation import Observation
@@ -123,6 +124,22 @@ def _bind_entity_name_alias(
             existing_entity_id=result.entity_id,
         )
     return result
+
+
+def _carry_held_evidence_ref(
+    properties: dict[str, Any], stored_properties: Mapping[str, Any] | None
+) -> None:
+    """Copy the stored ``evidence_ref`` into ``properties`` when they leave it out.
+
+    For the two writers that replace a node's whole bag (``entity.create`` over
+    an existing id, ``observation.record`` of an existing id). A stored value
+    that is empty or ``None`` is not held and is not copied.
+    """
+    if EVIDENCE_REF_KEY in properties or stored_properties is None:
+        return
+    held = stored_properties.get(EVIDENCE_REF_KEY)
+    if held not in (None, ""):
+        properties[EVIDENCE_REF_KEY] = held
 
 
 class EntityCreateHandler:
@@ -254,6 +271,12 @@ class EntityCreateHandler:
             clearance=self._clearance,
             writer="entity.create",
         )
+        # An upsert replaces the whole bag, so a command that leaves the key out
+        # would clear the pointer the rule above says a node keeps. Carry it
+        # forward the way ``document_ids`` is below: omission means "leave it
+        # alone", and a supplied value was judged above.
+        if existing_node is not None:
+            _carry_held_evidence_ref(props, existing_node.get("properties"))
 
         # ``document_ids`` is the first-class graph↔document link (Phase 4 of
         # ADR planes-and-substrates). Threading it here gives the pointer a
@@ -720,22 +743,26 @@ class ObservationRecordHandler:
             "confidence": obs.confidence,
             "observed_at": obs.observed_at.isoformat(),
         }
+        # Re-recording an id replaces the node, so the stored pointer is the one
+        # a different value would overwrite, and one the new record leaves out
+        # would be cleared; it is carried forward instead.
+        existing_observation = store.get_node(obs.observation_id)
+        stored_properties = (
+            existing_observation.get("properties")
+            if existing_observation is not None
+            else None
+        )
         if obs.evidence_ref is not None:
-            # Re-recording an id replaces the node, so the stored pointer is
-            # the one a different value would overwrite.
-            existing_observation = store.get_node(obs.observation_id)
             _refuse_node_evidence_ref(
                 self._registry,
                 {"evidence_ref": obs.evidence_ref},
-                stored_properties=(
-                    existing_observation.get("properties")
-                    if existing_observation is not None
-                    else None
-                ),
+                stored_properties=stored_properties,
                 clearance=self._clearance,
                 writer="observation.record",
             )
             props["evidence_ref"] = obs.evidence_ref
+        else:
+            _carry_held_evidence_ref(props, stored_properties)
         if obs.metadata is not None:
             props["metadata"] = obs.metadata
 

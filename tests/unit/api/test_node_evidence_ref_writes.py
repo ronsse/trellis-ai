@@ -407,3 +407,121 @@ class TestPostEntities:
         assert "may not change a node's evidence_ref" in resp.text
         node = registry.knowledge.graph_store.get_node(NODE_ID)
         assert node["properties"]["evidence_ref"] == HELD
+
+
+class TestAnUpsertThatLeavesTheKeyOutKeepsThePointer:
+    """``entity.create`` over an id and a re-recorded observation replace the bag.
+
+    A command that leaves ``evidence_ref`` out must not clear the pointer, or
+    the rule that a node keeps it is one omitted key away from nothing.
+    """
+
+    def _held(self, registry):
+        return registry.knowledge.graph_store.get_node(NODE_ID)["properties"].get(
+            "evidence_ref"
+        )
+
+    def test_the_gate_probe_sequence_through_commands_batch(self, client, registry):
+        headers = _headers(registry)
+        accepted, message = _write(client, headers, "entity.create", HELD)
+        assert accepted, message
+        # The direct changes are refused ...
+        for ref in (OTHER, None):
+            accepted, _ = _write(client, headers, "entity.update", ref)
+            assert not accepted
+        # ... and so is the way around them: an upsert that omits the key.
+        accepted, message = _write(
+            client, headers, "entity.create", None, omit_ref=True
+        )
+        assert accepted, message
+        assert self._held(registry) == HELD
+        accepted, message = _write(client, headers, "entity.update", OTHER)
+        assert not accepted
+        assert "may not change a node's evidence_ref" in message
+        assert self._held(registry) == HELD
+
+    def test_the_rest_of_the_bag_is_still_replaced(self, client, registry):
+        _seed_node(registry, "entity.create", HELD)
+        registry.knowledge.graph_store.upsert_node(
+            node_id=NODE_ID,
+            node_type="service",
+            properties={"name": "Target", "evidence_ref": HELD, "team": "old"},
+        )
+        resp = client.post(
+            "/api/v1/entities",
+            json={
+                "entity_type": "service",
+                "name": "Target",
+                "entity_id": NODE_ID,
+                "properties": {"team": "new"},
+            },
+            headers=_headers(registry),
+        )
+        assert resp.status_code == 200, resp.text
+        props = registry.knowledge.graph_store.get_node(NODE_ID)["properties"]
+        assert props == {"name": "Target", "team": "new", "evidence_ref": HELD}
+
+    @pytest.mark.parametrize("held", [None, ""])
+    def test_a_pointer_that_is_not_held_is_not_carried(self, client, registry, held):
+        registry.knowledge.graph_store.upsert_node(
+            node_id=NODE_ID,
+            node_type="service",
+            properties={"name": "Target", "evidence_ref": held},
+        )
+        accepted, message = _write(
+            client, _headers(registry), "entity.create", None, omit_ref=True
+        )
+        assert accepted, message
+        assert (
+            "evidence_ref"
+            not in (registry.knowledge.graph_store.get_node(NODE_ID)["properties"])
+        )
+
+    def test_a_node_without_one_is_unchanged_by_an_upsert(self, client, registry):
+        _seed_node(registry, "entity.create")
+        accepted, message = _write(
+            client, _headers(registry), "entity.create", None, omit_ref=True
+        )
+        assert accepted, message
+        assert self._held(registry) is None
+
+    @pytest.mark.parametrize("path", ["observations", "commands"])
+    def test_a_re_recorded_observation_keeps_it(self, client, registry, path):
+        _seed_node(registry, "observation.record", HELD)
+        headers = _headers(registry)
+        body = {
+            "observation_id": NODE_ID,
+            "subject_entity_id": "subject-1",
+            "subject_entity_type": "service",
+            "observer_agent_id": "agent-1",
+            "content": "p99 latency fell",
+            "confidence": 0.9,
+        }
+        if path == "observations":
+            resp = client.post("/api/v1/observations", json=body, headers=headers)
+        else:
+            resp = client.post(
+                "/api/v1/commands/batch",
+                json={
+                    "commands": [
+                        {
+                            "operation": "observation.record",
+                            "args": {"observation": body},
+                        }
+                    ],
+                    "strategy": "continue_on_error",
+                },
+                headers=headers,
+            )
+        assert resp.status_code in (200, 201), resp.text
+        props = registry.knowledge.graph_store.get_node(NODE_ID)["properties"]
+        assert props["content"] == "p99 latency fell"
+        assert props["evidence_ref"] == HELD
+        accepted, _ = _write(client, headers, "observation.record", OTHER)
+        assert not accepted
+        assert (
+            registry.knowledge.graph_store.get_node(NODE_ID)["properties"][
+                "evidence_ref"
+            ]
+            == HELD
+        )

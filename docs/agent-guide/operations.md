@@ -6318,9 +6318,20 @@ above its own clearance, and cannot touch a document it may not read.**
   an `evidence_ref` that names no readable document is now refused where it
   was previously stored as sent, and re-recording an observation id with a
   different `evidence_ref` is refused. Recording one again with no
-  `evidence_ref` still replaces the node and drops the pointer. A caller that
-  never sends `evidence_ref`, or sends a readable document id once, stores the
-  row it always stored.
+  `evidence_ref` keeps the pointer the node holds.
+- **An upsert that leaves `evidence_ref` out keeps the one the node holds.**
+  `entity.create` over an existing id and `observation.record` of an existing
+  observation id replace the node's property bag, so without this a call that
+  merely omitted the key would clear the pointer and a later `entity.update`
+  could set any readable document in its place. The stored pointer is carried
+  into the new version when the command leaves the key out (a stored `null` or
+  `""` is not held and is not carried), the same way an omitted `document_ids`
+  is left alone. The rest of the bag is still replaced. A re-extraction that
+  used to lose the pointer now keeps it, and since the pack builder resolves
+  another item's `superseded_by` through an item's `evidence_ref`, supersession
+  can resolve where the pointer used to be lost. A caller that never sends
+  `evidence_ref` on a node that holds none, or sends a readable document id
+  once, stores the row it always stored.
 - **Accepted posture: the 409 tells a key the document exists.** An
   `evidence.ingest` overwrite refusal (`POST /api/v1/evidence`,
   `POST /api/v1/documents`, `POST /api/v1/commands/batch`) and the

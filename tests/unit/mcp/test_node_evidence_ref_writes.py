@@ -281,3 +281,62 @@ class TestRecordObservation:
         assert result["status"] == "ok", result
         node = temp_registry.knowledge.graph_store.get_node(result["observation_id"])
         assert "evidence_ref" not in node["properties"]
+
+
+class TestAnUpsertThatLeavesTheKeyOutKeepsThePointer:
+    """A command that omits ``evidence_ref`` must not clear the one a node holds."""
+
+    def _held(self, registry: StoreRegistry) -> Any:
+        node = registry.knowledge.graph_store.get_node(NODE_ID)
+        return node["properties"].get("evidence_ref")
+
+    def test_the_gate_probe_sequence(self, temp_registry: StoreRegistry) -> None:
+        with as_http(MUTATE):
+            assert _run("entity.create", {"evidence_ref": HELD})["status"] == "success"
+            for ref in (OTHER, None):
+                assert _run("entity.update", {"evidence_ref": ref})["status"] == (
+                    "rejected"
+                )
+            # The way around them: an upsert that leaves the key out.
+            assert _run("entity.create", {})["status"] == "success"
+            assert self._held(temp_registry) == HELD
+            changed = _run("entity.update", {"evidence_ref": OTHER})
+        assert changed["status"] == "rejected"
+        assert "may not change a node's evidence_ref" in changed["message"]
+        assert self._held(temp_registry) == HELD
+
+    def test_a_re_recorded_observation_keeps_it(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        observation = {
+            "observation_id": NODE_ID,
+            "subject_entity_id": "subject-1",
+            "subject_entity_type": "service",
+            "observer_agent_id": "agent-1",
+            "content": "p99 latency rose",
+            "confidence": 0.7,
+        }
+        with as_http(MUTATE):
+            first = json.loads(
+                execute_mutation(
+                    operation="observation.record",
+                    args={"observation": {**observation, "evidence_ref": HELD}},
+                )
+            )
+            again = json.loads(
+                execute_mutation(
+                    operation="observation.record",
+                    args={"observation": {**observation, "content": "p99 fell"}},
+                )
+            )
+            other = json.loads(
+                execute_mutation(
+                    operation="observation.record",
+                    args={"observation": {**observation, "evidence_ref": OTHER}},
+                )
+            )
+        assert first["status"] == again["status"] == "success", (first, again)
+        assert other["status"] == "rejected"
+        props = temp_registry.knowledge.graph_store.get_node(NODE_ID)["properties"]
+        assert props["content"] == "p99 fell"
+        assert props["evidence_ref"] == HELD
