@@ -93,40 +93,38 @@ class TestPrecedentOfARelabelledSource:
         assert row["entity_id"] == precedent_id
         assert row["payload"]["source_item_id"] == SOURCE_ID
 
-    def test_rest_entity_read_blanks_the_source_pointer_below_the_label(
+    def test_rest_entity_read_withholds_the_precedent_below_the_label(
         self, client: TestClient, registry: StoreRegistry
     ) -> None:
+        """Withheld, not rewritten: a missing and a withheld entity answer alike."""
         precedent_id = promote(registry)
         relabel_source_restricted(registry)
         url = f"/api/v1/entities/{precedent_id}"
         below = client.get(url, headers=_headers(registry, READ))
-        assert below.status_code == 200, below.text
-        assert "source_item_id" not in below.json()["entity"]["properties"]
+        assert below.status_code == 404, below.text
+        assert SOURCE_ID not in below.text
         above = client.get(url, headers=_headers(registry, RESTRICTED))
+        assert above.status_code == 200, above.text
         assert above.json()["entity"]["properties"]["source_item_id"] == SOURCE_ID
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "A promotion stores the source's title and opening excerpt as text "
-            "on the node and on the document at the precedent's id. The "
-            "promotion-time rule omits both for a source that is labelled "
-            "then; a relabel afterwards leaves them. Not part of the "
-            "source_item_id pointer; drop this marker with the fix."
-        ),
-    )
     @pytest.mark.parametrize("route", ["entities", "documents"])
     def test_rest_read_serves_nothing_derived_from_the_source(
         self, client: TestClient, registry: StoreRegistry, route: str
     ) -> None:
+        """A promotion stores the source's title and opening excerpt on the node
+        and on the document at the precedent's id; a relabel afterwards leaves
+        them. A key below the new label is refused the precedent, not served a
+        copy with the source id blanked."""
         precedent_id = promote(registry)
         relabel_source_restricted(registry)
-        below = client.get(
-            f"/api/v1/{route}/{precedent_id}", headers=_headers(registry, READ)
-        )
-        assert below.status_code == 200, below.text
+        url = f"/api/v1/{route}/{precedent_id}"
+        below = client.get(url, headers=_headers(registry, READ))
+        assert below.status_code == 404, below.text
         for needle in (SOURCE_ID, SOURCE_TITLE, SOURCE_EXCERPT):
             assert needle not in below.text, needle
+        above = client.get(url, headers=_headers(registry, RESTRICTED))
+        assert above.status_code == 200, above.text
+        assert SOURCE_TITLE in above.text
 
 
 def _served(body: dict[str, Any]) -> dict[str, Any]:

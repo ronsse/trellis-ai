@@ -3418,11 +3418,28 @@ in neither the served title nor description. Withholding drops the row, never
 rewrites its text, and happens before `--limit`, so a page stays full while
 readable precedents remain. A document store that cannot answer, or no document
 store at all, withholds every row that needs a verdict. MCP `get_lessons` applies
-the same rule with the caller's clearance. This covers precedent listings only:
-a source relabelled after promotion still reaches a read key through
-`GET /entities/{id}`, `GET /documents/{id}`, `GET /search` and `POST /packs`
-(the precedent's own row and node hold the excerpt and carry no label), and
-`GET /precedents/domains` still counts a withheld precedent's domain.
+the same rule with the caller's clearance.
+
+The same judgement, one predicate
+(`trellis.retrieve.precedents.PrecedentClearance`), runs where a promoted
+precedent is served by id or by query, because the precedent's own row and node
+hold the excerpt and carry no label (#1080):
+
+| Route | A precedent the caller may not read |
+|-------|-------------------------------------|
+| `GET /entities/{id}` | 404 for the entity; absent from `subgraph.nodes`, with the edges that touch it |
+| `GET /documents/{id}` | 404, as a missing document |
+| `GET /search` | left out of `results` |
+| `POST /packs`, `POST /packs/sectioned` | withheld at the collect seam, so every strategy is covered, and recorded in `rejected_items` and the pack's withheld line under reason `sensitivity` |
+| `GET /precedents/domains` | not counted |
+
+A lookup that fails (the source's document row or the precedent's graph node
+cannot be read) withholds too, failing closed. A pack counts it under its own
+reason, `sensitivity_unreadable`, apart from `sensitivity` (a label that said
+no); the other routes log `precedent_source_lookup_failed`. Nothing is
+rewritten. Not covered: `GET /documents` and `GET /entities` listings,
+`GET /entities/{id}/versions`, MCP `get_items`, `search`, `get_graph` and
+`get_file_context`, and a pack built by a caller that wires no document store.
 
 ```bash
 trellis retrieve precedents [--domain DOMAIN] [--limit N] [--format text|json]
@@ -3815,7 +3832,7 @@ result = executor.execute(cmd)
 | Operation | Required Args | Description |
 |-----------|---------------|-------------|
 | `entity.create` | `entity_type`, `name` | Create a new entity. Upserting over an existing precedent is refused unless the precedent is current *and* the supplied `entity_type` is `"precedent"`. A non-current precedent is refused (`entity_create_over_existing_precedent`): an unconditional property replace would drop its lifecycle, silently coming back `"current"` with no reason recorded and no `PRECEDENT_REINSTATED` event -- use `precedent.reinstate`, or `entity.update` for a non-lifecycle edit. Any other `entity_type` is refused regardless of lifecycle state (`entity_create_retypes_existing_precedent`), mirroring the `entity.update` retype guard below. A **current** precedent is upserted normally -- this is what lets re-approving an already-promoted learning candidate succeed. With `if_absent: true` (and a caller-supplied `entity_id`; without one it is refused, `entity_create_if_absent_needs_id`) the create is a create-if-absent: an existing node is left alone, with no write, alias or `ENTITY_CREATED` event, and the reply says so. It exists so an extractor can write a name-only placeholder that never replaces a real record. |
-| `entity.update` | `entity_id` | Update entity properties (merged, not replaced; `properties` may be a dict or an iterable of `(key, value)` pairs -- both are normalised to a dict before either guard below runs, so neither shape bypasses them). An `entity_id` that names no node, including one redacted while the command runs, is rejected (`target_not_found`). A precedent's `node_type` may never be changed away from `"precedent"` (`precedent_entity_type_change_refused`), lifecycle write or not -- this closes a two-step bypass (retype away with no lifecycle payload, then retype back with one). A write to `properties.lifecycle` is refused when the node's current type is `"precedent"`, *or* when the supplied `entity_type` names `"precedent"` in the same call (`precedent_lifecycle_via_entity_update`) -- use `precedent.demote`/`precedent.reinstate` instead, which keep the audit trail and the vector row in sync. |
+| `entity.update` | `entity_id` | Update entity properties (merged, not replaced; `properties` may be a dict or an iterable of `(key, value)` pairs -- both are normalised to a dict before either guard below runs, so neither shape bypasses them). An `entity_id` that names no node, including one redacted while the command runs, is rejected (`target_not_found`). A precedent's `node_type` may never be changed away from `"precedent"` (`precedent_entity_type_change_refused`), lifecycle write or not -- this closes a two-step bypass (retype away with no lifecycle payload, then retype back with one). A write to `properties.lifecycle` is refused when the node's current type is `"precedent"`, *or* when the supplied `entity_type` names `"precedent"` in the same call (`precedent_lifecycle_via_entity_update`) -- use `precedent.demote`/`precedent.reinstate` instead, which keep the audit trail and the vector row in sync. A write to `properties.source_excerpt_status` on a precedent (an existing one, a node in the `precedent://learning/` namespace, or `entity_type="precedent"` in the same call) is refused with `precedent_excerpt_status_via_entity_update`: only a promotion states it, and serving trusts it to exempt a precedent from its source's label. |
 | `entity.merge` | `source_id`, `target_id` | Merge two entities |
 
 **Example -- create entity:**
