@@ -67,6 +67,7 @@ from trellis_wire.dtos import (
 
 if TYPE_CHECKING:
     from trellis.stores.base.document import DocumentStore
+    from trellis.stores.base.graph import GraphStore
 
 #: Every hand-raised 422 in this module carries a plain-string ``detail``
 #: (describing the bad trace/evidence/vectors body), not FastAPI's own
@@ -450,17 +451,84 @@ def _item_pointer_problem(
     )
 
 
+def _graph_node_identity(node: dict[str, Any]) -> dict[str, Any]:
+    """What a graph node says about itself, under each identity key.
+
+    ``node_role`` and ``node_type`` are the row's columns; ``agent_id``,
+    ``document_form`` and ``content_type`` are its properties, present only where
+    the node carries them. ``content`` and ``excerpt`` are the text the graph axis
+    serves for the node (``description``, else ``name``, else ``title``), because a
+    vector row at the node's id that wins the pack's dedup serves its own text in
+    that place.
+    """
+    properties = node.get("properties")
+    props: dict[str, Any] = properties if isinstance(properties, dict) else {}
+    own: dict[str, Any] = {
+        "node_role": node.get("node_role", "semantic"),
+        "node_type": node.get("node_type"),
+    }
+    for key in ("agent_id", "document_form", "content_type"):
+        if key in props:
+            own[key] = props[key]
+    served = str(props.get("description", props.get("name", props.get("title", ""))))
+    own["content"] = served
+    own["excerpt"] = served
+    return own
+
+
+def _node_identity_problem(
+    document_store: DocumentStore,
+    graph_store: GraphStore,
+    item_id: Any,
+    metadata: dict[str, Any],
+) -> str | None:
+    """Why a row at a graph node's id may not state its own identity, or ``None``.
+
+    The semantic axis spreads a row's ``metadata`` into the pack item it builds,
+    and the pack builder keeps one copy of an id, the highest-scoring, then
+    judges that copy: ``node_role`` drops a structural node, ``node_type`` with an
+    ``agent_id`` drops a meta-activity, the form feeds the class-prior gate and
+    ``content`` is the text served. A row at an id naming a *graph node* and no
+    stored document is therefore a second copy of that node, and it can win.
+    Each identity key it carries (:data:`_DOCUMENT_IDENTITY_KEYS` and ``content``)
+    must equal what the node says of itself (:func:`_graph_node_identity`): a row
+    that repeats the node changes nothing, one that contradicts it is refused.
+
+    Reads the document and then the node only for a row that carries one of the
+    keys, so an ordinary row costs no read here. An id that names a document is
+    the document's (:func:`_vector_row_metadata`), and one that names neither is
+    free-standing and stored as sent.
+    """
+    keys = [k for k in (*_DOCUMENT_IDENTITY_KEYS, "content") if k in metadata]
+    if not keys or not item_id or document_store.get(item_id) is not None:
+        return None
+    node = graph_store.get_node(item_id)
+    if node is None:
+        return None
+    own = _graph_node_identity(node)
+    for key in keys:
+        if key not in own or metadata[key] != own[key]:
+            return (
+                f"{key} must match the graph node {item_id!r}, or be left out: "
+                "item_id names a node and no stored document, and the pack "
+                "builder withholds and renders a node by this key"
+            )
+    return None
+
+
 def _vector_item_problem(
     item: dict[str, Any],
     document_store: DocumentStore,
+    graph_store: GraphStore,
     width: tuple[int, str] | None,
 ) -> str | None:
     """Why one batch row is a 422, phrased from the row's own field, or ``None``.
 
     ``item_id`` that is present must be a string (one that is absent, ``null`` or
     empty is a row with no id, which the second pass counts), ``metadata`` must be
-    an object or ``null``, and then the reserved-id, metadata, pointer-key and
-    vector checks run. Everything here is judged on what the caller sent.
+    an object or ``null``, and then the reserved-id, metadata, pointer-key,
+    node-identity and vector checks run. Everything here is judged on what the
+    caller sent.
     """
     item_id = item.get("item_id")
     if item_id is not None and not isinstance(item_id, str):
@@ -479,6 +547,10 @@ def _vector_item_problem(
         problem = _vector_metadata_problem(metadata)
         if problem is None:
             problem = _item_pointer_problem(document_store, item_id, metadata)
+        if problem is None:
+            problem = _node_identity_problem(
+                document_store, graph_store, item_id, metadata
+            )
         if problem is not None:
             return f"metadata.{problem}"
     return _vector_problem(item.get("vector"), width)
@@ -558,11 +630,19 @@ def upsert_vectors(
     here. A row whose ``item_id`` names no stored document may not carry
     ``metadata.lifecycle`` or ``metadata.evidence_ref`` (422): the pack builder
     withholds by id, so those keys would act on whatever item holds that id.
-    Those two pointer keys are the only metadata refused at such an id; every
-    other key is stored as sent. A row whose ``item_id`` is a document (or a chunk
-    of one) above the key's
-    clearance is refused (409): replacing its vector row would replace what a
-    semantic hit shows and carries.
+    Those two pointer keys are the only metadata refused at an id that names
+    nothing at all; every other key is stored as sent. An id that names a
+    current *graph node* and no stored document is a second copy of that node, and
+    the pack builder keeps the higher-scoring copy and judges its metadata, so
+    there ``node_role``, ``node_type``, ``agent_id``, ``document_form``, the flat
+    ``content_type``, ``excerpt`` and ``content`` must each equal what the node
+    says of itself (its columns and properties, and for the two text keys the text
+    the graph axis serves for it) or be left out (422); a row that repeats the
+    node changes nothing. On a graph-backed vector store the node is the one the
+    vector attaches to, and a node made only to hold a vector is judged like any
+    other, since the store keeps no marker for it. A row whose ``item_id`` is a
+    document (or a chunk of one) above the key's clearance is refused (409):
+    replacing its vector row would replace what a semantic hit shows and carries.
 
     **What is not atomic.** The second pass writes row by row. A row with no
     ``item_id`` (absent, ``null`` or empty) or no ``vector`` (absent, ``null`` or
@@ -595,6 +675,7 @@ def upsert_vectors(
         raise HTTPException(status_code=501, detail="Vector store not configured")
 
     document_store = registry.knowledge.document_store
+    graph_store = registry.knowledge.graph_store
     width = _vector_width(vectors, vector_store.dimensions)
     for index, item in enumerate(vectors):
         if not isinstance(item, dict):
@@ -603,10 +684,11 @@ def upsert_vectors(
             )
         # A row the semantic axis could not serve (it would skip it, or a bad
         # vector would poison scores), that squats on the trace-embed worker's
-        # ids, or that carries ``lifecycle`` / ``evidence_ref`` at an id naming no
-        # stored document, is refused here, where the caller can be told, rather
+        # ids, that carries ``lifecycle`` / ``evidence_ref`` at an id naming no
+        # stored document, or that contradicts the graph node its id names, is
+        # refused here, where the caller can be told, rather
         # than stored for packs (or the worker) to trip on.
-        problem = _vector_item_problem(item, document_store, width)
+        problem = _vector_item_problem(item, document_store, graph_store, width)
         if problem is not None:
             raise HTTPException(status_code=422, detail=f"vectors[{index}].{problem}")
         item_id = item.get("item_id")

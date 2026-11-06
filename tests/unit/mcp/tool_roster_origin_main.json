@@ -735,7 +735,7 @@
       }
      ],
      "default": null,
-     "description": "Optional pointer to supporting evidence\n(e.g., a trace_id / document_id / URN)."
+     "description": "Optional id of a stored document, readable with\nthis key, that supports the observation. An id naming none is\nrefused, and an observation id keeps the one it has."
     },
     "metadata": {
      "anyOf": [
