@@ -29,18 +29,33 @@ there — and it matches the surrounding call sites (MCP ``save_experience``
 submits ``trace.ingest`` with no key either). ``document_store.put`` with an
 explicit id upserts, so a re-run over a half-written trace repairs it rather
 than duplicating it.
+
+**A summary the egress gate declines is stored, without a vector.** Egress
+governs what is sent to the embedder, not what is stored. A summary is judged,
+after the document is written, by its own label and by the documents its trace
+cites (:meth:`~trellis.llm.egress.EgressGate.summary_verdict`); when that says no
+the embedder is never called, ``embed.withheld`` is recorded, and the command
+succeeds with the document in place, so keyword and graph search can find it and
+only the semantic axis cannot. ``last_embed_withheld`` carries the verdict for
+the worker to count: ``WITHHELD`` (a label) advances its cursor, ``UNREADABLE``
+(a store could not be asked) holds it, and the next pass writes the same
+document again and tries the embed again.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from trellis.llm.egress import EgressGate, EgressVerdict
 from trellis.mutate.commands import Command, Operation
 from trellis.mutate.handlers import EvidenceIngestHandler
+from trellis.ops.embed_egress_health import UNREADABLE_REEMIT_AFTER
+from trellis.retrieve.embed_ingest_hook import record_embed_withheld
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from trellis.stores.base.trace import TraceStore
     from trellis.stores.registry import StoreRegistry
 
 __all__ = ["TraceSummaryIngestHandler", "build_trace_summary_command"]
@@ -96,3 +111,45 @@ class TraceSummaryIngestHandler(EvidenceIngestHandler):
             embedding_fn=embedding_fn,
             empty_error_code="trace_summary_empty",
         )
+
+    def _embed_strict(
+        self,
+        doc_id: str,
+        content: str,
+        metadata: dict[str, Any],
+        evidence: dict[str, Any],
+        requested_by: str,
+    ) -> bool:
+        """Embed the stored summary unless the egress gate declines it.
+
+        Runs after the summary document is written, so a declined summary is
+        stored and findable by keyword and graph search; only its vector is
+        missing. ``True`` for a decline, with the verdict on
+        :attr:`last_embed_withheld`; anything else is the core strict embed.
+        """
+        egress = EgressGate.for_embedder(
+            self._registry, self._registry.knowledge.document_store
+        )
+
+        def open_trace_store() -> TraceStore:
+            return self._registry.operational.trace_store
+
+        verdict = egress.summary_verdict(doc_id, metadata, open_trace_store)
+        if verdict is EgressVerdict.PERMITTED:
+            return super()._embed_strict(
+                doc_id, content, metadata, evidence, requested_by
+            )
+        self.last_embed_withheld = verdict
+        # An unreadable summary is met again on every pass while the cursor is
+        # held, and counted once a day rather than once per pass. A withheld one
+        # advances the cursor, so it is met once.
+        record_embed_withheld(
+            self._registry,
+            doc_id,
+            verdict,
+            source=requested_by,
+            once_within=(
+                UNREADABLE_REEMIT_AFTER if verdict is EgressVerdict.UNREADABLE else None
+            ),
+        )
+        return True

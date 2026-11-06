@@ -30,7 +30,7 @@ from trellis_workers.trace_embed.handler import (
 )
 from trellis_workers.trace_embed.render import DOC_ID_PREFIX as RENDER_DOC_ID_PREFIX
 
-from .conftest import seed_traces
+from .conftest import append_trace_named, seed_traces
 
 
 @pytest.fixture(autouse=True)
@@ -68,6 +68,7 @@ def test_filing_a_summary_id_does_not_hide_the_trace(
 def test_the_worker_handler_is_exempt_and_writes_its_own_id(registry, recorder) -> None:
     """The one writer the refusal does not cover: the worker's own handler."""
     doc_id = trace_summary_doc_id("trace-0001")
+    append_trace_named(registry, "trace-0001")
     command = build_trace_summary_command(
         doc_id=doc_id,
         trace_id="trace-0001",

@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from tests.cli_output import plain
-from tests.unit.cli.test_worker import runner
+from tests.structlog_isolation import IsolatedCliRunner
 from tests.unit.workers.learning.test_miner import (
     _MOCK_JSON,
     _CountingLLM,
@@ -28,6 +28,12 @@ from trellis_cli.main import app
 from trellis_cli.stores import _reset_registry, get_document_store, get_trace_store
 from trellis_cli.worker import _mining_scan_fields
 from trellis_workers.learning.miner import PrecedentMiner
+
+# Not ``tests.unit.cli.test_worker.runner``: that one is a bare ``CliRunner``, which
+# the ``tests/unit/cli`` package fixture covers only inside that package. Run from
+# here it left the ``mine-precedents`` log level memoised in every live logger
+# proxy, and a later ``structlog.testing.capture_logs`` saw nothing.
+runner = IsolatedCliRunner()
 
 _SECRET = {"data_classification": {"sensitivity": "confidential"}}
 

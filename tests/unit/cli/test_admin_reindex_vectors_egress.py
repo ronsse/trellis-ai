@@ -314,3 +314,41 @@ def test_the_text_output_words_each_count_by_its_verdict(
     # An unreadable skip is not a statement about the embedder's declaration.
     unreadable_line = out.split("1 unreadable (egress_unreadable)", 1)[1]
     assert "not declared true" not in unreadable_line
+
+
+def test_a_summarys_own_label_wins_over_an_unreadable_citation(cli_env) -> None:
+    """Withheld is a decision, unreadable a fault: the decision settles it.
+
+    Same precedence as the worker's, because both ask ``summary_verdict``.
+    """
+    _seed_summary("open-doc", trace=False)
+    docs = _get_registry().knowledge.document_store
+    docs.put(SUMMARY, "the summary of a trace", metadata=label("restricted"))
+
+    summary = _run("--force")
+
+    assert summary["skipped_egress_unreadable"] == 0
+    assert summary["skipped_egress_withheld"] == SECRET_ITSELF + 1
+    assert "the summary of a trace" not in SEEN
+    assert _summary_vector()["metadata"]["content"] == "stale"
+
+
+def test_a_summary_stored_without_a_vector_is_left_to_the_worker(cli_env) -> None:
+    """The worker stores a citation-withheld summary with no vector row.
+
+    This command must not give it one, forced or not: that is the worker's
+    verdict to revisit (``worker embed-traces --reset-watermark``), and an
+    unlabelled document body is no proof the cited documents are open.
+    """
+    docs = _get_registry().knowledge.document_store
+    docs.put("secret-doc", "a restricted document", metadata=label("restricted"))
+    docs.put(SUMMARY, "the summary of a trace", metadata={})
+    _get_registry().operational.trace_store.append(_trace("secret-doc"))
+
+    plain_run = _run()
+    forced = _run("--force")
+
+    assert plain_run["skipped_reserved"] == 1
+    assert forced["skipped_reserved"] == 1
+    assert _vector(SUMMARY) is None
+    assert "the summary of a trace" not in SEEN

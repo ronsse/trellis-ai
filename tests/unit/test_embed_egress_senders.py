@@ -13,6 +13,7 @@ An unlabelled or ``internal`` document is embedded either way.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -468,6 +469,97 @@ class TestHealth:
         assert (
             emit_embed_withheld(None, "d1", EgressVerdict.WITHHELD, source="t") is False
         )
+
+    def test_a_retried_document_is_one_unreadable_not_one_per_pass(
+        self, tmp_path: Path
+    ) -> None:
+        log = self._log(tmp_path)
+        for _ in range(3):
+            emit_embed_withheld(log, "d1", EgressVerdict.UNREADABLE, source="t")
+        emit_embed_withheld(log, "d2", EgressVerdict.UNREADABLE, source="t")
+        report = summarize_embed_egress(log, days=7)
+        assert report.unreadable == 2
+        assert report.unreadable_docs == ["d1", "d2"]
+        health = summarize_backend_health(log, days=7)
+        assert health.embed_egress is not None
+        assert health.embed_egress.unreadable == 2
+
+    def test_once_within_skips_a_repeat_and_still_reports_it_counted(
+        self, tmp_path: Path
+    ) -> None:
+        log = self._log(tmp_path)
+        window = timedelta(days=1)
+        for _ in range(3):
+            assert emit_embed_withheld(
+                log, "d1", EgressVerdict.UNREADABLE, source="t", once_within=window
+            )
+        assert len(log.get_events(event_type=EventType.EMBED_WITHHELD)) == 1
+        assert summarize_embed_egress(log, days=7).unreadable == 1
+
+    def test_once_within_keys_on_the_document_and_the_verdict(
+        self, tmp_path: Path
+    ) -> None:
+        log = self._log(tmp_path)
+        window = timedelta(days=1)
+        emit_embed_withheld(
+            log, "d1", EgressVerdict.UNREADABLE, source="t", once_within=window
+        )
+        # Another document, and the other verdict on the same document, are new.
+        emit_embed_withheld(
+            log, "d2", EgressVerdict.UNREADABLE, source="t", once_within=window
+        )
+        emit_embed_withheld(
+            log, "d1", EgressVerdict.WITHHELD, source="t", once_within=window
+        )
+        assert len(log.get_events(event_type=EventType.EMBED_WITHHELD)) == 3
+
+    def test_once_within_re_emits_once_the_window_has_passed(
+        self, tmp_path: Path
+    ) -> None:
+        log = self._log(tmp_path)
+        emit_embed_withheld(
+            log, "d1", EgressVerdict.UNREADABLE, source="t", once_within=timedelta(0)
+        )
+        emit_embed_withheld(
+            log, "d1", EgressVerdict.UNREADABLE, source="t", once_within=timedelta(0)
+        )
+        assert len(log.get_events(event_type=EventType.EMBED_WITHHELD)) == 2
+        # The reader still counts one document.
+        assert summarize_embed_egress(log, days=7).unreadable == 1
+
+    def test_a_failing_dedupe_lookup_never_raises(self) -> None:
+        log = MagicMock()
+        log.get_events.side_effect = OSError("disk full")
+        assert (
+            emit_embed_withheld(
+                log,
+                "d1",
+                EgressVerdict.UNREADABLE,
+                source="t",
+                once_within=timedelta(days=1),
+            )
+            is False
+        )
+
+    def test_the_reason_says_how_each_kind_of_document_gets_its_vector(
+        self, tmp_path: Path
+    ) -> None:
+        log = self._log(tmp_path)
+        emit_embed_withheld(
+            log, "trace-summary:t-1", EgressVerdict.UNREADABLE, source="t"
+        )
+        (summary_only,) = embed_egress_reasons(summarize_embed_egress(log, days=7))
+        assert "1 document(s)" in summary_only
+        assert "retried by the next worker embed-traces pass" in summary_only
+        assert "reindex-vectors" not in summary_only
+        # The wording must not promise the document has no row at all.
+        assert "no vector row yet" in summary_only
+
+        emit_embed_withheld(log, "plain-doc", EgressVerdict.UNREADABLE, source="t")
+        (both,) = embed_egress_reasons(summarize_embed_egress(log, days=7))
+        assert "2 document(s)" in both
+        assert "retried by the next worker embed-traces pass" in both
+        assert "admin reindex-vectors" in both
 
     def test_the_backend_health_report_carries_the_count(self, tmp_path: Path) -> None:
         registry = make_registry(tmp_path, local=None)

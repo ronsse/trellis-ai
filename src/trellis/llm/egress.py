@@ -75,6 +75,10 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
+from trellis.core.reserved_doc_ids import (
+    TRACE_SUMMARY_DOC_ID_PREFIX,
+    is_trace_summary_doc_id,
+)
 from trellis.llm.routing import LLMRoutingError
 from trellis.schemas.classification import sensitivity_of, sensitivity_rank
 from trellis.schemas.pack import PackItem
@@ -83,6 +87,7 @@ if TYPE_CHECKING:
     from trellis.llm.routing import LLMConsumer
     from trellis.schemas.classification import Sensitivity
     from trellis.stores.base.document import DocumentStore
+    from trellis.stores.base.trace import TraceStore
     from trellis.stores.registry import StoreRegistry
 
 __all__ = [
@@ -93,6 +98,7 @@ __all__ = [
     "egress_reason",
     "failed_read_verdict",
     "may_reach_route",
+    "strictest_verdict",
 ]
 
 #: The named reason a report, event or note gives for an egress skip.
@@ -130,6 +136,22 @@ class EgressVerdict(StrEnum):
 
 def _verdict(permitted: bool) -> EgressVerdict:
     return EgressVerdict.PERMITTED if permitted else EgressVerdict.WITHHELD
+
+
+def strictest_verdict(*verdicts: EgressVerdict) -> EgressVerdict:
+    """The verdict that keeps content off the route most firmly.
+
+    ``WITHHELD`` wins over ``UNREADABLE``, which wins over ``PERMITTED``: a
+    permanent fact about what is stored is not hidden behind a fault a retry
+    might clear, whichever question (a document's own label, the documents it
+    cites) raised which. The one place the order is written, so no sender
+    can disagree about it.
+    """
+    if EgressVerdict.WITHHELD in verdicts:
+        return EgressVerdict.WITHHELD
+    if EgressVerdict.UNREADABLE in verdicts:
+        return EgressVerdict.UNREADABLE
+    return EgressVerdict.PERMITTED
 
 
 def egress_reason(verdict: EgressVerdict) -> str:
@@ -344,6 +366,44 @@ class EgressGate:
                 return verdict
             unreadable = unreadable or verdict is EgressVerdict.UNREADABLE
         return EgressVerdict.UNREADABLE if unreadable else EgressVerdict.PERMITTED
+
+    def summary_verdict(
+        self,
+        doc_id: str,
+        metadata: Mapping[str, Any] | None,
+        open_trace_store: Callable[[], TraceStore],
+    ) -> EgressVerdict:
+        """The verdict for embedding ``doc_id``: its label, and a summary's cited ones.
+
+        A ``trace-summary:`` document is derived from a trace and carries no
+        label of its own, so it is judged by the documents that trace cites
+        (:meth:`cited_verdict`) as well as by its own metadata
+        (:meth:`verdict`), and the strictest of the two stands
+        (:func:`strictest_verdict`). The one question both the trace-embed
+        worker's write and ``admin reindex-vectors`` ask, so they cannot
+        disagree about a summary.
+
+        A trace that cannot be loaded is ``UNREADABLE``: nothing says what it
+        cited, so nothing says the summary may be sent. Any other id, and any
+        id on a local gate, is judged by :meth:`verdict` alone and never opens
+        the trace store. Never raises.
+        """
+        own = self.verdict(doc_id, metadata)
+        if own is EgressVerdict.WITHHELD or self.local:
+            return own
+        if not is_trace_summary_doc_id(doc_id):
+            return own
+        try:
+            trace = open_trace_store().get(doc_id[len(TRACE_SUMMARY_DOC_ID_PREFIX) :])
+        # GRACEFUL-DEGRADATION: fail closed. A trace store that cannot answer
+        # must not read as permission; the count says it was a fault, not a label.
+        except Exception:
+            return strictest_verdict(own, EgressVerdict.UNREADABLE)
+        if trace is None:
+            return strictest_verdict(own, EgressVerdict.UNREADABLE)
+        return strictest_verdict(
+            own, self.cited_verdict(ref.evidence_id for ref in trace.evidence_used)
+        )
 
     def verdict(self, doc_id: str, metadata: Mapping[str, Any] | None) -> EgressVerdict:
         """Whether the document ``doc_id`` carrying ``metadata`` may be sent.
