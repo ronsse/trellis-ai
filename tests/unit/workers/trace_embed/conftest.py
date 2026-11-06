@@ -129,3 +129,14 @@ def seed_traces(registry, count: int, **kwargs) -> list[Trace]:
     for trace in traces:
         registry.operational.trace_store.append(trace)
     return traces
+
+
+def append_trace_named(registry, trace_id: str) -> Trace:
+    """Store a trace under *trace_id*, for a test that drives the handler directly.
+
+    The handler judges a summary by the documents its trace cites, and reads the
+    trace to find them; a trace it cannot find is unreadable, not unlabelled.
+    """
+    trace = make_trace(0).model_copy(update={"trace_id": trace_id})
+    registry.operational.trace_store.append(trace)
+    return trace

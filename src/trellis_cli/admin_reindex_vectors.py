@@ -24,6 +24,15 @@ trace for good. So a reserved id with no vector row is left alone and counted
 in ``skipped_reserved``; ``--force`` still re-embeds one that already has a
 vector, because after an embedding-model change the worker will not (it skips
 any id with a vector) and the row loses nothing by it.
+
+A summary the worker stored without a vector (its trace cites a labelled
+document, or the store could not answer) is exactly such a reserved id with no
+row, so this command leaves it alone as well; ``worker embed-traces
+--reset-watermark`` is how it gets its vector once the verdict changes. With
+``--force`` the summary that does have a vector is judged by the same
+:meth:`~trellis.llm.egress.EgressGate.summary_verdict` the worker's handler asks:
+its own label first, then the documents its trace cites, so a withheld own label
+wins over an unreadable citation here as there.
 """
 
 from __future__ import annotations
@@ -35,10 +44,7 @@ import structlog
 import typer
 from rich.markup import escape
 
-from trellis.core.reserved_doc_ids import (
-    TRACE_SUMMARY_DOC_ID_PREFIX,
-    is_trace_summary_doc_id,
-)
+from trellis.core.reserved_doc_ids import is_trace_summary_doc_id
 from trellis.errors import StoreError, TrellisError
 from trellis.llm.egress import EgressGate, EgressVerdict
 from trellis.retrieve.embed_ingest_hook import EmbedWithheldError, build_vector_row
@@ -117,54 +123,6 @@ def _skip_reason(
     return None
 
 
-def _cited_verdict(
-    doc_id: str,
-    egress: EgressGate,
-    open_trace_store: Callable[[], TraceStore],
-) -> EgressVerdict:
-    """What the documents a trace summary's trace cites say, else ``PERMITTED``.
-
-    A ``trace-summary:`` document carries no label of its own: it is derived
-    from a trace, so (as in ``worker embed-traces``) it is judged by the
-    documents that trace cites. A trace that cannot be loaded is ``UNREADABLE``:
-    nothing says what it cited, so nothing says the summary may be sent. Any
-    other id, and any id on a gate that is local, is ``PERMITTED`` without a
-    read; the trace store is not opened for either.
-    """
-    if egress.local or not is_trace_summary_doc_id(doc_id):
-        return EgressVerdict.PERMITTED
-    try:
-        trace = open_trace_store().get(doc_id[len(TRACE_SUMMARY_DOC_ID_PREFIX) :])
-    # GRACEFUL-DEGRADATION: fail closed. A trace store that cannot answer must
-    # not read as permission; the count says it was a fault, not a label.
-    except Exception:
-        return EgressVerdict.UNREADABLE
-    if trace is None:
-        return EgressVerdict.UNREADABLE
-    return egress.cited_verdict(ref.evidence_id for ref in trace.evidence_used)
-
-
-def _egress_verdict(
-    doc: dict[str, Any],
-    egress: EgressGate,
-    open_trace_store: Callable[[], TraceStore],
-) -> EgressVerdict:
-    """Whether the listed document may be sent: its own label, and a summary's trace's.
-
-    Both are asked and ``WITHHELD`` wins over ``UNREADABLE``, as in mining.
-    """
-    doc_id = doc["doc_id"]
-    own = egress.verdict(doc_id, doc.get("metadata"))
-    if own is EgressVerdict.WITHHELD:
-        return own
-    verdicts = {own, _cited_verdict(doc_id, egress, open_trace_store)}
-    if EgressVerdict.WITHHELD in verdicts:
-        return EgressVerdict.WITHHELD
-    if EgressVerdict.UNREADABLE in verdicts:
-        return EgressVerdict.UNREADABLE
-    return EgressVerdict.PERMITTED
-
-
 def _embed_doc(
     doc: dict[str, Any],
     content: str,
@@ -184,7 +142,9 @@ def _embed_doc(
     """
     doc_id = doc["doc_id"]
     metadata = doc.get("metadata")
-    verdict = _egress_verdict(doc, egress, open_trace_store)
+    # A summary's own label and the documents its trace cites, as the
+    # trace-embed worker's write asks (``EgressGate.summary_verdict``).
+    verdict = egress.summary_verdict(doc_id, metadata, open_trace_store)
     if dry_run:
         permitted = verdict is EgressVerdict.PERMITTED
         tally["embedded" if permitted else _egress_key(verdict)] += 1

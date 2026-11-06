@@ -78,6 +78,7 @@ _GATE_BUILDING_FUNCTIONS = frozenset(
         ("trellis/retrieve/embed_ingest_hook.py", "run_embed_on_ingest"),
         ("trellis/mutate/handlers/evidence_handler.py", "_embed_strict"),
         ("trellis_cli/admin_reindex_vectors.py", "run_reindex_vectors"),
+        ("trellis_workers/trace_embed/handler.py", "_judge"),
         ("trellis_workers/trace_embed/worker.py", "run_trace_embed_pass"),
     }
 )
@@ -306,7 +307,7 @@ def test_the_embedder_gate_builders_are_the_rostered_ones() -> None:
         if site.module != _EGRESS_MODULE
     }
     assert_hand_read_floor(
-        len(builders), 4, subject="embedder gate builder", hint="see the roster"
+        len(builders), 5, subject="embedder gate builder", hint="see the roster"
     )
     assert gate_builder_violations(_SRC, _GATE_BUILDING_FUNCTIONS) == []
 

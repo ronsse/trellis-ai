@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from tests.unit.cli.test_worker import runner
+from tests.structlog_isolation import IsolatedCliRunner
 from tests.unit.workers.session_capture.test_capture import (
     A,
     B,
@@ -26,6 +26,12 @@ from trellis_cli import worker
 from trellis_cli.main import app
 from trellis_workers.session_capture import sweep as capture_sweep
 from trellis_workers.session_capture.models import CaptureReport
+
+# Not ``tests.unit.cli.test_worker.runner``: that one is a bare ``CliRunner``, which
+# the ``tests/unit/cli`` package fixture covers only inside that package. Run from
+# here it left the ``mine-precedents`` log level memoised in every live logger
+# proxy, and a later ``structlog.testing.capture_logs`` saw nothing.
+runner = IsolatedCliRunner()
 
 _SECRET = {"data_classification": {"sensitivity": "confidential"}}
 

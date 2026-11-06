@@ -49,10 +49,8 @@ from trellis.llm.egress import EgressGate, EgressVerdict
 from trellis.mutate.commands import CommandStatus
 from trellis.mutate.executor import MutationExecutor
 from trellis.mutate.policy_source import build_policy_gate
-from trellis.retrieve.embed_ingest_hook import record_embed_withheld
 from trellis.stores.base.trace import as_utc
 from trellis_workers.trace_embed.handler import (
-    REQUESTED_BY,
     TraceSummaryIngestHandler,
     build_trace_summary_command,
 )
@@ -141,13 +139,14 @@ class TraceEmbedReport:
     #: cites a document labelled above ``internal``, or a summary that itself
     #: carries such a label. A permanent fact about what is stored, so the pass
     #: advances past it and it does not make ``status`` partial, as for
-    #: ``skipped_redacted``. A trace withheld for what it cites has no summary
-    #: document at all (nothing is written); one withheld for its own label is
-    #: stored with no vector row.
+    #: ``skipped_redacted``. The summary document is stored all the same, with
+    #: no vector row: egress governs what is sent, not what is stored.
     skipped_egress_withheld: int = 0
     #: Summaries kept off the embedder because a store could not be asked for a
     #: label (``egress_unreadable``), a cited document's included. A fault a later
     #: pass may clear: the cursor holds behind it and ``status`` is ``partial``.
+    #: The summary is stored without a vector row, and the retry writes the
+    #: same document again and embeds it.
     skipped_egress_unreadable: int = 0
     failed: int = 0
     stopped_early: bool = False
@@ -414,10 +413,11 @@ def run_trace_embed_pass(
         candidates = candidates[:limit]
     report.more_remaining = truncated
 
-    # One gate per pass, as ``admin reindex-vectors`` builds one per run. A
-    # summary carries no label of its own: it is judged by the documents its
-    # trace cites, so the gate needs the document store (a declared-local
-    # embedder reads nothing and answers "yes" for every trace).
+    # One gate per pass, as ``admin reindex-vectors`` builds one per run, for the
+    # dry run's screen; the handler builds its own for a live write. A summary
+    # carries no label of its own: it is judged by the documents its trace
+    # cites, so the gate needs the document store (a declared-local embedder
+    # reads nothing and answers "yes" for every trace).
     egress = EgressGate.for_embedder(registry, registry.knowledge.document_store)
     handler = TraceSummaryIngestHandler(registry, embedding_fn)
     executor = MutationExecutor(
@@ -478,6 +478,38 @@ def _log_skipped_invalid(report: TraceEmbedReport) -> None:
         logger.warning("trace_embed_skipped_invalid", count=report.skipped_invalid)
 
 
+def _dry_run_one(
+    trace: Trace,
+    *,
+    egress: EgressGate,
+    registry: StoreRegistry,
+    document_store: DocumentStore,
+    report: TraceEmbedReport,
+) -> bool:
+    """Count what a live pass would do with ``trace``; write nothing.
+
+    A redacted summary id is counted as redacted, cursor included: the row can
+    never be embedded. It is asked before the egress screen, as the live write
+    is (the write seam refuses before the handler screens), so a redacted
+    summary is redacted whatever its trace cites. Anything else is judged by
+    the same ``summary_verdict`` the handler asks, so the dry run and the live
+    pass cannot disagree about a trace.
+    """
+    stored = document_store.get(trace_summary_doc_id(trace.trace_id))
+    if stored is not None and is_redaction_tombstone(stored):
+        report.skipped_redacted += 1
+        return True
+    verdict = egress.summary_verdict(
+        trace_summary_doc_id(trace.trace_id),
+        build_trace_metadata(trace),
+        lambda: registry.operational.trace_store,
+    )
+    if verdict is not EgressVerdict.PERMITTED:
+        return _count_withheld(verdict, report)
+    report.embedded += 1
+    return False
+
+
 def _process_one(
     trace: Trace,
     *,
@@ -521,14 +553,16 @@ def _process_one(
     executor is a plain failure: it holds the cursor, because nothing about
     it says the next attempt cannot succeed.
 
-    A trace is judged by the documents it cites (``evidence_used``) before
-    anything is written, unless the embedder is declared local: the summary is
-    derived from the trace and carries no label of its own for the handler's
-    gate to find. One cited document labelled above ``internal`` withholds the
-    summary (``skipped_egress_withheld``, and the cursor advances: it is the
-    same on every retry); a cited document no store could answer for holds the
-    cursor (``skipped_egress_unreadable``), as a failure does. Neither writes a
-    summary document. A dry run asks the same question and writes nothing.
+    A summary is judged by the documents its trace cites (``evidence_used``) and
+    by its own label, unless the embedder is declared local. That is asked in the
+    handler, after the summary document is written (egress governs what is sent,
+    not what is stored): a withheld summary is stored with no vector row
+    (``skipped_egress_withheld``, and the cursor advances: it is the same on
+    every retry); one whose cited document no store could answer for is stored
+    the same way and holds the cursor (``skipped_egress_unreadable``), as a
+    failure does, so the next pass writes it again and tries the embed again.
+    A summary that was redacted is refused by the write seam before the screen
+    and counts as redacted. A dry run asks the same question and writes nothing.
     """
     # Before the vector-store lookup, not after it: a backend that binds the
     # id as a SQL parameter (Postgres refuses a NUL in a text value) would
@@ -554,27 +588,14 @@ def _process_one(
         )
         return False
 
-    cited = egress.cited_verdict(ref.evidence_id for ref in trace.evidence_used)
-    if cited is not EgressVerdict.PERMITTED:
-        if not dry_run:
-            record_embed_withheld(
-                registry,
-                trace_summary_doc_id(trace.trace_id),
-                cited,
-                source=REQUESTED_BY,
-            )
-        return _count_withheld(cited, report)
-
     if dry_run:
-        stored = document_store.get(trace_summary_doc_id(trace.trace_id))
-        redacted = stored is not None and is_redaction_tombstone(stored)
-        if redacted:
-            # What the live pass does with the write seam's refusal below,
-            # cursor included: the row can never be embedded.
-            report.skipped_redacted += 1
-        else:
-            report.embedded += 1
-        return redacted
+        return _dry_run_one(
+            trace,
+            egress=egress,
+            registry=registry,
+            document_store=document_store,
+            report=report,
+        )
 
     result = executor.execute(
         build_trace_summary_command(
