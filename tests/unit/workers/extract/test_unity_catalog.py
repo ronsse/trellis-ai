@@ -1458,6 +1458,59 @@ class TestOpenLineageAndCatalogInOneStore:
             orders,
         ]
 
+    @BOTH_MODES
+    async def test_a_dataset_in_the_default_scope_namespace_leaves_the_catalog_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lom: bool
+    ) -> None:
+        """Its verbatim id is the table's id; a full draft there replaced the row."""
+        store = Store(tmp_path, monkeypatch, lom=lom)
+        uc, _ = await self._runs()
+        orders = tid("main.sales.orders", BARE)
+        shadow = {
+            "namespace": BARE,
+            "name": "main.sales.orders",
+            "facets": {"schema": {"fields": [{"name": "x", "type": "long"}]}},
+        }
+        ol = await OpenLineageExtractor().extract(
+            [lineage_event(shadow)], source_hint="ol"
+        )
+
+        store.write(uc)
+        before = (store.props(orders), len(store.graph.get_node_history(orders)))
+        store.write(ol)
+
+        assert (
+            store.props(orders),
+            len(store.graph.get_node_history(orders)),
+        ) == before
+        assert store.props(orders)["description"] == "One row per order"
+        edges = store.graph.get_edges(JOB, direction="outgoing", edge_type="reads_from")
+        assert [e["target_id"] for e in edges] == [orders]
+
+    @BOTH_MODES
+    async def test_a_mixed_batch_writes_one_node_for_the_table(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lom: bool
+    ) -> None:
+        """A symlinked mention and a bare mention of one location: one node, and the
+        job reads and writes it, where the bare mention used to get a twin."""
+        store = Store(tmp_path, monkeypatch, lom=lom)
+        uc, _ = await self._runs()
+        orders = tid("main.sales.orders", BARE)
+        bare = {"namespace": STORAGE[0], "name": STORAGE[1]}
+        event = lineage_event(storage_dataset("Main.Sales.Orders"))
+        event["outputs"] = [bare]
+        ol = await OpenLineageExtractor().extract([event], source_hint="ol")
+        assert ol.skipped_rows == {"uc_storage_redirected": 1}
+
+        store.write(uc)
+        store.write(ol)
+
+        assert store.graph.get_node(f"dataset:{STORAGE[0]}:{STORAGE[1]}") is None
+        assert store.props(orders)["description"] == "One row per order"
+        for kind in ("reads_from", "writes_to"):
+            edges = store.graph.get_edges(JOB, direction="outgoing", edge_type=kind)
+            assert [e["target_id"] for e in edges] == [orders]
+
     @pytest.mark.parametrize("catalog_first", [True, False])
     async def test_an_if_absent_write_on_an_existing_node_still_binds_its_aliases(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, catalog_first: bool

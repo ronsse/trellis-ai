@@ -70,7 +70,10 @@ console = build_console()
 # resolved via the entry-points group ``trellis.extractors`` at runtime;
 # this mapping handles the in-tree references the CLI ships with.
 def _resolve_extractor(
-    extractor_type: str, *, max_columns_per_table: int | None = None
+    extractor_type: str,
+    *,
+    max_columns_per_table: int | None = None,
+    unity_catalog_scope: str | None = None,
 ) -> object:
     """Instantiate the extractor whose ``supported_sources`` claims ``extractor_type``.
 
@@ -78,8 +81,9 @@ def _resolve_extractor(
     third-party extractors register themselves via ``trellis.extractors``
     entry points and are discovered automatically.
 
-    ``max_columns_per_table`` is the Unity Catalog column cap; any other
-    extractor refuses it rather than ignoring it.
+    ``max_columns_per_table`` is the Unity Catalog column cap and
+    ``unity_catalog_scope`` the OpenLineage extractor's symlink scope; any other
+    extractor refuses either rather than ignoring it.
     """
     registry = ExtractorRegistry()
     registry.load_entry_points()
@@ -113,14 +117,30 @@ def _resolve_extractor(
     candidates = registry.candidates_for(extractor_type)
     if candidates:
         chosen = candidates[0]
-        if max_columns_per_table is None:
-            return chosen
-        if getattr(chosen, "name", None) != "unity_catalog":
+        chosen_name = getattr(chosen, "name", None)
+        if max_columns_per_table is not None and chosen_name != "unity_catalog":
             msg = "--max-columns-per-table applies only to the unity-catalog type."
             raise typer.BadParameter(msg)
-        from trellis_workers.extract import UnityCatalogExtractor  # noqa: PLC0415
+        if unity_catalog_scope is not None and chosen_name != "openlineage":
+            msg = "--unity-catalog-scope applies only to the openlineage type."
+            raise typer.BadParameter(msg)
+        if max_columns_per_table is not None:
+            from trellis_workers.extract import UnityCatalogExtractor  # noqa: PLC0415
 
-        return UnityCatalogExtractor(max_columns_per_table=max_columns_per_table)
+            return UnityCatalogExtractor(max_columns_per_table=max_columns_per_table)
+        if unity_catalog_scope is not None:
+            from trellis_workers.extract import OpenLineageExtractor  # noqa: PLC0415
+            from trellis_workers.extract.unity_catalog_identity import (  # noqa: PLC0415
+                explicit_scope,
+            )
+
+            try:
+                scope = explicit_scope(unity_catalog_scope)
+            except ValueError as exc:
+                msg = f"--unity-catalog-scope {exc}."
+                raise typer.BadParameter(msg) from None
+            return OpenLineageExtractor(unity_catalog_scope=scope)
+        return chosen
     available_sources = sorted(
         {s for name in registry.names() for s in registry.get(name).supported_sources}  # type: ignore[union-attr]
     )
@@ -443,6 +463,11 @@ def _run_refresh(
         **_command_counts(results),
         "diffs": diffs,
     }
+    # The scope an OpenLineage ``unity-catalog`` symlink was read in, so a run
+    # that mismatches the catalog export's namespace can be seen in the output.
+    scope = getattr(extractor, "unity_catalog_scope", None)
+    if scope is not None:
+        summary["unity_catalog_scope"] = scope
     return summary, results
 
 
@@ -451,6 +476,7 @@ def _refresh_entry(
     *,
     sources_root: Path,
     max_columns_per_table: int | None = None,
+    unity_catalog_scope: str | None = None,
 ) -> tuple[dict[str, Any], list[CommandResult]]:
     """Run refresh for a single SourceEntry."""
     if entry.endpoint is not None:
@@ -474,7 +500,9 @@ def _refresh_entry(
         msg = f"Source {entry.name!r}: path {raw_path} does not exist."
         raise typer.BadParameter(msg)
     extractor = _resolve_extractor(
-        entry.type, max_columns_per_table=max_columns_per_table
+        entry.type,
+        max_columns_per_table=max_columns_per_table,
+        unity_catalog_scope=unity_catalog_scope,
     )
     raw_input = _read_raw_input(raw_path, entry.type)
     registry = _get_registry()
@@ -541,6 +569,15 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             "columns_over_cap."
         ),
     ),
+    unity_catalog_scope: str | None = typer.Option(
+        None,
+        "--unity-catalog-scope",
+        help=(
+            "openlineage only: the scope of a 'unity-catalog' symlink, which "
+            "carries no host (default 'unity_catalog'). Must equal the Unity "
+            "Catalog export's namespace, or the two write different ids."
+        ),
+    ),
     output_format: str = typer.Option(
         "text", "--format", help="Output format: text or json."
     ),
@@ -595,6 +632,7 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
                 entry,
                 sources_root=sources_path.parent.resolve(),
                 max_columns_per_table=max_columns_per_table,
+                unity_catalog_scope=unity_catalog_scope,
             )
         except typer.Exit:
             raise
@@ -624,7 +662,9 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
             raise typer.Exit(code=EXIT_INTERNAL)
         try:
             extractor = _resolve_extractor(
-                extractor_type, max_columns_per_table=max_columns_per_table
+                extractor_type,
+                max_columns_per_table=max_columns_per_table,
+                unity_catalog_scope=unity_catalog_scope,
             )
             raw_input = _read_raw_input(type_path, extractor_type)
             registry = _get_registry()
@@ -671,6 +711,11 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
         console.print(f"  Changed:           {summary['changed_entities']}")
         console.print(f"  Unchanged:         {summary['unchanged_entities']}")
         console.print(f"  Edges emitted:     {summary['edges_emitted']}")
+        if "unity_catalog_scope" in summary:
+            console.print(
+                f"  UC symlink scope:  {escape(summary['unity_catalog_scope'])}",
+                soft_wrap=True,
+            )
         skipped = summary["skipped_rows"]
         if skipped:
             reasons = ", ".join(f"{name}={count}" for name, count in skipped.items())

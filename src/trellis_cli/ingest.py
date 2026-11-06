@@ -599,9 +599,41 @@ def ingest_dbt_manifest(
         raise typer.Exit(code=refusal_exit_code(refusal))
 
 
+def _explicit_scope_or_fail(value: str | None, output_format: str) -> str | None:
+    """The normalised ``--unity-catalog-scope``, ``None`` when it was not given.
+
+    A value that names nothing (blank, or a ``unitycatalog://`` with no host) is
+    refused rather than read as the default scope: that would be the silent
+    mismatch the option exists to prevent.
+    """
+    if value is None:
+        return None
+    from trellis_workers.extract.unity_catalog_identity import (  # noqa: PLC0415
+        explicit_scope,
+    )
+
+    try:
+        return explicit_scope(value)
+    except ValueError as exc:
+        _fail(
+            f"--unity-catalog-scope {exc}.",
+            output_format,
+            error_type="ValidationError",
+        )
+
+
 @ingest_app.command("openlineage")
 def ingest_openlineage(
     events_path: str = typer.Argument(..., help="Path to OpenLineage events JSON file"),
+    unity_catalog_scope: str | None = typer.Option(
+        None,
+        "--unity-catalog-scope",
+        help=(
+            "Scope of a 'unity-catalog' symlink, which carries no host "
+            "(default 'unity_catalog'). Must equal the Unity Catalog export's "
+            "namespace, or the two write different ids."
+        ),
+    ),
     output_format: str = typer.Option(
         "text", "--format", help="Output format: text or json"
     ),
@@ -631,11 +663,13 @@ def ingest_openlineage(
 
     from trellis_workers.extract import OpenLineageExtractor  # noqa: PLC0415
 
+    scope = _explicit_scope_or_fail(unity_catalog_scope, output_format)
+    extractor = OpenLineageExtractor(unity_catalog_scope=scope)
     registry = _get_registry()
     try:
         result = _run_extraction(
             registry,
-            extractor=OpenLineageExtractor(),
+            extractor=extractor,
             raw_input=events,
             source_hint="openlineage",
         )
@@ -658,7 +692,11 @@ def ingest_openlineage(
         raise typer.Exit(code=exit_code_for(exc)) from None
     refusal = outcome.refusal
 
-    counts = {"nodes": nodes, "edges": edges}
+    counts = {
+        "nodes": nodes,
+        "edges": edges,
+        "unity_catalog_scope": extractor.unity_catalog_scope,
+    }
     if output_format == "json":
         emit_json({**outcome.status, **counts})
     else:
@@ -670,5 +708,9 @@ def ingest_openlineage(
         )
         console.print(f"  Nodes: {counts['nodes']}")
         console.print(f"  Edges: {counts['edges']}")
+        console.print(
+            f"  Unity Catalog scope: {escape(extractor.unity_catalog_scope)}",
+            soft_wrap=True,
+        )
     if refusal is not None:
         raise typer.Exit(code=refusal_exit_code(refusal))

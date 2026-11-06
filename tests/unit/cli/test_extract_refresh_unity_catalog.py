@@ -398,3 +398,174 @@ class TestColumnCap:
             for fmt in ("json", "text")
         }
         assert codes["json"] == codes["text"]
+
+
+_OL_EVENTS = [
+    {
+        "job": {"namespace": "databricks", "name": "build_revenue"},
+        "inputs": [
+            {
+                "namespace": "s3://example-bucket",
+                "name": "/warehouse/orders",
+                "facets": {
+                    "symlinks": {
+                        "identifiers": [
+                            {
+                                "namespace": "unity-catalog",
+                                "name": "main.sales.orders",
+                                "type": "TABLE",
+                            }
+                        ]
+                    }
+                },
+            },
+            {"namespace": "s3://example-bucket", "name": "/warehouse/orders"},
+        ],
+        "outputs": [],
+    }
+]
+
+
+class TestOpenLineageScope:
+    """``--unity-catalog-scope`` reaches ``OpenLineageExtractor`` and nothing else."""
+
+    @pytest.fixture(params=["json", "text"])
+    def fmt(self, request: pytest.FixtureRequest) -> str:
+        return str(request.param)
+
+    def _events(self, tmp_path: Path) -> Path:
+        path = tmp_path / "events.json"
+        path.write_text(json.dumps(_OL_EVENTS))
+        return path
+
+    def _run(self, path: Path, *extra: str, fmt: str = "json") -> Any:
+        return runner.invoke(
+            app,
+            [
+                *("extract", "refresh", "--type", "openlineage", "--path", str(path)),
+                *extra,
+                *("--format", fmt),
+            ],
+        )
+
+    def test_the_scope_is_applied_and_reported(self, tmp_path: Path) -> None:
+        result = self._run(self._events(tmp_path), "--unity-catalog-scope", "custom")
+        assert result.exit_code == 0, result.stdout
+        data = json.loads(result.stdout.strip())
+        assert data["unity_catalog_scope"] == "custom"
+        ids = {d["entity_id"] for d in data["diffs"]}
+        assert "dataset:custom:main.sales.orders" in ids
+        assert "dataset:unity_catalog:main.sales.orders" not in ids
+
+    def test_the_scope_is_normalised_as_the_catalog_side_does(
+        self, tmp_path: Path
+    ) -> None:
+        result = self._run(
+            self._events(tmp_path),
+            "--unity-catalog-scope",
+            " UnityCatalog://Host:443/ ",
+        )
+        data = json.loads(result.stdout.strip())
+        assert data["unity_catalog_scope"] == "unitycatalog://host"
+        assert "dataset:unitycatalog://host:main.sales.orders" in {
+            d["entity_id"] for d in data["diffs"]
+        }
+
+    def test_the_default_scope_is_reported_when_none_is_given(
+        self, tmp_path: Path
+    ) -> None:
+        data = json.loads(self._run(self._events(tmp_path)).stdout.strip())
+        assert data["unity_catalog_scope"] == "unity_catalog"
+        # And the redirect is reported by `extract refresh`, beside the scope.
+        assert data["skipped_rows"] == {"uc_storage_redirected": 1}
+
+    def test_text_output_names_the_scope(self, tmp_path: Path) -> None:
+        result = self._run(
+            self._events(tmp_path), "--unity-catalog-scope", "custom", fmt="text"
+        )
+        assert result.exit_code == 0, result.stdout
+        out = plain(result.stdout)
+        assert "UC symlink scope:  custom" in out
+        assert "uc_storage_redirected=1" in out
+
+    def test_another_extractor_reports_no_scope(self, tmp_path: Path) -> None:
+        result = _refresh(_export_dir(tmp_path))
+        assert "unity_catalog_scope" not in json.loads(result.stdout.strip())
+
+    def test_sources_yaml_entry_takes_the_option(self, tmp_path: Path) -> None:
+        sources = tmp_path / "sources.yaml"
+        sources.write_text(
+            "sources:\n  - name: lineage\n    type: openlineage\n"
+            f"    path: {self._events(tmp_path)}\n"
+        )
+        result = runner.invoke(
+            app,
+            [
+                *("extract", "refresh", "--source", "lineage"),
+                *("--sources-file", str(sources), "--format", "json"),
+                *("--unity-catalog-scope", "custom"),
+            ],
+        )
+        assert result.exit_code == 0, result.stdout
+        assert json.loads(result.stdout.strip())["unity_catalog_scope"] == "custom"
+
+    @pytest.mark.parametrize("extractor_type", ["unity-catalog", "dbt-manifest"])
+    def test_another_extractor_refuses_the_option(
+        self, tmp_path: Path, fmt: str, extractor_type: str
+    ) -> None:
+        path = tmp_path / "input.json"
+        path.write_text("{}")
+        result = runner.invoke(
+            app,
+            [
+                *("extract", "refresh", "--type", extractor_type, "--path", str(path)),
+                *("--unity-catalog-scope", "custom", "--format", fmt),
+            ],
+        )
+        assert result.exit_code == 1, result.stdout
+        assert "applies only to the openlineage type" in plain(result.stdout)
+        if fmt == "json":
+            assert json.loads(result.stdout.strip())["status"] == "error"
+
+    def test_a_sources_entry_of_another_type_refuses_it(self, tmp_path: Path) -> None:
+        export = _export_dir(tmp_path)
+        sources = tmp_path / "sources.yaml"
+        sources.write_text(
+            "sources:\n  - name: lakehouse\n    type: unity-catalog\n"
+            f"    path: {export}\n"
+        )
+        result = runner.invoke(
+            app,
+            [
+                *("extract", "refresh", "--source", "lakehouse"),
+                *("--sources-file", str(sources), "--format", "json"),
+                *("--unity-catalog-scope", "custom"),
+            ],
+        )
+        assert result.exit_code == 1, result.stdout
+        assert "applies only to the openlineage type" in plain(result.stdout)
+
+    @pytest.mark.parametrize("value", ["", "   ", "unitycatalog://", "/"])
+    def test_a_scope_that_names_nothing_is_refused_on_both_formats(
+        self, tmp_path: Path, fmt: str, value: str
+    ) -> None:
+        result = self._run(
+            self._events(tmp_path), "--unity-catalog-scope", value, fmt=fmt
+        )
+        assert result.exit_code == 1, result.stdout
+        assert "must name a scope" in plain(result.stdout)
+        if fmt == "json":
+            assert json.loads(result.stdout.strip())["status"] == "error"
+
+    def test_exit_code_does_not_depend_on_format(self, tmp_path: Path) -> None:
+        events = self._events(tmp_path)
+        for args in (("--unity-catalog-scope", ""), ("--unity-catalog-scope", "x")):
+            codes = {
+                fmt: self._run(events, *args, fmt=fmt).exit_code
+                for fmt in ("json", "text")
+            }
+            assert codes["json"] == codes["text"], args
+
+    def test_the_option_is_documented_in_the_help(self) -> None:
+        result = runner.invoke(app, ["extract", "refresh", "--help"])
+        assert "--unity-catalog-scope" in plain(result.stdout)
