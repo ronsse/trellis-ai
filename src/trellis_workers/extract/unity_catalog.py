@@ -35,14 +35,31 @@ export does hold is a full create, which replaces the node's properties and so
 drops ``stub``: the metadata that arrives after a lineage-only run lands whole.
 
 A wrapper may also carry ``"namespace"``, the OpenLineage dataset namespace for
-the workspace (``unitycatalog://<host>``, a trailing ``/`` is dropped).  The
-namespace is part of every entity id, so choose it before the first run.  With
-a namespace a table's entity id is the id
-:class:`~trellis_workers.extract.openlineage.OpenLineageExtractor` gives the
-same dataset *when* that extractor's dataset name is the lowercase, unquoted
-``catalog.schema.table`` and its namespace string is identical: OpenLineage
-keeps both verbatim, so a name differing in case or quoting, or a namespace
-differing in port or trailing ``/``, is a second node.
+the workspace (``unitycatalog://<host>``).  It is normalised by
+:func:`~trellis_workers.extract.unity_catalog_identity.normalize_scope`: the
+scheme and host are lowercased and a trailing ``/`` and a ``:443`` port are
+dropped.  The namespace is part of every entity id, so choose it before the first
+run.
+
+How a table meets its OpenLineage twin depends on what the OpenLineage producer
+emits.  A table's id is ``dataset:{scope}:{catalog.schema.table}``, and
+:class:`~trellis_workers.extract.openlineage.OpenLineageExtractor` mints the same
+id for a dataset with a Unity Catalog identity, built by the same helper
+(:mod:`~trellis_workers.extract.unity_catalog_identity`):
+
+* openlineage-spark 1.51.0 and later on Databricks emits the *storage location*
+  as the dataset's own namespace and name and names the table only in a
+  ``symlinks`` identifier in the fixed namespace ``unity-catalog``, which has no
+  host.  Leave this extractor's namespace unset: the scope is then the fixed
+  string ``unity_catalog``, which is what the OpenLineage extractor uses for that
+  symlink by default.  A namespace set here is also set there with
+  ``OpenLineageExtractor(unity_catalog_scope=...)``, or the two ids differ.
+* A producer that emits the table as ``unitycatalog://<host>`` plus
+  ``catalog.schema.table`` (the OpenLineage naming spec's form) is read by scope
+  and name alone, so set this extractor's namespace to that
+  ``unitycatalog://<host>``.
+
+Older OpenLineage nodes keep their storage-path ids; nothing here migrates them.
 
 A table carries ``column_names``, its column names in position order, so an
 agent can find a table by a column with the ``contains`` operator
@@ -86,7 +103,15 @@ from trellis.schemas.extraction import (
 )
 from trellis_workers.extract.openlineage import (
     OPENLINEAGE_DATASET_ALIAS_SOURCE_SYSTEM,
-    _dataset_id,
+)
+from trellis_workers.extract.unity_catalog_identity import (
+    DEFAULT_SCOPE,
+    UC_TABLE_ENTITY_TYPE,
+    identity_key,
+    normalize_scope,
+    split_full_name,
+    table_entity_id,
+    table_properties,
 )
 
 if TYPE_CHECKING:
@@ -94,9 +119,6 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-#: ``Dataset`` (lowercase, as OpenLineage writes it) so a table and the
-#: OpenLineage dataset naming it are one node of one type.
-UC_TABLE_ENTITY_TYPE: Final = "dataset"
 UC_CATALOG_ENTITY_TYPE: Final = "uc_catalog"
 UC_SCHEMA_ENTITY_TYPE: Final = "uc_schema"
 UC_COLUMN_ENTITY_TYPE: Final = "uc_column"
@@ -111,9 +133,6 @@ INPUT_REFUSAL_CODE: Final = "unity_catalog_input"
 
 #: Catalogs left out unless ``include_system`` is set.
 SYSTEM_CATALOGS: Final[frozenset[str]] = frozenset({"system", "__databricks_internal"})
-
-#: Scope used in entity ids when no OpenLineage namespace is known.
-_DEFAULT_SCOPE: Final = "unity_catalog"
 
 _WRAPPER_KEYS: Final = ("catalogs", "schemas", "tables", "upstreams", "downstreams")
 
@@ -153,53 +172,12 @@ def _refuse(message: str) -> NoReturn:
 
 
 # ---------------------------------------------------------------------------
-# Identity
+# Identity (the id, scope and name rules live in ``unity_catalog_identity``)
 # ---------------------------------------------------------------------------
-
-
-def _quote_part(part: str) -> str:
-    return f"`{part.replace('`', '``')}`" if "." in part or "`" in part else part
-
-
-def _identity_key(*parts: str) -> str:
-    """The canonical dotted name of a catalog, schema or table.
-
-    Case-folded and unquoted by
-    :func:`trellis.schemas.well_known.normalize_alias_raw_id`,
-    the function ``save_knowledge`` looks a Unity Catalog id up with, so
-    ``Main.Sales.Orders``, ``main.sales.orders`` and
-    ``` `main`.`sales`.`orders` ``` are one table.
-    """
-    joined = ".".join(_quote_part(part) for part in parts)
-    return wk.normalize_alias_raw_id(wk.UNITY_CATALOG_SOURCE_SYSTEM, joined)
-
-
-def _split_full_name(full_name: str, expected: int) -> tuple[str, ...] | None:
-    key = wk.normalize_alias_raw_id(wk.UNITY_CATALOG_SOURCE_SYSTEM, full_name)
-    if "`" in key:  # a part holding a dot, which Unity Catalog does not allow
-        return None
-    parts = tuple(key.split("."))
-    # A value the normaliser could not parse comes back unchanged, so a blank
-    # part (``a. .b``) is refused here rather than read as a name.
-    ok = len(parts) == expected and all(part.strip() for part in parts)
-    return parts if ok else None
 
 
 def _fold(value: Any) -> str:
     return str(value).strip().lower()
-
-
-def _clean_namespace(value: Any) -> str | None:
-    """A namespace as a string without surrounding space or a trailing ``/``."""
-    if not isinstance(value, str):
-        return None
-    return value.strip().rstrip("/").strip() or None
-
-
-def _host(namespace: str | None) -> str | None:
-    if not namespace or "://" not in namespace:
-        return None
-    return namespace.partition("://")[2].strip("/") or None
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +305,7 @@ def _table_parts(rec: dict[str, Any]) -> _TableParts | None:
     if all(isinstance(p, str) and p.strip() for p in (catalog, schema, name)):
         return (_fold(catalog), _fold(schema), _fold(name))
     full = rec.get("full_name")
-    parts = _split_full_name(full, 3) if isinstance(full, str) else None
+    parts = split_full_name(full, 3) if isinstance(full, str) else None
     return (parts[0], parts[1], parts[2]) if parts else None
 
 
@@ -336,7 +314,7 @@ def _schema_parts(rec: dict[str, Any]) -> tuple[str, str] | None:
     if all(isinstance(p, str) and p.strip() for p in (catalog, name)):
         return (_fold(catalog), _fold(name))
     full = rec.get("full_name")
-    parts = _split_full_name(full, 2) if isinstance(full, str) else None
+    parts = split_full_name(full, 2) if isinstance(full, str) else None
     return (parts[0], parts[1]) if parts else None
 
 
@@ -365,7 +343,7 @@ def _add_table(rec: Any, where: str, state: _Collected) -> None:
 def _row_table(row: dict[str, Any], side: str) -> _TableParts | None:
     full = row.get(f"{side}_table_full_name")
     if isinstance(full, str) and full.strip():
-        parts = _split_full_name(full, 3)
+        parts = split_full_name(full, 3)
         return (parts[0], parts[1], parts[2]) if parts else None
     catalog, schema, name = (
         row.get(f"{side}_table_catalog"),
@@ -403,7 +381,7 @@ def _add_lineage_row(row: dict[str, Any], state: _Collected) -> None:
 def _add_lineage_api(doc: dict[str, Any], where: str, state: _Collected) -> None:
     """A ``lineage-tracking/table-lineage`` response for ``doc["table_name"]``."""
     queried = doc.get("table_name")
-    parts = _split_full_name(queried, 3) if isinstance(queried, str) else None
+    parts = split_full_name(queried, 3) if isinstance(queried, str) else None
     if parts is None:
         _refuse(
             f"{where}: a lineage-tracking response must also carry "
@@ -450,7 +428,7 @@ def _walk(node: Any, where: str, state: _Collected) -> None:  # noqa: PLR0912 - 
     if any(key in node for key in _WRAPPER_KEYS) or (
         node.keys() <= _IGNORED_DOCUMENT_KEYS
     ):
-        namespace = _clean_namespace(node.get("namespace"))
+        namespace = normalize_scope(node.get("namespace"))
         if namespace:
             state.namespaces.add(namespace)
         for key, add in (
@@ -513,11 +491,14 @@ class UnityCatalogExtractor:
 
     Args:
         namespace: The OpenLineage dataset namespace of the workspace
-            (``unitycatalog://<host>``, a trailing ``/`` is dropped).  When
-            known it makes a table's entity id the one OpenLineage gives that
-            dataset, if its name and namespace are spelled the same, and binds
-            the dataset's OpenLineage alias to it.  Overrides a ``namespace`` in
-            the input.  It is part of every id: choose it before the first run.
+            (``unitycatalog://<host>``, normalised as the module docstring
+            says).  Leave it unset to join an OpenLineage ``unity-catalog``
+            symlink out of the box.  When set it makes a table's entity id the
+            one :class:`~trellis_workers.extract.openlineage.OpenLineageExtractor`
+            gives a ``unitycatalog://<host>`` dataset (or a symlink, given the
+            same ``unity_catalog_scope``) and binds that OpenLineage alias to the
+            table.  Overrides a ``namespace`` in the input.  It is part of every
+            id: choose it before the first run.
         include_system: Keep the ``system`` and ``__databricks_internal``
             catalogs (default: leave them out, along with lineage that touches them).
         include_columns: Emit a ``uc_column`` entity per column and column
@@ -555,7 +536,7 @@ class UnityCatalogExtractor:
         if max_columns_per_table < 1:
             msg = "max_columns_per_table must be at least 1"
             raise ValueError(msg)
-        self._namespace = _clean_namespace(namespace)
+        self._namespace = normalize_scope(namespace)
         self._include_system = include_system
         self._include_columns = include_columns
         self._max_columns = max_columns_per_table
@@ -618,7 +599,7 @@ class _Builder:
     ) -> None:
         self._state = state
         self._namespace = namespace
-        self._scope = namespace or _DEFAULT_SCOPE
+        self._scope = namespace or DEFAULT_SCOPE
         self._include_system = include_system
         self._include_columns = include_columns
         self._max_columns = max_columns
@@ -629,16 +610,16 @@ class _Builder:
     # -- ids ---------------------------------------------------------------
 
     def _catalog_id(self, catalog: str) -> str:
-        return f"{UC_CATALOG_ENTITY_TYPE}:{self._scope}:{_identity_key(catalog)}"
+        return f"{UC_CATALOG_ENTITY_TYPE}:{self._scope}:{identity_key(catalog)}"
 
     def _schema_id(self, catalog: str, schema: str) -> str:
-        return f"{UC_SCHEMA_ENTITY_TYPE}:{self._scope}:{_identity_key(catalog, schema)}"
+        return f"{UC_SCHEMA_ENTITY_TYPE}:{self._scope}:{identity_key(catalog, schema)}"
 
     def _table_id(self, parts: _TableParts) -> str:
-        return _dataset_id(self._scope, _identity_key(*parts))
+        return table_entity_id(self._scope, identity_key(*parts))
 
     def _column_id(self, parts: _TableParts, column: str) -> str:
-        return f"{UC_COLUMN_ENTITY_TYPE}:{self._scope}:{_identity_key(*parts)}/{column}"
+        return f"{UC_COLUMN_ENTITY_TYPE}:{self._scope}:{identity_key(*parts)}/{column}"
 
     # -- selection ---------------------------------------------------------
 
@@ -657,7 +638,7 @@ class _Builder:
         if cid not in self._entities:
             found = self._state.catalogs.get(catalog)
             rec = found or {}
-            key = _identity_key(catalog)
+            key = identity_key(catalog)
             props = _drop_none(
                 {
                     "name": _text(rec.get("name")) or catalog,
@@ -695,7 +676,7 @@ class _Builder:
         if sid not in self._entities:
             found = self._state.schemas.get((catalog, schema))
             rec = found or {}
-            key = _identity_key(catalog, schema)
+            key = identity_key(catalog, schema)
             props = _drop_none(
                 {
                     "name": _text(rec.get("name")) or schema,
@@ -736,23 +717,15 @@ class _Builder:
         catalog, schema, table = parts
         found = self._state.tables.get(parts)
         rec = found or {}
-        key = _identity_key(*parts)
+        key = identity_key(*parts)
         columns = rec.get("columns")
         names = self._column_names(parts) if isinstance(columns, list) else None
-        props: dict[str, Any] = {
-            "name": _text(rec.get("name")) or table,
-            "full_name": key,
-            "database_name": catalog,
-            "schema_name": schema,
-            "source_system": "databricks",
-        }
-        if found is None:
-            props["stub"] = True
-        host = _host(self._namespace)
-        if host:
-            props[wk.DATASET_PROP_PHYSICAL_URI] = (
-                f"databricks://{host}/{catalog}/{schema}/{table}"
-            )
+        props = table_properties(
+            parts,
+            self._scope,
+            name=_text(rec.get("name")) or table,
+            stub=found is None,
+        )
         props.update(
             _drop_none(
                 {
@@ -806,7 +779,7 @@ class _Builder:
         props: dict[str, Any] = _drop_none(
             {
                 "name": shown,
-                "table_full_name": _identity_key(*parts),
+                "table_full_name": identity_key(*parts),
                 "source_system": "databricks",
                 "stub": True if found is None else None,
                 "type_text": _text(rec.get("type_text")),
