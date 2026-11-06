@@ -18,6 +18,9 @@ Write semantics (ADR §4), applied per record:
 * **Moved** (new id, known content hash under this source's id prefix,
   move detection enabled) → re-keyed: stored under the new ``doc_id``,
   the old document tree deleted. Reported as a move, not a new ingest.
+  The one stored key a move carries is ``data_classification``, under this
+  run's metadata as an update merges it; every other stored key (content
+  tags, lifecycle, the chunk rows' own tags) is rebuilt from this run (#1132).
   Move detection is a file-corpus concern (content-derived ids); readers
   with content-independent ids (conversation uuids) disable it.
 * **Vanished** → deleted only when prune is on *and* the source is
@@ -92,7 +95,7 @@ from trellis.llm.egress import (
     may_reach_route,
 )
 from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
-from trellis.schemas.classification import sensitivity_of
+from trellis.schemas.classification import DATA_CLASSIFICATION_KEY, sensitivity_of
 from trellis.schemas.document_metadata import DocumentMetadata
 from trellis.stores.base.event_log import EventType
 
@@ -589,6 +592,23 @@ def _apply_record(
         metadata = {**_stored_metadata(stored), **metadata}
         if not spans:
             metadata.pop("chunk_count", None)
+    elif outcome.action == "move" and outcome.moved_from is not None:
+        # A move re-keys the same bytes, so the label stored on the old row is
+        # still the label of this text, and every gate reads it off the parent
+        # row. Carried *under* this run's metadata, the precedence an update
+        # gives every stored key: a label the handler or the operator supplies
+        # this run replaces it, whole record. Only this key, not the stored bag
+        # (see the module docstring), and a record that is present is carried as
+        # it stands, malformed included, so :func:`sensitivity_of` still reads
+        # it as restricted. Without it a moved document is served below its
+        # label and its text can reach a route that is not declared local
+        # (#1132).
+        stored_bag = _stored_metadata(doc_store.get(outcome.moved_from))
+        if DATA_CLASSIFICATION_KEY in stored_bag:
+            metadata = {
+                DATA_CLASSIFICATION_KEY: stored_bag[DATA_CLASSIFICATION_KEY],
+                **metadata,
+            }
 
     # Classify-on-write: tag the FULL document once (not per chunk — a chunk in
     # isolation lacks the doc's structural cues, and StructuralClassifier would
