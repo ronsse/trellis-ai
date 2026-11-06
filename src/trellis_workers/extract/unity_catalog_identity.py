@@ -83,6 +83,21 @@ def normalize_scope(value: Any) -> str | None:
     return f"{scope}/{path}" if path else scope
 
 
+def explicit_scope(value: str) -> str:
+    """The normalised scope of a value an operator typed, else ``ValueError``.
+
+    :func:`normalize_scope` returns ``None`` for a blank value and for a bare
+    ``unitycatalog://``, and an extractor reads that as "use the default scope".
+    For a value typed on purpose that would be a silent mismatch, so the CLI
+    refuses it through this function instead.
+    """
+    scope = normalize_scope(value)
+    if scope is None:
+        msg = "must name a scope (not blank, and a unitycatalog:// scope needs a host)"
+        raise ValueError(msg)
+    return scope
+
+
 def scope_host(scope: str | None) -> str | None:
     """The host of a ``scheme://host`` scope, or ``None`` for any other."""
     if not scope or "://" not in scope:

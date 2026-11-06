@@ -670,6 +670,96 @@ class TestIngestOpenLineage:
         )
         assert result.exit_code == 2
 
+    @staticmethod
+    def _uc_events(tmp_path: Path) -> Path:
+        symlinked = {
+            "namespace": "s3://example-bucket",
+            "name": "/warehouse/orders",
+            "facets": {
+                "symlinks": {
+                    "identifiers": [
+                        {
+                            "namespace": "unity-catalog",
+                            "name": "main.sales.orders",
+                            "type": "TABLE",
+                        }
+                    ]
+                }
+            },
+        }
+        bare = {"namespace": "s3://example-bucket", "name": "/warehouse/orders"}
+        event = {
+            "job": {"namespace": "databricks", "name": "build_revenue"},
+            "inputs": [symlinked],
+            "outputs": [bare],
+        }
+        path = tmp_path / "uc-events.json"
+        path.write_text(json.dumps([event]))
+        return path
+
+    def test_the_scope_is_reported_and_defaults(self, tmp_path: Path) -> None:
+        runner.invoke(app, ["admin", "init"])
+        path = self._uc_events(tmp_path)
+        result = runner.invoke(
+            app, ["ingest", "openlineage", str(path), "--format", "json"]
+        )
+        assert result.exit_code == 0, result.stdout
+        data = json.loads(result.stdout.strip())
+        assert data["unity_catalog_scope"] == "unity_catalog"
+        # job + one table node (the bare mention joined it), two edges
+        assert (data["nodes"], data["edges"]) == (2, 2)
+
+    def test_the_scope_option_reaches_the_extractor(self, tmp_path: Path) -> None:
+        runner.invoke(app, ["admin", "init"])
+        path = self._uc_events(tmp_path)
+        result = runner.invoke(
+            app,
+            [
+                *("ingest", "openlineage", str(path)),
+                *("--unity-catalog-scope", "UnityCatalog://Host:443/"),
+                *("--format", "json"),
+            ],
+        )
+        assert result.exit_code == 0, result.stdout
+        assert json.loads(result.stdout.strip())["unity_catalog_scope"] == (
+            "unitycatalog://host"
+        )
+        from trellis_cli.stores import get_graph_store
+
+        graph = get_graph_store()
+        assert graph.get_node("dataset:unitycatalog://host:main.sales.orders")
+        assert graph.get_node("dataset:unity_catalog:main.sales.orders") is None
+
+    def test_text_output_names_the_scope(self, tmp_path: Path) -> None:
+        runner.invoke(app, ["admin", "init"])
+        result = runner.invoke(
+            app,
+            [
+                *("ingest", "openlineage", str(self._uc_events(tmp_path))),
+                *("--unity-catalog-scope", "custom"),
+            ],
+        )
+        assert result.exit_code == 0, result.stdout
+        assert "Unity Catalog scope: custom" in plain(result.stdout)
+
+    @pytest.mark.parametrize("fmt", ["json", "text"])
+    @pytest.mark.parametrize("value", ["", "  ", "unitycatalog://"])
+    def test_a_scope_that_names_nothing_is_refused_with_one_exit_code(
+        self, tmp_path: Path, fmt: str, value: str
+    ) -> None:
+        runner.invoke(app, ["admin", "init"])
+        result = runner.invoke(
+            app,
+            [
+                *("ingest", "openlineage", str(self._uc_events(tmp_path))),
+                *("--unity-catalog-scope", value, "--format", fmt),
+            ],
+        )
+        assert result.exit_code == 2, result.stdout
+        assert "must name a scope" in plain(result.stdout)
+        if fmt == "json":
+            assert json.loads(result.stdout.strip())["status"] == "error"
+
 
 class TestIngestDbtManifestClassifies:
     """dbt description documents are tagged on write (#568, first half).

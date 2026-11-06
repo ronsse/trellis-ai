@@ -16,7 +16,9 @@ See :class:`OpenLineageExtractor`.
 from __future__ import annotations
 
 from collections import Counter
-from typing import TYPE_CHECKING, Any, ClassVar
+from collections.abc import Iterator
+from itertools import chain
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
 import structlog
 
@@ -53,11 +55,29 @@ OPENLINEAGE_DATASET_ALIAS_SOURCE_SYSTEM = "openlineage_dataset"
 logger = structlog.get_logger(__name__)
 
 
-#: Reasons counted in ``skipped_rows`` when a dataset names a Unity Catalog table
-#: in a form this extractor cannot read.  The dataset is not dropped: it keeps
-#: its storage-path node.
+#: Reasons counted in ``skipped_rows`` for a dataset mention that names a Unity
+#: Catalog table in a form this extractor cannot read, or that it routes by its
+#: storage location.  The mention is not dropped: its edges are kept, on the
+#: table or on its storage-path node.  Each mention is counted at most once per
+#: reason, and the three ``unread`` reasons only when no identifier on it resolves.
 SKIP_UC_PRIMARY_UNPARSED = "uc_primary_unparsed"
 SKIP_UC_SYMLINK_UNPARSED = "uc_symlink_unparsed"
+#: A ``unitycatalog://`` namespace with no host, as the dataset's own or a symlink's.
+SKIP_UC_NAMESPACE_WITHOUT_HOST = "uc_namespace_without_host"
+#: A mention with no Unity Catalog identity of its own whose exact storage
+#: ``(namespace, name)`` another mention in the same batch resolved to a table.
+SKIP_UC_STORAGE_REDIRECTED = "uc_storage_redirected"
+#: The same, but two mentions in the batch resolved that storage location to
+#: different tables, so the bare mention is not guessed onto either.
+SKIP_UC_STORAGE_AMBIGUOUS = "uc_storage_ambiguous"
+
+
+class _Table(NamedTuple):
+    """A Unity Catalog table a dataset mention resolves to."""
+
+    entity_id: str
+    scope: str
+    parts: tuple[str, str, str]
 
 
 def _job_id(namespace: str, name: str) -> str:
@@ -104,34 +124,47 @@ def _symlink_identifiers(dataset: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _unity_catalog_candidates(
     dataset: dict[str, Any], symlink_scope: str
-) -> list[tuple[str, str, str]]:
+) -> list[tuple[str | None, str, str]]:
     """Each place ``dataset`` names a Unity Catalog table, best first.
 
-    ``(scope, name, skip_reason)`` per place.  Three forms count:
+    ``(scope, name, skip_reason)`` per place; the scope is ``None`` for a
+    ``unitycatalog://`` namespace with no host.  Four forms count:
 
     * the dataset's own namespace is ``unitycatalog://<host>`` (the OpenLineage
       naming spec's form), so the scope is that namespace;
+    * the dataset's own namespace is the bare scope string a Unity Catalog table
+      id carries (:data:`DEFAULT_SCOPE`, or ``symlink_scope``).  Its verbatim
+      ``dataset:{namespace}:{name}`` id is then a table's id, so it must not be
+      written as a full draft on that table;
     * a ``symlinks`` identifier has a ``unitycatalog://`` namespace, likewise;
     * a ``symlinks`` identifier of type ``TABLE`` has the fixed namespace
       ``unity-catalog`` (openlineage-spark 1.51.0 and later on Databricks, whose
       own namespace and name are then the storage location).  That namespace
       has no host, so the scope is ``symlink_scope``.
     """
-    found: list[tuple[str, str, str]] = []
+    found: list[tuple[str | None, str, str]] = []
     namespace, name = dataset.get("namespace"), dataset.get("name")
-    scope = (
-        normalize_scope(namespace) if is_unity_catalog_namespace(namespace) else None
-    )
-    if scope and isinstance(name, str):
-        found.append((scope, name, SKIP_UC_PRIMARY_UNPARSED))
+    if isinstance(name, str):
+        if is_unity_catalog_namespace(namespace):
+            scope = normalize_scope(namespace)
+            reason = (
+                SKIP_UC_PRIMARY_UNPARSED if scope else SKIP_UC_NAMESPACE_WITHOUT_HOST
+            )
+            found.append((scope, name, reason))
+        elif namespace in (DEFAULT_SCOPE, symlink_scope):
+            found.append((namespace, name, SKIP_UC_PRIMARY_UNPARSED))
     for ident in _symlink_identifiers(dataset):
         ident_ns, ident_name = ident.get("namespace"), ident.get("name")
         if not isinstance(ident_ns, str) or not isinstance(ident_name, str):
             continue
         if is_unity_catalog_namespace(ident_ns):
             ident_scope = normalize_scope(ident_ns)
-            if ident_scope:
-                found.append((ident_scope, ident_name, SKIP_UC_SYMLINK_UNPARSED))
+            reason = (
+                SKIP_UC_SYMLINK_UNPARSED
+                if ident_scope
+                else SKIP_UC_NAMESPACE_WITHOUT_HOST
+            )
+            found.append((ident_scope, ident_name, reason))
         elif (
             ident_ns.strip().lower() == SYMLINK_NAMESPACE
             and str(ident.get("type", "")).strip().upper() == "TABLE"
@@ -140,11 +173,105 @@ def _unity_catalog_candidates(
     return found
 
 
+def _read_table(
+    dataset: dict[str, Any], symlink_scope: str
+) -> tuple[_Table | None, str | None]:
+    """The table ``dataset`` names, else why it names one unreadably.
+
+    The first place in :func:`_unity_catalog_candidates` that parses wins.  When
+    none does, the reason is the first unreadable place's, so a dataset with
+    several unreadable identifiers is counted once; it is ``None`` when the
+    dataset names no table at all.
+    """
+    reason: str | None = None
+    for scope, name, why in _unity_catalog_candidates(dataset, symlink_scope):
+        parts = split_full_name(name, 3) if scope else None
+        if scope is None or parts is None:
+            reason = reason or why
+            continue
+        table = (parts[0], parts[1], parts[2])
+        return _Table(table_entity_id(scope, identity_key(*table)), scope, table), None
+    return None, reason
+
+
+def _job_events(
+    raw_input: list[Any],
+) -> Iterator[tuple[str, str, list[Any], list[Any]]]:
+    """``(job namespace, job name, inputs, outputs)`` of each event that names a job.
+
+    The one place that decides which events count, so the storage pre-pass and
+    the drafting pass cannot disagree about which datasets were seen.
+    """
+    for event in raw_input:
+        if not isinstance(event, dict):
+            continue
+        job_info = event.get("job") or {}
+        job_ns = job_info.get("namespace", "")
+        job_name = job_info.get("name", "")
+        if not job_ns or not job_name:
+            continue
+        yield (
+            job_ns,
+            job_name,
+            event.get("inputs", []) or [],
+            event.get("outputs", []) or [],
+        )
+
+
+def _storage_tables(
+    raw_input: list[Any], symlink_scope: str
+) -> dict[tuple[str, str], dict[str, _Table]]:
+    """The storage ``(namespace, name)`` of each mention that resolves to a table.
+
+    The pre-pass behind the redirect.  Exact strings only: a storage path is
+    case-sensitive, so ``s3://B/p`` and ``s3://b/p`` are two locations.  A
+    location that two mentions resolve to different tables holds both, and the
+    redirect then declines it.
+    """
+    found: dict[tuple[str, str], dict[str, _Table]] = {}
+    for _, _, inputs, outputs in _job_events(raw_input):
+        for dataset in chain(inputs, outputs):
+            ds_ns, ds_name = dataset.get("namespace", ""), dataset.get("name", "")
+            table, _ = _read_table(dataset, symlink_scope)
+            if ds_ns and ds_name and table is not None:
+                found.setdefault((ds_ns, ds_name), {})[table.entity_id] = table
+    return found
+
+
+def _place_table(
+    table: _Table, seen: dict[str, EntityDraft], storage_alias: AliasDraft
+) -> None:
+    """Register ``table``'s placeholder in ``seen`` and bind ``storage_alias`` to it."""
+    if table.entity_id not in seen:
+        # A placeholder: ``if_absent`` leaves a table the Unity Catalog
+        # extractor already wrote alone, and its full record replaces this
+        # one.  The dataset's own facets are not carried: they describe the
+        # storage object, the catalog owns the table's properties, and a
+        # facet written here would be replaced by the next catalog run and
+        # kept by none.  The storage identity survives as an alias.
+        name = table.parts[2]
+        seen[table.entity_id] = EntityDraft(
+            entity_id=table.entity_id,
+            entity_type=UC_TABLE_ENTITY_TYPE,
+            name=name,
+            properties=table_properties(table.parts, table.scope, name=name, stub=True),
+            if_absent=True,
+            aliases=[storage_alias],
+        )
+    elif all(
+        (a.source_system, a.raw_id)
+        != (storage_alias.source_system, storage_alias.raw_id)
+        for a in seen[table.entity_id].aliases
+    ):
+        seen[table.entity_id].aliases.append(storage_alias)
+
+
 def _ensure_dataset(
     dataset: dict[str, Any],
     seen: dict[str, EntityDraft],
     *,
     symlink_scope: str,
+    storage_tables: dict[tuple[str, str], dict[str, _Table]],
     skipped: Counter[str],
 ) -> str | None:
     """Register a dataset entity if not already seen.  Returns its id."""
@@ -158,36 +285,21 @@ def _ensure_dataset(
         raw_name=ds_name,
     )
 
-    for scope, uc_name, reason in _unity_catalog_candidates(dataset, symlink_scope):
-        parts = split_full_name(uc_name, 3)
-        if parts is None:
-            skipped[reason] += 1
-            continue
-        table = (parts[0], parts[1], parts[2])
-        did = table_entity_id(scope, identity_key(*table))
-        if did not in seen:
-            # A placeholder: ``if_absent`` leaves a table the Unity Catalog
-            # extractor already wrote alone, and its full record replaces this
-            # one.  The dataset's own facets are not carried: they describe the
-            # storage object, the catalog owns the table's properties, and a
-            # facet written here would be replaced by the next catalog run and
-            # kept by none.  The storage identity survives as an alias.
-            stub_props = table_properties(table, scope, name=table[2], stub=True)
-            seen[did] = EntityDraft(
-                entity_id=did,
-                entity_type=UC_TABLE_ENTITY_TYPE,
-                name=table[2],
-                properties=stub_props,
-                if_absent=True,
-                aliases=[storage_alias],
-            )
-        elif all(
-            (a.source_system, a.raw_id)
-            != (storage_alias.source_system, storage_alias.raw_id)
-            for a in seen[did].aliases
-        ):
-            seen[did].aliases.append(storage_alias)
-        return did
+    table, unread = _read_table(dataset, symlink_scope)
+    if table is None:
+        if unread:
+            skipped[unread] += 1
+        # No identity of its own, but another mention in the batch resolved this
+        # exact storage location: it is that table, or one node would split in two.
+        owners = storage_tables.get((ds_ns, ds_name), {})
+        if len(owners) == 1:
+            table = next(iter(owners.values()))
+            skipped[SKIP_UC_STORAGE_REDIRECTED] += 1
+        elif owners:
+            skipped[SKIP_UC_STORAGE_AMBIGUOUS] += 1
+    if table is not None:
+        _place_table(table, seen, storage_alias)
+        return table.entity_id
 
     did = dataset_entity_id(ds_ns, ds_name)
     if did not in seen:
@@ -218,14 +330,19 @@ class OpenLineageExtractor:
 
     **Unity Catalog tables.**  A dataset keeps its verbatim
     ``dataset:{namespace}:{name}`` id unless it names a Unity Catalog table in
-    one of three forms (see :func:`_unity_catalog_candidates`): a
+    one of four forms (see :func:`_unity_catalog_candidates`): a
     ``unitycatalog://<host>`` namespace of its own, a ``symlinks`` identifier in
-    that namespace, or a ``symlinks`` identifier of type ``TABLE`` in the fixed
-    namespace ``unity-catalog``.  The last is what openlineage-spark 1.51.0 and
-    later emits on Databricks, where the dataset's own namespace and name are
-    the *storage location* (``s3://bucket`` and ``/path``) and only the symlink
-    names the table.  Older versions put a storage-derived namespace on the
-    symlink, which is not recognised: those datasets keep their storage-path ids.
+    that namespace, a ``symlinks`` identifier of type ``TABLE`` in the fixed
+    namespace ``unity-catalog``, or a namespace that is itself the scope string a
+    table id carries (``unity_catalog`` by default).  The third is what
+    openlineage-spark 1.51.0 and later emits on Databricks, where the dataset's
+    own namespace and name are the *storage location* (``s3://bucket`` and
+    ``/path``) and only the symlink names the table.  Older versions put a
+    storage-derived namespace on the symlink, which is not recognised: those
+    datasets keep their storage-path ids.  The fourth exists because the verbatim
+    id of such a dataset *is* a table's id: a full draft there would overwrite
+    the catalog's record, so it is a table identity with the placeholder
+    semantics below, and its name is case-folded like any table's.
 
     Such a dataset gets the id
     :class:`~trellis_workers.extract.unity_catalog.UnityCatalogExtractor` gives
@@ -236,10 +353,27 @@ class OpenLineageExtractor:
     whichever ran first.  The dataset's facets are not carried (the catalog owns
     the table's properties).  With ``TRELLIS_KNOWLEDGE_LINK_OR_MINT`` on, the
     storage identity ``{namespace}/{name}`` is bound as an ``openlineage_dataset``
-    alias of the table, on an existing table too.  A name that is not exactly
-    ``catalog.schema.table`` is counted in ``skipped_rows``
-    (``uc_symlink_unparsed``, ``uc_primary_unparsed``) and the dataset keeps its
-    storage-path node.  Nothing else is changed: storage paths are
+    alias of the table, on an existing table too.
+
+    **One batch, one node.**  Before drafting, the extractor maps every resolved
+    dataset's storage ``(namespace, name)`` to its table.  A mention of exactly
+    that storage location with no Unity Catalog identity of its own (a job that
+    names the path and not the table) goes to the table too, with the same
+    placeholder and no facets, wherever in the batch the two appear, and is
+    counted as ``uc_storage_redirected``.  The match is exact: a storage path is
+    case-sensitive and nothing is folded.  A location two mentions resolve to
+    different tables is left on its own storage-path node and counted as
+    ``uc_storage_ambiguous``.  Across batches nothing is redirected: the
+    extractor is pure and does not read the store, so a bare mention in a later
+    batch becomes a storage-path node, and only the ``openlineage_dataset``
+    alias (with link-or-mint on) records that the location belongs to the table.
+
+    A dataset that names a table in a form this extractor cannot read keeps its
+    storage-path node, and is counted once in ``skipped_rows``, under the reason
+    of its first unreadable place and only when no place on it resolves:
+    ``uc_primary_unparsed`` and ``uc_symlink_unparsed`` (a name that is not exactly
+    ``catalog.schema.table``) and ``uc_namespace_without_host`` (a bare
+    ``unitycatalog://``).  Nothing else is changed: storage paths are
     case-sensitive and are never folded.
 
     Args:
@@ -249,16 +383,22 @@ class OpenLineageExtractor:
             scope), or the two mint different ids.  A ``unitycatalog://`` scope is
             normalised as the Unity Catalog extractor normalises its own.  A
             ``unitycatalog://`` namespace on the dataset or a symlink carries its
-            own scope and ignores this one.
+            own scope and ignores this one.  Read it back as
+            :attr:`unity_catalog_scope`.
     """
 
     name = "openlineage"
     tier = ExtractorTier.DETERMINISTIC
     supported_sources: ClassVar[list[str]] = ["openlineage"]
-    version = "0.2.0"
+    version = "0.3.0"
 
     def __init__(self, *, unity_catalog_scope: str | None = None) -> None:
         self._symlink_scope = normalize_scope(unity_catalog_scope) or DEFAULT_SCOPE
+
+    @property
+    def unity_catalog_scope(self) -> str:
+        """The scope a ``unity-catalog`` symlink is read in, after normalisation."""
+        return self._symlink_scope
 
     async def extract(
         self,
@@ -279,16 +419,9 @@ class OpenLineageExtractor:
         seen: dict[str, EntityDraft] = {}
         raw_edges: list[EdgeDraft] = []
         skipped: Counter[str] = Counter()
+        storage_tables = _storage_tables(raw_input, self._symlink_scope)
 
-        for event in raw_input:
-            if not isinstance(event, dict):
-                continue
-            job_info = event.get("job") or {}
-            job_ns = job_info.get("namespace", "")
-            job_name = job_info.get("name", "")
-            if not job_ns or not job_name:
-                continue
-
+        for job_ns, job_name, inputs, outputs in _job_events(raw_input):
             jid = _job_id(job_ns, job_name)
             if jid not in seen:
                 seen[jid] = EntityDraft(
@@ -314,9 +447,13 @@ class OpenLineageExtractor:
             # pre-flight in LinkCreateHandler doesn't reject cross-batch
             # references.  Within a single batch _ensure_dataset still
             # registers the entity, so the strict path is also satisfied.
-            for inp in event.get("inputs", []) or []:
+            for inp in inputs:
                 did = _ensure_dataset(
-                    inp, seen, symlink_scope=self._symlink_scope, skipped=skipped
+                    inp,
+                    seen,
+                    symlink_scope=self._symlink_scope,
+                    storage_tables=storage_tables,
+                    skipped=skipped,
                 )
                 if did:
                     raw_edges.append(
@@ -328,9 +465,13 @@ class OpenLineageExtractor:
                         )
                     )
 
-            for out in event.get("outputs", []) or []:
+            for out in outputs:
                 did = _ensure_dataset(
-                    out, seen, symlink_scope=self._symlink_scope, skipped=skipped
+                    out,
+                    seen,
+                    symlink_scope=self._symlink_scope,
+                    storage_tables=storage_tables,
+                    skipped=skipped,
                 )
                 if did:
                     raw_edges.append(
