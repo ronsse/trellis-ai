@@ -3423,6 +3423,21 @@ readable precedents remain. A document store that cannot answer, or no document
 store at all, withholds every row that needs a verdict. MCP `get_lessons` applies
 the same rule with the caller's clearance.
 
+A third rule withholds a promotion with nothing left to judge it by (#1080). The
+event log is immutable, so an event outlives its node (a redaction purges it, and
+a failed re-create leaves none), its document row and a source id its payload may
+never have carried. A learning promotion (`precedent://learning/`) whose document
+row the store answered with none, whose event and node name no source, and whose
+node is gone has no label to read, and an id with no row reads as readable, so it
+was served at `internal` for want of anything to say no. It is now withheld below
+`restricted` under the unreadable reason, as a lookup that fails is. A row that
+still has a node, a named source or its own document row is judged as before; a
+trace precedent (no row, no source, by construction) is served; a `restricted`
+caller reads nothing and is served the row. The rule runs on the listings only
+(`list_precedents`, so `GET /precedents` and MCP `get_lessons`, and `GET
+/precedents/domains`): a by-id read, a search hit or a pack item holds a node or a
+row to judge, and no pack changes.
+
 The same judgement, one predicate
 (`trellis.retrieve.precedents.PrecedentClearance`), runs where a promoted
 precedent is served by id or by query, because the precedent's own row and node
@@ -3441,7 +3456,7 @@ hold the excerpt and carry no label (#1080):
 | MCP `get_file_context` | left out of the path's documents and entities |
 | MCP `search` | left out; counted on the pack's `Withheld` line |
 | `POST /packs`, `POST /packs/sectioned` | withheld at the collect seam, so every strategy is covered, and recorded in `rejected_items` and the pack's withheld line under reason `sensitivity`; a builder wired with no document store withholds it as `sensitivity_unreadable` |
-| `GET /precedents/domains` | not counted |
+| `GET /precedents/domains` | not counted; nor is a promotion with nothing left to judge it by (third rule above) |
 
 A lookup that fails (the source's document row or the precedent's graph node
 cannot be read) withholds too, failing closed. A pack counts it under its own
@@ -5223,7 +5238,7 @@ trellis worker curate [--output-dir DIR] [--days N] [--interval SECONDS] \
 
 **Promotion-ready digest (#845).** Both `--format json`'s `learning_promotion_ready` field and the `intent_learning_candidates.json` artifact's `promotion_ready` key carry a surfacing-only summary — `count` of `promote_guidance` candidates with `helpful_count >= LEARNING_PROMOTION_READY_MIN_HELPFUL_COUNT` (currently `1`) and `unhelpful_count == 0`, plus `top` (up to 5, ranked by `helpful_count` desc, then `success_rate` desc, then `times_served` desc). Text output prints `"N candidate(s) promotion-ready — review with trellis curate promote-learning or the Review tab"` when `N > 0` (singular at `N == 1`). Nothing here promotes anything; it only tells a reader that candidates are waiting. A candidate's `precedent_name` also gets a readable fallback name (first non-empty line of its document, frontmatter and heading markers stripped) when it has no `title` and its item resolves — kept as a bare item id only when the item can't be resolved.
 
-**What a promoted precedent carries.** Its description opens with a bounded excerpt of the source document (`PRECEDENT_SOURCE_EXCERPT_MAX_CHARS`, read from the document store when `promote-learning` builds the command; `properties.source_excerpt_status` is `included` or the reason there is none), and it gets a `precedent_applies_to` edge to each entity the serving packs were seeded from (`PACK_ASSEMBLED.seed_entity_ids`, recorded only when the graph axis expanded seeds). A pack whose graph axis expanded no seeds records none, so its candidate gets no edges. An unseeded graph axis serves nothing by default (#961), so a flat pack then reaches that precedent through its document row: by keyword always, by embedding only when embed-on-ingest is on (it defaults off). With the recency window opted in, it can also reach it while it is among the newest nodes. A precedent whose source is labelled above `internal` (`confidential` or `restricted`, a chunk judged by its parent too) carries no source text and no source id outside `properties.source_item_id`: no excerpt, a neutral name unless a reviewer supplied one, a statistics sentence without the id, and `source_excerpt_status` reads `source_labelled`.
+**What a promoted precedent carries.** Its description opens with a bounded excerpt of the source document (`PRECEDENT_SOURCE_EXCERPT_MAX_CHARS`, read from the document store when `promote-learning` builds the command; `properties.source_excerpt_status` is `included` or the reason there is none), and it gets a `precedent_applies_to` edge to each entity the serving packs were seeded from (`PACK_ASSEMBLED.seed_entity_ids`, recorded only when the graph axis expanded seeds). A pack whose graph axis expanded no seeds records none, so its candidate gets no edges. An unseeded graph axis serves nothing by default (#961), so a flat pack then reaches that precedent through its document row: by keyword always, by embedding only when embed-on-ingest is on (it defaults off). With the recency window opted in, it can also reach it while it is among the newest nodes. A precedent whose source is labelled above `internal` (`confidential` or `restricted`, a chunk judged by its parent too) carries no source text and no source id outside `properties.source_item_id`: no excerpt, a neutral name unless a reviewer supplied one, a statistics sentence without the id, and `source_excerpt_status` reads `source_labelled`. A promotion built while the document store could not be read reads `source_excerpt_status` `lookup_failed`: no excerpt, a neutral name, and nothing said about the source's label. A later redaction does not take it for one that already ran (the neutral name is read as a redaction's mark only beside a status that records a redaction), so promoting the same candidate again after the store is back, or after the source is relabelled, builds the precedent as that run finds the source (#1080).
 
 ### `trellis worker enrich`
 
