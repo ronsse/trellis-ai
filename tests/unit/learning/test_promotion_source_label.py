@@ -542,3 +542,56 @@ def test_a_redacted_node_is_still_read_as_redacted_whatever_its_name(
     )
 
     assert promotions.submit(candidate)["status"] == REFUSED_REDACTED
+
+
+# --- A chunk whose row is gone (#1080, residual 3) ---------------------------
+
+CHUNK_ID = f"{SOURCE_ID}#chunk-0"
+
+
+@pytest.mark.parametrize("sensitivity", ["confidential", "restricted"])
+def test_a_chunk_whose_row_is_gone_under_a_labelled_parent_is_not_a_redaction(
+    promotions: _Promotions, sensitivity: str
+) -> None:
+    """A re-chunk deletes the chunk row; the candidate still names the old id.
+
+    The residual feared that this promotion recorded ``document_not_found`` beside
+    the neutral name, which ``_source_redacted`` reads as a redaction, so the
+    retry after the parent's label was lowered was refused. It records
+    ``source_labelled``, because the chunk is judged by its parent although its own
+    row is gone, so the retry proceeds. Nothing of the parent is copied.
+    """
+    promotions.documents.put(SOURCE_ID, BODY, _label(sensitivity))
+    assert promotions.documents.get(CHUNK_ID) is None
+    candidate = _candidate(CHUNK_ID, title=TITLE)
+
+    assert promotions.submit(candidate)["status"] == "promoted"
+    properties = _precedent_properties(promotions)
+    assert properties["source_excerpt_status"] == SOURCE_EXCERPT_LABELLED
+    assert properties["name_source"] == NAME_SOURCE_NEUTRAL
+    # Nothing of the source but the structured pointer a redaction matches on.
+    assert properties.pop("source_item_id") == CHUNK_ID
+    stored = json.dumps(properties)
+    for text in (CHUNK_ID, SOURCE_ID, TITLE, "SECRETWORD"):
+        assert text not in stored
+
+    promotions.documents.put(SOURCE_ID, BODY, _label("internal"))
+
+    assert promotions.submit(candidate)["status"] == "promoted"
+    assert _precedent_properties(promotions)["name_source"] == "item_title"
+
+
+def test_a_real_redaction_of_the_parent_of_a_gone_chunk_is_still_refused(
+    promotions: _Promotions,
+) -> None:
+    """The parent's tombstone answers, as for a chunk whose row is present."""
+    promotions.documents.put(SOURCE_ID, BODY, _label("confidential"))
+    candidate = _candidate(CHUNK_ID, title=TITLE)
+    assert promotions.submit(candidate)["status"] == "promoted"
+    promotions.documents.put(
+        SOURCE_ID,
+        "",
+        {LIFECYCLE_KEY: {"deprecation_reason": REDACTION_TOMBSTONE_REASON}},
+    )
+
+    assert promotions.submit(candidate)["status"] == REFUSED_REDACTED
