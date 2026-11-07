@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING, Any, cast
 import structlog
 
 from trellis.core.error_sanitize import describe_validation_error
+from trellis.core.ids import generate_ulid
 from trellis.core.precedent_document import (
+    PROMOTION_COMMAND_MARK,
     SOURCE_EXCERPT_STATUS_KEY,
     is_promoted_precedent_document,
 )
@@ -18,6 +20,7 @@ from trellis.mutate.evidence_pointer_keys import node_evidence_ref_refusal
 from trellis.mutate.handlers._common import (
     _current_lifecycle_state,
     _rewrite_current_node,
+    _write_node_replacing_read,
 )
 from trellis.mutate.retention import CURRENT_STATE
 from trellis.retrieve.lifecycle import EVIDENCE_REF_KEY
@@ -188,11 +191,27 @@ class EntityCreateHandler:
     nothing; the message is how that is told apart from a create. An
     absent node is created as usual. The arg needs an ``entity_id`` to
     check and is refused without one. A skip writes nothing, so it cannot
-    bypass the precedent refusals above. The check is a read before the
-    write, like every guard in this handler, so it does not order two
-    writers racing on one id; a single extraction run is one writer. In
-    that window a placeholder can replace a real record written
-    concurrently, and stays until the next run that holds the record.
+    bypass the precedent refusals above.
+
+    **The write replaces the version that was read, and only that one.** The
+    node is read, every check in this handler runs on that read, and the
+    store writes only if the node is still that version
+    (``update_node_if_current``), or still absent for a first create
+    (``create_node_if_absent``). A write that committed in between, such
+    as an ``entity.update`` that set a first ``evidence_ref`` or a real
+    create racing an ``if_absent`` placeholder, makes the condition fail:
+    the node is re-read and the checks run again on the new version, and an
+    ``if_absent`` that now finds a node writes nothing. On the Bolt backends
+    ``create_node_if_absent`` is one statement without a uniqueness
+    constraint behind it, so two *first* creates of one absent id that start
+    together can still both write.
+
+    **A caller cannot set ``source_excerpt_status`` on a precedent.** The
+    reviewed promotion stamps it and a serve-time check trusts it, so a
+    command without the promotion's reserved mark
+    (``PROMOTION_COMMAND_MARK``) that carries it, over an existing precedent,
+    as a ``precedent`` entity or at an id in the precedent namespace, is
+    refused with ``precedent_excerpt_status_via_entity_create``.
     """
 
     def __init__(
@@ -202,8 +221,8 @@ class EntityCreateHandler:
         self._clearance = clearance
 
     def handle(self, command: Command) -> tuple[str | None, str]:
-        props: dict[str, Any] = dict(command.args.get("properties", {}))
-        props["name"] = command.args["name"]
+        base_props: dict[str, Any] = dict(command.args.get("properties", {}))
+        base_props["name"] = command.args["name"]
 
         # Use caller-supplied entity_id if provided, otherwise auto-generate ULID
         caller_id = command.args.get("entity_id")
@@ -221,92 +240,126 @@ class EntityCreateHandler:
             raise ValidationError(
                 msg, errors=[msg], code="entity_create_if_absent_needs_id"
             )
+        node_id = caller_id if caller_id is not None else generate_ulid()
+        entity_type = command.args["entity_type"]
+        graph_store = self._registry.knowledge.graph_store
+        # Whether this command is the reviewed promotion's own write. The mark
+        # is a reserved ``Command.metadata`` key, so no agent-facing door can
+        # set it (see ``PROMOTION_COMMAND_MARK``).
+        is_promotion = command.metadata.get(PROMOTION_COMMAND_MARK) is True
 
-        # One read serves both the precedent guard below and
-        # ``_resolve_document_ids``'s stored-link lookup, so a caller_id
-        # that already exists costs a single extra read either way.
-        existing_node = (
-            self._registry.knowledge.graph_store.get_node(caller_id)
-            if caller_id is not None
-            else None
-        )
-        if if_absent and existing_node is not None:
-            name = command.args["name"]
-            return (caller_id, f"{ENTITY_LEFT_ALONE_MESSAGE}: {name}")
-        if existing_node is not None and existing_node["node_type"] == "precedent":
-            supplied_entity_type = command.args["entity_type"]
-            if supplied_entity_type != "precedent":
+        def build(existing_node: dict[str, Any] | None) -> dict[str, Any] | None:
+            # Everything below is judged against ``existing_node``, the version
+            # the write will replace: the store writes only over that version,
+            # so a retry after a concurrent write re-runs it on the new one.
+            if if_absent and existing_node is not None:
+                return None
+            if existing_node is not None and existing_node["node_type"] == "precedent":
+                if entity_type != "precedent":
+                    msg = (
+                        f"entity.create refuses to retype existing precedent "
+                        f"{caller_id} to {entity_type!r}: a later "
+                        "entity.update naming properties.lifecycle under that "
+                        "non-precedent node_type would then slip past the guard "
+                        "that refuses it on a precedent; use entity.update for "
+                        "a non-retyping property edit"
+                    )
+                    raise ValidationError(
+                        msg,
+                        errors=[msg],
+                        code="entity_create_retypes_existing_precedent",
+                    )
+                if _current_lifecycle_state(existing_node) != CURRENT_STATE:
+                    msg = (
+                        f"entity.create refuses to upsert over existing "
+                        f"precedent {caller_id}: an unconditional property "
+                        "replace would drop its lifecycle (a demoted precedent "
+                        "would come back 'current' with no reason recorded and "
+                        "no PRECEDENT_REINSTATED event); use "
+                        "precedent.reinstate for that, or entity.update for a "
+                        "non-lifecycle property edit"
+                    )
+                    raise ValidationError(
+                        msg,
+                        errors=[msg],
+                        code="entity_create_over_existing_precedent",
+                    )
+
+            # The promotion stamps ``source_excerpt_status``; a serve-time check
+            # trusts it to exempt a precedent from its source's label (#1080).
+            # Any other writer would forge that exemption, on an existing
+            # precedent or on a new one, so the same targets
+            # ``entity.update`` refuses are refused here.
+            if (
+                SOURCE_EXCERPT_STATUS_KEY in base_props
+                and not is_promotion
+                and (
+                    (
+                        existing_node is not None
+                        and existing_node["node_type"] == "precedent"
+                    )
+                    or entity_type == "precedent"
+                    or is_promoted_precedent_document(node_id)
+                )
+            ):
                 msg = (
-                    f"entity.create refuses to retype existing precedent "
-                    f"{caller_id} to {supplied_entity_type!r}: a later "
-                    "entity.update naming properties.lifecycle under that "
-                    "non-precedent node_type would then slip past the guard "
-                    "that refuses it on a precedent; use entity.update for "
-                    "a non-retyping property edit"
+                    f"entity.create refuses properties.{SOURCE_EXCERPT_STATUS_KEY} "
+                    f"on precedent {node_id}: the promotion writes it, and a "
+                    "serve-time check trusts it"
                 )
                 raise ValidationError(
-                    msg,
-                    errors=[msg],
-                    code="entity_create_retypes_existing_precedent",
-                )
-            if _current_lifecycle_state(existing_node) != CURRENT_STATE:
-                msg = (
-                    f"entity.create refuses to upsert over existing "
-                    f"precedent {caller_id}: an unconditional property "
-                    "replace would drop its lifecycle (a demoted precedent "
-                    "would come back 'current' with no reason recorded and "
-                    "no PRECEDENT_REINSTATED event); use "
-                    "precedent.reinstate for that, or entity.update for a "
-                    "non-lifecycle property edit"
-                )
-                raise ValidationError(
-                    msg, errors=[msg], code="entity_create_over_existing_precedent"
+                    msg, errors=[msg], code="precedent_excerpt_status_via_entity_create"
                 )
 
-        # A caller-supplied ``evidence_ref`` names the document another item is
-        # superseded by: it must exist, be readable at the caller's clearance,
-        # and not replace one the node already holds. Judged after the skip
-        # above (a left-alone node writes nothing) and before any write.
-        _refuse_node_evidence_ref(
-            self._registry,
-            props,
-            stored_properties=(
+            stored_properties = (
                 existing_node.get("properties") if existing_node is not None else None
-            ),
-            clearance=self._clearance,
-            writer="entity.create",
-        )
-        # An upsert replaces the whole bag, so a command that leaves the key out
-        # would clear the pointer the rule above says a node keeps. Carry it
-        # forward the way ``document_ids`` is below: omission means "leave it
-        # alone", and a supplied value was judged above.
-        if existing_node is not None:
-            _carry_held_evidence_ref(props, existing_node.get("properties"))
+            )
+            # A caller-supplied ``evidence_ref`` names the document another item
+            # is superseded by: it must exist, be readable at the caller's
+            # clearance, and not replace one the node already holds. Judged
+            # after the skip above (a left-alone node writes nothing) and before
+            # any write.
+            _refuse_node_evidence_ref(
+                self._registry,
+                base_props,
+                stored_properties=stored_properties,
+                clearance=self._clearance,
+                writer="entity.create",
+            )
+            # An upsert replaces the whole bag, so a command that leaves the key
+            # out would clear the pointer the rule above says a node keeps. Carry
+            # it forward the way ``document_ids`` is below: omission means "leave
+            # it alone", and a supplied value was judged above.
+            props = dict(base_props)
+            _carry_held_evidence_ref(props, stored_properties)
+            # ``document_ids`` is the first-class graph<->document link (Phase 4
+            # of ADR planes-and-substrates). Threading it here gives the pointer
+            # a governed write path: the pointer-not-prose invariant depends on a
+            # created entity being able to carry an ``evidence_ref`` document
+            # pointer without smuggling it through metadata.
+            #
+            # ENTITY_CREATE on an existing id is an upsert (it opens a new SCD-2
+            # version), so an *omitted* ``document_ids`` has to carry the stored
+            # link forward the way EntityUpdateHandler does. Passing ``None``
+            # straight through would write NULL and silently destroy a link some
+            # other writer established, e.g. re-extracting an entity that
+            # ``save_knowledge`` had linked to its document. Omission means
+            # "leave it alone"; an explicit value still replaces.
+            return {
+                "node_type": entity_type,
+                "properties": props,
+                "node_role": node_role,
+                "generation_spec": generation_spec,
+                "document_ids": self._resolve_document_ids(command, existing_node),
+            }
 
-        # ``document_ids`` is the first-class graph↔document link (Phase 4 of
-        # ADR planes-and-substrates). Threading it here gives the pointer a
-        # governed write path — the pointer-not-prose invariant depends on a
-        # created entity being able to carry an ``evidence_ref`` document
-        # pointer without smuggling it through metadata.
-        #
-        # ENTITY_CREATE on an existing id is an upsert (it opens a new SCD-2
-        # version), so an *omitted* ``document_ids`` has to carry the stored
-        # link forward the way EntityUpdateHandler does. Passing ``None``
-        # straight through would write NULL and silently destroy a link some
-        # other writer established — e.g. re-extracting an entity that
-        # ``save_knowledge`` had linked to its document. Omission means
-        # "leave it alone"; an explicit value still replaces.
-        document_ids = self._resolve_document_ids(command, existing_node)
-        node_id = self._registry.knowledge.graph_store.upsert_node(
-            node_id=caller_id,
-            node_type=command.args["entity_type"],
-            properties=props,
-            node_role=node_role,
-            generation_spec=generation_spec,
-            document_ids=document_ids,
-        )
+        written = _write_node_replacing_read(graph_store, node_id, build)
+        if written is None:
+            name = command.args["name"]
+            return (node_id, f"{ENTITY_LEFT_ALONE_MESSAGE}: {name}")
+        document_ids = written["document_ids"]
         _bind_entity_name_alias(
-            self._registry.knowledge.graph_store,
+            graph_store,
             entity_id=node_id,
             name=command.args["name"],
         )
@@ -315,7 +368,7 @@ class EntityCreateHandler:
             EventType.ENTITY_CREATED,
             source="mutation_executor",
             entity_id=node_id,
-            entity_type=command.args["entity_type"],
+            entity_type=entity_type,
             payload={
                 "name": command.args["name"],
                 "node_role": node_role,
@@ -729,6 +782,11 @@ class ObservationRecordHandler:
     signal. See ``docs/design/adr-observation-entity-type.md`` §2.1;
     ``hasObservation`` is the canonical edge from the subject entity to
     the observation node.
+
+    The replace is conditional on the version that was read: a write that
+    committed since (for example an ``entity.update`` setting a first
+    ``evidence_ref``) fails the condition, and the node is re-read and the
+    ``evidence_ref`` checks run again on it.
     """
 
     def __init__(
@@ -766,34 +824,43 @@ class ObservationRecordHandler:
             "confidence": obs.confidence,
             "observed_at": obs.observed_at.isoformat(),
         }
-        # Re-recording an id replaces the node, so the stored pointer is the one
-        # a different value would overwrite, and one the new record leaves out
-        # would be cleared; it is carried forward instead.
-        existing_observation = store.get_node(obs.observation_id)
-        stored_properties = (
-            existing_observation.get("properties")
-            if existing_observation is not None
-            else None
-        )
-        if obs.evidence_ref is not None:
-            _refuse_node_evidence_ref(
-                self._registry,
-                {"evidence_ref": obs.evidence_ref},
-                stored_properties=stored_properties,
-                clearance=self._clearance,
-                writer="observation.record",
-            )
-            props["evidence_ref"] = obs.evidence_ref
-        else:
-            _carry_held_evidence_ref(props, stored_properties)
         if obs.metadata is not None:
             props["metadata"] = obs.metadata
 
-        node_id = store.upsert_node(
-            node_id=obs.observation_id,
-            node_type=OBSERVATION,
-            properties=props,
-        )
+        def build(existing_observation: dict[str, Any] | None) -> dict[str, Any]:
+            # Re-recording an id replaces the node, so the stored pointer is
+            # the one a different value would overwrite, and one the new record
+            # leaves out would be cleared; it is carried forward instead. Both
+            # are judged against ``existing_observation``, the version the
+            # write replaces: the store writes only over that version, so a
+            # retry after a concurrent write re-judges the new one.
+            stored_properties = (
+                existing_observation.get("properties")
+                if existing_observation is not None
+                else None
+            )
+            node_props = dict(props)
+            if obs.evidence_ref is not None:
+                _refuse_node_evidence_ref(
+                    self._registry,
+                    {"evidence_ref": obs.evidence_ref},
+                    stored_properties=stored_properties,
+                    clearance=self._clearance,
+                    writer="observation.record",
+                )
+                node_props["evidence_ref"] = obs.evidence_ref
+            else:
+                _carry_held_evidence_ref(node_props, stored_properties)
+            return {
+                "node_type": OBSERVATION,
+                "properties": node_props,
+                "node_role": "semantic",
+                "generation_spec": None,
+                "document_ids": None,
+            }
+
+        _write_node_replacing_read(store, obs.observation_id, build)
+        node_id = obs.observation_id
 
         # Best-effort hasObservation edge from the subject entity to the
         # new observation node. The subject may not be a graph node in
@@ -850,6 +917,10 @@ class MeasurementRecordHandler:
     short-circuit-on-repeat behavior because Measurements are mutable
     signals over time — a metric may be re-measured with a corrected
     value. Use a new ``measurement_id`` to record a distinct signal.
+
+    The replace is conditional on the version that was read, as in
+    :class:`ObservationRecordHandler`, so a held ``evidence_ref`` written in
+    between is carried forward rather than cleared.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -882,21 +953,28 @@ class MeasurementRecordHandler:
             props["unit"] = meas.unit
         if meas.metadata is not None:
             props["metadata"] = meas.metadata
-        # A Measurement has no evidence_ref of its own, so re-recording an id that
-        # holds one would clear it; it is carried forward instead.
-        existing_measurement = store.get_node(meas.measurement_id)
-        _carry_held_evidence_ref(
-            props,
-            existing_measurement.get("properties")
-            if existing_measurement is not None
-            else None,
-        )
 
-        node_id = store.upsert_node(
-            node_id=meas.measurement_id,
-            node_type=MEASUREMENT,
-            properties=props,
-        )
+        def build(existing_measurement: dict[str, Any] | None) -> dict[str, Any]:
+            # A Measurement has no evidence_ref of its own, so re-recording an
+            # id that holds one would clear it; it is carried forward instead,
+            # from the version the write replaces.
+            node_props = dict(props)
+            _carry_held_evidence_ref(
+                node_props,
+                existing_measurement.get("properties")
+                if existing_measurement is not None
+                else None,
+            )
+            return {
+                "node_type": MEASUREMENT,
+                "properties": node_props,
+                "node_role": "semantic",
+                "generation_spec": None,
+                "document_ids": None,
+            }
+
+        _write_node_replacing_read(store, meas.measurement_id, build)
+        node_id = meas.measurement_id
 
         # Same narrow-catch discipline as ObservationRecordHandler —
         # silent-fallback hygiene per PR #122 (C2 Phase 5). Measurement

@@ -50,6 +50,16 @@ RESERVED_DOCUMENT_ID_CODE = "reserved_document_id"
 SOURCE_EXCERPT_STATUS_KEY = "source_excerpt_status"
 
 
+#: The ``Command.metadata`` key the reviewed-promotion writer sets on its
+#: ``entity.create`` (``submit_learning_promotion``) to say that the command is
+#: the promotion itself. ``entity.create`` refuses a caller-set
+#: ``source_excerpt_status`` on a precedent unless it finds this mark, so it must
+#: be a key no agent-facing door lets a caller set: it is in
+#: ``RESERVED_COMMAND_METADATA_KEYS``, which REST ``/commands/batch`` refuses,
+#: and MCP ``execute_mutation`` has no caller metadata at all (#1080).
+PROMOTION_COMMAND_MARK = "learning_promotion"
+
+
 def reserved_document_id_message(field: str, doc_id: str) -> str:
     """The refusal text for a caller-chosen ``doc_id`` in the reserved namespace.
 
@@ -73,6 +83,7 @@ def is_promoted_precedent_document(doc_id: object) -> bool:
 
 __all__ = [
     "PRECEDENT_ENTITY_ID_PREFIX",
+    "PROMOTION_COMMAND_MARK",
     "RESERVED_DOCUMENT_ID_CODE",
     "SOURCE_EXCERPT_STATUS_KEY",
     "is_promoted_precedent_document",
