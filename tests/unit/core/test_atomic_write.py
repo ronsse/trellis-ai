@@ -178,7 +178,10 @@ class TestSymlinkLoop:
         first.symlink_to(second)
         second.symlink_to(first)
 
-        with pytest.raises(OSError, match="oop") as caught:
+        # No ``match=``: on 3.13 ``resolve()`` returns without raising and the
+        # OSError comes from the later ``stat()``, worded by the OS ("Too many
+        # levels of symbolic links") and with no cause. The errno is the pin.
+        with pytest.raises(OSError) as caught:
             atomic_write_text(first, "doomed")
 
         assert caught.value.errno == errno.ELOOP
