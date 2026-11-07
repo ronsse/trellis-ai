@@ -244,6 +244,13 @@ class TestDocumentRowStamps:
         assert row["metadata"]["created_at"] == traces[0].created_at.isoformat()
 
 
+def _no_vectors(registry, traces) -> bool:
+    return all(
+        registry.knowledge.vector_store.get(trace_summary_doc_id(t.trace_id)) is None
+        for t in traces
+    )
+
+
 class TestStageTwoRunsOnThisPath:
     """#424: this worker built its executor without a policy gate.
 
@@ -301,20 +308,31 @@ class TestStageTwoRunsOnThisPath:
         )
         assert [e.payload.get("reason") for e in rejected] == ["policy_violation"] * 3
 
-    def test_the_cursor_does_not_advance_past_a_denied_trace(
-        self, registry, watermark_path
+    def test_a_denied_trace_is_listed_not_treated_as_done(
+        self, registry, watermark_path, recorder
     ) -> None:
         """A refused write must not look like a done one.
 
         Without a gate the pass embedded and advanced. With one, a denied
-        trace is a failure like any other: the watermark stays behind it, so
-        lifting the policy re-reaches every trace it blocked.
+        trace is a failure like any other: it goes on the retry list rather
+        than being forgotten, so lifting the policy re-reaches every trace it
+        blocked.
         """
-        self._deny(registry.stores_dir, "*")
-        seed_traces(registry, 3)
+        from trellis.mutate.policy_source import POLICY_FILENAME
 
-        run_trace_embed_pass(registry, watermark_path=watermark_path)
-        assert not watermark_path.exists()
+        self._deny(registry.stores_dir, "*")
+        traces = seed_traces(registry, 3)
+
+        denied = run_trace_embed_pass(registry, watermark_path=watermark_path)
+        assert denied.failed == 3
+        assert denied.retry_pending == 3
+        assert _no_vectors(registry, traces)
+
+        (registry.stores_dir / POLICY_FILENAME).unlink()
+        lifted = run_trace_embed_pass(registry, watermark_path=watermark_path)
+        assert lifted.embedded == 3
+        assert lifted.retry_pending == 0
+        assert not _no_vectors(registry, traces)
 
     def test_an_unrelated_deny_leaves_the_pass_alone(
         self, registry, watermark_path
