@@ -103,6 +103,12 @@ successful injection's damage to junk, not leakage.
   distils it. A store that could not answer is `sessions_skipped_egress_unreadable`
   instead: a warning, a failed run under `TRELLIS_CAPTURE_STRICT`. See
   [Keeping labelled content off a hosted model](operations.md#keeping-labelled-content-off-a-hosted-model).
+- **A memory carries the label of what its session was served.** Whatever the
+  route, a memory distilled from a session served a document labelled above
+  `internal` is written under the strictest such label
+  (`classified_by: ["session-inherit"]`), so a caller below it is not served it.
+  Counted as `memories_label_inherited` in the report. See
+  [the same section](operations.md#keeping-labelled-content-off-a-hosted-model).
 
 ## Three ways to run it
 

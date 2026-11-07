@@ -495,6 +495,30 @@ class EgressGate:
         """
         return self._judge_summary(doc_id, metadata, open_trace_store, with_level=True)
 
+    def judge_served(self, doc_ids: Iterable[str]) -> SummaryJudgement:
+        """:meth:`cited_verdict` over ``doc_ids``, and the label its result inherits.
+
+        For a session's served documents: one read of each row answers both
+        whether the content may be sent to this route and what it must be
+        labelled afterwards, so the two cannot disagree. ``inherited`` is the
+        strictest label above ``internal`` among the documents, ``restricted``
+        for one that could not be judged (an unparseable row, a chunk whose
+        parent is gone, a store that could not answer), and ``None`` when none
+        is labelled above ``internal``.
+
+        Unlike :meth:`cited_verdict` it reads the rows on a local gate too,
+        because the label a result inherits does not depend on the route. A
+        local gate asks through a twin that is not local, so the verdict and
+        level are the true ones: ``WITHHELD`` there means "labelled above
+        ``internal`` or unjudgeable", which a local route does not refuse, and
+        the caller reads it with :attr:`SummaryJudgement.inherited`. Without
+        the twin a local gate would read an orphan chunk as unlabelled. Never
+        raises.
+        """
+        gate = EgressGate(self._documents, local=False) if self.local else self
+        verdict, inherited, unreadable = gate._cited(doc_ids, with_level=True)
+        return SummaryJudgement(verdict, inherited, unreadable=unreadable)
+
     def _judge_summary(
         self,
         doc_id: str,

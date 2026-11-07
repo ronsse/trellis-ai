@@ -82,6 +82,7 @@ _PREDICATE_NAMES = frozenset(
         "permits_metadata",
         "stored_verdict",
         "cited_verdict",
+        "judge_served",
     }
 )
 

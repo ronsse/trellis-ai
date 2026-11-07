@@ -11,9 +11,12 @@ existing leak-safe :class:`~trellis.schemas.memory_op.MemoryOpJudgedPayload`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from trellis_workers.session_capture.outcome import SessionOutcome
+
+if TYPE_CHECKING:
+    from trellis.schemas.classification import Sensitivity
 
 
 @dataclass
@@ -406,6 +409,12 @@ class CandidateMemory:
     reconciliation: str = ""
     updates_doc_id: str | None = None
     supersedes_doc_id: str | None = None
+    #: The label this memory is written under because of what its session was
+    #: served: the strictest one above ``internal`` among the documents of the
+    #: session's packs. ``None`` stamps nothing: nothing served was labelled above
+    #: ``internal``, or the stored row at this memory's id already carries a label
+    #: at least as strict. Set by the sweep, never by the judge.
+    inherited_sensitivity: Sensitivity | None = None
 
 
 @dataclass
@@ -550,6 +559,14 @@ class CaptureReport:
     supersessions_failed: int = 0
     memories_written: int = 0
     memories_skipped_unchanged: int = 0
+    #: Memories written (in a dry run, that would be) under a label inherited from
+    #: the documents their session was served, because one of them was labelled
+    #: above ``internal``. A subset of ``memories_written``: a memory skipped as
+    #: unchanged is not rewritten and not counted here.
+    memories_label_inherited: int = 0
+    #: :attr:`memories_label_inherited` by the label stamped (``confidential``,
+    #: ``restricted``), so a dry run reports the label it would stamp.
+    memories_label_inherited_by_level: dict[str, int] = field(default_factory=dict)
     #: Per-class hit counters from the secret-scan gate: class *label* → int.
     #: Plainly named (labels + counts, nothing else) so the report payload is
     #: structurally and nominally safe for every log/print sink.
@@ -597,6 +614,10 @@ class CaptureReport:
             "supersessions_failed": self.supersessions_failed,
             "memories_written": self.memories_written,
             "memories_skipped_unchanged": self.memories_skipped_unchanged,
+            "memories_label_inherited": self.memories_label_inherited,
+            "memories_label_inherited_by_level": dict(
+                self.memories_label_inherited_by_level
+            ),
             "scan_hits_by_class": dict(self.scan_hits_by_class),
             "warnings": list(self.warnings),
         }

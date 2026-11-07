@@ -2661,6 +2661,21 @@ def _render_capture_text(payload: dict[str, Any]) -> None:
         f"  memories written: {payload['memories_written']}  "
         f"unchanged: {payload['memories_skipped_unchanged']}"
     )
+    # Outside any flag, like the egress lines below: a memory stamped with a
+    # label it did not earn on its own is something to see on every run.
+    if payload["memories_label_inherited"]:
+        by_level = ", ".join(
+            f"{count} {level}"
+            for level, count in sorted(
+                payload["memories_label_inherited_by_level"].items()
+            )
+        )
+        console.print(
+            f"  labels inherited: {payload['memories_label_inherited']} memor"
+            f"{'y' if payload['memories_label_inherited'] == 1 else 'ies'} "
+            f"written under the label of a document their session was served "
+            f"({escape(by_level)})"
+        )
     if payload["reconcile_enabled"]:
         console.print(
             f"  reconcile: {payload['candidates_reconciled_noop']} noop  "
@@ -2688,9 +2703,9 @@ def _render_capture_text(payload: dict[str, Any]) -> None:
         console.print(
             f"[red]  egress_unreadable: "
             f"{payload['sessions_skipped_egress_unreadable']} session(s) not "
-            f"distilled because a store could not be asked whether what they "
-            f"were served may leave the host (a fault, not a label); they stay "
-            f"un-watermarked and the run is partial[/red]"
+            f"distilled because a store could not be asked what label what they "
+            f"were served carries, or whether it may leave the host (a fault, "
+            f"not a label); they stay un-watermarked and the run is partial[/red]"
         )
     if payload["supersessions_failed"]:
         # Never folded into the reconcile line above: a supersession the
