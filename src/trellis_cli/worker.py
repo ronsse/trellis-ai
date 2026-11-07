@@ -2745,7 +2745,8 @@ def embed_traces_cmd(
         False,
         "--reset-watermark",
         help=(
-            "Forget the cursor and re-scan from the beginning. Costs time, "
+            "Forget the cursor and the retry list and re-scan from the "
+            "beginning. Costs time, "
             "never rows — traces that already have a vector row are "
             "skipped. A partial status from a row with nothing to render "
             "recurs after the reset: the row is still there."
@@ -2777,8 +2778,10 @@ def embed_traces_cmd(
     over zero rows.
 
     Safe to interrupt. The cursor advances only through a contiguous run of
-    traces confirmed to have a vector row, and correctness does not depend on
-    it: the check that decides whether a trace is done asks the vector store.
+    traces that have a vector row, are permanently refused, or are on the retry
+    list (traces that could not be embedded yet, attempted again by every
+    pass), and correctness does not depend on it: the check that decides
+    whether a trace is done asks the vector store.
     """
     from trellis_workers.trace_embed import (  # noqa: PLC0415
         TraceEmbedScanLimitError,
@@ -2826,6 +2829,7 @@ def embed_traces_cmd(
         or report.skipped_empty
         or report.skipped_invalid
         or report.skipped_egress_unreadable
+        or report.retry_pending
         or report.restamp_unreadable
         or report.restamp_failed
     ):
@@ -2864,8 +2868,14 @@ def _render_embed_traces_text(payload: dict[str, Any]) -> None:
         console.print(
             f"  egress: {payload['skipped_egress_unreadable']} unreadable "
             f"(egress_unreadable): a store could not be asked for the label of "
-            f"a document a trace cites; the cursor is held and the next pass "
-            f"retries",
+            f"a document a trace cites; the trace is held for the next pass",
+            soft_wrap=True,
+        )
+    if payload["retry_pending"]:
+        console.print(
+            f"  retry list: {payload['retry_pending']} trace(s) held without a "
+            f"vector; the cursor moved past them and every pass attempts them "
+            f"again until each is embedded or permanently refused",
             soft_wrap=True,
         )
     if payload["restamp_scanned"] or payload["restamp_failed"]:

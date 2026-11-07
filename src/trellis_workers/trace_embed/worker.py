@@ -10,23 +10,32 @@ The pass in four steps:
    ``trellis admin reindex-vectors``: invoking the command is the opt-in, so
    no feature flag is required, but a missing embedder or vector store exits
    loudly instead of reporting a clean pass over zero rows.
-2. **Collect candidates.** Everything at or after the watermark, walked
+2. **Retry what was held.** Every trace on the watermark's retry list is
+   attempted again, before anything newer. One that now ends with a vector row,
+   or meets a permanent refusal, leaves the list; one that still cannot be
+   embedded stays on it.
+3. **Collect candidates.** Everything at or after the watermark, walked
    backwards from now via :meth:`TraceStore.query`'s ``until`` (the ABC's
    ``query`` returns newest-first and takes no offset, so backwards is the
    only direction that pages without gaps), then sorted **ascending**.
-3. **Process ascending, advancing a contiguous prefix.** Each trace is either
-   already embedded (skipped), embedded now (success), or failed. The cursor
-   follows the run of confirmed successes from the start and stops at the
-   first failure — while the rest of the batch is still attempted, so one bad
-   trace does not stall the pass.
-4. **Save the cursor.** Never in a dry run, and never past a failure.
+4. **Process ascending, advancing a contiguous prefix.** Each trace is either
+   already embedded (skipped), embedded now (success), permanently refused, or
+   held. A held trace goes on the retry list and the cursor moves past it; when
+   the list is full the cursor stops there instead, and the rest of the batch
+   is still attempted, so one bad trace does not stall the pass.
+5. **Save the cursor and the list.** Never in a dry run, and never past a trace
+   that is neither done nor listed.
 
 The failure this design is built against is a tracking gap that skips rows in
 silence. Two independent things prevent it. The cursor is an optimisation, not
 a record of work: :func:`trace_is_embedded` asks the vector store directly, so
 a cursor that somehow ran ahead can only cause a *re-check*, never a skip, on
 any trace the pass still looks at. And the cursor cannot run ahead in the
-first place, because it only ever advances through confirmed successes.
+first place, because it only ever advances through traces that are done,
+permanently refused or written down on the retry list. The list exists because
+a cursor held behind one trace makes every pass retake the same oldest
+``max_scan`` slice: newer traces are never reached, the backlog outgrows
+``max_scan * SCAN_CEILING_FACTOR`` and every pass then refuses.
 """
 
 from __future__ import annotations
@@ -34,6 +43,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -78,6 +88,7 @@ __all__ = [
     "DEFAULT_MAX_SCAN",
     "DEFAULT_PAGE_SIZE",
     "ENV_WATERMARK",
+    "RETRY_LIST_LIMIT",
     "SCAN_CEILING_FACTOR",
     "TraceEmbedReport",
     "TraceEmbedScanLimitError",
@@ -95,6 +106,13 @@ DEFAULT_PAGE_SIZE = 200
 #: a large backlog; the cursor advances each pass, so repeated runs converge.
 #: It is not a ceiling on reads — see :func:`collect_candidates`.
 DEFAULT_MAX_SCAN = 5000
+
+#: How many held traces the watermark's retry list will carry. Every pass
+#: re-attempts all of them on top of ``max_scan`` new traces, so the bound is
+#: also the most extra work a pass can take on; a list that fills means the
+#: fault is wide rather than one bad trace, and the cursor then holds behind the
+#: next held trace exactly as it did before the list existed.
+RETRY_LIST_LIMIT = 100
 
 #: How long a clean restamp sweep (:mod:`~trellis_workers.trace_embed.restamp`)
 #: stands in for the next. It bounds how long a summary can outlive a relabel of a
@@ -151,11 +169,17 @@ class TraceEmbedReport:
     skipped_egress_withheld: int = 0
     #: Summaries kept off the embedder because a store could not be asked for a
     #: label (``egress_unreadable``), a cited document's included. A fault a later
-    #: pass may clear: the cursor holds behind it and ``status`` is ``partial``.
-    #: The summary is stored without a vector row, and the retry writes the
-    #: same document again and embeds it.
+    #: pass may clear: the trace goes on the retry list (or holds the cursor when
+    #: the list is full) and ``status`` is ``partial``. The summary is stored
+    #: without a vector row, and the retry writes the same document again and
+    #: embeds it.
     skipped_egress_unreadable: int = 0
     failed: int = 0
+    #: Traces on the watermark's retry list when the pass ended: held ones the
+    #: cursor has moved past, each attempted again by every pass. ``status`` is
+    #: ``partial`` while any remain. In a dry run, which changes no list, this is
+    #: the list as stored.
+    retry_pending: int = 0
     #: The restamp sweep (:mod:`~trellis_workers.trace_embed.restamp`), which
     #: runs at most once per ``restamp_interval``: summaries judged, summaries
     #: raised to a relabelled citation's label (in a dry run, that would be), those
@@ -189,6 +213,7 @@ class TraceEmbedReport:
                 or self.skipped_invalid
                 or self.skipped_empty
                 or self.skipped_egress_unreadable
+                or self.retry_pending
                 or self.restamp_unreadable
                 or self.restamp_failed
                 else "ok"
@@ -202,6 +227,7 @@ class TraceEmbedReport:
             "skipped_egress_withheld": self.skipped_egress_withheld,
             "skipped_egress_unreadable": self.skipped_egress_unreadable,
             "failed": self.failed,
+            "retry_pending": self.retry_pending,
             "restamp_scanned": self.restamp_scanned,
             "restamp_raised": self.restamp_raised,
             "restamp_unreadable": self.restamp_unreadable,
@@ -343,6 +369,7 @@ def run_trace_embed_pass(
     include_step_errors: bool = True,
     should_continue: Callable[[], bool] | None = None,
     restamp_interval: timedelta = RESTAMP_INTERVAL,
+    retry_limit: int = RETRY_LIST_LIMIT,
 ) -> TraceEmbedReport:
     """Run one pass. See the module docstring for the ordering guarantees.
 
@@ -350,24 +377,29 @@ def run_trace_embed_pass(
         registry: The active :class:`StoreRegistry`.
         watermark_path: Cursor file. Defaults to
             :func:`default_watermark_path`.
-        limit: Stop after considering this many traces (0 = no limit).
+        limit: Stop after considering this many new traces (0 = no limit). The
+            retry list is attempted on top of it.
         page_size: Traces per :meth:`TraceStore.query` round trip.
-        max_scan: Ceiling on traces collected in one pass.
+        max_scan: Ceiling on new traces collected in one pass. The retry list
+            (at most ``retry_limit`` traces) is attempted on top of it.
         dry_run: Count what would be embedded; write nothing and leave the
             cursor exactly where it was.
-        reset_watermark: Forget the cursor first and re-scan from the start.
-            Costs time, never rows — every embedded trace is skipped by
-            :func:`trace_is_embedded`.
+        reset_watermark: Forget the cursor and the retry list first and re-scan
+            from the start. Costs time, never rows — every embedded trace is
+            skipped by :func:`trace_is_embedded`.
         include_step_errors: Render recorded step errors into the summary.
-        should_continue: Cooperative stop. Checked before each trace; when it
-            returns ``False`` the pass stops, saves the contiguous prefix it
-            reached, and reports ``stopped_early``. This is what a SIGINT
-            handler drives — an interrupted pass ends at a known-good cursor
-            instead of a guessed one.
+        should_continue: Cooperative stop. Checked before each trace, listed
+            ones included; when it returns ``False`` the pass stops, saves the
+            contiguous prefix it reached and the traces still on the retry list,
+            and reports ``stopped_early``. This is what a SIGINT handler drives
+            — an interrupted pass ends at a known-good cursor instead of a
+            guessed one.
         restamp_interval: Run the restamp sweep when none has finished
             within this long (always after ``reset_watermark``). A sweep raises a
             stored summary to the label a cited document now carries; the pass
             above never rewrites a summary that already has a vector.
+        retry_limit: How many held traces the retry list may carry. At the
+            limit a further held trace holds the cursor instead; none is dropped.
 
     Raises:
         TraceEmbedUnavailableError: no embedder, or no vector store.
@@ -422,23 +454,14 @@ def run_trace_embed_pass(
     if reset_watermark:
         watermark.reset()
     before = watermark.cursor
+    #: The list this pass will leave behind: what it inherited, less what now
+    #: ends well, plus what it holds. Only a live pass writes it back.
+    held = {entry.trace_id: entry for entry in watermark.retry}
 
     report = TraceEmbedReport(
         dry_run=dry_run,
         watermark_before=before.created_at.isoformat() if before else None,
     )
-
-    candidates, truncated = collect_candidates(
-        registry.operational.trace_store,
-        after=before,
-        page_size=page_size,
-        max_scan=max_scan,
-    )
-    if limit > 0:
-        if len(candidates) > limit:
-            truncated = True
-        candidates = candidates[:limit]
-    report.more_remaining = truncated
 
     # One gate per pass, as ``admin reindex-vectors`` builds one per run, for the
     # dry run's screen; the handler builds its own for a live write. A summary
@@ -452,35 +475,56 @@ def run_trace_embed_pass(
         handlers={"evidence.ingest": handler},
         policy_gate=policy_gate,
     )
+    process = partial(
+        _process_one,
+        executor=executor,
+        handler=handler,
+        egress=egress,
+        registry=registry,
+        vector_store=vector_store,
+        document_store=registry.knowledge.document_store,
+        dry_run=dry_run,
+        include_step_errors=include_step_errors,
+        report=report,
+    )
 
-    frontier: TraceCursor | None = before
-    contiguous = True
+    # Before anything newer, so a held trace is attempted again on every pass
+    # however far the cursor has moved past it.
+    _retry_held(
+        held,
+        registry.operational.trace_store,
+        process,
+        report,
+        should_continue=should_continue,
+    )
 
-    for trace in candidates:
-        if should_continue is not None and not should_continue():
-            report.stopped_early = True
-            break
-        report.scanned += 1
-        outcome = _process_one(
-            trace,
-            executor=executor,
-            handler=handler,
-            egress=egress,
-            registry=registry,
-            vector_store=vector_store,
-            document_store=registry.knowledge.document_store,
-            dry_run=dry_run,
-            include_step_errors=include_step_errors,
-            report=report,
+    candidates: list[Trace] = []
+    truncated = False
+    if not report.stopped_early:
+        candidates, truncated = collect_candidates(
+            registry.operational.trace_store,
+            after=before,
+            page_size=page_size,
+            max_scan=max_scan,
         )
-        if outcome and contiguous:
-            frontier = _cursor_for(trace)
-        elif not outcome:
-            # Stop advancing here — but keep going, so one unembeddable trace
-            # does not stall every newer one. The cursor stays pinned behind
-            # this trace and the next pass reaches it again.
-            contiguous = False
+    if limit > 0:
+        if len(candidates) > limit:
+            truncated = True
+        candidates = candidates[:limit]
+    report.more_remaining = truncated
 
+    frontier = _walk_candidates(
+        candidates,
+        process,
+        held,
+        report,
+        before=before,
+        retry_limit=retry_limit,
+        dry_run=dry_run,
+        should_continue=should_continue,
+    )
+
+    report.retry_pending = len(watermark.retry) if dry_run else len(held)
     _commit(
         registry,
         policy_gate,
@@ -488,6 +532,7 @@ def run_trace_embed_pass(
         report,
         frontier=frontier,
         before=before,
+        retry=None if dry_run else list(held.values()),
         dry_run=dry_run,
         restamp_interval=restamp_interval,
     )
@@ -504,6 +549,75 @@ def run_trace_embed_pass(
     return report
 
 
+def _walk_candidates(
+    candidates: Sequence[Trace],
+    process: Callable[[Trace], bool],
+    held: dict[str, TraceCursor],
+    report: TraceEmbedReport,
+    *,
+    before: TraceCursor | None,
+    retry_limit: int,
+    dry_run: bool,
+    should_continue: Callable[[], bool] | None,
+) -> TraceCursor | None:
+    """Process *candidates* in order; return how far the cursor may move.
+
+    A trace that did not end with a vector row goes on ``held`` while the list
+    has room, and the cursor may pass it. With the list full it pins the cursor
+    behind it instead, and the rest of the batch is still attempted, so one bad
+    trace does not stall the pass; the next pass reaches it again. A dry run
+    lists nothing, so it holds the cursor where a live pass with no room would.
+    """
+    frontier = before
+    contiguous = True
+    for trace in candidates:
+        if should_continue is not None and not should_continue():
+            report.stopped_early = True
+            break
+        report.scanned += 1
+        outcome = process(trace)
+        if not outcome and contiguous and not dry_run and len(held) < retry_limit:
+            # Written down, so the cursor may pass it: the next pass attempts it
+            # from the list instead of by retaking the slice that starts here.
+            held[trace.trace_id] = _cursor_for(trace)
+            outcome = True
+        if outcome and contiguous:
+            frontier = _cursor_for(trace)
+        elif not outcome:
+            contiguous = False
+    return frontier
+
+
+def _retry_held(
+    held: dict[str, TraceCursor],
+    trace_store: TraceStore,
+    process: Callable[[Trace], bool],
+    report: TraceEmbedReport,
+    *,
+    should_continue: Callable[[], bool] | None,
+) -> None:
+    """Attempt every held trace again, oldest first; drop those that now end well.
+
+    ``process`` answers as for a new trace: ``True`` is a vector row or a
+    permanent refusal, either of which settles the trace. ``False`` leaves it on
+    the list with no attempt budget, so a trace that stays unreadable is retried
+    on every pass for as long as it does. A trace the store no longer has cannot
+    be embedded by any later pass, so it leaves the list with a warning.
+    """
+    for entry in sorted(held.values()):
+        if should_continue is not None and not should_continue():
+            report.stopped_early = True
+            return
+        trace = trace_store.get(entry.trace_id)
+        if trace is None:
+            logger.warning("trace_embed_retry_trace_missing", trace_id=entry.trace_id)
+            del held[entry.trace_id]
+            continue
+        report.scanned += 1
+        if process(trace):
+            del held[entry.trace_id]
+
+
 def _commit(
     registry: StoreRegistry,
     policy_gate: PolicyGate,
@@ -512,19 +626,22 @@ def _commit(
     *,
     frontier: TraceCursor | None,
     before: TraceCursor | None,
+    retry: list[TraceCursor] | None,
     dry_run: bool,
     restamp_interval: timedelta,
 ) -> None:
-    """Move the cursor to ``frontier``, run a due restamp sweep, and persist both."""
+    """Move the cursor to ``frontier``, store the retry list, run a due restamp
+    sweep, and persist all of it. ``retry`` is ``None`` in a dry run."""
     moved = frontier is not None and frontier != before
     if not dry_run and moved and frontier is not None:
         watermark.advance_to(frontier)
+    listed = retry is not None and watermark.set_retry(retry)
     marked = False
     if not report.stopped_early and watermark.restamp_due(
         datetime.now(UTC), restamp_interval
     ):
         marked = _restamp(registry, policy_gate, watermark, report, dry_run=dry_run)
-    if not dry_run and (moved or marked):
+    if not dry_run and (moved or marked or listed):
         watermark.save()
 
 
@@ -648,8 +765,9 @@ def _process_one(
     the cursor behind it would rescan the same oldest rows every pass, embed
     nothing newer and eventually trip ``TraceEmbedScanLimitError``. Every
     other non-``SUCCESS`` result from the
-    executor is a plain failure: it holds the cursor, because nothing about
-    it says the next attempt cannot succeed.
+    executor is a plain failure: it returns ``False``, because nothing about
+    it says the next attempt cannot succeed, and the driver then lists the
+    trace for a retry (or holds the cursor when the list is full).
 
     A summary is judged by the documents its trace cites (``evidence_used``) and
     by its own label, unless the embedder is declared local. That is asked in the
@@ -657,8 +775,8 @@ def _process_one(
     not what is stored): a withheld summary is stored with no vector row
     (``skipped_egress_withheld``, and the cursor advances: it is the same on
     every retry); one whose cited document no store could answer for is stored
-    the same way and holds the cursor (``skipped_egress_unreadable``), as a
-    failure does, so the next pass writes it again and tries the embed again.
+    the same way and is held (``skipped_egress_unreadable``), as a failure is,
+    so the next pass writes it again and tries the embed again.
     A summary that was redacted is refused by the write seam before the screen
     and counts as redacted. A dry run asks the same question and writes nothing.
     """
@@ -736,7 +854,7 @@ def _count_success(
 ) -> bool:
     """Count a ``SUCCESS`` as embedded or as declined by the egress gate.
 
-    ``False`` holds the cursor: a summary kept off the embedder because a store
+    ``False`` is a hold: a summary kept off the embedder because a store
     could not be asked is a fault a later pass may clear, as a failure is. A
     summary withheld for a label is a fact about what is stored, the same on
     every retry, so the pass advances past it as it does past a redacted one.
@@ -749,7 +867,7 @@ def _count_success(
 
 
 def _count_withheld(verdict: EgressVerdict, report: TraceEmbedReport) -> bool:
-    """Count one summary kept off the embedder; ``False`` holds the cursor.
+    """Count one summary kept off the embedder; ``False`` is a hold.
 
     ``UNREADABLE`` is a fault a later pass may clear; ``WITHHELD`` is a fact
     about what is stored and is the same on every retry, so the pass advances.
@@ -776,6 +894,7 @@ def summarize(
         total.skipped_egress_withheld += r.skipped_egress_withheld
         total.skipped_egress_unreadable += r.skipped_egress_unreadable
         total.failed += r.failed
+        total.retry_pending = r.retry_pending  # a level, not a flow: the last pass's
         total.restamp_scanned += r.restamp_scanned
         total.restamp_raised += r.restamp_raised
         total.restamp_unreadable += r.restamp_unreadable
