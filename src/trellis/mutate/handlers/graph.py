@@ -15,7 +15,7 @@ from trellis.core.precedent_document import (
 )
 from trellis.errors import NotFoundError, StoreError, ValidationError
 from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
-from trellis.mutate.commands import Command
+from trellis.mutate.commands import HANDLER_OUTCOME_KEY, OUTCOME_LEFT_ALONE, Command
 from trellis.mutate.evidence_pointer_keys import node_evidence_ref_refusal
 from trellis.mutate.handlers._common import (
     _current_lifecycle_state,
@@ -46,10 +46,11 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-#: What ``entity.create`` with ``if_absent`` answers when the id already names
-#: a node and nothing was written. A caller that must not claim a create it did
-#: not make tells the two apart by this prefix (``save_knowledge``'s domain
-#: mint), so the handler and its readers share one spelling.
+#: What ``entity.create`` with ``if_absent`` says when the id already names a
+#: node and nothing was written. It is for people. A caller that must not claim
+#: a create it did not make (``save_knowledge``'s domain mint) reads
+#: ``CommandResult.metadata["outcome"] == "left_alone"``, which the handler
+#: sets beside this message, and never matches the text.
 ENTITY_LEFT_ALONE_MESSAGE = "Entity left alone, already exists (if_absent)"
 
 
@@ -356,6 +357,7 @@ class EntityCreateHandler:
         written = _write_node_replacing_read(graph_store, node_id, build)
         if written is None:
             name = command.args["name"]
+            command.metadata[HANDLER_OUTCOME_KEY] = OUTCOME_LEFT_ALONE
             return (node_id, f"{ENTITY_LEFT_ALONE_MESSAGE}: {name}")
         document_ids = written["document_ids"]
         _bind_entity_name_alias(

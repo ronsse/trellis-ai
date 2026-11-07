@@ -74,7 +74,8 @@ def _build_command(
     :func:`~trellis.mutate.reject_reserved_metadata` first -- which
     raises :class:`~trellis.mutate.ReservedMetadataKeyError` for a
     planted ``requested_by_claim``/``key_id``/``key_name``/
-    ``write_provenance``/``handler_warnings``/``learning_promotion`` -- *before* the
+    ``write_provenance``/``handler_warnings``/``handler_outcome``/
+    ``learning_promotion`` -- *before* the
     server-derived ``requested_by_claim`` override below is applied, so
     the guard only ever sees what the caller actually sent.
     """
@@ -112,8 +113,8 @@ def _build_command(
                 "``metadata``, named a key reserved for server-side audit "
                 "stamping (``requested_by_claim``, ``key_id``, "
                 "``key_name``, ``write_provenance``, "
-                "``handler_warnings``, ``learning_promotion``); ``detail`` "
-                "names the key."
+                "``handler_warnings``, ``handler_outcome``, "
+                "``learning_promotion``); ``detail`` names the key."
             )
         },
         403: {
@@ -165,7 +166,8 @@ def execute_batch(
     A command's own ``metadata`` is otherwise free-form decoration, with
     one exception: it may not name a key reserved for server-side audit
     stamping (``requested_by_claim``, ``key_id``, ``key_name``,
-    ``write_provenance``, ``handler_warnings``, ``learning_promotion`` --
+    ``write_provenance``, ``handler_warnings``, ``handler_outcome``,
+    ``learning_promotion`` --
     :data:`~trellis.mutate.RESERVED_COMMAND_METADATA_KEYS`). The batch's
     own ``metadata`` (``CommandBatch.metadata``, distinct from any one
     command's) carries the same restriction, even though nothing reads it
