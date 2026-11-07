@@ -34,6 +34,7 @@ from trellis.retrieve.formatters import (
     format_subgraph_as_markdown,
 )
 from trellis.retrieve.lessons_pack import record_lessons_pack
+from trellis.retrieve.precedents import PrecedentClearance
 from trellis.retrieve.sensitivity import (
     DocumentClearance,
     conceal_node_pointers,
@@ -140,7 +141,16 @@ def get_graph(
 
     registry = _get_registry()
     node = registry.knowledge.graph_store.get_node(entity_id)
-    if node is None:
+    # A promoted precedent is judged by its source's label as well as its own
+    # (#1080). One predicate for the entity and every neighbour: a withheld
+    # entity is the not-found a missing one gets, a withheld neighbour and each
+    # edge that touches it are left out.
+    precedents = PrecedentClearance(
+        registry.knowledge.document_store,
+        current_clearance(),
+        registry.knowledge.graph_store,
+    )
+    if node is None or precedents.verdict_of(entity_id, node) is not None:
         _raise_not_found(
             f"entity not found: {entity_id}",
             data={"entity_id": entity_id},
@@ -149,6 +159,21 @@ def get_graph(
     subgraph = registry.knowledge.graph_store.get_subgraph(
         seed_ids=[entity_id], depth=depth
     )
+    withheld = {
+        n["node_id"]
+        for n in subgraph.get("nodes", [])
+        if precedents.verdict_of(n["node_id"], n) is not None
+    }
+    if withheld:
+        subgraph = {
+            **subgraph,
+            "nodes": [n for n in subgraph["nodes"] if n["node_id"] not in withheld],
+            "edges": [
+                e
+                for e in subgraph.get("edges", [])
+                if e["source_id"] not in withheld and e["target_id"] not in withheld
+            ],
+        }
     # A node carries no label, so the root and every neighbour are served; what
     # is dropped is a pointer naming a document this caller may not read. One
     # judgement for the whole response (root first, then the neighbourhood).
@@ -184,7 +209,9 @@ _GET_ITEMS_MAX_IDS = 50
 
 
 def _render_fetched_item(
-    registry: StoreRegistry, item_id: str
+    registry: StoreRegistry,
+    item_id: str,
+    precedents: PrecedentClearance | None = None,
 ) -> tuple[str, str] | None:
     """Resolve ``item_id`` to ``(kind, markdown body)``, or ``None``.
 
@@ -195,7 +222,17 @@ def _render_fetched_item(
     :func:`~trellis.retrieve.formatters.format_entity_as_markdown` block
     ``get_graph`` renders, so a fetched entity carries the ``document_ids``
     evidence pointers that make it a hop rather than a dead end.
+
+    ``precedents`` is the per-call :class:`PrecedentClearance` (#1080), so a
+    caller fetching many ids judges each precedent once; one is built for this
+    id when it is left out.
     """
+    if precedents is None:
+        precedents = PrecedentClearance(
+            registry.knowledge.document_store,
+            current_clearance(),
+            registry.knowledge.graph_store,
+        )
     doc = read_document_row(
         registry.knowledge.document_store, item_id, current_clearance()
     )
@@ -205,6 +242,10 @@ def _render_fetched_item(
         if not DocumentClearance(
             registry.knowledge.document_store, current_clearance()
         ).permits(item_id, doc.get("metadata")):
+            return None
+        # A precedent's own row holds the source's excerpt and carries no
+        # label, so its source's label decides.
+        if precedents.verdict_of(item_id) is not None:
             return None
         return "document", doc.get("content", "")
 
@@ -216,6 +257,8 @@ def _render_fetched_item(
 
     node = registry.knowledge.graph_store.get_node(item_id)
     if node is not None:
+        if precedents.verdict_of(item_id, node) is not None:
+            return None
         # The node is served; a pointer to a document above the caller's
         # clearance is not.
         (node,) = conceal_node_pointers(
@@ -286,8 +329,14 @@ def get_items(
     try:
         fetched: list[dict[str, Any]] = []
         not_found: list[str] = []
+        # One judgement per precedent for the whole call.
+        precedents = PrecedentClearance(
+            registry.knowledge.document_store,
+            current_clearance(),
+            registry.knowledge.graph_store,
+        )
         for item_id in unique_ids:
-            resolved = _render_fetched_item(registry, item_id)
+            resolved = _render_fetched_item(registry, item_id, precedents)
             if resolved is None:
                 not_found.append(item_id)
             else:

@@ -94,6 +94,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trellis.retrieve.excerpts import truncate_excerpt
+from trellis.retrieve.precedents import PrecedentClearance
 from trellis.retrieve.sensitivity import DocumentClearance, conceal_node_pointers
 from trellis.schemas.extraction import (
     EXTRACTION_STATUS_PROPERTY,
@@ -238,6 +239,7 @@ def _matching_documents(
     paths: Sequence[str],
     *,
     clearance: Sensitivity,
+    precedents: PrecedentClearance,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, set[str]]]:
     """Scan the document store once for path matches on either key.
 
@@ -254,7 +256,8 @@ def _matching_documents(
     ``source_path`` half would return the document while hiding the
     entities linked to it.
 
-    A document above ``clearance`` is skipped before either is recorded.
+    A document above ``clearance`` is skipped before either is recorded, and so
+    is a promoted precedent ``precedents`` bars (#1080).
     """
     # Deferred: ``trellis.ingest_corpus.__init__`` pulls ``sync``, which
     # imports back into ``trellis.retrieve`` (the embed hook). At module
@@ -287,6 +290,8 @@ def _matching_documents(
                 # Above the caller's clearance: neither the document nor an
                 # entity anchored only to it may surface (#194).
                 if not readable.permits(doc_id, metadata):
+                    continue
+                if precedents.verdict_of(doc_id) is not None:
                     continue
                 anchors_by_path[path].add(doc_id)
                 if not is_chunk_doc_id(doc_id):
@@ -328,6 +333,7 @@ def _linked_entities(
     anchors_by_path: dict[str, set[str]],
     *,
     clearance: Sensitivity,
+    precedents: PrecedentClearance,
     include_unconfirmed: bool,
     include_structural: bool,
     graph_scan_limit: int,
@@ -341,7 +347,8 @@ def _linked_entities(
     An entity is anchored by a document the caller may read but lists every
     id it links, so each entry is built from the node as a caller at
     ``clearance`` may be shown it (:func:`conceal_node_pointers`). Anchoring
-    uses the stored ids; the anchors are readable by construction.
+    uses the stored ids; the anchors are readable by construction. A promoted
+    precedent ``precedents`` bars (#1080) is left out whole.
     """
     entities_by_path: dict[str, list[dict[str, Any]]] = {p: [] for p in anchors_by_path}
     all_anchor_ids: set[str] = set().union(*anchors_by_path.values())
@@ -361,6 +368,8 @@ def _linked_entities(
     for node in nodes:
         linked = set(node.get("document_ids") or [])
         if not linked & all_anchor_ids:
+            continue
+        if precedents.verdict_of(str(node.get("node_id") or ""), node) is not None:
             continue
         if not include_structural and node.get("node_role") == "structural":
             continue
@@ -432,14 +441,18 @@ def build_file_context(
     if not deduped:
         return {"paths": [], "graph_scan_truncated": False}
 
+    # A promoted precedent is judged by its source's label as well as its own
+    # (#1080); one instance, so each is judged once for the whole call.
+    precedents = PrecedentClearance(document_store, clearance, graph_store)
     docs_by_path, anchors_by_path = _matching_documents(
-        document_store, deduped, clearance=clearance
+        document_store, deduped, clearance=clearance, precedents=precedents
     )
     entities_by_path, graph_scan_truncated = _linked_entities(
         graph_store,
         document_store,
         anchors_by_path,
         clearance=clearance,
+        precedents=precedents,
         include_unconfirmed=include_unconfirmed,
         include_structural=include_structural,
         graph_scan_limit=graph_scan_limit,
