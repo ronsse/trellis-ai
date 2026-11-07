@@ -364,7 +364,7 @@ def run_trace_embed_pass(
             reached, and reports ``stopped_early``. This is what a SIGINT
             handler drives — an interrupted pass ends at a known-good cursor
             instead of a guessed one.
-        restamp_interval: Run the restamp sweep when none has finished cleanly
+        restamp_interval: Run the restamp sweep when none has finished
             within this long (always after ``reset_watermark``). A sweep raises a
             stored summary to the label a cited document now carries; the pass
             above never rewrites a summary that already has a vector.
@@ -538,8 +538,11 @@ def _restamp(
 ) -> bool:
     """Run the restamp sweep into ``report``; ``True`` when the watermark changed.
 
-    A clean sweep marks the time; one that could not judge every summary clears the
-    mark, so the next pass sweeps again.
+    Every sweep that judged something marks the time, clean or not: one
+    citation that stays unreadable would otherwise make every pass a full sweep
+    (N summaries by k citation reads). An unclean sweep still makes the report
+    ``partial``, and its summaries are retried by the next sweep, an interval
+    later.
 
     A second handler in ``embed="none"`` mode: the sweep rewrites a document that
     has its vector already, so it must call no embedder, and the core handler
@@ -561,7 +564,7 @@ def _restamp(
         # A dry run moves nothing; and a store with no summaries has nothing for
         # the mark to stand in for, so it does not make a watermark file.
         return False
-    watermark.mark_restamped(datetime.now(UTC) if sweep.clean else None)
+    watermark.mark_restamped(datetime.now(UTC))
     return True
 
 

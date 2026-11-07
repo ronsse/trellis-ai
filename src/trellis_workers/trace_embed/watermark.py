@@ -93,7 +93,7 @@ class TraceEmbedWatermark:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._cursor: TraceCursor | None = None
-        #: When the last clean restamp sweep finished
+        #: When the last restamp sweep finished, clean or not
         #: (:mod:`~trellis_workers.trace_embed.restamp`). Bookkeeping like the
         #: cursor, and as expendable: losing it runs one sweep early.
         self._restamped_at: datetime | None = None
@@ -136,18 +136,18 @@ class TraceEmbedWatermark:
                 self._restamped_at = None
 
     def restamp_due(self, now: datetime, interval: timedelta) -> bool:
-        """Whether a restamp sweep has not finished cleanly within ``interval``."""
+        """Whether no restamp sweep has finished within ``interval``."""
         if self._restamped_at is None:
             return True
         return as_utc(now) - self._restamped_at >= interval
 
-    def mark_restamped(self, now: datetime | None) -> None:
-        """Record that a restamp sweep finished cleanly at ``now``.
+    def mark_restamped(self, now: datetime) -> None:
+        """Record that a restamp sweep finished at ``now``.
 
-        ``None`` clears the mark, so the next pass sweeps again: a sweep that
-        could not judge every summary has not stood in for the next one.
+        An unclean sweep is marked too, so a citation that stays unreadable is
+        retried once an interval rather than on every pass.
         """
-        self._restamped_at = as_utc(now) if now is not None else None
+        self._restamped_at = as_utc(now)
         self._dirty = True
 
     def advance_to(self, cursor: TraceCursor) -> bool:
