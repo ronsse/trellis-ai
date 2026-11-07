@@ -296,6 +296,12 @@ def list_precedents(
     left out of its payload. A trace precedent, which has neither a document row
     nor a source, is served.
 
+    A third rule fails closed on what is left of a promotion
+    (:meth:`PrecedentClearance._nothing_to_judge`): a learning promotion whose
+    document row the store answered with none, whose event and node name no
+    source, and whose node is gone, has no label to judge it by, and is withheld
+    below ``restricted`` as unreadable rather than served at ``internal``.
+
     A served learning promotion's ``payload.source_item_id`` is also left out of
     the ``payload`` when ``clearance`` may not read that document, once the rows
     are chosen, so no title or description changes. The default ``restricted``
@@ -422,19 +428,26 @@ class _FaultRecordingStore:
     ``readable_ids`` fails closed on a store error and logs it, which leaves "the
     label said no" and "the store could not answer" looking alike in its result.
     This wraps the store handed to it and notes each id whose ``get`` raised, so
-    the caller can tell the two apart without changing ``readable_ids``.
+    the caller can tell the two apart without changing ``readable_ids``. It notes
+    each id the store answered with no row as well (``absent``): ``readable_ids``
+    reads an id with no row as readable, as it must for a graph node or a trace,
+    and a caller that needs to know the row was not there asks the recorder.
     """
 
     def __init__(self, inner: DocumentStore) -> None:
         self._inner = inner
         self.faulted: set[str] = set()
+        self.absent: set[str] = set()
 
     def get(self, doc_id: str) -> dict[str, Any] | None:
         try:
-            return self._inner.get(doc_id)
+            row = self._inner.get(doc_id)
         except Exception:
             self.faulted.add(doc_id)
             raise
+        if row is None:
+            self.absent.add(doc_id)
+        return row
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
@@ -477,7 +490,8 @@ class PrecedentClearance:
     follows (:func:`_conceal_source_pointers`).
 
     A lookup that fails withholds (:data:`PRECEDENT_WITHHELD_UNREADABLE`) and is
-    counted apart from a label that said no (:attr:`counts`).
+    counted apart from a label that said no (:attr:`counts`). So does a listed
+    promotion with nothing left to judge it by (:meth:`_nothing_to_judge`).
     """
 
     def __init__(
@@ -491,6 +505,7 @@ class PrecedentClearance:
         self._graph = graph_store
         self._verdicts: dict[str, bool] = {}
         self._faulted: set[str] = set()
+        self._absent: set[str] = set()
         self._served: dict[str, str | None] = {}
         self._reasons: dict[str, str] = {}
 
@@ -528,6 +543,9 @@ class PrecedentClearance:
                 )
                 self._faulted.update(fresh)
             self._faulted.update(i for i in fresh if self._read_faulted(i, recording))
+            self._absent.update(
+                i for i in fresh if i in recording.absent and i not in self._faulted
+            )
         for item_id in fresh:
             self._verdicts[item_id] = item_id in readable
         failed = [i for i in fresh if i not in readable and i in self._faulted]
@@ -579,6 +597,36 @@ class PrecedentClearance:
             return None
         return self._why_unreadable(entity_id)
 
+    def _nothing_to_judge(
+        self, entity_id: str | None, node: dict[str, Any] | None, source: str | None
+    ) -> bool:
+        """Whether a listed promotion has no label left to judge it by.
+
+        The event log is immutable, so a promotion's event outlives what the two
+        rules above read: its node (a redaction purges it, and a failed re-create
+        leaves none), its document row, and the source id its payload may never
+        have carried. With all three gone the rules find no label, and an id with
+        no row reads as readable, so the row was served at ``internal`` for want
+        of anything to say no. Every other read fails closed on what it cannot
+        judge, so this one does too: a promotion in the learning namespace, whose
+        row the store answered with none, naming no source and holding no node, is
+        withheld as :data:`PRECEDENT_WITHHELD_UNREADABLE` below ``restricted``.
+
+        Only the learning namespace: a trace precedent has no row and no source by
+        construction and is served. Only a row the store *answered* absent: one it
+        failed to read is already unreadable. Only the listings ask it, because a
+        by-id read, a search hit or a pack item holds a node or a row to judge.
+        ``restricted`` reads nothing, so nothing is withheld.
+        """
+        return (
+            self._clearance != "restricted"
+            and source is None
+            and node is None
+            and entity_id is not None
+            and is_promoted_precedent_document(entity_id)
+            and entity_id in self._absent
+        )
+
     def barred_events(
         self,
         events: list[Event],
@@ -588,7 +636,7 @@ class PrecedentClearance:
 
         Judges every id the window needs (each entity id, each source id) in one
         :meth:`judge` call, then applies the two rules in
-        :func:`list_precedents`.
+        :func:`list_precedents` and the third, :meth:`_nothing_to_judge`.
         """
         planned = []
         wanted: list[str] = []
@@ -596,15 +644,17 @@ class PrecedentClearance:
             node = node_of(e)
             source = _source_id_of(e.payload, node)
             exempt = source is not None and _holds_nothing_of_source(e, node, source)
-            planned.append((e, source, exempt))
+            planned.append((e, node, source, exempt))
             if e.entity_id:
                 wanted.append(e.entity_id)
             if source is not None:
                 wanted.append(source)
         self.judge(wanted)
         barred: set[str] = set()
-        for e, source, exempt in planned:
+        for e, node, source, exempt in planned:
             reason = self._bar_reason(e.entity_id, source, exempt=exempt)
+            if reason is None and self._nothing_to_judge(e.entity_id, node, source):
+                reason = PRECEDENT_WITHHELD_UNREADABLE
             if reason is not None:
                 barred.add(e.event_id)
                 self._reasons[e.event_id] = reason
