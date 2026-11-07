@@ -484,6 +484,117 @@ class TestScan:
         assert facts.skipped_lines == 3
         assert facts.tool_uses == 3
 
+    def test_an_over_long_grade_call_still_grades_the_pack_it_names(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # A record_feedback call with a very long ``notes`` is over the cap, so
+        # it is never parsed; its first bytes still name the tool and the pack.
+        log = Transcript()
+        log.served_pack(PACK_A)
+        log.work(10)
+        log.feedback(
+            {
+                "pack_id": PACK_A,
+                "helpful_item_ids": ["d1"],
+                "notes": "n" * (hooks.MAX_LINE_BYTES + 10),
+            }
+        )
+        assert len(log.lines[-2].encode()) > hooks.MAX_LINE_BYTES
+        path = log.write(tmp_path / "t.jsonl")
+
+        parsed: list[int] = []
+        real_loads = json.loads
+
+        def spy(text: Any, *args: Any, **kwargs: Any) -> Any:
+            parsed.append(len(text))
+            return real_loads(text, *args, **kwargs)
+
+        monkeypatch.setattr(hooks.json, "loads", spy)
+        facts = scan_transcript(path)
+        assert facts is not None
+        assert facts.skipped_lines == 1
+        assert facts.skipped_feedback_calls == 1
+        assert facts.ungraded == []
+        # Bounded memory stays bounded: nothing past the cap was parsed.
+        assert max(parsed) <= hooks.MAX_LINE_BYTES
+        reply = decide_grade(_stop(path), HookState(tmp_path / "s"), threshold=3)
+        assert reply is None
+
+    def test_an_over_long_grade_for_another_pack_leaves_this_one_ungraded(
+        self, tmp_path: Path
+    ):
+        log = Transcript()
+        log.served_pack(PACK_A)
+        log.served_pack(PACK_B)
+        log.feedback(
+            {
+                "pack_id": PACK_B,
+                "helpful_item_ids": ["d1"],
+                "notes": "n" * (hooks.MAX_LINE_BYTES + 10),
+            }
+        )
+        facts = scan_transcript(log.write(tmp_path / "t.jsonl"))
+        assert facts is not None
+        assert (facts.skipped_feedback_calls, facts.ungraded) == (1, [PACK_A])
+
+    def test_an_over_long_grade_naming_no_readable_pack_grades_what_was_served(
+        self, tmp_path: Path
+    ):
+        # The pack id sits past the bytes read, so the call grades what was
+        # served so far (as a parsed grade with no pack id does) and not a pack
+        # served after it.
+        log = Transcript()
+        log.served_pack(PACK_A)
+        log.feedback(
+            {
+                "notes": "n" * (hooks.MAX_LINE_BYTES + 10),
+                "pack_id": PACK_A,
+                "helpful_item_ids": ["d1"],
+            }
+        )
+        log.served_pack(PACK_B)
+        facts = scan_transcript(log.write(tmp_path / "t.jsonl"))
+        assert facts is not None
+        assert (facts.skipped_feedback_calls, facts.ungraded) == (1, [PACK_B])
+
+    def test_an_over_long_line_that_is_not_a_grade_grades_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(hooks, "MAX_LINE_BYTES", 2048)
+        log = Transcript()
+        log.served_pack(PACK_A)
+        log.use("Bash", {"command": "y" * 5000})
+        # Another server's tool of the same name.
+        log.use("mcp__other__record_feedback", {"pack_id": PACK_A, "n": "y" * 5000})
+        # A tool result that quotes a call: its quotes are escaped in the file.
+        quoted = json.dumps(
+            {"name": FEEDBACK, "input": {"pack_id": PACK_A}, "pad": "y" * 5000}
+        )
+        use_id = log.use("Bash", {"command": "cat transcript"})
+        log.result(use_id, quoted)
+        facts = scan_transcript(log.write(tmp_path / "t.jsonl"))
+        assert facts is not None
+        assert facts.skipped_lines == 3
+        assert (facts.skipped_feedback_calls, facts.ungraded) == (0, [PACK_A])
+
+    def test_an_over_long_grade_in_a_sidechain_grades_only_for_a_sidechain_scan(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(hooks, "MAX_LINE_BYTES", 2048)
+        log = Transcript(sidechain=True)
+        log.served_pack(PACK_A)
+        log.feedback(
+            {"pack_id": PACK_A, "helpful_item_ids": ["d1"], "notes": "n" * 5000}
+        )
+        path = log.write(tmp_path / "t.jsonl")
+        main_scan = scan_transcript(path)
+        assert main_scan is not None
+        assert (main_scan.skipped_lines, main_scan.skipped_feedback_calls) == (1, 0)
+        sidechain_scan = scan_transcript(path, include_sidechain=True)
+        assert sidechain_scan is not None
+        assert sidechain_scan.skipped_feedback_calls == 1
+        assert sidechain_scan.ungraded == []
+
     def test_the_clock_is_read_within_a_run_of_long_lines(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

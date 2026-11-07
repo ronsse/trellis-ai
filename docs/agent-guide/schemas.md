@@ -464,7 +464,20 @@ system but Unity Catalog, so a dbt `unique_id`, an OpenLineage `namespace/name` 
 Unity Catalog `catalog.schema.table` all take the same shape. A JSON rule binding under
 `unity_catalog` stores the id lower-cased and unquoted (`normalize_alias_raw_id`), because those
 identifiers are case-insensitive; `save_knowledge` looks it up with the same function, and
-`alias.upsert` applies it to any `unity_catalog` id it is sent. A draft's
+`alias.upsert` applies it to any `unity_catalog` id it is sent. What the stored form keeps and
+drops:
+
+| Sent | Stored | Why |
+|---|---|---|
+| `Main.Sales.Orders` | `main.sales.orders` | every part is case-folded |
+| `Main . Sales . Orders` | `main.sales.orders` | space around a dot is not part of a name |
+| `My Cat.Sales.Orders` | `my cat.sales.orders` | space inside a part is kept |
+| `` ` Main `.Sales.Orders `` | `main.sales.orders` | space just inside a backtick quote is dropped too |
+| `` MAIN.`a.b`.C `` | `` main.`a.b`.c `` | a part holding a dot or backtick is quoted again |
+| `Main..Orders`, `` `Main.Sales `` | unchanged, case kept | a malformed id (empty part, open quote) is never rewritten |
+
+A malformed id is bound and looked up verbatim, so `Main..Orders` and `main..orders` are two
+keys. A draft's
 `aliases` are left out of the `unparsed_residue["rejected_by_validators"]` dump, so that record has
 the shape it had before aliases existed. A draft without an `entity_id` binds nothing. `EntityRule` (JSON rules) gains
 `alias_source_system`: when set, the matched `id_field` value is bound under that system. The wire

@@ -118,6 +118,17 @@ _TYPE_SUMMARY = "summary"
 #: the line after its title (``trellis.retrieve.formatters``). ``get_items``
 #: prints whatever pack id its caller passes, normally that of the pack
 #: whose items it fetches. ``get_file_context`` prints no header.
+#:
+#: ``get_lessons`` is left out on purpose, although the server tags it as
+#: pack-returning. Behind ``TRELLIS_GET_LESSONS_PACK_EVENT`` it prints its pack id
+#: in a footer, which :func:`_header_pack_id` does not read. Recognising its
+#: replies would raise a join's ``retrieval_results``, and with the knob on its
+#: ``pack_ids_unparsed``, and ``analyze holdout`` sorts a session by those two
+#: counters (its "never called" and "unparsed" no-retrieval counts, and which
+#: sessions reached a retrieval). That changes what the holdout reports, so it
+#: waits for the readout. ``tests/unit/mcp/test_hook_text_claims.py`` pins this
+#: set to the server's tagged tools less that one name, so another tagged tool
+#: cannot be missed unnoticed.
 _PACK_TOOLS = frozenset(
     {
         "get_context",
