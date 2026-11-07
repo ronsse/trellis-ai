@@ -22,8 +22,11 @@ a precedent-typed node whose id is in the namespace.
 
 The *node* is a different matter. ``entity.create`` takes a caller-supplied
 ``entity_id`` and is the very call ``submit_learning_promotion`` makes to write
-a promoted precedent's node, so it cannot refuse the namespace, and a node there
-is skipped by ``retention.prune`` whoever created it. That grants nothing new:
+a promoted precedent's node, so it cannot refuse the namespace outright. It
+refuses any type but ``precedent`` there from a command without the promotion's
+mark (``entity.update`` likewise), because the serve-time check is keyed on the
+type; a node there is skipped by ``retention.prune`` whoever created it. That
+grants nothing new:
 ``lifecycle.state=current`` already makes any node prune-immune (counted as
 ``skipped_restored``). So the promotion-authority argument holds for the row
 alone, and the exemption is keyed on the id and nothing else.

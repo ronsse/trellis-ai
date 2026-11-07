@@ -21,7 +21,8 @@ logger = structlog.get_logger(__name__)
 #: ``retrieve.advisory_generator``, each overridable per component via
 #: the ``success_rating_threshold`` parameter-registry key). At *write*
 #: time :meth:`PackFeedback.from_agent_signal` uses it to derive
-#: ``outcome`` from a graded call that gave no explicit ``success``.
+#: ``outcome`` from a graded call that gave no explicit ``success``; a
+#: *derived* rating must be strictly above it (#1208).
 #:
 #: Note the asymmetry that follows: because :meth:`to_event_payload`
 #: always emits an explicit ``success``, rows written through this model
@@ -42,8 +43,9 @@ def derive_rating(
     What :meth:`PackFeedback.from_agent_signal` records as the rating when a
     caller sent neither ``rating`` nor ``success`` (#1194): distinct helpful
     ids over distinct helpful plus distinct unhelpful ids. A call naming only
-    unhelpful ids is ``0.0``, only helpful ids ``1.0``, one of each ``0.5``.
-    Repeating an id within a list does not weight it.
+    unhelpful ids is ``0.0``, only helpful ids ``1.0``, one of each ``0.5``
+    (as is one id named in both lists). Repeating an id within a list does
+    not weight it.
 
     Only pack items count. ``followed_advisory_ids`` and ``ignored_item_ids``
     are not passed in: an advisory is guidance the agent acted on, not a
@@ -177,10 +179,17 @@ class PackFeedback:
           ``success`` is given** (#1194). It is the helpful share of the
           named pack items (:func:`derive_rating`), ``rating_derived`` is
           set, and ``success`` then follows from it as below. A call naming
-          only unhelpful ids is a ``0.0``, not a win. A call naming no pack
-          item at all has nothing to derive from and keeps the earlier
-          behaviour: success, ``rating_derived`` unset. An explicit
-          ``rating`` or ``success`` is always used as sent.
+          only unhelpful ids is a ``0.0``, not a win. A derived ``0.5`` (an
+          even split, or one id named both helpful and unhelpful) is not a
+          win either: a derived rating must be *above*
+          :data:`SUCCESS_RATING_THRESHOLD`, while an explicit one keeps the
+          inclusive threshold (#1208). A call naming only ignored ids (no
+          followed advisory either) derives no rating and records a
+          failure, since the agent used nothing it was shown. A call
+          naming no pack item at all has nothing to derive from and keeps
+          the earlier behaviour: success,
+          ``rating_derived`` unset. An explicit ``rating`` or ``success``
+          is always used as sent.
         * **``success`` is derived from ``rating`` when not given.**
           Every consumer reads ``payload["success"]`` first and only
           falls back to ``rating``, so a graded call that also shipped a
@@ -227,13 +236,24 @@ class PackFeedback:
             if derived is not None:
                 rating = derived
                 rating_derived = True
+            elif ignored_item_ids and not followed_advisory_ids:
+                # Ignored-only: the agent used nothing it was shown. Not a
+                # verdict on any item, so nothing is derived, but not a win.
+                # A followed advisory is something used, so it keeps the
+                # earlier success.
+                success = False
 
-        if success is None:
-            succeeded = (
-                rating >= SUCCESS_RATING_THRESHOLD if rating is not None else True
-            )
-        else:
+        if success is not None:
             succeeded = success
+        elif rating is None:
+            succeeded = True
+        elif rating_derived:
+            # A derived even split, an id named both helpful and unhelpful
+            # included, is no net evidence of help, so it is not a win. An
+            # explicit rating keeps the inclusive threshold.
+            succeeded = rating > SUCCESS_RATING_THRESHOLD
+        else:
+            succeeded = rating >= SUCCESS_RATING_THRESHOLD
 
         metadata: dict[str, Any] = {}
         if pack_id:

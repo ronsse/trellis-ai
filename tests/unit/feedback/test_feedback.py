@@ -908,9 +908,44 @@ class TestDerivedRating:
         below = PackFeedback.from_agent_signal(
             run_id="r", helpful_item_ids=["a"], unhelpful_item_ids=["x", "y"]
         )
+        above = PackFeedback.from_agent_signal(
+            run_id="r", helpful_item_ids=["a", "b"], unhelpful_item_ids=["x"]
+        )
         assert at.rating == 0.5
-        assert at.succeeded is True
+        # A derived even split is no net evidence of help (#1208).
+        assert at.succeeded is False
         assert below.succeeded is False
+        assert above.succeeded is True
+
+    def test_an_explicit_half_rating_keeps_the_inclusive_threshold(self):
+        fb = PackFeedback.from_agent_signal(run_id="r", rating=0.5)
+        assert fb.succeeded is True
+
+    def test_an_id_named_both_helpful_and_unhelpful_is_not_a_win(self):
+        fb = PackFeedback.from_agent_signal(
+            run_id="r", helpful_item_ids=["x"], unhelpful_item_ids=["x"]
+        )
+        assert fb.rating == 0.5
+        assert fb.rating_derived is True
+        assert fb.succeeded is False
+        assert fb.to_event_payload()["success"] is False
+
+    def test_an_ignored_only_grade_is_a_failure_with_nothing_derived(self):
+        fb = PackFeedback.from_agent_signal(run_id="r", ignored_item_ids=["i"])
+        assert fb.rating is None
+        assert fb.rating_derived is False
+        assert fb.succeeded is False
+        payload = fb.to_event_payload()
+        assert payload["success"] is False
+        assert payload["rating"] == 0.0
+        assert "rating_derived" not in payload
+
+    def test_ignored_ids_beside_a_verdict_do_not_change_it(self):
+        fb = PackFeedback.from_agent_signal(
+            run_id="r", helpful_item_ids=["a"], ignored_item_ids=["i"]
+        )
+        assert fb.rating == 1.0
+        assert fb.succeeded is True
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -936,7 +971,7 @@ class TestDerivedRating:
         for extra in (
             {},
             {"followed_advisory_ids": ["adv"]},
-            {"ignored_item_ids": ["i"]},
+            {"followed_advisory_ids": ["adv"], "ignored_item_ids": ["i"]},
         ):
             fb = PackFeedback.from_agent_signal(run_id="r", **extra)
             assert fb.succeeded is True

@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
 from trellis.core.precedent_document import (
+    PRECEDENT_ENTITY_ID_PREFIX,
     PROMOTION_COMMAND_MARK,
     SOURCE_EXCERPT_STATUS_KEY,
 )
@@ -154,3 +155,89 @@ class TestOrdinaryWritesAreUnaffected:
         assert resp.status_code == 200, resp.text
         [result] = resp.json()["results"]
         assert result["status"] == "success", result
+
+
+class TestThePrecedentNamespaceKeepsItsType:
+    """An id under ``precedent://learning/`` is not stored as another type (#1080).
+
+    Defective subject: drop the namespace check in ``EntityCreateHandler`` or
+    ``EntityUpdateHandler`` and the matching test stores the node.
+    """
+
+    def _command(self, operation: str, **args: Any) -> dict[str, Any]:
+        return {
+            "commands": [{"operation": operation, "args": args}],
+            "strategy": "sequential",
+        }
+
+    def test_a_create_under_another_type_is_rejected_and_audited(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        node_id = f"{PRECEDENT_ENTITY_ID_PREFIX}p1"
+
+        resp = client.post(
+            "/api/v1/commands/batch",
+            json=self._command(
+                "entity.create",
+                entity_type="concept",
+                entity_id=node_id,
+                name="Pooling",
+            ),
+        )
+
+        assert resp.status_code == 200, resp.text
+        [result] = resp.json()["results"]
+        assert result["status"] == "rejected", result
+        rejected = registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_REJECTED
+        )
+        assert [e.payload["reason"] for e in rejected] == [
+            "precedent_namespace_type_via_entity_create"
+        ]
+        assert registry.knowledge.graph_store.get_node(node_id) is None
+
+    def test_a_retype_of_a_stamped_node_to_precedent_is_rejected_and_audited(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        registry.knowledge.graph_store.upsert_node(
+            node_id="n1",
+            node_type="concept",
+            properties={
+                "name": "Pooling",
+                SOURCE_EXCERPT_STATUS_KEY: "source_labelled",
+            },
+        )
+
+        resp = client.post(
+            "/api/v1/commands/batch",
+            json=self._command(
+                "entity.update", entity_id="n1", entity_type="precedent"
+            ),
+        )
+
+        assert resp.status_code == 200, resp.text
+        [result] = resp.json()["results"]
+        assert result["status"] == "rejected", result
+        rejected = registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_REJECTED
+        )
+        assert [e.payload["reason"] for e in rejected] == [
+            "precedent_retype_excerpt_status_via_entity_update"
+        ]
+        node = registry.knowledge.graph_store.get_node("n1")
+        assert node is not None
+        assert node["node_type"] == "concept"
+
+    def test_a_planted_promotion_mark_cannot_lift_either_refusal(
+        self, client: TestClient, registry: StoreRegistry
+    ) -> None:
+        node_id = f"{PRECEDENT_ENTITY_ID_PREFIX}p1"
+        body = self._command(
+            "entity.create", entity_type="concept", entity_id=node_id, name="Pooling"
+        )
+        body["commands"][0]["metadata"] = {PROMOTION_COMMAND_MARK: True}
+
+        resp = client.post("/api/v1/commands/batch", json=body)
+
+        assert resp.status_code == 400, resp.text
+        assert registry.knowledge.graph_store.get_node(node_id) is None
