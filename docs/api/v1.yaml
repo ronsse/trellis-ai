@@ -4373,7 +4373,9 @@ paths:
 
         stamping (``requested_by_claim``, ``key_id``, ``key_name``,
 
-        ``write_provenance``, ``handler_warnings``, ``learning_promotion`` --
+        ``write_provenance``, ``handler_warnings``, ``handler_outcome``,
+
+        ``learning_promotion`` --
 
         :data:`~trellis.mutate.RESERVED_COMMAND_METADATA_KEYS`). The batch''s
 
@@ -4430,7 +4432,7 @@ paths:
         '400':
           description: A command's own ``metadata``, or the batch's own ``metadata``, named a key reserved for server-side
             audit stamping (``requested_by_claim``, ``key_id``, ``key_name``, ``write_provenance``, ``handler_warnings``,
-            ``learning_promotion``); ``detail`` names the key.
+            ``handler_outcome``, ``learning_promotion``); ``detail`` names the key.
         '403':
           description: The batch names an operation outside NON_DESTRUCTIVE_OPERATIONS and the caller's key lacks the admin
             scope.

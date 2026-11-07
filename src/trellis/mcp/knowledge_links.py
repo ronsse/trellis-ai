@@ -52,7 +52,7 @@ from trellis.extract.referents import (
 )
 from trellis.extract.trace import normalize_slug
 from trellis.mutate import Command, CommandResult, CommandStatus, Operation
-from trellis.mutate.handlers.graph import ENTITY_LEFT_ALONE_MESSAGE
+from trellis.mutate.commands import OUTCOME_LEFT_ALONE, OUTCOME_METADATA_KEY
 from trellis.mutate.retention import CURRENT_STATE
 from trellis.schemas.classification import lifecycle_state_of
 from trellis.schemas.well_known import (
@@ -603,8 +603,9 @@ def _mint_domain(
 
     ``ENTITY_CREATE`` on an existing id replaces that node's properties, so
     the mint is guarded twice.  The command carries ``if_absent``, which makes
-    the handler leave an existing node alone (``Entity left alone``, answered
-    as a success that wrote nothing, and not reported here as a mint), and a
+    the handler leave an existing node alone (answered as a success that wrote
+    nothing, marked ``outcome: left_alone`` on the result, and not reported here
+    as a mint), and a
     key derived from the id, which answers a second mint of the same domain
     DUPLICATE.  The key protects a retry or a serial save, since it is
     recorded only after a mint succeeds.  ``if_absent`` is the guard for a
@@ -640,7 +641,7 @@ def _mint_domain(
         )
     )
     if result.status == CommandStatus.SUCCESS:
-        if result.message.startswith(ENTITY_LEFT_ALONE_MESSAGE):
+        if result.metadata.get(OUTCOME_METADATA_KEY) == OUTCOME_LEFT_ALONE:
             # A node landed after the check above; link to it, claim nothing.
             return domain_id, []
         return domain_id, [f"Domain minted: {domain_id}"]

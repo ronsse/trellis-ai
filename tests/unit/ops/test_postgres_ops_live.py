@@ -164,8 +164,8 @@ def _relation(dsn: str, create: str, drop: str) -> Iterator[None]:
 
 
 class TestPostgresMigrateSeesOnlyBaseTables:
-    """``pg_tables`` lists base tables of the schema; the information schema lists
-    views too, and only what the role holds a privilege on."""
+    """``pg_class`` lists base tables the search path reaches; the information schema
+    lists views too, and only what the role holds a privilege on."""
 
     def test_a_view_named_like_a_store_table_does_not_make_the_store_current(
         self, dsn: str, tmp_path: Path

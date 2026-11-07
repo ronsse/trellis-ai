@@ -32,6 +32,10 @@ stamp rather than treated as opaque decoration --
   :func:`trellis.mutate.executor._handler_warnings` and surfaced verbatim
   on ``CommandResult.warnings``; a caller-planted list would appear in the
   API response as a warning the handler never raised.
+* ``handler_outcome`` -- read by
+  :func:`trellis.mutate.executor._handler_outcome` and surfaced as
+  ``CommandResult.metadata["outcome"]``; a caller-planted value would report
+  an outcome (``left_alone``) the handler never reached.
 
 A caller that sets one of these directly -- even an admin caller -- can
 forge who the audit trail blames, backdate which build wrote an event, or
@@ -55,6 +59,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from trellis.core.precedent_document import PROMOTION_COMMAND_MARK
+from trellis.mutate.commands import HANDLER_OUTCOME_KEY
 
 #: Keys the executor, a handler, or the write-provenance stamp read off
 #: ``Command.metadata`` as authoritative rather than as opaque caller
@@ -67,6 +72,7 @@ RESERVED_COMMAND_METADATA_KEYS: frozenset[str] = frozenset(
         "key_name",
         "write_provenance",
         "handler_warnings",
+        HANDLER_OUTCOME_KEY,
         PROMOTION_COMMAND_MARK,
     }
 )

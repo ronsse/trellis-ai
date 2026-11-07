@@ -1,15 +1,16 @@
-"""Every agent-visible rendering of the loop is byte-identical to ``main``.
+"""Every agent-visible rendering of the loop matches the hand-kept golden.
 
 The holdout's subjects are agents, so the text they read in the server
 instructions, tool descriptions, packaged prompts and skills, pack footers and
-tool replies is part of the treatment environment. Until the readout is in,
-serving and that text are frozen.
+tool replies is part of the treatment environment. The text may change, but
+only on purpose: a surface that drifts without its golden entry changing fails
+here, and a change made on purpose edits the golden by hand in the same change
+and says so in the PR.
 
-``golden/loop_text_surfaces.json`` was captured from ``main`` (8eae6c98) before
-the loop text had a single source, by ``collect_surfaces`` on the unmodified
-tree. There is deliberately no regenerate switch: a golden the code under test
-can rewrite pins nothing. Change a surface on purpose only after the readout,
-and replace the golden by hand in the same change, saying so in the PR.
+``golden/loop_text_surfaces.json`` was first captured from ``main`` (8eae6c98)
+before the loop text had a single source, by ``collect_surfaces`` on the
+unmodified tree, and has been edited by hand since. There is deliberately no
+regenerate switch: a golden the code under test can rewrite pins nothing.
 """
 
 from __future__ import annotations

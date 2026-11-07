@@ -127,6 +127,29 @@ STORE_REFUSAL_REASONS = frozenset(
 )
 
 
+#: The ``Command.metadata`` key a handler sets to say how its write came out
+#: when the ``(created_id, message)`` it returns cannot. The executor copies it
+#: onto the result as ``CommandResult.metadata[OUTCOME_METADATA_KEY]`` and
+#: nowhere else. Reserved (see ``reserved_metadata``): a value a caller planted
+#: would be reported as something the handler decided.
+HANDLER_OUTCOME_KEY = "handler_outcome"
+
+#: The ``CommandResult.metadata`` key that carries a handler's outcome on a
+#: SUCCESS. The human ``message`` is for people and may be reworded; a caller
+#: that branches on how a write came out reads this instead.
+OUTCOME_METADATA_KEY = "outcome"
+
+#: ``metadata["outcome"]`` of an ``entity.create`` with ``if_absent`` whose id
+#: already named a node: the command succeeded and wrote nothing, so a caller
+#: must not claim a create it did not make. Its ``message`` is the handler's
+#: ``ENTITY_LEFT_ALONE_MESSAGE``.
+OUTCOME_LEFT_ALONE = "left_alone"
+
+#: Every value a handler may leave under :data:`HANDLER_OUTCOME_KEY`; anything
+#: else is dropped rather than reported, so the result's vocabulary is closed.
+HANDLER_OUTCOMES = frozenset({OUTCOME_LEFT_ALONE})
+
+
 class CommandResult(VersionedModel):
     """Result of executing a command through the pipeline.
 
@@ -137,6 +160,11 @@ class CommandResult(VersionedModel):
     set none). A caller holding only the result, such as the CLI choosing
     an exit code, can then tell a policy refusal from any other using
     :data:`POLICY_REFUSAL_REASONS` and :data:`STORE_REFUSAL_REASONS`.
+
+    A SUCCESS whose handler wrote nothing says so in
+    ``metadata["outcome"]`` (:data:`OUTCOME_METADATA_KEY`), one of
+    :data:`HANDLER_OUTCOMES`; the key is absent on an ordinary success. This
+    metadata is in-process only: the REST ``CommandResponse`` does not carry it.
     """
 
     command_id: str
