@@ -155,18 +155,24 @@ def test_an_unreadable_citation_is_counted_not_raised_and_retried(
     _store_document(registry, "doc-a", None)
     trace = _embedded_summary(registry, watermark_path, "doc-a")
     _store_document(registry, "doc-a", "confidential")
+    before_sweep = datetime.now(UTC)
     with monkeypatch.context() as patched:
         _raise_for(patched, registry, "doc-a")
         report = _sweep(registry, watermark_path)
     assert (report.restamp_unreadable, report.restamp_raised) == (1, 0)
     assert report.to_dict()["status"] == "partial"
     assert _stored_label(registry, trace) is None
-    # Not marked done, so the next pass sweeps again even on the default interval.
-    assert TraceEmbedWatermark(watermark_path).restamp_due(
-        datetime.now(UTC), timedelta(hours=1)
+    # Marked like a clean sweep (later than the first pass's mark), so the retry
+    # waits for the interval instead of making every pass a full sweep.
+    assert not TraceEmbedWatermark(watermark_path).restamp_due(
+        before_sweep, timedelta(0)
     )
+    within = run_trace_embed_pass(registry, watermark_path=watermark_path)
+    assert within.restamp_scanned == 0
 
-    again = run_trace_embed_pass(registry, watermark_path=watermark_path)
+    again = run_trace_embed_pass(
+        registry, watermark_path=watermark_path, restamp_interval=timedelta(0)
+    )
 
     assert (again.restamp_raised, again.restamp_unreadable) == (1, 0)
     assert _stored_label(registry, trace)["sensitivity"] == "confidential"
