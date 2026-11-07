@@ -6,12 +6,16 @@ from abc import ABC, abstractmethod
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from pydantic import BaseModel
+
 from trellis.errors import ValidationError
 from trellis.schemas.trace import Trace
 
 #: How many levels a trace's free-form payload may nest: ``steps[].args``,
 #: ``steps[].result``, ``outcome.metrics`` and ``metadata``. A field counts its
-#: own dict or list as level 1, so ``{"a": {"b": 1}}`` is 2 deep.
+#: own container as level 1, so ``{"a": {"b": 1}}`` is 2 deep. A container is
+#: anything the JSON writer turns into an object or an array: a dict, a pydantic
+#: model, or a list, tuple, set or frozenset.
 #:
 #: The bound exists because a store keeps a trace as JSON and reads it back with
 #: a parser that gives up past 200 levels of the whole document (measured on
@@ -50,7 +54,13 @@ def as_utc(moment: datetime) -> datetime:
 
 
 def _nests_deeper_than(value: Any, limit: int) -> bool:
-    """Whether *value* nests more than *limit* levels of dict or list.
+    """Whether *value* nests more than *limit* levels of container.
+
+    A container is a dict, a pydantic model (its field values), or a list,
+    tuple, set or frozenset. The store writes a trace with ``model_dump_json``,
+    which turns a model into an object and a set into an array, so a model or a
+    set placed in a free-form field is as deep on disk as the dict or list it
+    becomes.
 
     Iterative, so a payload nested far past the interpreter's recursion limit
     is measured rather than crashing the measurement, and it stops at the first
@@ -61,7 +71,11 @@ def _nests_deeper_than(value: Any, limit: int) -> bool:
         node, depth = stack.pop()
         if isinstance(node, dict):
             children: Any = node.values()
-        elif isinstance(node, (list, tuple)):
+        elif isinstance(node, BaseModel):
+            # Iterating a model yields ``(name, value)`` for its fields and any
+            # extras, which is what the JSON writer walks.
+            children = [field_value for _name, field_value in node]
+        elif isinstance(node, (list, tuple, set, frozenset)):
             children = node
         else:
             continue

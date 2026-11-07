@@ -357,8 +357,9 @@ Output on validation error:
 ### Nesting limit
 
 A trace is refused at write time when `steps[].args`, `steps[].result`, `outcome.metrics` or `metadata`
-nests more than 100 levels of objects and lists (`MAX_TRACE_PAYLOAD_DEPTH`, in `trellis.stores.base.trace`).
-A flat payload counts as 1 level. The error code is `trace_too_deep`, the
+nests more than 100 levels of containers (`MAX_TRACE_PAYLOAD_DEPTH`, in `trellis.stores.base.trace`).
+A container is an object, a list, or anything the store would write as one: a pydantic model counts
+as an object, and a tuple, set or frozenset counts as a list. A flat payload counts as 1 level. The error code is `trace_too_deep`, the
 message names the field and the bound, and every surface reports it as a rejected write: MCP
 `save_experience` raises `failed to store trace`, `POST /api/v1/traces` answers 400, and
 `trellis ingest trace` exits 2 whether `--format` is `text` or `json`. If you hit it, flatten the
