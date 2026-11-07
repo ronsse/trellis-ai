@@ -10,10 +10,11 @@ survive. Closing that window closes the main way the state gets created.
 Lifted out of :mod:`trellis.stores.advisory_store` (#393/#414), which named
 the extraction as a follow-up, so :mod:`trellis.stores.policy_store` (#413)
 did not become a fourth copy. It is deliberately *not* a drop-in for the
-two watermark writers (``trace_embed/watermark.py``,
-``session_capture/watermark.py``): those swallow ``OSError`` and continue,
-where this propagates. Converting them is a separate decision about their
-failure posture, not a refactor.
+two watermark writers: they swallow ``OSError`` and continue, where this
+propagates. ``trace_embed/watermark.py`` calls it and keeps its posture by
+catching ``OSError`` at the call site; ``session_capture/watermark.py`` still
+has its own writer. Converting it is a separate decision about its failure
+posture, not a refactor.
 """
 
 from __future__ import annotations

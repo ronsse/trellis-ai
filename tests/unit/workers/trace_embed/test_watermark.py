@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -36,6 +38,74 @@ class TestRoundTrip:
         path = tmp_path / "wm.json"
         TraceEmbedWatermark(path).save()
         assert not path.exists()
+
+
+class TestSaveIsDurable:
+    def test_save_fsyncs_the_file_then_the_directory(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The rename is atomic but not durable on its own: the bytes are synced
+        before it and the directory entry after it. A power loss then costs a
+        rescan at worst, never a half-written or un-renamed cursor. The effect
+        cannot be observed from a test; the calls can."""
+        real_fsync = os.fsync
+        synced: list[str] = []
+
+        def spy(fd: int) -> None:
+            kind = "dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
+            synced.append(kind)
+            real_fsync(fd)
+
+        monkeypatch.setattr(os, "fsync", spy)
+        path = tmp_path / "wm.json"
+        wm = TraceEmbedWatermark(path)
+        wm.advance_to(_cursor(5))
+        wm.set_retry([_cursor(2, "a")])
+        wm.save()
+
+        assert synced == ["file", "dir"]
+
+    def test_the_file_format_is_unchanged(self, tmp_path) -> None:
+        """Same keys, same version rule, same bytes as the plain ``json.dump``
+        the writer used before it fsynced."""
+        path = tmp_path / "wm.json"
+        wm = TraceEmbedWatermark(path)
+        wm.advance_to(_cursor(5))
+        wm.set_retry([_cursor(2, "a")])
+        wm.save()
+        assert path.read_text(encoding="utf-8") == json.dumps(
+            {
+                "version": WATERMARK_VERSION_WITH_RETRY,
+                "cursor": _cursor(5).to_json(),
+                "restamped_at": None,
+                "retry": [_cursor(2, "a").to_json()],
+            }
+        )
+        assert [p.name for p in tmp_path.iterdir()] == ["wm.json"], "no temp file"
+
+    def test_a_failed_write_is_swallowed_and_the_cursor_stays_unsaved(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The helper raises ``OSError``; the watermark must not. A cursor that
+        cannot be saved costs the next pass time, not rows, so it never fails
+        the pass, and it stays dirty so the next save tries again."""
+        path = tmp_path / "wm.json"
+        wm = TraceEmbedWatermark(path)
+        wm.advance_to(_cursor(5))
+
+        def refuse(*_args: object, **_kwargs: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr(
+            "trellis_workers.trace_embed.watermark.atomic_write_text", refuse
+        )
+        wm.save()
+        assert not path.exists()
+
+        monkeypatch.undo()
+        wm.save()
+        assert TraceEmbedWatermark(path).cursor == _cursor(5)
 
 
 class TestFailsSafe:

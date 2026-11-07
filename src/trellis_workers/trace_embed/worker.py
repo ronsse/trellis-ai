@@ -180,6 +180,14 @@ class TraceEmbedReport:
     #: ``partial`` while any remain. In a dry run, which changes no list, this is
     #: the list as stored.
     retry_pending: int = 0
+    #: Listed traces the trace store no longer had when the pass tried them
+    #: again. No later pass can embed a trace that is not there, so each one left
+    #: the list; the count (and a ``partial`` status, once) is the record, because
+    #: the ``trace_embed_retry_trace_missing`` warning is invisible on the default
+    #: CLI. Traces are immutable and not deleted by any normal operation, so one
+    #: going missing means a store was swapped or edited by hand. Its summary may
+    #: still be stored, without a vector row.
+    retry_missing: int = 0
     #: The restamp sweep (:mod:`~trellis_workers.trace_embed.restamp`), which
     #: runs at most once per ``restamp_interval``: summaries judged, summaries
     #: raised to a relabelled citation's label (in a dry run, that would be), those
@@ -214,6 +222,7 @@ class TraceEmbedReport:
                 or self.skipped_empty
                 or self.skipped_egress_unreadable
                 or self.retry_pending
+                or self.retry_missing
                 or self.restamp_unreadable
                 or self.restamp_failed
                 else "ok"
@@ -228,6 +237,7 @@ class TraceEmbedReport:
             "skipped_egress_unreadable": self.skipped_egress_unreadable,
             "failed": self.failed,
             "retry_pending": self.retry_pending,
+            "retry_missing": self.retry_missing,
             "restamp_scanned": self.restamp_scanned,
             "restamp_raised": self.restamp_raised,
             "restamp_unreadable": self.restamp_unreadable,
@@ -602,7 +612,8 @@ def _retry_held(
     permanent refusal, either of which settles the trace. ``False`` leaves it on
     the list with no attempt budget, so a trace that stays unreadable is retried
     on every pass for as long as it does. A trace the store no longer has cannot
-    be embedded by any later pass, so it leaves the list with a warning.
+    be embedded by any later pass, so it leaves the list, counted in
+    ``report.retry_missing`` as well as warned about.
     """
     for entry in sorted(held.values()):
         if should_continue is not None and not should_continue():
@@ -611,6 +622,7 @@ def _retry_held(
         trace = trace_store.get(entry.trace_id)
         if trace is None:
             logger.warning("trace_embed_retry_trace_missing", trace_id=entry.trace_id)
+            report.retry_missing += 1
             del held[entry.trace_id]
             continue
         report.scanned += 1
@@ -796,8 +808,14 @@ def _process_one(
     content = render_trace_summary(trace, include_step_errors=include_step_errors)
     if not content.strip():
         # A trace with no intent should not have validated. Count it rather
-        # than crashing the pass, and refuse to advance past it — a row this
-        # worker cannot render is a row it has not handled.
+        # than crashing the pass, and hold it — a row this worker cannot render
+        # is a row it has not handled. Held, not permanently refused, although a
+        # trace is immutable: what renders depends on ``include_step_errors``, a
+        # per-pass setting, so a trace whose only prose is a step error is empty
+        # under ``--no-step-errors`` and not otherwise. A later pass with the
+        # setting flipped embeds it, so it goes on the retry list (and the cursor
+        # holds when the list is full), unlike the refusals above that no
+        # setting can change.
         report.skipped_empty += 1
         report.failures.append(
             {"trace_id": trace.trace_id, "error": "rendered summary was empty"}
@@ -895,6 +913,7 @@ def summarize(
         total.skipped_egress_unreadable += r.skipped_egress_unreadable
         total.failed += r.failed
         total.retry_pending = r.retry_pending  # a level, not a flow: the last pass's
+        total.retry_missing += r.retry_missing
         total.restamp_scanned += r.restamp_scanned
         total.restamp_raised += r.restamp_raised
         total.restamp_unreadable += r.restamp_unreadable

@@ -2830,6 +2830,7 @@ def embed_traces_cmd(
         or report.skipped_invalid
         or report.skipped_egress_unreadable
         or report.retry_pending
+        or report.retry_missing
         or report.restamp_unreadable
         or report.restamp_failed
     ):
@@ -2837,7 +2838,9 @@ def embed_traces_cmd(
         # scheduled to do, and a green exit would hide exactly the silent gap
         # this worker exists to close. A permanently invalid row advances the
         # cursor, but the pass that moved past it still exits non-zero so the
-        # one-time skip is not silent.
+        # one-time skip is not silent. A listed trace that vanished from the
+        # trace store leaves the list on that pass and is counted once, the
+        # same way: nothing else would show that a store lost a record.
         raise typer.Exit(code=EXIT_INTERNAL)
 
 
@@ -2876,6 +2879,13 @@ def _render_embed_traces_text(payload: dict[str, Any]) -> None:
             f"  retry list: {payload['retry_pending']} trace(s) held without a "
             f"vector; the cursor moved past them and every pass attempts them "
             f"again until each is embedded or permanently refused",
+            soft_wrap=True,
+        )
+    if payload["retry_missing"]:
+        console.print(
+            f"  retry list: {payload['retry_missing']} listed trace(s) no longer "
+            f"in the trace store, so nothing is left to embed; a live pass "
+            f"takes them off the list",
             soft_wrap=True,
         )
     if payload["restamp_scanned"] or payload["restamp_failed"]:

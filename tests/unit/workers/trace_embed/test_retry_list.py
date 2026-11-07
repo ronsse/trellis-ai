@@ -18,9 +18,11 @@ import json
 
 import pytest
 
+from tests.cli_output import plain
 from tests.redaction_tombstone import make_tombstone
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.mutate.commands import OperationRegistry
+from trellis.schemas.trace import TraceStep
 from trellis_cli.worker import worker_app
 from trellis_workers.trace_embed import (
     TraceCursor,
@@ -248,6 +250,89 @@ class TestAPermanentOutcomeLeavesTheList:
         assert report.scanned == 0, "nothing to attempt, nothing to count"
         assert TraceEmbedWatermark(watermark_path).retry == ()
 
+    def test_a_trace_the_store_no_longer_has_is_counted_once(
+        self, registry, watermark_path, recorder, poison
+    ) -> None:
+        """The warning that used to be the only record is invisible on the
+        default CLI, so the loss is a report counter, and the pass is partial
+        for the one pass that finds it."""
+        traces = seed_traces(registry, 2)
+        poison.add(traces[0].trace_id)
+        run_trace_embed_pass(registry, watermark_path=watermark_path)
+
+        store = registry.operational.trace_store
+        store._conn.execute(
+            "DELETE FROM traces WHERE trace_id = ?", (traces[0].trace_id,)
+        )
+        store._conn.commit()
+        stored = watermark_path.read_bytes()
+
+        dry = run_trace_embed_pass(
+            registry, watermark_path=watermark_path, dry_run=True
+        )
+        assert dry.retry_missing == 1
+        assert dry.to_dict()["status"] == "partial"
+        assert watermark_path.read_bytes() == stored, "a dry run lists nothing"
+
+        found = run_trace_embed_pass(registry, watermark_path=watermark_path)
+        assert found.retry_missing == 1
+        assert found.retry_pending == 0
+        assert found.to_dict()["retry_missing"] == 1
+        assert found.to_dict()["status"] == "partial"
+
+        settled = run_trace_embed_pass(registry, watermark_path=watermark_path)
+        assert settled.retry_missing == 0
+        assert settled.to_dict()["status"] == "ok"
+
+
+class TestAnEmptyRenderIsHeldNotRefused:
+    """``skipped_empty`` is not a permanent outcome, so it stays on the list.
+
+    A trace is immutable, but what it renders to is not a function of the trace
+    alone: ``include_step_errors`` is a per-pass setting. A trace whose only
+    prose is a step error renders to nothing under ``--no-step-errors`` and to a
+    summary otherwise, so a later pass can embed what an earlier one could not.
+    Advancing past it as a permanent refusal would skip that trace for good.
+    """
+
+    def test_a_trace_empty_only_without_step_errors_is_listed_then_embedded(
+        self, registry, watermark_path, recorder
+    ) -> None:
+        traces = seed_traces(registry, 3)
+        only_an_error = traces[1].model_copy(
+            update={
+                "intent": "",
+                "outcome": None,
+                "steps": [
+                    TraceStep(step_type="tool_call", name="build", error="disk full")
+                ],
+            }
+        )
+        store = registry.operational.trace_store
+        store._conn.execute(
+            "UPDATE traces SET trace_json = ? WHERE trace_id = ?",
+            (only_an_error.model_dump_json(), only_an_error.trace_id),
+        )
+        store._conn.commit()
+
+        narrow = run_trace_embed_pass(
+            registry, watermark_path=watermark_path, include_step_errors=False
+        )
+        assert narrow.skipped_empty == 1
+        assert narrow.retry_pending == 1
+        assert narrow.to_dict()["status"] == "partial"
+        saved = TraceEmbedWatermark(watermark_path)
+        assert saved.cursor == _entry(traces[2]), "the cursor moved past it"
+        assert saved.retry == (_entry(only_an_error),), "and it is listed, not dropped"
+        assert _embedded(registry, traces) == {traces[0].trace_id, traces[2].trace_id}
+
+        wide = run_trace_embed_pass(registry, watermark_path=watermark_path)
+        assert wide.skipped_empty == 0
+        assert wide.embedded == 1
+        assert wide.retry_pending == 0
+        assert TraceEmbedWatermark(watermark_path).retry == ()
+        assert _embedded(registry, traces) == {t.trace_id for t in traces}
+
 
 class TestDryRunAndReset:
     def test_a_dry_run_writes_no_list_and_leaves_the_stored_one(
@@ -330,7 +415,7 @@ class TestTheCLI:
 
         text = self._run(cli_runner, watermark_path)
         assert text.exit_code == 1, text.output
-        assert "retry list: 1 trace(s)" in text.output
+        assert "retry list: 1 trace(s)" in plain(text.output)
 
     def test_a_clean_pass_carries_a_zero_count_and_no_line(
         self, registry, watermark_path, recorder, cli_runner
@@ -344,7 +429,37 @@ class TestTheCLI:
         assert payload["retry_pending"] == 0
 
         text = self._run(cli_runner, watermark_path)
-        assert "retry list" not in text.output
+        assert "retry list" not in plain(text.output)
+        assert payload["retry_missing"] == 0
+
+    def test_a_listed_trace_that_vanished_exits_non_zero_in_both_formats(
+        self, registry, tmp_path, recorder, poison, cli_runner
+    ) -> None:
+        """The exit is the same whichever ``--format`` asked, and it is the one
+        pass that finds the loss: the next one is clean."""
+        traces = seed_traces(registry, 2)
+        poison.add(traces[0].trace_id)
+        for name in ("json.wm", "text.wm"):
+            self._run(cli_runner, tmp_path / name)
+        store = registry.operational.trace_store
+        store._conn.execute(
+            "DELETE FROM traces WHERE trace_id = ?", (traces[0].trace_id,)
+        )
+        store._conn.commit()
+
+        as_json = self._run(cli_runner, tmp_path / "json.wm", "--format", "json")
+        payload = json.loads(as_json.output.strip().splitlines()[-1])
+        assert as_json.exit_code == 1, as_json.output
+        assert payload["status"] == "partial"
+        assert payload["retry_missing"] == 1
+
+        as_text = self._run(cli_runner, tmp_path / "text.wm")
+        assert as_text.exit_code == 1, as_text.output
+        assert "no longer in the trace store" in plain(as_text.output)
+
+        again = self._run(cli_runner, tmp_path / "json.wm", "--format", "json")
+        assert again.exit_code == 0, again.output
+        assert json.loads(again.output.strip().splitlines()[-1])["retry_missing"] == 0
 
 
 def test_a_pass_resumes_from_a_watermark_written_before_the_list(
