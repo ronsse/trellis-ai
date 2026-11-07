@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from trellis.core.precedent_document import PROMOTION_COMMAND_MARK
 from trellis.learning.scoring import (
     ALREADY_PROMOTED,
     precedent_document_content,
@@ -303,6 +304,9 @@ def test_a_missing_promote_event_is_mended_by_running_it_again(
             },
             target_type="entity",
             requested_by="test",
+            # The promotion's own create, as ``submit_learning_promotion``
+            # sends it: nothing else writes under the namespace (#1080).
+            metadata={PROMOTION_COMMAND_MARK: True},
         )
     )
     assert created.status.value == "success", created.message
