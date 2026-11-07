@@ -19,6 +19,9 @@ from trellis.errors import (
     ValidationError,
 )
 from trellis.mutate.commands import (
+    HANDLER_OUTCOME_KEY,
+    HANDLER_OUTCOMES,
+    OUTCOME_METADATA_KEY,
     BatchStrategy,
     Command,
     CommandBatch,
@@ -233,6 +236,21 @@ def _handler_warnings(command: Command) -> list[str]:
     return [str(w) for w in raw]
 
 
+def _handler_outcome(command: Command) -> dict[str, Any]:
+    """The ``CommandResult.metadata`` a handler's reported outcome contributes.
+
+    Like :func:`_handler_warnings`, this reads what the handler left on
+    ``command.metadata`` (``handle`` returns a fixed ``(created_id, message)``
+    pair), under :data:`~trellis.mutate.commands.HANDLER_OUTCOME_KEY`. A value
+    outside :data:`~trellis.mutate.commands.HANDLER_OUTCOMES` is dropped, so
+    the result never reports an outcome the executor does not know.
+    """
+    raw = command.metadata.get(HANDLER_OUTCOME_KEY)
+    if isinstance(raw, str) and raw in HANDLER_OUTCOMES:
+        return {OUTCOME_METADATA_KEY: raw}
+    return {}
+
+
 class PolicyGate(Protocol):
     """Protocol for policy checking. Implementations injected by caller."""
 
@@ -441,6 +459,9 @@ class MutationExecutor:
                 warnings=policy_warnings,
             )
 
+        # A reused ``Command`` object must not carry a previous run's outcome
+        # into this one: only what the handler sets during ``handle`` counts.
+        command.metadata.pop(HANDLER_OUTCOME_KEY, None)
         try:
             created_id, message = handler.handle(command)
         except ValidationError as exc:
@@ -624,6 +645,7 @@ class MutationExecutor:
                 *_handler_warnings(command),
                 *_audit_warnings(audit),
             ],
+            metadata=_handler_outcome(command),
         )
 
     def _validation_rejection(

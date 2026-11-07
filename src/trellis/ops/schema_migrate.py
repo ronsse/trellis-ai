@@ -362,6 +362,18 @@ class _SqliteDb(_Db):
             self._conn = None
 
 
+#: The base tables the connection's ``search_path`` reaches, by name.
+#: ``relkind`` ``r`` is an ordinary table and ``p`` a partitioned one, the two
+#: kinds ``pg_tables`` lists.
+_VISIBLE_BASE_TABLES_SQL = (
+    "SELECT c.relname FROM pg_catalog.pg_class c"
+    " WHERE c.relkind IN ('r', 'p')"
+    " AND pg_catalog.pg_table_is_visible(c.oid)"
+    " AND c.relnamespace NOT IN"
+    " ('pg_catalog'::regnamespace, 'information_schema'::regnamespace)"
+)
+
+
 class _PostgresDb(_Db):
     def __init__(self, dsn: str, *, writable: bool) -> None:
         try:
@@ -377,15 +389,20 @@ class _PostgresDb(_Db):
 
     def inspect(self, store: str) -> tuple[frozenset[str], int | None]:
         with self._conn.cursor() as cur:
-            # ``pg_tables`` lists the base tables of the schema whatever the role
-            # may do with them. ``information_schema.tables`` lists views as well
-            # (a view called ``documents`` would read as the store) and only what
-            # the role holds a privilege on (an under-granted role would read
-            # ``absent`` for a store that is there).
-            cur.execute(
-                "SELECT tablename FROM pg_catalog.pg_tables"
-                " WHERE schemaname = current_schema()"
-            )
+            # ``pg_class`` lists the base tables (ordinary and partitioned) whatever
+            # the role may do with them. ``information_schema.tables`` lists views
+            # as well (a view called ``documents`` would read as the store) and
+            # only what the role holds a privilege on (an under-granted role would
+            # read ``absent`` for a store that is there).
+            #
+            # ``pg_table_is_visible`` is true for a table the ``search_path``
+            # reaches and no earlier schema shadows, which is how the unqualified
+            # names in the store's own SQL and in ``VERSION_TABLE`` below resolve.
+            # ``pg_tables`` filtered on ``current_schema()`` saw only the first
+            # existing schema on the path, so a store living in a later one read
+            # ``absent``. ``pg_catalog`` is always on the path, so it is left out
+            # here, and so is ``information_schema``.
+            cur.execute(_VISIBLE_BASE_TABLES_SQL)
             tables = frozenset(r[0] for r in cur.fetchall())
             version = None
             if VERSION_TABLE in tables:

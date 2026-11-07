@@ -26,7 +26,13 @@ import pytest
 
 from tests.unit.mutate._purge_race import rival_inside_first_read
 from trellis.mutate import build_curate_executor
-from trellis.mutate.commands import Command, CommandStatus, Operation
+from trellis.mutate.commands import (
+    OUTCOME_LEFT_ALONE,
+    OUTCOME_METADATA_KEY,
+    Command,
+    CommandStatus,
+    Operation,
+)
 from trellis.mutate.handlers._common import _REWRITE_ATTEMPTS
 from trellis.mutate.handlers.graph import ENTITY_LEFT_ALONE_MESSAGE
 from trellis.schemas.measurement import Measurement
@@ -196,6 +202,8 @@ class TestIfAbsentPlaceholder:
         assert real.status == CommandStatus.SUCCESS
         assert placeholder.status == CommandStatus.SUCCESS
         assert placeholder.created_id == "n1"
+        assert placeholder.metadata[OUTCOME_METADATA_KEY] == OUTCOME_LEFT_ALONE
+        # The human message is unchanged; the outcome is what a caller reads.
         assert placeholder.message.startswith(ENTITY_LEFT_ALONE_MESSAGE)
         graph = registry.knowledge.graph_store
         assert _props(registry, "n1") == {"name": "Original", "owner": "team-a"}
@@ -210,6 +218,21 @@ class TestIfAbsentPlaceholder:
 
         assert result.status == CommandStatus.SUCCESS
         assert _props(registry, "n1") == {"name": "Placeholder", "stub": True}
+        assert OUTCOME_METADATA_KEY not in result.metadata
+        assert result.message == "Entity created: Placeholder"
+
+    def test_a_placeholder_over_an_existing_node_reports_it_was_left_alone(
+        self, registry: StoreRegistry
+    ) -> None:
+        executor = build_curate_executor(registry, clearance="restricted")
+        executor.execute(_create("n1", owner="team-a"))
+
+        result = executor.execute(self._placeholder("n1"))
+
+        assert result.status == CommandStatus.SUCCESS
+        assert result.metadata == {OUTCOME_METADATA_KEY: OUTCOME_LEFT_ALONE}
+        assert result.message == f"{ENTITY_LEFT_ALONE_MESSAGE}: Placeholder"
+        assert _props(registry, "n1") == {"name": "Original", "owner": "team-a"}
 
     def test_a_node_that_never_settles_fails_after_the_attempt_cap(
         self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
