@@ -545,8 +545,9 @@ class FakeCatalogConnection:
 
     The database holds one base table the role cannot read (``edges``), one it can
     (``nodes``) and a view (``documents``). ``information_schema.tables`` lists the
-    view and leaves out what the role holds no privilege on; ``pg_tables`` lists
-    base tables only, whatever the role may do with them.
+    view and leaves out what the role holds no privilege on; ``pg_class`` (read as
+    ``pg_tables`` reads it, ordinary and partitioned tables) lists base tables
+    only, whatever the role may do with them.
     """
 
     BASE_TABLES = ("nodes", "edges")
@@ -571,7 +572,7 @@ class FakeCatalogConnection:
         self.queries.append(sql)
         if "information_schema.tables" in sql:
             self._rows = [(n,) for n in (*self.GRANTED, *self.VIEWS)]
-        elif "pg_catalog.pg_tables" in sql:
+        elif "pg_catalog.pg_class" in sql:
             self._rows = [(n,) for n in self.BASE_TABLES]
         else:
             self._rows = []
@@ -584,7 +585,7 @@ class FakeCatalogConnection:
 
 
 class TestPostgresInspectReadsBaseTablesOnly:
-    """The inspect asks ``pg_catalog.pg_tables``, scoped to the current schema.
+    """The inspect asks ``pg_catalog.pg_class`` for the tables the search path reaches.
 
     The fake models the difference between the catalogs; the same two cases run
     against a real server in ``test_postgres_ops_live.py``, which CI's live-infra
@@ -600,15 +601,42 @@ class TestPostgresInspectReadsBaseTablesOnly:
         assert version is None
         return conn, tables
 
-    def test_it_reads_pg_tables_and_not_the_information_schema(self) -> None:
+    def test_it_reads_pg_class_and_not_the_information_schema(self) -> None:
         conn, _tables = self.inspect()
 
         assert len(conn.queries) == 1
         sql = conn.queries[0]
-        assert "pg_catalog.pg_tables" in sql
-        assert "information_schema" not in sql
-        assert "schemaname = current_schema()" in sql
+        assert "pg_catalog.pg_class" in sql
+        assert "information_schema.tables" not in sql
+        assert "relkind IN ('r', 'p')" in sql, "ordinary and partitioned tables only"
         assert conn.rolled_back, "the read transaction is ended"
+
+    def test_it_follows_the_whole_search_path_and_not_the_first_schema(self) -> None:
+        """``current_schema()`` is the first existing schema on the path, so a
+        store living in a later one read ``absent``. ``pg_table_is_visible`` is
+        what the store's own unqualified table names resolve by.
+
+        The live leg that creates a store behind a second schema was not run
+        here; this pins the query's text, and the SQL was run by hand against a
+        throwaway Postgres 16 (views excluded, partitioned tables included,
+        shadowed names once, ``pg_catalog`` left out).
+        """
+        conn, _tables = self.inspect()
+
+        sql = conn.queries[0]
+        assert "pg_catalog.pg_table_is_visible(c.oid)" in sql
+        assert "current_schema" not in sql
+        assert "schemaname" not in sql
+
+    def test_the_system_schemas_are_left_out(self) -> None:
+        """``pg_catalog`` is always on the path, so without this its tables
+        would be listed and a store with no table list would read as present."""
+        conn, _tables = self.inspect()
+
+        sql = conn.queries[0]
+        assert "'pg_catalog'::regnamespace" in sql
+        assert "'information_schema'::regnamespace" in sql
+        assert "NOT IN" in sql
 
     def test_a_view_is_not_a_table_and_an_unreadable_table_is_still_one(self) -> None:
         _conn, tables = self.inspect()
