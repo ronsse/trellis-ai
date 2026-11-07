@@ -63,9 +63,11 @@ known namespace prefix mints nothing. `ENTITY_CREATE` on an existing id replaces
 the mint re-reads the id immediately before writing, is an `if_absent` create (an existing node is left
 alone and is linked to, not reported as minted) and carries an idempotency key derived from the id. The
 key is recorded only after a success, so it protects a retry or a serial save; `if_absent` guards a
-writer that holds no key, such as a trace. It is a read before a write in the handler, so the window
-is narrowed to that gap, not closed: two truly concurrent saves inside it can both write the same
-`minted_by` and possibly another spelling of the name.
+writer that holds no key, such as a trace. The handler writes only if the id is still absent
+(`create_node_if_absent`), so a node a trace wrote in between is kept. That insert is atomic on SQLite
+and Postgres; on the Bolt backends (Neo4j, ArcadeDB) it is one statement without a uniqueness
+constraint, so two truly concurrent saves there can both write the same `minted_by` and possibly
+another spelling of the name.
 
 ## 3. Why the default stays off
 

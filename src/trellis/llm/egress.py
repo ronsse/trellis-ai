@@ -147,11 +147,14 @@ class SummaryJudgement:
     ``verdict`` is :meth:`EgressGate.summary_verdict`'s answer. ``inherited`` is
     the strictest label above ``internal`` among the documents the trace cites,
     ``restricted`` when the trace or a citation could not be read, and ``None``
-    when nothing cited is labelled above ``internal``.
+    when nothing cited is labelled above ``internal``. ``unreadable`` says the
+    trace or a citation could not be read, which ``verdict`` hides when another
+    citation withholds it: a retry might lower ``inherited``.
     """
 
     verdict: EgressVerdict
     inherited: Sensitivity | None
+    unreadable: bool = False
 
 
 def strictest_verdict(*verdicts: EgressVerdict) -> EgressVerdict:
@@ -421,8 +424,9 @@ class EgressGate:
 
     def _cited(
         self, doc_ids: Iterable[str], *, with_level: bool
-    ) -> tuple[EgressVerdict, Sensitivity | None]:
-        """:meth:`cited_verdict`, and the strictest label above ``internal`` cited.
+    ) -> tuple[EgressVerdict, Sensitivity | None, bool]:
+        """:meth:`cited_verdict`, the strictest label above ``internal`` cited, and
+        whether any citation could not be read.
 
         The level is ``None`` when no citation is labelled above ``internal``
         (an unlabelled or ``public`` one never lowers anything), and
@@ -442,10 +446,12 @@ class EgressGate:
             ):
                 strictest = level
         if withheld:
-            return EgressVerdict.WITHHELD, strictest
+            return EgressVerdict.WITHHELD, strictest, unreadable
         return (
-            EgressVerdict.UNREADABLE if unreadable else EgressVerdict.PERMITTED
-        ), strictest
+            (EgressVerdict.UNREADABLE if unreadable else EgressVerdict.PERMITTED),
+            strictest,
+            unreadable,
+        )
 
     def summary_verdict(
         self,
@@ -512,11 +518,14 @@ class EgressGate:
             return SummaryJudgement(
                 strictest_verdict(own, EgressVerdict.UNREADABLE),
                 "restricted" if with_level else None,
+                unreadable=True,
             )
-        cited, level = self._cited(
+        cited, level, unreadable = self._cited(
             (ref.evidence_id for ref in trace.evidence_used), with_level=with_level
         )
-        return SummaryJudgement(strictest_verdict(own, cited), level)
+        return SummaryJudgement(
+            strictest_verdict(own, cited), level, unreadable=unreadable
+        )
 
     def verdict(self, doc_id: str, metadata: Mapping[str, Any] | None) -> EgressVerdict:
         """Whether the document ``doc_id`` carrying ``metadata`` may be sent.

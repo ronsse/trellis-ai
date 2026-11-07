@@ -1003,6 +1003,51 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             check_node_role_immutable(node_id, existing, node_role)
         return False
 
+    def create_node_if_absent(
+        self,
+        node_id: str,
+        node_type: str,
+        properties: dict[str, Any],
+        *,
+        node_role: str = "semantic",
+        generation_spec: dict[str, Any] | None = None,
+        document_ids: list[str] | None = None,
+    ) -> bool:
+        validate_node_role_args(node_role, generation_spec)
+        validate_document_ids(document_ids)
+        now = _iso(utc_now())
+        new_props = {
+            "node_id": node_id,
+            "version_id": generate_ulid(),
+            "node_type": node_type,
+            "node_role": node_role,
+            "generation_spec_json": json.dumps(generation_spec, allow_nan=False)
+            if generation_spec is not None
+            else None,
+            "document_ids_json": json.dumps(document_ids, allow_nan=False)
+            if document_ids is not None
+            else None,
+            "properties_json": json.dumps(properties or {}, allow_nan=False),
+            "created_at": now,
+            "updated_at": now,
+            "valid_from": now,
+            "valid_to": None,
+        }
+        # One statement: the CREATE runs only when the node has no current
+        # row. Neither engine enforces one current version per ``node_id``
+        # (module docstring), so two calls that both observe no row can both
+        # create; the window this closes is the caller's read-then-write.
+        cypher = """
+        OPTIONAL MATCH (cur:Node {node_id: $node_id}) WHERE cur.valid_to IS NULL
+        WITH collect(cur) AS current_rows
+        WHERE size(current_rows) = 0
+        CREATE (n:Node)
+        SET n = $new_props
+        RETURN n.node_id AS node_id
+        """
+        record = self._run_write_single(cypher, node_id=node_id, new_props=new_props)
+        return record is not None
+
     def upsert_nodes_bulk(
         self,
         nodes: list[dict[str, Any]],

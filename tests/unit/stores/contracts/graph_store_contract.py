@@ -1692,6 +1692,107 @@ class GraphStoreContractTests:
             assert _current(store, node_id)["properties"] == {"by": winner}
 
     # ------------------------------------------------------------------
+    # create_node_if_absent — create only when no version is current
+    # ------------------------------------------------------------------
+
+    #: Whether two concurrent calls for one absent id can both write. False on
+    #: the Bolt engines, which enforce no uniqueness on a current version.
+    ATOMIC_CREATE_IF_ABSENT = True
+
+    def test_create_node_if_absent_creates_an_absent_node(
+        self, store: GraphStore
+    ) -> None:
+        created = store.create_node_if_absent(
+            "n1", "service", {"v": 1}, document_ids=["doc-1"]
+        )
+
+        assert created is True
+        node = _current(store, "n1")
+        assert node["node_type"] == "service"
+        assert node["node_role"] == "semantic"
+        assert node["properties"] == {"v": 1}
+        assert node["document_ids"] == ["doc-1"]
+        assert node["created_at"] is not None
+        assert node["valid_from"] is not None
+        assert len(store.get_node_history("n1")) == 1
+
+    def test_create_node_if_absent_leaves_a_current_node_untouched(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("n1", "service", {"v": 1})
+        current = _current(store, "n1")
+
+        created = store.create_node_if_absent("n1", "person", {"v": 2})
+
+        assert created is False
+        assert store.get_node("n1") == current
+        assert len(store.get_node_history("n1")) == 1
+
+    def test_create_node_if_absent_creates_over_a_purged_id(
+        self, store: GraphStore
+    ) -> None:
+        store.upsert_node("n1", "service", {"v": 1})
+        assert store.delete_node("n1") is True
+
+        created = store.create_node_if_absent("n1", "service", {"v": "again"})
+
+        assert created is True
+        assert _current(store, "n1")["properties"] == {"v": "again"}
+
+    def test_create_node_if_absent_carries_a_structural_role_and_a_spec(
+        self, store: GraphStore
+    ) -> None:
+        spec = {"generator_name": "louvain", "generator_version": "1.0.0"}
+        assert store.create_node_if_absent(
+            "col", "uc_column", {}, node_role="structural"
+        )
+        assert store.create_node_if_absent(
+            "cluster_x", "concept", {}, node_role="curated", generation_spec=spec
+        )
+
+        assert _current(store, "col")["node_role"] == "structural"
+        curated = _current(store, "cluster_x")
+        assert curated["node_role"] == "curated"
+        assert curated["generation_spec"] == spec
+
+    def test_create_node_if_absent_validates_like_upsert_node(
+        self, store: GraphStore
+    ) -> None:
+        with pytest.raises(ValueError, match="generation_spec"):
+            store.create_node_if_absent("c1", "concept", {}, node_role="curated")
+        with pytest.raises(ValueError, match="node_role"):
+            store.create_node_if_absent("c2", "concept", {}, node_role="bogus")
+        with pytest.raises(ValueError, match="document_ids"):
+            store.create_node_if_absent("c3", "concept", {}, document_ids=["a", "a"])
+
+        assert store.get_node("c1") is None
+        assert store.get_node("c2") is None
+        assert store.get_node("c3") is None
+
+    def test_create_node_if_absent_is_atomic_for_concurrent_writers(
+        self, store: GraphStore
+    ) -> None:
+        if not self.ATOMIC_CREATE_IF_ABSENT:
+            pytest.skip("this engine enforces no uniqueness on a current version")
+        for round_number in range(20):
+            node_id = f"n{round_number}"
+            barrier = Barrier(2)
+
+            def _contend(
+                writer: str, node_id: str = node_id, barrier: Barrier = barrier
+            ) -> bool:
+                barrier.wait()
+                return store.create_node_if_absent(node_id, "service", {"by": writer})
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(_contend, ("a", "b")))
+
+            assert sorted(results) == [False, True], (node_id, results)
+            winner = "a" if results[0] else "b"
+            assert len(store.get_node_history(node_id)) == 1
+            assert _current(store, node_id)["properties"] == {"by": winner}
+
+    # ------------------------------------------------------------------
     # counts
     # ------------------------------------------------------------------
 

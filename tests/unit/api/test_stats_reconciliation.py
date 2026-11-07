@@ -25,7 +25,6 @@ from contextlib import asynccontextmanager
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from typer.testing import CliRunner
 
 import trellis_api.app as app_module
 from tests.chunk_corpus import seed_chunked
@@ -109,7 +108,9 @@ def test_stats_counts_agree_on_a_corpus_with_no_chunks(client, registry):
     assert stats["documents"] == stats["document_rows"] == 4
 
 
-def test_cli_stats_matches_the_rest_fields(client, registry, tmp_path, monkeypatch):
+def test_cli_stats_matches_the_rest_fields(
+    client, registry, tmp_path, monkeypatch, cli_runner
+):
     """``trellis admin stats --format json`` reports the same two keys.
 
     The CLI is the second stats surface #412 names. It reads its own
@@ -123,14 +124,14 @@ def test_cli_stats_matches_the_rest_fields(client, registry, tmp_path, monkeypat
     monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "cli-data"))
     _reset_registry()
 
-    result = CliRunner().invoke(admin_app, ["init"])
+    result = cli_runner.invoke(admin_app, ["init"])
     assert result.exit_code == 0
 
     from trellis_cli.stores import get_document_store
 
     seed_chunked(get_document_store(), parents=_PARENTS, per_parent=_PER_PARENT)
 
-    result = CliRunner().invoke(admin_app, ["stats", "--format", "json"])
+    result = cli_runner.invoke(admin_app, ["stats", "--format", "json"])
     assert result.exit_code == 0
     payload = json.loads(result.stdout.strip().splitlines()[-1])
 

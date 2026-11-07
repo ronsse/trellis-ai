@@ -575,6 +575,45 @@ class GraphStore(ABC):
         """
 
     @abstractmethod
+    def create_node_if_absent(
+        self,
+        node_id: str,
+        node_type: str,
+        properties: dict[str, Any],
+        *,
+        node_role: str = "semantic",
+        generation_spec: dict[str, Any] | None = None,
+        document_ids: list[str] | None = None,
+    ) -> bool:
+        """Create a node only when no version of *node_id* is current.
+
+        The counterpart of :meth:`update_node_if_current` for the case the
+        caller read *no* node: when the id still has no current version the
+        node is created, as :meth:`upsert_node` creates one. Otherwise
+        nothing is written and the call returns ``False``: another writer
+        created the id after the caller's read, and the caller re-reads and
+        decides again. It never replaces a version, so a write that read an
+        absent id cannot overwrite a record that committed in between.
+
+        The check and the write are one step. On SQLite and Postgres it is
+        atomic: of concurrent calls for one absent id exactly one returns
+        ``True``. On the Bolt backends (Neo4j, ArcadeDB) it is one Cypher
+        statement, so the window is the statement rather than the caller's
+        read-then-write, but those engines enforce no uniqueness on a
+        current version (see :class:`BoltOpenCypherGraphStore`), so two
+        concurrent calls that both observe no current row can both write.
+
+        Raises:
+            ValueError / TypeError: under the same conditions as
+                :meth:`upsert_node`, before anything is read.
+
+        Backend failures raise rather than being reported as ``False``.
+
+        Returns:
+            ``True`` when the node was created.
+        """
+
+    @abstractmethod
     def resolve_alias(
         self,
         source_system: str,

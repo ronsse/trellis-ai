@@ -64,6 +64,48 @@ def _rewrite_current_node(
     raise StoreError(msg, store="graph")
 
 
+def _write_node_replacing_read(
+    store: GraphStore,
+    node_id: str,
+    build: Callable[[dict[str, Any] | None], dict[str, Any] | None],
+) -> dict[str, Any] | None:
+    """Write ``node_id`` from a read of it, over the version that was read.
+
+    For the writers that replace a node's whole bag (``entity.create`` over
+    an existing id, ``observation.record``, ``measurement.record``). ``build``
+    receives the current row, or ``None`` when the id has no current version,
+    runs every check on it, and returns the fields to write (``node_type``,
+    ``properties``, ``node_role``, ``generation_spec``, ``document_ids``), or
+    ``None`` to write nothing.
+
+    The write is conditional on what ``build`` was shown: a compare-and-set
+    on the row's ``valid_from`` when there was a row, ``create_node_if_absent``
+    when there was none. A write that committed in between makes the
+    condition fail, and the node is re-read and ``build`` re-applied, at most
+    ``_REWRITE_ATTEMPTS`` times in all, so the checks and the write always
+    apply to the same version. An unconditional ``upsert_node`` would replace
+    that write with a bag built from the read that preceded it.
+
+    Returns the fields written, or ``None`` when ``build`` declined. Raises
+    :class:`StoreError` when every attempt lost to a concurrent writer.
+    """
+    for _attempt in range(_REWRITE_ATTEMPTS):
+        existing = store.get_node(node_id)
+        fields = build(existing)
+        if fields is None:
+            return None
+        if existing is None:
+            written = store.create_node_if_absent(node_id, **fields)
+        else:
+            written = store.update_node_if_current(
+                node_id, existing["valid_from"], **fields
+            )
+        if written:
+            return fields
+    msg = f"Node {node_id} changed during each of {_REWRITE_ATTEMPTS} write attempts"
+    raise StoreError(msg, store="graph")
+
+
 def _current_lifecycle_state(node: dict[str, Any]) -> str:
     """``node``'s current ``Lifecycle.state``, fail-open to ``CURRENT_STATE``.
 

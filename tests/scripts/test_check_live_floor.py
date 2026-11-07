@@ -234,11 +234,24 @@ def test_the_contract_is_floored(floor: ModuleType, contract: str) -> None:
     assert fewest >= 1
 
 
-@pytest.mark.parametrize("contract", [c for c in CONTRACTS if c != NEO4J_VECTOR])
+#: The Bolt graph contracts skip the one concurrent-create case
+#: (``ATOMIC_CREATE_IF_ABSENT = False``): no uniqueness constraint can arbitrate
+#: two first creates under SCD2, where a node's versions share a ``node_id``.
+BOLT_GRAPH_GATED = (
+    "tests/unit/stores/contracts/test_arcadedb_graph_contract.py",
+    "tests/unit/stores/contracts/test_neo4j_graph_contract.py",
+)
+
+
+@pytest.mark.parametrize(
+    "contract",
+    [c for c in CONTRACTS if c != NEO4J_VECTOR and c not in BOLT_GRAPH_GATED],
+)
 def test_a_contract_with_no_capability_gate_may_skip_nothing(
     floor: ModuleType, contract: str
 ) -> None:
-    """Only the Neo4j vector contract gates cases by name (``SEARCH``).
+    """Only the Neo4j vector contract (``SEARCH``) and the Bolt graph contracts
+    (one concurrent-create case) gate cases by name.
 
     A wider allowance on any other row lets that many cases skip unseen, so
     it stays zero until a case is gated in the same diff that raises it.
@@ -246,6 +259,15 @@ def test_a_contract_with_no_capability_gate_may_skip_nothing(
     _, most = floor.FLOORS[contract]
 
     assert most == 0
+
+
+@pytest.mark.parametrize("contract", BOLT_GRAPH_GATED)
+def test_a_bolt_graph_contract_may_skip_exactly_the_concurrent_create_case(
+    floor: ModuleType, contract: str
+) -> None:
+    _, most = floor.FLOORS[contract]
+
+    assert most == 1
 
 
 def _dotted(path: str) -> str:
