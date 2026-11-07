@@ -10,6 +10,7 @@ store whose file matters least.
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from pathlib import Path
@@ -164,6 +165,28 @@ class TestSymlinks:
         atomic_write_text(link, "after")
 
         assert stat.S_IMODE(real.stat().st_mode) == 0o640
+
+
+class TestSymlinkLoop:
+    def test_a_looping_symlink_raises_oserror_with_its_cause(
+        self, tmp_path: Path
+    ) -> None:
+        """Callers catch ``OSError``; before Python 3.13 ``resolve()`` raised
+        ``RuntimeError`` for a loop, which escaped every one of them."""
+        first = tmp_path / "a.json"
+        second = tmp_path / "b.json"
+        first.symlink_to(second)
+        second.symlink_to(first)
+
+        with pytest.raises(OSError, match="oop") as caught:
+            atomic_write_text(first, "doomed")
+
+        assert caught.value.errno == errno.ELOOP
+        assert first.is_symlink(), "the link is left alone"
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["a.json", "b.json"]
+        if isinstance(caught.value.__cause__, BaseException):
+            assert isinstance(caught.value.__cause__, RuntimeError)
+            assert str(caught.value.__cause__) in str(caught.value)
 
 
 class TestDurability:

@@ -791,6 +791,10 @@ def _process_one(
     so the next pass writes it again and tries the embed again.
     A summary that was redacted is refused by the write seam before the screen
     and counts as redacted. A dry run asks the same question and writes nothing.
+
+    A trace that renders to nothing is counted under ``skipped_empty`` either
+    way (:func:`_count_empty`): it advances when step errors are on and still
+    render nothing, and is held when only ``--no-step-errors`` emptied it.
     """
     # Before the vector-store lookup, not after it: a backend that binds the
     # id as a SQL parameter (Postgres refuses a NUL in a text value) would
@@ -807,20 +811,7 @@ def _process_one(
 
     content = render_trace_summary(trace, include_step_errors=include_step_errors)
     if not content.strip():
-        # A trace with no intent should not have validated. Count it rather
-        # than crashing the pass, and hold it — a row this worker cannot render
-        # is a row it has not handled. Held, not permanently refused, although a
-        # trace is immutable: what renders depends on ``include_step_errors``, a
-        # per-pass setting, so a trace whose only prose is a step error is empty
-        # under ``--no-step-errors`` and not otherwise. A later pass with the
-        # setting flipped embeds it, so it goes on the retry list (and the cursor
-        # holds when the list is full), unlike the refusals above that no
-        # setting can change.
-        report.skipped_empty += 1
-        report.failures.append(
-            {"trace_id": trace.trace_id, "error": "rendered summary was empty"}
-        )
-        return False
+        return _count_empty(trace, include_step_errors, report)
 
     if dry_run:
         return _dry_run_one(
@@ -865,6 +856,44 @@ def _process_one(
         )
         advance = False
     return advance
+
+
+def _count_empty(
+    trace: Trace, include_step_errors: bool, report: TraceEmbedReport
+) -> bool:
+    """Count a trace that rendered to nothing; ``False`` is a hold.
+
+    ``Trace.intent`` is a bare ``str``, so a blank intent with no outcome summary
+    is storable (``trellis ingest trace`` stores one). Whether such a trace
+    renders empty depends on ``include_step_errors``, a per-pass setting, and on
+    nothing else: ``render_trace_summary`` reads only the trace, a trace is
+    immutable, and no path rewrites a stored one. So there are two cases.
+
+    * Empty even with step errors on: no setting and no later pass can change it.
+      It is counted and the pass advances past it, as for ``skipped_invalid``;
+      holding it would keep a retry-list slot for ever and make every pass report
+      ``retry_pending`` and exit non-zero. It stays under ``skipped_empty``, so the
+      one pass that meets it is ``partial`` and exits non-zero, which is how
+      ``skipped_invalid`` is told too. Nothing is lost: the trace has no prose to
+      embed. A build whose renderer reads more of a trace reaches it again
+      through ``--reset-watermark``.
+    * Empty only because of ``--no-step-errors``: a trace whose only prose is a
+      step error. A later pass without the flag embeds it, so it is held (the
+      retry list, or the cursor when the list is full).
+    """
+    report.skipped_empty += 1
+    permanent = include_step_errors or not render_trace_summary(trace).strip()
+    report.failures.append(
+        {
+            "trace_id": trace.trace_id,
+            "error": (
+                "rendered summary was empty even with step errors; not retried"
+                if permanent
+                else "rendered summary was empty"
+            ),
+        }
+    )
+    return permanent
 
 
 def _count_success(
