@@ -47,6 +47,18 @@ serve the digest of a ``confidential`` document to a caller cleared only to
 ``internal``. The handler stamps the label in before the write
 (:meth:`TraceSummaryIngestHandler._label_for_write`), from the same read of the
 citations that decides the embed.
+
+**Only the sensitivity is inherited, not regulatory tags.** ``regulatory_tags``
+(``phi``, ``pii`` ...) are written by ``classification.tag_regulatory`` and read
+by the handlers and the label proposer; no retrieval, egress or auth gate reads
+them, so inheriting them would change nothing a caller can observe. If a gate ever
+reads them, inherit them here as a union (never lower, never drop a tag a person
+set), next to the sensitivity.
+
+**A relabelled citation is picked up by the restamp sweep**
+(:mod:`trellis_workers.trace_embed.restamp`), because a summary that already has a
+vector is never rewritten by the pass above. It uses this handler in
+``embed="none"`` mode.
 """
 
 from __future__ import annotations
@@ -54,7 +66,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from trellis.llm.egress import EgressGate, EgressVerdict
+from trellis.llm.egress import EgressGate, EgressVerdict, SummaryJudgement
 from trellis.mutate.commands import Command, Operation
 from trellis.mutate.handlers import EvidenceIngestHandler
 from trellis.ops.embed_egress_health import UNREADABLE_REEMIT_AFTER
@@ -69,7 +81,7 @@ from trellis.schemas.classification import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from trellis.llm.egress import SummaryJudgement
+    from trellis.mutate.evidence_ingest import EvidenceEmbedMode
     from trellis.stores.base.trace import TraceStore
     from trellis.stores.registry import StoreRegistry
 
@@ -104,8 +116,13 @@ def build_trace_summary_command(
     content: str,
     metadata: dict[str, Any],
     created_at: str | None = None,
+    embed_mode: EvidenceEmbedMode = "strict",
 ) -> Command:
-    """The ``evidence.ingest`` command for one rendered trace summary."""
+    """The ``evidence.ingest`` command for one rendered trace summary.
+
+    ``embed_mode`` must equal the executing handler's mode (the core handler
+    refuses a mismatch): ``"strict"`` for the pass, ``"none"`` for a restamp.
+    """
     return Command(
         operation=Operation.EVIDENCE_INGEST,
         target_id=doc_id,
@@ -119,7 +136,7 @@ def build_trace_summary_command(
                 "metadata": metadata,
                 "created_at": created_at,
                 "preserve_updated_at": True,
-                "embed_mode": "strict",
+                "embed_mode": embed_mode,
             }
         },
     )
@@ -135,17 +152,25 @@ class TraceSummaryIngestHandler(EvidenceIngestHandler):
     def __init__(
         self,
         registry: StoreRegistry,
-        embedding_fn: Callable[[str], list[float]],
+        embedding_fn: Callable[[str], list[float]] | None = None,
+        *,
+        embed: EvidenceEmbedMode = "strict",
     ) -> None:
         super().__init__(
             registry,
-            embed="strict",
+            embed=embed,
             embedding_fn=embedding_fn,
             empty_error_code="trace_summary_empty",
         )
         #: What :meth:`_label_for_write` found out about the command in hand,
         #: for :meth:`_embed_strict`; set at the start of each command's write.
-        self._judgement: SummaryJudgement | None = None
+        #: Fail closed until then: ``handle`` runs ``_label_for_write`` before
+        #: it can reach ``_embed_strict`` (proved by a mutant that raised in the
+        #: old fallback branch while 172 trace-embed tests passed), so this value
+        #: is never read, and were it ever read it withholds rather than embeds.
+        self._judgement: SummaryJudgement = SummaryJudgement(
+            verdict=EgressVerdict.UNREADABLE, inherited="restricted"
+        )
 
     def _judge(self, doc_id: str, metadata: dict[str, Any]) -> SummaryJudgement:
         """The summary's verdict and inherited label, from one read of its citations."""
@@ -216,8 +241,7 @@ class TraceSummaryIngestHandler(EvidenceIngestHandler):
         label, which would withhold it, and so would turn a citation that could
         not be read into a decline that advances the cursor and is never retried.
         """
-        judgement = self._judgement or self._judge(doc_id, metadata)
-        verdict = judgement.verdict
+        verdict = self._judgement.verdict
         if verdict is EgressVerdict.PERMITTED:
             return super()._embed_strict(
                 doc_id, content, metadata, evidence, requested_by

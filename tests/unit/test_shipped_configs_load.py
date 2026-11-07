@@ -15,13 +15,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import yaml
-from typer.testing import CliRunner
 
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.main import app
 
 if TYPE_CHECKING:
     import pytest
+
+    from tests.structlog_isolation import IsolatedCliRunner
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPLOY_CONFIG = REPO_ROOT / "deploy" / "config.compose.yaml"
@@ -129,13 +130,13 @@ def test_the_recommended_config_blocks_load(tmp_path: Path) -> None:
 
 
 def test_admin_init_writes_a_config_that_loads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: IsolatedCliRunner
 ) -> None:
     config_dir = tmp_path / "config"
     monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "data"))
 
-    result = CliRunner().invoke(app, ["admin", "init"])
+    result = cli_runner.invoke(app, ["admin", "init"])
 
     assert result.exit_code == 0, result.output
     written = yaml.safe_load((config_dir / "config.yaml").read_text(encoding="utf-8"))
@@ -146,13 +147,13 @@ def test_admin_init_writes_a_config_that_loads(
 
 
 def test_the_templates_admin_init_appends_load_uncommented(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: IsolatedCliRunner
 ) -> None:
     """``init`` appends commented ``llm:`` and ``classify:`` blocks to fill in."""
     config_dir = tmp_path / "config"
     monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "data"))
-    assert CliRunner().invoke(app, ["admin", "init"]).exit_code == 0
+    assert cli_runner.invoke(app, ["admin", "init"]).exit_code == 0
     text = (config_dir / "config.yaml").read_text(encoding="utf-8")
     uncommented = "\n".join(line.removeprefix("# ") for line in text.splitlines())
 
