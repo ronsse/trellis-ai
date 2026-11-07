@@ -306,6 +306,62 @@ class TestEntityListing:
 
         assert precedent in [r["entity_id"] for r in resp["results"]]
 
+    def test_total_does_not_count_the_withheld_precedent(
+        self, client, registry, precedent
+    ):
+        below = _entity_listing(client, _headers(registry, BELOW), precedent)
+        cleared = _entity_listing(client, _headers(registry, CLEARED), precedent)
+
+        assert precedent in [r["entity_id"] for r in cleared["results"]]
+        assert below["total"] == below["count"] == cleared["total"] - 1
+
+    def test_a_node_type_filter_other_than_precedent_keeps_its_total(
+        self, client, registry, precedent
+    ):
+        resp = client.get(
+            "/api/v1/graph/search",
+            params={"node_type": "entity"},
+            headers=_headers(registry, BELOW),
+        ).json()
+
+        assert resp["total"] == resp["count"] == 1
+
+
+class TestEntityFacets:
+    def _facets(self, client, headers) -> dict[str, Any]:
+        resp = client.get(
+            "/api/v1/graph/search/facets", params={"q": "learning"}, headers=headers
+        )
+        assert resp.status_code == 200, resp.text
+        body: dict[str, Any] = resp.json()
+        return body
+
+    def test_a_withheld_precedent_is_not_counted(self, client, registry, precedent):
+        below = self._facets(client, _headers(registry, BELOW))
+        cleared = self._facets(client, _headers(registry, CLEARED))
+
+        assert {"node_type": "precedent", "count": 1} in cleared["node_types"]
+        assert "precedent" not in [f["node_type"] for f in below["node_types"]]
+        assert below["total"] == cleared["total"] - 1
+
+    def test_the_facets_sum_to_the_search_total(self, client, registry, precedent):
+        headers = _headers(registry, BELOW)
+
+        facets = self._facets(client, headers)
+
+        assert facets["total"] == _entity_listing(client, headers, precedent)["total"]
+
+    def test_an_unlabelled_store_answers_as_it_did_before_the_gate(
+        self, client, registry, open_precedent, monkeypatch
+    ):
+        headers = _headers(registry, BELOW)
+        with_gate = self._facets(client, headers)
+        assert {"node_type": "precedent", "count": 1} in with_gate["node_types"]
+
+        monkeypatch.setattr(PrecedentClearance, "verdict_of", lambda *_a, **_k: None)
+
+        assert self._facets(client, headers) == with_gate
+
 
 class TestHistory:
     def test_a_withheld_precedent_answers_as_a_missing_entity(
@@ -348,6 +404,25 @@ class TestHistory:
         )
 
         assert below.status_code == 404
+
+    def test_an_older_version_that_names_a_relabelled_source_bars_the_history(
+        self, client, registry, open_precedent
+    ):
+        """Re-promoted after its source is labelled, the newest version holds
+        nothing of the source and passes; the older one still carries it."""
+        relabel(registry, SOURCE, "confidential")
+        assert promote(registry, "cand:one", SOURCE) == open_precedent
+        versions = registry.knowledge.graph_store.get_node_history(open_precedent)
+        assert len(versions) >= 2
+
+        below = client.get(
+            "/api/v1/graph/history",
+            params={"entity_id": open_precedent},
+            headers=_headers(registry, BELOW),
+        )
+
+        assert below.status_code == 404
+        assert not any(leak in below.text for leak in LEAKS), below.text
 
     def test_a_node_outside_the_precedent_namespace_is_untouched(
         self, client, registry, precedent

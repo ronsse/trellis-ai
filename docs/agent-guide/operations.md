@@ -3434,8 +3434,8 @@ hold the excerpt and carry no label (#1080):
 | `GET /documents/{id}` | 404, as a missing document |
 | `GET /search` | left out of `results` |
 | `GET /documents` (list, and the `q` search) | left out of `documents`, and not counted in `count` or `total` |
-| `GET /graph/search` (the entity listing) | left out of `results`; `total` and `GET /graph/search/facets` still count it (below) |
-| `GET /graph/history` (a node's versions) | 404, as a missing entity; judged once, by the newest version |
+| `GET /graph/search` (the entity listing) | left out of `results` and not counted in `total`; not counted in `GET /graph/search/facets` either |
+| `GET /graph/history` (a node's versions) | 404, as a missing entity; every version is judged, and one barred version bars the history |
 | MCP `get_items` | reported `not found`, as a missing id |
 | MCP `get_graph` | `entity not found` for the root; a withheld neighbour is left out with the edges that touch it |
 | MCP `get_file_context` | left out of the path's documents and entities |
@@ -3452,9 +3452,13 @@ it did before the judgement. The reads it adds are bounded: per distinct
 promoted precedent a request meets, at most one graph-node read and two document
 reads (the precedent's own row and its source), each id judged once per request;
 a request that meets no precedent adds none, and a `restricted` caller adds none.
-Not covered: the `total` of `GET /graph/search` and its facets, which count a
-withheld precedent (a count, no text), and a precedent's chunks (judged on their
-own row only, as on `GET /search`).
+The exception is `GET /graph/search` (with no `node_type`, or `node_type=precedent`)
+and `GET /graph/search/facets`: to keep a withheld precedent out of `total` and the
+`precedent` count they page through every `precedent` node matching `q`, 500 at a
+time, and judge each one. A node under `precedent://learning/` stored as another
+type is left out of the page but not subtracted from a count. Not covered: a
+precedent's chunks (judged on their own row only, as on `GET /search`), and a
+withheld precedent's id named in another node's `document_ids`.
 
 ```bash
 trellis retrieve precedents [--domain DOMAIN] [--limit N] [--format text|json]
@@ -6080,8 +6084,9 @@ is dropped from `POST /api/v1/packs` and `/packs/sectioned` for a caller below
 that resolves through the ref (a loser whose successor a node names) is decided
 before the drop. `GET /api/v1/graph/search/facets` counts nodes per `node_type` and
 names no property, so there is nothing in it to conceal, and a concealed pointer
-never removes a node, so its counts and `/graph/search`'s `total` are the same for
-every caller. An edge is concealed on the same terms in the `subgraph` of `GET
+never removes a node, so it changes neither those counts nor `/graph/search`'s
+`total`. Only a withheld promoted precedent leaves them (see
+[`trellis retrieve precedents`](#trellis-retrieve-precedents)). An edge is concealed on the same terms in the `subgraph` of `GET
 /api/v1/entities/{id}`: a string top-level `evidence_ref` (the provenance
 column, not a node property) reads `null` when it names a document the caller may
 not read, and a pointer inside its `properties` (`evidence_ref`,

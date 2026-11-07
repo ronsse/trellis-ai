@@ -783,21 +783,26 @@ def get_node_history(
     names a document the caller may not read is served without that id. A
     promoted precedent the caller may not read (its own row or its source above
     the caller's clearance, or a lookup that failed) answers 404 as a missing
-    entity does, whatever version asks (#1080).
+    entity does. Every version is judged and one barred version bars the
+    whole history, since an older version can name a source the newest does
+    not (#1080).
     """
     registry = get_registry()
     versions = registry.knowledge.graph_store.get_node_history(entity_id)
     if not versions:
         raise HTTPException(status_code=404, detail=f"Entity not found: {entity_id}")
-    # The newest version names the source the precedent is judged by; judged
-    # once, so an older version is withheld with it, never served on its own.
-    precedents = PrecedentClearance(
-        registry.knowledge.document_store,
-        request_clearance(ctx),
-        registry.knowledge.graph_store,
-    )
-    if precedents.verdict_of(entity_id, versions[0]) is not None:
-        raise HTTPException(status_code=404, detail=f"Entity not found: {entity_id}")
+    for version in versions:
+        # A fresh clearance per version: ``verdict_of`` caches by entity id,
+        # and every version shares one.
+        precedents = PrecedentClearance(
+            registry.knowledge.document_store,
+            request_clearance(ctx),
+            registry.knowledge.graph_store,
+        )
+        if precedents.verdict_of(entity_id, version) is not None:
+            raise HTTPException(
+                status_code=404, detail=f"Entity not found: {entity_id}"
+            )
     versions = conceal_node_pointers(
         versions, registry.knowledge.document_store, request_clearance(ctx)
     )

@@ -5446,7 +5446,11 @@ paths:
 
         the caller''s clearance, or a lookup that failed) answers 404 as a missing
 
-        entity does, whatever version asks (#1080).'
+        entity does. Every version is judged and one barred version bars the
+
+        whole history, since an older version can name a source the newest does
+
+        not (#1080).'
       operationId: get_node_history_api_v1_graph_history_get
       parameters:
       - description: Node ID to fetch SCD-2 history for
@@ -5495,9 +5499,7 @@ paths:
 
         above the caller''s clearance, or a lookup that failed) is left out of the
 
-        page (#1080). ``total`` is the store''s match count and still counts it, so
-
-        that page can be shorter than ``limit``.'
+        page and of ``total`` (#1080), so a page can be shorter than ``limit``.'
       operationId: search_entities_api_v1_graph_search_get
       parameters:
       - description: A case-insensitive substring of the name, node_id or node_type
@@ -5590,7 +5592,9 @@ paths:
 
         ``/graph/search``''s ``total`` for the same ``q``. ``node_type`` is not a
 
-        parameter because it is the dimension being counted.'
+        parameter because it is the dimension being counted. A promoted
+
+        precedent the caller may not read is not counted (#1080).'
       operationId: search_entity_facets_api_v1_graph_search_facets_get
       parameters:
       - description: 'The /graph/search q filter: a case-insensitive substring of the name, node_id or node_type'

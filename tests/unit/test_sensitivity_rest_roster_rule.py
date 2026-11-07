@@ -161,7 +161,7 @@ ROSTER: dict[str, str] = {
     "retrieve:assemble_pack": GATED,  # POST /packs
     "retrieve:assemble_sectioned_pack": GATED,  # POST /packs/sectioned
     "retrieve:search_entities": GATED,  # GET /graph/search
-    "retrieve:search_entity_facets": FREE,  # GET /graph/search/facets (counts only)
+    "retrieve:search_entity_facets": GATED,  # GET /graph/search/facets (#1080)
     "retrieve:get_entity": GATED,  # GET /entities/{entity_id:path}
     "retrieve:list_traces": FREE,  # GET /traces
     "retrieve:list_trace_domains": FREE,  # GET /traces/domains

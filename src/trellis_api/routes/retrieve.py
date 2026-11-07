@@ -55,6 +55,7 @@ from trellis_wire.dtos import (
 
 if TYPE_CHECKING:
     from trellis.schemas.classification import Sensitivity
+    from trellis.stores.base.graph import GraphStore
 
 logger = structlog.get_logger(__name__)
 
@@ -400,6 +401,41 @@ def assemble_sectioned_pack(
     )
 
 
+# The node type the learning promoter stores a precedent under.
+PRECEDENT_NODE_TYPE = "precedent"
+_PRECEDENT_SCAN_PAGE = 500
+
+
+def _count_withheld_precedents(
+    store: GraphStore, precedents: PrecedentClearance, q: str | None
+) -> int:
+    """How many promoted precedents matching ``q`` the caller may not read.
+
+    A count depends only on rows the key can read (#1026), so a withheld
+    precedent leaves ``/graph/search``'s ``total`` and its facets as well as
+    the page (#1080). Only ``PRECEDENT_NODE_TYPE`` nodes are scanned; a node
+    in the precedent namespace stored under another type is not subtracted.
+    """
+    withheld = 0
+    offset = 0
+    while True:
+        rows, total = store.search_nodes(
+            search=q,
+            node_type=PRECEDENT_NODE_TYPE,
+            limit=_PRECEDENT_SCAN_PAGE,
+            offset=offset,
+        )
+        withheld += sum(
+            1
+            for r in rows
+            if is_promoted_precedent_document(r["node_id"])
+            and precedents.verdict_of(r["node_id"], r) is not None
+        )
+        offset += len(rows)
+        if not rows or offset >= total:
+            return withheld
+
+
 @router.get(
     "/graph/search",
     summary="Search graph entities",
@@ -428,8 +464,7 @@ def search_entities(
 
     A promoted precedent the caller may not read (its own row or its source
     above the caller's clearance, or a lookup that failed) is left out of the
-    page (#1080). ``total`` is the store's match count and still counts it, so
-    that page can be shorter than ``limit``.
+    page and of ``total`` (#1080), so a page can be shorter than ``limit``.
     """
     registry = get_registry()
     store = registry.knowledge.graph_store
@@ -444,13 +479,13 @@ def search_entities(
         offset=offset,
     )
     clearance = request_clearance(ctx)
-    if clearance != "restricted" and any(
-        is_promoted_precedent_document(r["node_id"]) for r in rows
-    ):
+    if clearance != "restricted":
         precedents = PrecedentClearance(
             registry.knowledge.document_store, clearance, store
         )
         rows = [r for r in rows if precedents.verdict_of(r["node_id"], r) is None]
+        if node_type in (None, PRECEDENT_NODE_TYPE):
+            total -= _count_withheld_precedents(store, precedents, q)
     rows = conceal_node_pointers(rows, registry.knowledge.document_store, clearance)
     results = [
         {
@@ -484,16 +519,27 @@ def search_entity_facets(
             " name, node_id or node_type"
         ),
     ),
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
 ) -> dict[str, Any]:
     """Count current graph nodes per stored ``node_type`` under ``q``.
 
     The graph page's type chips. Every type is counted server-side, in its
     stored case, by count descending then type, and the counts sum to
     ``/graph/search``'s ``total`` for the same ``q``. ``node_type`` is not a
-    parameter because it is the dimension being counted.
+    parameter because it is the dimension being counted. A promoted
+    precedent the caller may not read is not counted (#1080).
     """
-    store = get_registry().knowledge.graph_store
+    registry = get_registry()
+    store = registry.knowledge.graph_store
     counts = store.count_nodes_by_type(search=q or None)
+    clearance = request_clearance(ctx)
+    if clearance != "restricted" and counts.get(PRECEDENT_NODE_TYPE):
+        precedents = PrecedentClearance(
+            registry.knowledge.document_store, clearance, store
+        )
+        counts[PRECEDENT_NODE_TYPE] -= _count_withheld_precedents(store, precedents, q)
+        if counts[PRECEDENT_NODE_TYPE] <= 0:
+            del counts[PRECEDENT_NODE_TYPE]
     node_types = [
         {"node_type": node_type, "count": count}
         for node_type, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
