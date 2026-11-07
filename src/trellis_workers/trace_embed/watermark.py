@@ -37,7 +37,7 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -93,6 +93,10 @@ class TraceEmbedWatermark:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._cursor: TraceCursor | None = None
+        #: When the last clean restamp sweep finished
+        #: (:mod:`~trellis_workers.trace_embed.restamp`). Bookkeeping like the
+        #: cursor, and as expendable: losing it runs one sweep early.
+        self._restamped_at: datetime | None = None
         self._dirty = False
         self._load()
 
@@ -124,6 +128,27 @@ class TraceEmbedWatermark:
             )
             return
         self._cursor = TraceCursor.from_json(raw.get("cursor"))
+        stamp = raw.get("restamped_at")
+        if isinstance(stamp, str):
+            try:
+                self._restamped_at = as_utc(datetime.fromisoformat(stamp))
+            except ValueError:
+                self._restamped_at = None
+
+    def restamp_due(self, now: datetime, interval: timedelta) -> bool:
+        """Whether a restamp sweep has not finished cleanly within ``interval``."""
+        if self._restamped_at is None:
+            return True
+        return as_utc(now) - self._restamped_at >= interval
+
+    def mark_restamped(self, now: datetime | None) -> None:
+        """Record that a restamp sweep finished cleanly at ``now``.
+
+        ``None`` clears the mark, so the next pass sweeps again: a sweep that
+        could not judge every summary has not stood in for the next one.
+        """
+        self._restamped_at = as_utc(now) if now is not None else None
+        self._dirty = True
 
     def advance_to(self, cursor: TraceCursor) -> bool:
         """Move the cursor forward to *cursor*.
@@ -140,10 +165,14 @@ class TraceEmbedWatermark:
         return True
 
     def reset(self) -> None:
-        """Forget the cursor, so the next pass re-scans from the beginning."""
-        if self._cursor is None:
+        """Forget the cursor, so the next pass re-scans from the beginning.
+
+        Forgets the last restamp sweep too, so the same pass runs one.
+        """
+        if self._cursor is None and self._restamped_at is None:
             return
         self._cursor = None
+        self._restamped_at = None
         self._dirty = True
 
     def save(self) -> None:
@@ -153,6 +182,9 @@ class TraceEmbedWatermark:
         payload: dict[str, Any] = {
             "version": WATERMARK_VERSION,
             "cursor": self._cursor.to_json() if self._cursor is not None else None,
+            "restamped_at": (
+                self._restamped_at.isoformat() if self._restamped_at else None
+            ),
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(dir=str(self._path.parent), suffix=".tmp")

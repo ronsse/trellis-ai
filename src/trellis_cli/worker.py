@@ -2826,6 +2826,8 @@ def embed_traces_cmd(
         or report.skipped_empty
         or report.skipped_invalid
         or report.skipped_egress_unreadable
+        or report.restamp_unreadable
+        or report.restamp_failed
     ):
         # A pass that left traces unreachable did not do the job it was
         # scheduled to do, and a green exit would hide exactly the silent gap
@@ -2865,6 +2867,13 @@ def _render_embed_traces_text(payload: dict[str, Any]) -> None:
             f"a document a trace cites; the cursor is held and the next pass "
             f"retries",
             soft_wrap=True,
+        )
+    if payload["restamp_scanned"] or payload["restamp_failed"]:
+        console.print(
+            f"  restamp: {payload['restamp_scanned']} summaries checked  "
+            f"{payload['restamp_raised']} raised to a cited document's label  "
+            f"{payload['restamp_unreadable']} unreadable  "
+            f"{payload['restamp_failed']} failed"
         )
     console.print(
         f"  cursor: {payload['watermark_before'] or '(none)'} -> "

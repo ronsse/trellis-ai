@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -59,11 +59,13 @@ from trellis_workers.trace_embed.render import (
     render_trace_summary,
     trace_summary_doc_id,
 )
+from trellis_workers.trace_embed.restamp import restamp_summaries
 from trellis_workers.trace_embed.watermark import TraceCursor, TraceEmbedWatermark
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from trellis.mutate.executor import PolicyGate
     from trellis.schemas.trace import Trace
     from trellis.stores.base.document import DocumentStore
     from trellis.stores.base.trace import TraceStore
@@ -93,6 +95,11 @@ DEFAULT_PAGE_SIZE = 200
 #: a large backlog; the cursor advances each pass, so repeated runs converge.
 #: It is not a ceiling on reads — see :func:`collect_candidates`.
 DEFAULT_MAX_SCAN = 5000
+
+#: How long a clean restamp sweep (:mod:`~trellis_workers.trace_embed.restamp`)
+#: stands in for the next. It bounds how long a summary can outlive a relabel of a
+#: document it cites; ``--reset-watermark`` forces one at once.
+RESTAMP_INTERVAL = timedelta(hours=1)
 
 #: Multiple of ``max_scan`` this worker will read in one pass before refusing.
 #: The oldest-first slice requires reading the whole range, so an unanticipated
@@ -149,6 +156,15 @@ class TraceEmbedReport:
     #: same document again and embeds it.
     skipped_egress_unreadable: int = 0
     failed: int = 0
+    #: The restamp sweep (:mod:`~trellis_workers.trace_embed.restamp`), which
+    #: runs at most once per ``restamp_interval``: summaries judged, summaries
+    #: raised to a relabelled citation's label (in a dry run, that would be), those
+    #: left alone because a citation could not be read (a fault; ``status`` is
+    #: ``partial``), and raises the executor refused (the same).
+    restamp_scanned: int = 0
+    restamp_raised: int = 0
+    restamp_unreadable: int = 0
+    restamp_failed: int = 0
     stopped_early: bool = False
     #: More traces remained after ``max_scan`` cut this pass. Reported, not
     #: logged only: a scheduled pass that silently leaves a backlog behind
@@ -173,6 +189,8 @@ class TraceEmbedReport:
                 or self.skipped_invalid
                 or self.skipped_empty
                 or self.skipped_egress_unreadable
+                or self.restamp_unreadable
+                or self.restamp_failed
                 else "ok"
             ),
             "scanned": self.scanned,
@@ -184,6 +202,10 @@ class TraceEmbedReport:
             "skipped_egress_withheld": self.skipped_egress_withheld,
             "skipped_egress_unreadable": self.skipped_egress_unreadable,
             "failed": self.failed,
+            "restamp_scanned": self.restamp_scanned,
+            "restamp_raised": self.restamp_raised,
+            "restamp_unreadable": self.restamp_unreadable,
+            "restamp_failed": self.restamp_failed,
             "stopped_early": self.stopped_early,
             "more_remaining": self.more_remaining,
             "dry_run": self.dry_run,
@@ -320,6 +342,7 @@ def run_trace_embed_pass(
     reset_watermark: bool = False,
     include_step_errors: bool = True,
     should_continue: Callable[[], bool] | None = None,
+    restamp_interval: timedelta = RESTAMP_INTERVAL,
 ) -> TraceEmbedReport:
     """Run one pass. See the module docstring for the ordering guarantees.
 
@@ -341,6 +364,10 @@ def run_trace_embed_pass(
             reached, and reports ``stopped_early``. This is what a SIGINT
             handler drives — an interrupted pass ends at a known-good cursor
             instead of a guessed one.
+        restamp_interval: Run the restamp sweep when none has finished cleanly
+            within this long (always after ``reset_watermark``). A sweep raises a
+            stored summary to the label a cited document now carries; the pass
+            above never rewrites a summary that already has a vector.
 
     Raises:
         TraceEmbedUnavailableError: no embedder, or no vector store.
@@ -454,9 +481,16 @@ def run_trace_embed_pass(
             # this trace and the next pass reaches it again.
             contiguous = False
 
-    if not dry_run and frontier is not None and frontier != before:
-        watermark.advance_to(frontier)
-        watermark.save()
+    _commit(
+        registry,
+        policy_gate,
+        watermark,
+        report,
+        frontier=frontier,
+        before=before,
+        dry_run=dry_run,
+        restamp_interval=restamp_interval,
+    )
     report.watermark_after = (
         watermark.cursor.created_at.isoformat() if watermark.cursor else None
     )
@@ -468,6 +502,67 @@ def run_trace_embed_pass(
         **{k: v for k, v in report.to_dict().items() if k != "failures"},
     )
     return report
+
+
+def _commit(
+    registry: StoreRegistry,
+    policy_gate: PolicyGate,
+    watermark: TraceEmbedWatermark,
+    report: TraceEmbedReport,
+    *,
+    frontier: TraceCursor | None,
+    before: TraceCursor | None,
+    dry_run: bool,
+    restamp_interval: timedelta,
+) -> None:
+    """Move the cursor to ``frontier``, run a due restamp sweep, and persist both."""
+    moved = frontier is not None and frontier != before
+    if not dry_run and moved and frontier is not None:
+        watermark.advance_to(frontier)
+    marked = False
+    if not report.stopped_early and watermark.restamp_due(
+        datetime.now(UTC), restamp_interval
+    ):
+        marked = _restamp(registry, policy_gate, watermark, report, dry_run=dry_run)
+    if not dry_run and (moved or marked):
+        watermark.save()
+
+
+def _restamp(
+    registry: StoreRegistry,
+    policy_gate: PolicyGate,
+    watermark: TraceEmbedWatermark,
+    report: TraceEmbedReport,
+    *,
+    dry_run: bool,
+) -> bool:
+    """Run the restamp sweep into ``report``; ``True`` when the watermark changed.
+
+    A clean sweep marks the time; one that could not judge every summary clears the
+    mark, so the next pass sweeps again.
+
+    A second handler in ``embed="none"`` mode: the sweep rewrites a document that
+    has its vector already, so it must call no embedder, and the core handler
+    refuses a command whose mode is not its own. Same gate, same executor shape, so
+    the sweep is governed like the pass.
+    """
+    executor = MutationExecutor(
+        event_log=registry.operational.event_log,
+        handlers={"evidence.ingest": TraceSummaryIngestHandler(registry, embed="none")},
+        policy_gate=policy_gate,
+    )
+    sweep = restamp_summaries(registry, executor, dry_run=dry_run)
+    report.restamp_scanned = sweep.scanned
+    report.restamp_raised = sweep.raised
+    report.restamp_unreadable = sweep.unreadable
+    report.restamp_failed = sweep.failed
+    report.failures.extend(sweep.failures)
+    if dry_run or (sweep.clean and not sweep.scanned):
+        # A dry run moves nothing; and a store with no summaries has nothing for
+        # the mark to stand in for, so it does not make a watermark file.
+        return False
+    watermark.mark_restamped(datetime.now(UTC) if sweep.clean else None)
+    return True
 
 
 def _log_skipped_invalid(report: TraceEmbedReport) -> None:
@@ -678,5 +773,9 @@ def summarize(
         total.skipped_egress_withheld += r.skipped_egress_withheld
         total.skipped_egress_unreadable += r.skipped_egress_unreadable
         total.failed += r.failed
+        total.restamp_scanned += r.restamp_scanned
+        total.restamp_raised += r.restamp_raised
+        total.restamp_unreadable += r.restamp_unreadable
+        total.restamp_failed += r.restamp_failed
         total.failures.extend(r.failures)
     return total.to_dict()
