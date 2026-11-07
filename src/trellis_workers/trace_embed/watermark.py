@@ -41,8 +41,6 @@ keeps a same-instant sibling from being stepped over.
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -50,6 +48,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.core.atomic_write import atomic_write_text
 from trellis.stores.base.trace import as_utc
 
 if TYPE_CHECKING:
@@ -248,7 +247,17 @@ class TraceEmbedWatermark:
         self._dirty = True
 
     def save(self) -> None:
-        """Atomically persist the cursor (temp file + rename)."""
+        """Atomically and durably persist the cursor.
+
+        Through :func:`~trellis.core.atomic_write.atomic_write_text`: the bytes
+        are fsynced before the rename and the directory after it, so a power
+        loss cannot leave a rename that never reached the disk. The worst a
+        lost write ever cost was a rescan, and this closes the cheaper window.
+
+        A failed write is logged and swallowed, and the watermark stays dirty:
+        the helper raises, this class does not. A cursor that cannot be saved
+        costs the next pass time, never rows, so it must not fail the pass.
+        """
         if not self._dirty:
             return
         payload: dict[str, Any] = {
@@ -263,13 +272,9 @@ class TraceEmbedWatermark:
         if self._retry:
             payload["retry"] = [entry.to_json() for entry in self.retry]
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(dir=str(self._path.parent), suffix=".tmp")
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle)
-            Path(tmp_name).replace(self._path)
+            atomic_write_text(self._path, json.dumps(payload))
         except OSError:
             logger.exception("trace_embed_watermark_save_failed", path=str(self._path))
-            Path(tmp_name).unlink(missing_ok=True)
             return
         self._dirty = False

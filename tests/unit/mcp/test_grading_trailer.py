@@ -1,9 +1,10 @@
 """The reply trailer: off by default, one line when ``TRELLIS_GRADING_TRAILER`` is on.
 
-Serving and the agent-visible text are frozen until the experiment reads out, so
-the trailer ships behind a write-behaviour knob. With the knob unset every
+The agent-visible text is part of the holdout's treatment environment, so the
+trailer ships behind a write-behaviour knob. With the knob unset every
 retrieval reply is byte-identical to before it existed (the byte-for-byte pin is
-``test_loop_text_surfaces.py``; these tests add the behavioural ones).
+``test_loop_text_surfaces.py``, whose golden changes only on purpose, by hand,
+in the same change; these tests add the behavioural ones).
 """
 
 from __future__ import annotations
