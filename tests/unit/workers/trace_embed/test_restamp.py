@@ -9,11 +9,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from trellis.core.document_write import put_document
 from trellis.mutate.commands import Command, Operation
 from trellis.mutate.handlers.classification import ClassificationSetHandler
 from trellis.schemas.classification import DATA_CLASSIFICATION_KEY
 from trellis_workers.trace_embed import run_trace_embed_pass, trace_summary_doc_id
 from trellis_workers.trace_embed.handler import CITED_LABEL_CLASSIFIER
+from trellis_workers.trace_embed.restamp import UNATTRIBUTED
 from trellis_workers.trace_embed.watermark import TraceEmbedWatermark
 
 from .test_egress import (
@@ -168,6 +170,59 @@ def test_an_unreadable_citation_is_counted_not_raised_and_retried(
 
     assert (again.restamp_raised, again.restamp_unreadable) == (1, 0)
     assert _stored_label(registry, trace)["sensitivity"] == "confidential"
+
+
+def test_an_unreadable_citation_beside_a_withholding_one_is_still_unreadable(
+    registry, watermark_path, recorder, monkeypatch
+) -> None:
+    """The withholding citation hides the fault in the verdict, not in the count.
+
+    Judged by the verdict alone, the unreadable citation's ``restricted`` would be
+    written, and a sweep only raises, so nobody would take it back down.
+    """
+    _store_document(registry, "doc-a", None)
+    _store_document(registry, "doc-b", None)
+    trace = _embedded_summary(registry, watermark_path, "doc-a", "doc-b")
+    _store_document(registry, "doc-a", "confidential")
+    with monkeypatch.context() as patched:
+        _raise_for(patched, registry, "doc-b")
+        report = _sweep(registry, watermark_path)
+    assert (report.restamp_unreadable, report.restamp_raised) == (1, 0)
+    assert _stored_label(registry, trace) is None
+
+    again = _sweep(registry, watermark_path)
+
+    assert (again.restamp_raised, again.restamp_unreadable) == (1, 0)
+    assert _stored_label(registry, trace)["sensitivity"] == "confidential"
+
+
+def test_a_label_naming_no_classifier_does_not_become_the_derived_stamp(
+    registry, watermark_path, recorder
+) -> None:
+    """Exactly ``[trace-summary:cited]`` is what lets a later pass lower a label."""
+    _store_document(registry, "doc-a", None)
+    trace = _embedded_summary(registry, watermark_path, "doc-a")
+    summary_id = trace_summary_doc_id(trace.trace_id)
+    store = registry.knowledge.document_store
+    row = store.get(summary_id)
+    put_document(
+        store,
+        None,
+        summary_id,
+        row["content"],
+        {
+            **row["metadata"],
+            DATA_CLASSIFICATION_KEY: {"sensitivity": "public", "classified_by": []},
+        },
+        preserve_updated_at=True,
+    )
+    _store_document(registry, "doc-a", "confidential")
+
+    assert _sweep(registry, watermark_path).restamp_raised == 1
+
+    after = _stored_label(registry, trace)
+    assert after["sensitivity"] == "confidential"
+    assert after["classified_by"] == [UNATTRIBUTED, CITED_LABEL_CLASSIFIER]
 
 
 def test_a_dry_run_counts_the_raise_and_writes_nothing(

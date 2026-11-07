@@ -72,6 +72,9 @@ __all__ = ["RestampResult", "restamp_summaries"]
 #: Summaries listed per ``list_documents`` round trip.
 PAGE_SIZE = 200
 
+#: Kept ahead of ``trace-summary:cited`` when a raised label named no classifier.
+UNATTRIBUTED = "unattributed"
+
 
 @dataclass
 class RestampResult:
@@ -102,7 +105,9 @@ def _raised_metadata(
         CITED_LABEL_CLASSIFIER
     ]:
         by = record.get("classified_by")
-        classified_by = list(by) if isinstance(by, list) else []
+        # A record naming no classifier is not this handler's stamp, and must not
+        # become exactly one: that list is what lets a later pass lower it.
+        classified_by = list(by) if isinstance(by, list) and by else [UNATTRIBUTED]
         if CITED_LABEL_CLASSIFIER not in classified_by:
             classified_by.append(CITED_LABEL_CLASSIFIER)
         raised: dict[str, Any] = {
@@ -153,10 +158,10 @@ def restamp_summaries(
     its vector row and calls no embedder.
 
     Cost per sweep: one listing of the summaries, then for each one a document read,
-    a trace read and a read per distinct cited document (the egress gate caches the
-    last across summaries); a raised summary adds a second judging read inside the
-    handler and one write. Nothing is written for a summary that is already labelled
-    at or above what its citations give.
+    a trace read and a read per citation, so N summaries citing k documents each
+    cost N·k citation reads, nothing cached across summaries; a raised summary adds
+    a second judging read inside the handler and one write. Nothing is written for
+    a summary that is already labelled at or above what its citations give.
     """
     result = RestampResult()
     document_store = registry.knowledge.document_store
@@ -187,7 +192,9 @@ def restamp_summaries(
         # label, which would hide an unreadable citation behind a withhold.
         unlabelled = {k: v for k, v in metadata.items() if k != DATA_CLASSIFICATION_KEY}
         judgement = egress.judge_summary(doc_id, unlabelled, open_trace_store)
-        if judgement.verdict is EgressVerdict.UNREADABLE:
+        # Not the verdict alone: a withholding citation hides an unreadable one
+        # there, and the unreadable one's ``restricted`` is then in ``inherited``.
+        if judgement.unreadable or judgement.verdict is EgressVerdict.UNREADABLE:
             result.unreadable += 1
             continue
         inherited = judgement.inherited
