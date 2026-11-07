@@ -126,6 +126,14 @@ SOURCE_EXCERPT_REDACTED = "source_redacted"
 #: ``source_item_id``, the structured pointer a read surface conceals.
 SOURCE_EXCERPT_LABELLED = "source_labelled"
 
+#: ``properties["source_excerpt_status"]`` when the store could not be read while
+#: the promotion was built (:func:`resolve_source_excerpt`). The label read failed
+#: closed, so the name is the neutral one and no text was copied, but the source's
+#: label is **unknown**: the status says nothing about whether it was ever
+#: labelled, lowered or redacted. A reader that wants the source's label asks the
+#: source, as it does for any status other than :data:`SOURCE_EXCERPT_LABELLED`.
+SOURCE_EXCERPT_LOOKUP_FAILED = "lookup_failed"
+
 #: How a promoted precedent's name was derived, recorded as
 #: ``properties["name_source"]`` on its node and ``name_source`` on its
 #: ``PRECEDENT_PROMOTED`` payload. Only :data:`NAME_SOURCE_SOURCE_TEXT`
@@ -1025,7 +1033,7 @@ def resolve_source_excerpt(
             "precedent_source_excerpt_lookup_failed",
             error_type=type(exc).__name__,
         )
-        return None, "lookup_failed"
+        return None, SOURCE_EXCERPT_LOOKUP_FAILED
     labelled = _source_is_labelled(item_id, document_store)
     if labelled or withheld or not document:
         # The graph axis never re-checks a precedent's source, so copying a
@@ -1518,6 +1526,15 @@ def _redaction_refusal(
     }
 
 
+#: The ``source_excerpt_status`` values a promotion stamps beside the neutral
+#: name it gives a source it must not copy from. The neutral name is also what a
+#: redaction renames to, so it alone cannot say which happened; these two statuses
+#: say it was the promotion.
+_PROMOTION_NEUTRAL_NAME_STATUSES = frozenset(
+    {SOURCE_EXCERPT_LABELLED, SOURCE_EXCERPT_LOOKUP_FAILED}
+)
+
+
 def _source_redacted(
     entity_payload: Mapping[str, Any],
     existing_node: Mapping[str, Any] | None,
@@ -1532,10 +1549,12 @@ def _source_redacted(
     precedent's. Three signals, any of which answers yes:
 
     * the current node's markers, ``name_source`` ``neutral`` (not when
-      ``source_excerpt_status`` is ``source_labelled``, which also earns that
-      name) or ``source_excerpt_status`` ``source_redacted``. These do not last: a
-      later promotion of a regenerated candidate writes a new version without
-      them, so they cannot be the only signal;
+      ``source_excerpt_status`` is ``source_labelled`` or ``lookup_failed``, the
+      two statuses a promotion itself earns that name under: the source was
+      labelled, or the store could not say) or ``source_excerpt_status``
+      ``source_redacted``. These do not last: a later promotion of a regenerated
+      candidate writes a new version without them, so they cannot be the only
+      signal;
     * a redaction trace (:func:`_redaction_trace`) on the payload's
       ``source_item_id``;
     * the same on that id's parent, when it is a chunk id
@@ -1557,7 +1576,11 @@ def _source_redacted(
                 node_props.get("name_source") == NAME_SOURCE_NEUTRAL
                 # A labelled source gets the neutral name too; lowering its
                 # label later must not read the earlier promotion as redacted.
-                and node_props.get("source_excerpt_status") != SOURCE_EXCERPT_LABELLED
+                # So does a source whose label could not be read (the read
+                # fails closed): ``lookup_failed`` records an outage, not a
+                # label history, and a redaction leaves its own trace below.
+                and node_props.get("source_excerpt_status")
+                not in _PROMOTION_NEUTRAL_NAME_STATUSES
             )
             or node_props.get("source_excerpt_status") == SOURCE_EXCERPT_REDACTED
         )
@@ -2441,6 +2464,7 @@ __all__ = [
     "REFUSED_REDACTED",
     "REQUIRED_LEARNING_PARAMETER_KEYS",
     "SOURCE_EXCERPT_LABELLED",
+    "SOURCE_EXCERPT_LOOKUP_FAILED",
     "SOURCE_EXCERPT_REDACTED",
     "PromotionVerdict",
     "analyze_learning_observations",

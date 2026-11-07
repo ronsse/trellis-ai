@@ -26,9 +26,12 @@ from trellis.learning.scoring import (
     REFUSED_REDACTED,
     SOURCE_EXCERPT_INCLUDED,
     SOURCE_EXCERPT_LABELLED,
+    SOURCE_EXCERPT_LOOKUP_FAILED,
+    SOURCE_EXCERPT_REDACTED,
     _apply_readable_name_fallback,
     build_learning_promotion_payloads,
     neutral_precedent_name,
+    precedent_entity_id_for_candidate,
     resolve_source_excerpt,
     strip_source_excerpt,
     submit_learning_promotion,
@@ -406,6 +409,21 @@ class _Promotions:
             document_store=self.documents,
         )
 
+    def submit_built_during_outage(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        """Build the promotion while the document store cannot answer, then write
+        it to the real stores: the command is built at one moment and applied at
+        another, and an outage can sit between the two."""
+        payloads = _build(copy.deepcopy(candidate), _RaisingDocuments())
+        return submit_learning_promotion(
+            self.executor,
+            payloads["entity_payload"],
+            payloads["edge_payloads"],
+            requested_by="test",
+            graph_store=self.graph,
+            event_log=self.events,
+            document_store=self.documents,
+        )
+
     def promote_while_confidential(self) -> dict[str, Any]:
         """A candidate named from the source's text, promoted once the source is
         labelled, then the label lowered: the shape of a re-promotion."""
@@ -441,6 +459,86 @@ def test_a_real_redaction_of_a_labelled_source_is_still_refused(
         SOURCE_ID,
         "",
         {LIFECYCLE_KEY: {"deprecation_reason": REDACTION_TOMBSTONE_REASON}},
+    )
+
+    assert promotions.submit(candidate)["status"] == REFUSED_REDACTED
+
+
+# --- A promotion built during an outage (#1080, item 3) ---------------------
+
+
+def _precedent_properties(promotions: _Promotions) -> dict[str, Any]:
+    node = promotions.graph.get_node(precedent_entity_id_for_candidate(CANDIDATE_ID))
+    assert node is not None
+    properties: dict[str, Any] = node["properties"]
+    return properties
+
+
+@pytest.mark.parametrize("history", ["always_internal", "confidential_then_lowered"])
+def test_a_promotion_built_during_an_outage_is_not_read_as_a_redaction(
+    promotions: _Promotions, history: str
+) -> None:
+    """The outage leaves the neutral name and ``lookup_failed``; neither says the
+    source was redacted.
+
+    The label read fails closed, so the promotion takes the neutral name a
+    labelled source earns, but its status is ``lookup_failed``, which
+    ``_source_redacted`` did not exempt as it does ``source_labelled``. A retry
+    once the store answers, with the source readable, was then refused as
+    ``refused_redacted`` ("its source was redacted") although nothing redacted it.
+    """
+    promotions.documents.put(SOURCE_ID, BODY, _label("internal"))
+    candidate = _named_from_source(promotions.documents)
+    if history == "confidential_then_lowered":
+        promotions.documents.put(SOURCE_ID, BODY, _label("confidential"))
+
+    assert promotions.submit_built_during_outage(candidate)["status"] == "promoted"
+    properties = _precedent_properties(promotions)
+    assert properties["source_excerpt_status"] == SOURCE_EXCERPT_LOOKUP_FAILED
+    assert properties["name_source"] == NAME_SOURCE_NEUTRAL  # the premise
+
+    promotions.documents.put(SOURCE_ID, BODY, _label("internal"))
+
+    assert promotions.submit(candidate)["status"] == "promoted"
+    healed = _precedent_properties(promotions)
+    assert healed["source_excerpt_status"] == SOURCE_EXCERPT_INCLUDED
+    assert healed["name_source"] == "source_text"
+
+
+def test_a_real_redaction_after_an_outage_promotion_is_still_refused(
+    promotions: _Promotions,
+) -> None:
+    """The tombstone on the source answers; the node's markers never had to."""
+    promotions.documents.put(SOURCE_ID, BODY, _label("internal"))
+    candidate = _named_from_source(promotions.documents)
+    assert promotions.submit_built_during_outage(candidate)["status"] == "promoted"
+    promotions.documents.put(
+        SOURCE_ID,
+        "",
+        {LIFECYCLE_KEY: {"deprecation_reason": REDACTION_TOMBSTONE_REASON}},
+    )
+
+    assert promotions.submit(candidate)["status"] == REFUSED_REDACTED
+
+
+def test_a_redacted_node_is_still_read_as_redacted_whatever_its_name(
+    promotions: _Promotions,
+) -> None:
+    """The exemption is for the two promotion-time statuses, not for any status."""
+    promotions.documents.put(SOURCE_ID, BODY, _label("internal"))
+    candidate = _named_from_source(promotions.documents)
+    assert promotions.submit(candidate)["status"] == "promoted"
+    entity_id = precedent_entity_id_for_candidate(CANDIDATE_ID)
+    node = promotions.graph.get_node(entity_id)
+    assert node is not None
+    promotions.graph.upsert_node(
+        entity_id,
+        "precedent",
+        {
+            **node["properties"],
+            "name_source": NAME_SOURCE_NEUTRAL,
+            "source_excerpt_status": SOURCE_EXCERPT_REDACTED,
+        },
     )
 
     assert promotions.submit(candidate)["status"] == REFUSED_REDACTED
