@@ -20,16 +20,27 @@ refusal protects the *row*, which only ``precedent.promote`` writes (through
 ``put_document`` directly, so the ingest refusal does not stop it), and only for
 a precedent-typed node whose id is in the namespace.
 
-The *node* is a different matter. ``entity.create`` takes a caller-supplied
-``entity_id`` and is the very call ``submit_learning_promotion`` makes to write
-a promoted precedent's node, so it cannot refuse the namespace outright. It
-refuses any type but ``precedent`` there from a command without the promotion's
-mark (``entity.update`` likewise), because the serve-time check is keyed on the
-type; a node there is skipped by ``retention.prune`` whoever created it. That
-grants nothing new:
-``lifecycle.state=current`` already makes any node prune-immune (counted as
-``skipped_restored``). So the promotion-authority argument holds for the row
-alone, and the exemption is keyed on the id and nothing else.
+The *node* is reserved the same way, for a different reason. ``entity.create``
+takes a caller-supplied ``entity_id`` and is the very call
+``submit_learning_promotion`` makes to write a promoted precedent's node, so it
+tells the promotion apart by a reserved ``Command.metadata`` mark
+(``PROMOTION_COMMAND_MARK``) and refuses every other create at an id here, of
+any type. The code says which rule the command broke: the narrower ones
+(``precedent_excerpt_status_via_entity_create``, the type rule) answer first, and
+``precedent_namespace_via_entity_create`` is what remains. ``entity.update``
+refuses a type other than ``precedent`` there from a command without the mark,
+because the serve-time check is keyed on the type, and it still edits an
+existing precedent without it. A node there is skipped by ``retention.prune``
+whoever created it. That grants nothing new: ``lifecycle.state=current`` already
+makes any node prune-immune (counted as ``skipped_restored``).
+
+A *vector* row is reserved as well. ``PrecedentPromoteHandler`` writes the
+precedent's vector row in process, through ``put_document`` and the embed hook,
+so ``POST /vectors`` is never the promotion's door and refuses every row at an id
+here: a caller's row that names no document would otherwise be served as that
+promoted precedent, with the caller's own text.
+
+The predicate is keyed on the id and nothing else.
 
 This module imports nothing from the package, so ``classify``, ``mutate`` and
 ``learning`` can all import it without a cycle.
@@ -56,7 +67,8 @@ SOURCE_EXCERPT_STATUS_KEY = "source_excerpt_status"
 #: The ``Command.metadata`` key the reviewed-promotion writer sets on its
 #: ``entity.create`` (``submit_learning_promotion``) to say that the command is
 #: the promotion itself. ``entity.create`` refuses a caller-set
-#: ``source_excerpt_status`` on a precedent unless it finds this mark, so it must
+#: ``source_excerpt_status`` on a precedent, and any create at an id in the
+#: precedent namespace, unless it finds this mark, so it must
 #: be a key no agent-facing door lets a caller set: it is in
 #: ``RESERVED_COMMAND_METADATA_KEYS``, which REST ``/commands/batch`` refuses,
 #: and MCP ``execute_mutation`` has no caller metadata at all (#1080).

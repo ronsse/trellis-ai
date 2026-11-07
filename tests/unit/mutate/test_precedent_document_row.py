@@ -26,7 +26,10 @@ from trellis.classify.refresh import (
     reclassify_stale,
 )
 from trellis.core.document_write import is_redaction_tombstone, put_document
-from trellis.core.precedent_document import is_promoted_precedent_document
+from trellis.core.precedent_document import (
+    PROMOTION_COMMAND_MARK,
+    is_promoted_precedent_document,
+)
 from trellis.errors import StoreError
 from trellis.learning.scoring import (
     _apply_readable_name_fallback,
@@ -361,12 +364,12 @@ class TestPromotionOutsideTheNamespace:
             ("warning", self.OUTSIDE_ID)
         ]
 
-    def test_entity_create_accepts_a_namespace_id_because_promotion_uses_it(
+    def test_entity_create_refuses_a_namespace_id_without_the_promotion_mark(
         self, registry: StoreRegistry
     ) -> None:
-        """``entity.create`` cannot refuse the namespace: ``submit_learning_promotion``
-        writes a promoted precedent's node with it. The row is what the namespace
-        protects, and only ``precedent.promote`` writes that."""
+        """Only the promotion creates under the namespace (#1080): it carries the
+        reserved mark, and a command without it is rejected, so no caller can
+        plant the node a row there would be paired with."""
         result = build_curate_executor(registry, clearance="restricted").execute(
             Command(
                 operation=Operation.ENTITY_CREATE,
@@ -376,6 +379,30 @@ class TestPromotionOutsideTheNamespace:
                     "name": TITLE,
                 },
                 requested_by="test",
+            )
+        )
+
+        assert result.status == CommandStatus.REJECTED, result.message
+        assert (
+            result.metadata["rejection_reason"]
+            == "precedent_namespace_via_entity_create"
+        )
+        assert registry.knowledge.graph_store.get_node(NODE_ID) is None
+        assert registry.knowledge.document_store.get(NODE_ID) is None
+
+    def test_entity_create_accepts_a_namespace_id_from_the_promotion(
+        self, registry: StoreRegistry
+    ) -> None:
+        result = build_curate_executor(registry, clearance="restricted").execute(
+            Command(
+                operation=Operation.ENTITY_CREATE,
+                args={
+                    "entity_type": "precedent",
+                    "entity_id": NODE_ID,
+                    "name": TITLE,
+                },
+                requested_by="test",
+                metadata={PROMOTION_COMMAND_MARK: True},
             )
         )
 

@@ -15,6 +15,7 @@ from trellis.core.error_sanitize import (
     sanitize_error_message,
 )
 from trellis.core.ids import generate_ulid
+from trellis.core.precedent_document import PRECEDENT_ENTITY_ID_PREFIX
 from trellis.core.reserved_doc_ids import (
     TRACE_SUMMARY_DOC_ID_PREFIX as TRACE_SUMMARY_ID_PREFIX,
 )
@@ -543,6 +544,15 @@ def _vector_item_problem(
             f"item_id may not start with {TRACE_SUMMARY_ID_PREFIX!r}: that "
             "namespace is the trace-embed worker's"
         )
+    # A row at a promoted precedent's id would be served by the precedent gate
+    # as that precedent, at the caller's own text. The promotion's own vector
+    # row is written by ``put_document`` in-process, never through this route,
+    # so no caller has a reason to name the namespace here (#1080).
+    if isinstance(item_id, str) and item_id.startswith(PRECEDENT_ENTITY_ID_PREFIX):
+        return (
+            f"item_id may not start with {PRECEDENT_ENTITY_ID_PREFIX!r}: that "
+            "namespace is the reviewed promotion's"
+        )
     if metadata is not None:
         problem = _vector_metadata_problem(metadata)
         if problem is None:
@@ -624,7 +634,11 @@ def upsert_vectors(
     another width is accepted; a query there scores only the rows of its own
     width). So is an ``item_id``
     starting ``trace-summary:``, for every caller: that namespace is the
-    trace-embed worker's, and a row there makes it skip the trace for good. A
+    trace-embed worker's, and a row there makes it skip the trace for good. So
+    is an ``item_id`` starting ``precedent://learning/``, for every caller: that
+    namespace is the reviewed promotion's, whose own vector row is written in
+    process with its document, and a row there that names no document would be
+    served as a promoted precedent carrying the caller's text. A
     row's ``metadata`` may not carry a raw ``data_classification`` (422), whoever
     the caller is: a vector row's label is mirrored from its document, never set
     here. A row whose ``item_id`` names no stored document may not carry

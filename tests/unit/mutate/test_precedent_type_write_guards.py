@@ -184,10 +184,10 @@ class TestCreateRefusesTheNamespaceUnderAnotherType:
         assert result.status == CommandStatus.SUCCESS
         assert _node(registry, IN_NAMESPACE)["node_type"] == "concept"
 
-    def test_a_precedent_in_the_namespace_is_accepted(
+    def test_a_precedent_in_the_namespace_is_accepted_from_the_promotion(
         self, registry: StoreRegistry
     ) -> None:
-        result = _execute(registry, _create(IN_NAMESPACE, "precedent"))
+        result = _execute(registry, _create(IN_NAMESPACE, "precedent", metadata=MARK))
 
         assert result.status == CommandStatus.SUCCESS
         assert _node(registry, IN_NAMESPACE)["node_type"] == "precedent"
