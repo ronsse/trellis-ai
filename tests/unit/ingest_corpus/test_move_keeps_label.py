@@ -198,6 +198,25 @@ class TestReadGate:
         served, _ = _pack(registry, "internal")
         assert served.isdisjoint(chunks)
 
+    def test_a_chunk_vector_hit_is_judged_by_the_carried_parent_label(
+        self, tmp_path: Path
+    ) -> None:
+        """A chunk's vector row snapshots no label, so the parent's must decide."""
+        registry, _, _ = _moved_labelled(tmp_path, local=True)
+
+        chunks = _chunk_ids(registry, NEW_ID)
+        rows = [registry.knowledge.vector_store.get(c) for c in chunks]
+        assert rows
+        assert all(row is not None for row in rows)
+        assert all(
+            DATA_CLASSIFICATION_KEY not in (row.get("metadata") or {}) for row in rows
+        )
+        served, withheld = _pack(registry, "internal")
+        assert _of_document(served, NEW_ID) == set()
+        assert not withheld.isdisjoint(chunks)
+        served, _ = _pack(registry, "restricted")
+        assert not served.isdisjoint(chunks)
+
     def test_the_comparison_arm_is_served_before_the_label_is_set(
         self, tmp_path: Path
     ) -> None:
