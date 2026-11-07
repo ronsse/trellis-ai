@@ -164,6 +164,9 @@ class TranscriptFacts:
     ungraded: list[str] = field(default_factory=list)
     #: Lines longer than :data:`MAX_LINE_BYTES`, skipped without being parsed.
     skipped_lines: int = 0
+    #: Of those, the ones whose first bytes show a ``record_feedback`` call, which
+    #: the scan settled from those bytes alone (see :meth:`_Scan.skipped_line`).
+    skipped_feedback_calls: int = 0
 
 
 #: ``mcp``, the server, the tool: the three segments of an MCP tool name.
@@ -248,6 +251,15 @@ def _header_pack_id(content: Any) -> str | None:
     return None
 
 
+#: What the first bytes of a line too long to parse can still say: that it holds
+#: a ``record_feedback`` call, which pack it names, and whether it is a sidechain
+#: entry. A tool result that quotes a call has its quotes escaped, so it matches
+#: none of these.
+_SKIPPED_TOOL_NAME = re.compile(rb'"name"\s*:\s*"(mcp__[^"]*)"')
+_SKIPPED_PACK_ARG = re.compile(rb'"pack_id"\s*:\s*"([^"\\]*)"')
+_SKIPPED_SIDECHAIN = re.compile(rb'"isSidechain"\s*:\s*true')
+
+
 class _Scan:
     """Accumulates :class:`TranscriptFacts` while a transcript streams past."""
 
@@ -323,6 +335,40 @@ class _Scan:
             else:
                 # Attributed feedback that names no pack grades what was served.
                 self.facts.ungraded.clear()
+
+    def skipped_line(self, prefix: bytes, *, include_sidechain: bool) -> None:
+        """Settle a line too long to parse from its first bytes, if it is a grade.
+
+        A ``record_feedback`` call with a very long ``notes`` is over
+        :data:`MAX_LINE_BYTES` and is never parsed, so the pack it graded would
+        stay ungraded and the Stop hook would ask about it again. *prefix* is the
+        part of the line already read (at most the cap, so memory is no larger
+        than before): when it names a Trellis ``record_feedback`` call, the call
+        is applied the way :meth:`finish` applies one whose result never arrived,
+        as an attributed grade of the pack its ``pack_id`` names, or of whatever
+        was served so far when that argument is past the bytes read. Nothing else
+        in the line is read. The call's result is a separate, short line that is
+        not tied back to it, so a grade that errored is taken as made.
+        """
+        if b"record_feedback" not in prefix:
+            return
+        named = next(
+            (
+                found
+                for found in _SKIPPED_TOOL_NAME.finditer(prefix)
+                if _trellis_tool(found.group(1).decode("utf-8", "replace"))
+                == _FEEDBACK_TOOL
+            ),
+            None,
+        )
+        if named is None or (
+            not include_sidechain and _SKIPPED_SIDECHAIN.search(prefix)
+        ):
+            return
+        pack = _SKIPPED_PACK_ARG.search(prefix, named.end())
+        self.facts.skipped_feedback_calls += 1
+        pack_arg = pack.group(1).decode("utf-8", "replace") if pack else None
+        self._apply("feedback", (pack_arg, True))
 
     def finish(self) -> TranscriptFacts:
         """Settle calls whose result never reached the file (still in flight)."""
@@ -412,6 +458,7 @@ def scan_transcript(  # noqa: PLR0911, PLR0912 - one return per fail-open guard
                 unclocked += len(line)
                 if len(line) > MAX_LINE_BYTES and not line.endswith(b"\n"):
                     scan.facts.skipped_lines += 1
+                    scan.skipped_line(line, include_sidechain=include_sidechain)
                     if not _skip_rest_of_line(handle, started, deadline_seconds):
                         return None
                     continue
