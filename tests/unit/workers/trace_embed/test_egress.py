@@ -31,7 +31,12 @@ from trellis.retrieve.builder_factory import build_pack_builder
 from trellis.schemas.classification import DATA_CLASSIFICATION_KEY
 from trellis.schemas.trace import EvidenceRef
 from trellis.stores.base.event_log import EventType
-from trellis_workers.trace_embed import run_trace_embed_pass, trace_summary_doc_id
+from trellis_workers.trace_embed import (
+    TraceCursor,
+    TraceEmbedWatermark,
+    run_trace_embed_pass,
+    trace_summary_doc_id,
+)
 from trellis_workers.trace_embed import worker as worker_mod
 from trellis_workers.trace_embed.handler import CITED_LABEL_CLASSIFIER
 
@@ -273,7 +278,7 @@ def _raise_for(monkeypatch, registry, bad_id: str) -> None:
     monkeypatch.setattr(store, "get", get)
 
 
-def test_a_cited_document_that_cannot_be_read_holds_the_cursor_and_is_retried(
+def test_a_cited_document_that_cannot_be_read_is_listed_and_retried(
     registry, watermark_path, recorder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     broken = _append_citing(registry, 1, "unreadable-doc")
@@ -285,10 +290,14 @@ def test_a_cited_document_that_cannot_be_read_holds_the_cursor_and_is_retried(
     assert first.skipped_egress_unreadable == 1
     assert first.skipped_egress_withheld == 0
     assert first.to_dict()["status"] == "partial"
-    # The rest of the batch is still attempted; the cursor is pinned before the
-    # trace that could not be judged.
+    # The rest of the batch is still attempted, and the cursor moves past the
+    # trace that could not be judged: it is on the retry list, not forgotten.
     assert first.embedded == 2
-    assert first.watermark_after is None
+    assert first.retry_pending == 1
+    assert first.watermark_after == after[-1].created_at.isoformat()
+    assert TraceEmbedWatermark(watermark_path).retry == (
+        TraceCursor(created_at=broken.created_at, trace_id=broken.trace_id),
+    )
     assert _vectors(registry, [broken]) == 0
     assert _vectors(registry, after) == 2
     assert not any("widget-0001" in text for text in recorder.texts)
@@ -296,15 +305,18 @@ def test_a_cited_document_that_cannot_be_read_holds_the_cursor_and_is_retried(
     assert _summary_stored(registry, broken)
     assert _found_by_keyword(registry, broken)
 
-    # Once the store answers, the next pass reaches the trace again and embeds it.
+    # Once the store answers, the next pass attempts the listed trace again,
+    # embeds it, and the list empties.
     monkeypatch.undo()
     second = run_trace_embed_pass(registry, watermark_path=watermark_path)
 
     assert second.embedded == 1
-    assert second.skipped_existing == 2
+    assert second.scanned == 1
     assert second.skipped_egress_unreadable == 0
+    assert second.retry_pending == 0
+    assert second.to_dict()["status"] == "ok"
     assert _vectors(registry, [broken]) == 1
-    assert second.watermark_after is not None
+    assert TraceEmbedWatermark(watermark_path).retry == ()
 
 
 def test_a_withheld_citation_wins_over_an_unreadable_one(
@@ -404,9 +416,9 @@ def test_a_held_unreadable_trace_emits_one_event_across_passes(
         run_trace_embed_pass(registry, watermark_path=watermark_path) for _ in range(3)
     ]
 
-    # Every pass still reports it and still holds the cursor ...
+    # Every pass still reports it and still has it on the retry list ...
     assert [r.skipped_egress_unreadable for r in reports] == [1, 1, 1]
-    assert all(r.watermark_after is None for r in reports)
+    assert [r.retry_pending for r in reports] == [1, 1, 1]
     # ... but the event log has it once, and so does `analyze health`.
     events = _withheld_events(registry)
     assert [e.entity_id for e in events] == [trace_summary_doc_id(broken.trace_id)]
@@ -670,7 +682,7 @@ def test_a_stamped_summary_is_counted_once(registry, watermark_path, recorder) -
     assert recorder.texts == []
 
 
-def test_an_unreadable_citation_stamps_restricted_and_still_holds_the_cursor(
+def test_an_unreadable_citation_stamps_restricted_and_is_still_retried(
     registry, watermark_path, recorder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The stamp is the strictest reading; the verdict stays a fault to retry."""
@@ -684,7 +696,7 @@ def test_an_unreadable_citation_stamps_restricted_and_still_holds_the_cursor(
     assert stored["sensitivity"] == "restricted"
     assert first.skipped_egress_unreadable == 1
     assert first.skipped_egress_withheld == 0
-    assert first.watermark_after is None
+    assert first.retry_pending == 1
     _, rejected = _served_ids(registry, trace, "internal")
     assert trace_summary_doc_id(trace.trace_id) in rejected
 
@@ -805,7 +817,7 @@ def test_a_person_raising_a_stamped_summary_is_not_lowered_by_a_rescan(
     assert _stored_label(registry, trace)["sensitivity"] == "restricted"
 
 
-def test_a_local_embedder_still_holds_a_summary_whose_citation_cannot_be_read(
+def test_a_local_embedder_still_lists_a_summary_whose_citation_cannot_be_read(
     registry, watermark_path, recorder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The label is read on every route, so a failed read is not skipped locally."""
@@ -816,6 +828,6 @@ def test_a_local_embedder_still_holds_a_summary_whose_citation_cannot_be_read(
     report = run_trace_embed_pass(registry, watermark_path=watermark_path)
 
     assert report.skipped_egress_unreadable == 1
-    assert report.watermark_after is None
+    assert report.retry_pending == 1
     assert _vectors(registry, [trace]) == 0
     assert (_stored_label(registry, trace) or {}).get("sensitivity") == "restricted"

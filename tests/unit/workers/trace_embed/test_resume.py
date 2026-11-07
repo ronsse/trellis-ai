@@ -19,8 +19,9 @@ Three interruption shapes are covered, because they leave different wreckage:
 2. **Hard kill** (SIGKILL, power loss) — the cursor is never written at all.
    The pass that follows re-scans from zero and must recognise the finished
    work from the store rather than re-embedding it.
-3. **Mid-pass backend failure** — the embedder dies partway. The cursor must
-   pin behind the first failure even though later traces were still attempted.
+3. **Mid-pass backend failure** — the embedder dies partway. Later traces are
+   still attempted, and every trace that failed goes on the retry list before
+   the cursor moves past it, so the next pass reaches each one again.
 """
 
 from __future__ import annotations
@@ -136,7 +137,7 @@ class TestInterruptedPassResumes:
         assert second.embedded == 6
         _assert_complete_and_deduped(registry, traces, recorder)
 
-    def test_backend_failure_pins_the_cursor_behind_the_gap(
+    def test_backend_failure_lists_the_gap_before_the_cursor_passes_it(
         self, registry, watermark_path, recorder
     ) -> None:
         """The embedder dies mid-pass; later traces are still attempted."""
@@ -148,16 +149,22 @@ class TestInterruptedPassResumes:
         assert first.failed == 5, "every trace after the gap is still attempted"
         assert first.to_dict()["status"] == "partial"
 
-        # Pinned behind the first failure — not at the newest success, and not
-        # at the end of the batch.
-        saved = TraceEmbedWatermark(watermark_path).cursor
-        assert saved == TraceCursor(
-            created_at=traces[2].created_at, trace_id=traces[2].trace_id
+        # The cursor is at the end of the batch, and every trace it passed
+        # without a vector row is on the list, oldest first.
+        saved = TraceEmbedWatermark(watermark_path)
+        assert saved.cursor == TraceCursor(
+            created_at=traces[7].created_at, trace_id=traces[7].trace_id
         )
+        assert saved.retry == tuple(
+            TraceCursor(created_at=t.created_at, trace_id=t.trace_id)
+            for t in traces[3:]
+        )
+        assert first.retry_pending == 5
 
         recorder.fail_after = 0
         second = run_trace_embed_pass(registry, watermark_path=watermark_path)
         assert second.embedded == 5
+        assert second.retry_pending == 0
         _assert_complete_and_deduped(registry, traces, recorder)
 
     def test_failure_in_the_middle_does_not_strand_later_traces(
@@ -165,9 +172,9 @@ class TestInterruptedPassResumes:
     ) -> None:
         """One unrenderable trace must not stall every newer one forever.
 
-        The cursor stays behind it (so it is retried), but the traces after it
-        are embedded on the *same* pass — a stop-the-world design would leave
-        the newest work unreachable until someone fixed the bad row.
+        It goes on the retry list (so it is attempted again), but the traces
+        after it are embedded on the *same* pass — a stop-the-world design would
+        leave the newest work unreachable until someone fixed the bad row.
         """
         traces = seed_traces(registry, 6)
         # A trace with nothing to render: no intent, no outcome summary, no
@@ -185,18 +192,22 @@ class TestInterruptedPassResumes:
         assert report.skipped_empty == 1
         assert report.embedded == 5, "later traces are embedded despite the gap"
 
-        saved = TraceEmbedWatermark(watermark_path).cursor
-        assert saved == TraceCursor(
-            created_at=traces[1].created_at, trace_id=traces[1].trace_id
+        saved = TraceEmbedWatermark(watermark_path)
+        assert saved.cursor == TraceCursor(
+            created_at=traces[5].created_at, trace_id=traces[5].trace_id
+        )
+        assert saved.retry == (
+            TraceCursor(created_at=broken.created_at, trace_id=broken.trace_id),
         )
 
-        # A re-run re-reaches the broken trace (and everything after it, all of
-        # which the store-state check reports as already done).
+        # A re-run attempts the broken trace again, and only it: the traces
+        # after it are behind the cursor now.
         again = run_trace_embed_pass(registry, watermark_path=watermark_path)
-        assert again.scanned == 4
+        assert again.scanned == 1
         assert again.skipped_empty == 1
-        assert again.skipped_existing == 3
+        assert again.skipped_existing == 0
         assert again.embedded == 0
+        assert again.retry_pending == 1
 
 
 class TestStateIsTheAuthority:
@@ -417,13 +428,13 @@ class TestOnlyAHazardousIdIsPermanent:
         assert report.skipped_invalid == 1
         assert TraceEmbedWatermark(watermark_path).cursor is None
 
-    def test_a_stage_one_rejection_for_an_honest_id_pins_the_cursor(
+    def test_a_stage_one_rejection_for_an_honest_id_is_listed_not_skipped(
         self, registry, watermark_path, recorder, monkeypatch
     ) -> None:
         """A bug that makes ``OperationRegistry.validate`` refuse a command
         for reasons unrelated to the trace id must not be mistaken for the
-        hazardous-id case: it is counted as ``failed``, and the cursor stays
-        behind it so the next pass retries."""
+        hazardous-id case: it is counted as ``failed`` and put on the retry
+        list, so the next pass attempts it again."""
         from trellis.mutate.commands import OperationRegistry
 
         traces = seed_traces(registry, 3)
@@ -447,12 +458,15 @@ class TestOnlyAHazardousIdIsPermanent:
             "skip: the trace after it is still attempted and still embeds"
         )
 
-        saved = TraceEmbedWatermark(watermark_path).cursor
-        assert saved == TraceCursor(
-            created_at=traces[0].created_at, trace_id=traces[0].trace_id
+        saved = TraceEmbedWatermark(watermark_path)
+        assert saved.cursor == TraceCursor(
+            created_at=traces[2].created_at, trace_id=traces[2].trace_id
+        )
+        assert saved.retry == (
+            TraceCursor(created_at=poison.created_at, trace_id=poison.trace_id),
         )
 
-    def test_a_handler_stage_rejection_pins_the_cursor(
+    def test_a_handler_stage_rejection_is_listed_not_skipped(
         self, registry, watermark_path, recorder, monkeypatch
     ) -> None:
         """A REJECTED that originates in the handler, not the registry's own
@@ -482,9 +496,12 @@ class TestOnlyAHazardousIdIsPermanent:
             "skip: the trace after it is still attempted and still embeds"
         )
 
-        saved = TraceEmbedWatermark(watermark_path).cursor
-        assert saved == TraceCursor(
-            created_at=traces[0].created_at, trace_id=traces[0].trace_id
+        saved = TraceEmbedWatermark(watermark_path)
+        assert saved.cursor == TraceCursor(
+            created_at=traces[2].created_at, trace_id=traces[2].trace_id
+        )
+        assert saved.retry == (
+            TraceCursor(created_at=poison.created_at, trace_id=poison.trace_id),
         )
 
 
