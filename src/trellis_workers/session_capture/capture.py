@@ -57,13 +57,24 @@ from trellis.core.hashing import content_hash
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.ingest_corpus.models import SyncRecord
 from trellis.ingest_corpus.sync import sync_records
-from trellis.llm.egress import EgressGate, EgressVerdict, failed_read_verdict
+from trellis.llm.egress import (
+    EgressGate,
+    EgressVerdict,
+    failed_read_verdict,
+    strictest_verdict,
+)
 from trellis.llm.routing import LLMConsumer
 from trellis.mcp.reconcile import (
     RECONCILIATION_KEY,
     SUPERSEDES_DOC_KEY,
     UPDATES_DOC_KEY,
     reconcile_on_write_enabled,
+)
+from trellis.schemas.classification import (
+    DATA_CLASSIFICATION_KEY,
+    DataClassification,
+    sensitivity_of,
+    sensitivity_rank,
 )
 from trellis.stores.base.event_log import EventType
 from trellis_workers.session_capture import distill, gating, reconcile_pass
@@ -86,7 +97,9 @@ if TYPE_CHECKING:
     from datetime import datetime
     from pathlib import Path
 
+    from trellis.ingest_corpus.models import CorpusSyncReport
     from trellis.llm import LLMClient
+    from trellis.schemas.classification import Sensitivity
     from trellis.stores.registry import StoreRegistry
 
 logger = structlog.get_logger(__name__)
@@ -109,6 +122,11 @@ DEFAULT_CHECKPOINT_EVERY = 5
 MARKER_PENDING = "pending"
 
 _REQUESTED_BY = "worker:session-capture"
+
+#: The ``classified_by`` of the label a memory inherits from the documents its
+#: session was served. It marks the label as derived, so it reads apart from one a
+#: person set.
+SESSION_INHERIT_CLASSIFIER = "session-inherit"
 
 
 @dataclass
@@ -180,6 +198,14 @@ def _candidate_metadata(candidate: CandidateMemory) -> dict[str, object]:
         metadata[UPDATES_DOC_KEY] = candidate.updates_doc_id
     if candidate.supersedes_doc_id:
         metadata[SUPERSEDES_DOC_KEY] = candidate.supersedes_doc_id
+    if candidate.inherited_sensitivity is not None:
+        # Only the sensitivity, never ``regulatory_tags``: no gate reads those,
+        # so inheriting them would change nothing a caller can observe (see
+        # ``trellis_workers.trace_embed.handler``).
+        metadata[DATA_CLASSIFICATION_KEY] = DataClassification(
+            sensitivity=candidate.inherited_sensitivity,
+            classified_by=[SESSION_INHERIT_CLASSIFIER],
+        ).model_dump(mode="json")
     return metadata
 
 
@@ -727,25 +753,86 @@ def _readable_served_ids(payload: Mapping[str, Any]) -> set[str] | None:
     return served
 
 
+@dataclass(frozen=True)
+class _SessionServing:
+    """What the packs a session was served say, for the screen and for the label.
+
+    ``verdict`` keeps the session off its route unless it is ``PERMITTED``.
+    ``inherited`` is the label a memory distilled from the session carries: the
+    strictest one above ``internal`` among the documents it was served, and
+    ``restricted`` when one could not be judged. ``None`` stamps nothing.
+    """
+
+    verdict: EgressVerdict
+    inherited: Sensitivity | None = None
+
+
+def _stricter(a: Sensitivity | None, b: Sensitivity | None) -> Sensitivity | None:
+    """The stricter of two optional labels; ``None`` is the absence of one."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return b if sensitivity_rank(b) > sensitivity_rank(a) else a
+
+
+def _on_route(
+    egress: EgressGate,
+    verdict: EgressVerdict,
+    inherited: Sensitivity | None,
+    *,
+    unreadable: bool,
+) -> _SessionServing:
+    """The screen's answer for the route the session would be sent to.
+
+    A route that is not local keeps ``verdict`` as judged: a served label above
+    ``internal`` is a reason to keep the session off it. A local route admits any
+    label, so a label is not a reason to skip, only to stamp: it is
+    ``PERMITTED`` with ``inherited`` set, unless a store could not answer
+    (``unreadable``). Then it is ``UNREADABLE`` and the session is held, because
+    a retry may lower the label and a memory is not written unlabelled on a
+    read that failed.
+    """
+    if not egress.local:
+        return _SessionServing(verdict, inherited)
+    if unreadable or verdict is EgressVerdict.UNREADABLE:
+        return _SessionServing(EgressVerdict.UNREADABLE, inherited)
+    return _SessionServing(EgressVerdict.PERMITTED, inherited)
+
+
 def _session_egress_verdict(
     registry: StoreRegistry, digest: SessionDigest, egress: EgressGate
-) -> EgressVerdict:
-    """Whether the transcript digest may go to the route, by what the session read.
+) -> _SessionServing:
+    """Whether the digest may go to the route, and what label its memories inherit.
 
     A transcript carries no label, but the packs its session was served name
-    documents that do, and the memory distilled from it is written unlabelled.
-    Any served document labelled above ``internal`` (:mod:`trellis.llm.egress`)
-    makes the verdict ``WITHHELD``, whatever else failed to read. So does a
-    pack event that records no readable item list: events are immutable, so
-    that is a permanent fact no retry can clear, and the session stays off the
-    route without failing a strict run. Otherwise a store that could not answer
-    (the event log, a served document's row) makes it ``UNREADABLE``: kept off
-    the route, reported as a fault a later sweep may clear. A pack whose event
-    the log no longer holds names nothing to read and is skipped.
+    documents that do, and the memory distilled from it must not be served below
+    them. One read of the served documents answers both questions
+    (:meth:`~trellis.llm.egress.EgressGate.judge_served`), on every route.
+
+    On a route that is not local, any served document labelled above
+    ``internal`` makes the verdict ``WITHHELD``, whatever else failed to read.
+    So does a pack event that records no readable item list: events are
+    immutable, so that is a permanent fact no retry can clear, and the session
+    stays off the route without failing a strict run. Otherwise a store that
+    could not answer (the event log, a served document's row) makes it
+    ``UNREADABLE``: kept off the route, reported as a fault a later sweep may
+    clear.
+
+    On a local route nothing is kept off it for a label: the session is
+    distilled and the memory is stamped with ``inherited``. A permanent fact
+    (an unparseable row, a chunk whose parent is gone, an event with no readable
+    item list) stamps ``restricted``, because content that cannot be judged is
+    not judged ``internal``. A store that could not answer holds the session
+    instead (``UNREADABLE``), un-watermarked and counted like the fault it is.
+
+    A pack whose event the log no longer holds names nothing to read and is
+    skipped.
     """
-    if egress.local or not digest.pack_ids:
-        return EgressVerdict.PERMITTED
+    verdict = EgressVerdict.PERMITTED
+    inherited: Sensitivity | None = None
     unreadable = False
+    seen: set[str] = set()
     try:
         for pack_id in digest.pack_ids:
             for event in registry.operational.event_log.get_events(
@@ -753,20 +840,56 @@ def _session_egress_verdict(
             ):
                 served = _readable_served_ids(event.payload)
                 if served is None:
-                    return EgressVerdict.WITHHELD
-                for item_id in sorted(served):
-                    verdict = egress.stored_verdict(item_id)
-                    if verdict is EgressVerdict.WITHHELD:
-                        return verdict
-                    unreadable = unreadable or verdict is EgressVerdict.UNREADABLE
+                    # Nothing says what the pack served, now or on any retry, and
+                    # ``restricted`` is the strictest label: nothing read can
+                    # lower it.
+                    return _on_route(
+                        egress, EgressVerdict.WITHHELD, "restricted", unreadable=False
+                    )
+                judgement = egress.judge_served(sorted(served - seen))
+                seen |= served
+                verdict = strictest_verdict(verdict, judgement.verdict)
+                inherited = _stricter(inherited, judgement.inherited)
+                unreadable = unreadable or judgement.unreadable
+                if verdict is EgressVerdict.WITHHELD and not egress.local:
+                    return _SessionServing(verdict)
     except Exception as exc:
         # GRACEFUL-DEGRADATION: fail closed. A pack that cannot be read must
-        # not read as permission to send the transcript off the host. An event
-        # row whose own bytes do not parse never will, so it is withheld; an
-        # event log that could not answer is counted under
+        # not read as permission to send the transcript off the host, nor as a
+        # memory with no label. An event row whose own bytes do not parse never
+        # will, so it is withheld (``restricted`` on a local route); an event
+        # log that could not answer is counted under
         # ``sessions_skipped_egress_unreadable``, which strict mode fails on.
-        return failed_read_verdict(exc)
-    return EgressVerdict.UNREADABLE if unreadable else EgressVerdict.PERMITTED
+        fault = failed_read_verdict(exc)
+        return _on_route(
+            egress,
+            strictest_verdict(verdict, fault),
+            "restricted" if fault is EgressVerdict.WITHHELD else inherited,
+            unreadable=unreadable or fault is EgressVerdict.UNREADABLE,
+        )
+    return _on_route(egress, verdict, inherited, unreadable=unreadable)
+
+
+def _label_to_stamp(
+    registry: StoreRegistry, doc_id: str, inherited: Sensitivity | None
+) -> Sensitivity | None:
+    """``inherited``, unless the row stored at ``doc_id`` is labelled as strictly.
+
+    A label is never lowered, and an equal one is not rewritten. The id is
+    content-derived, so a row is already there only when the same memory was
+    captured before: its label stands if it is at least as strict, and a fresh
+    stamp replaces it only if it is stricter (a write merges fresh metadata over
+    the stored). A row that cannot be read raises, which leaves the session
+    un-watermarked for a retry rather than writing it unlabelled.
+    """
+    if inherited is None:
+        return None
+    stored = registry.knowledge.document_store.get(doc_id)
+    if stored is not None and sensitivity_rank(
+        sensitivity_of(stored.get("metadata"))
+    ) >= sensitivity_rank(inherited):
+        return None
+    return inherited
 
 
 def _record_egress_skip(
@@ -810,8 +933,9 @@ def _capture_session(
     the live sweep would execute.
     """
     # Nothing is sent with no client, so the no-client path is not gated.
+    inherited: Sensitivity | None = None
     if llm_client is not None:
-        verdict = _session_egress_verdict(
+        serving = _session_egress_verdict(
             registry,
             digest,
             EgressGate.for_route(
@@ -820,12 +944,13 @@ def _capture_session(
                 registry.knowledge.document_store,
             ),
         )
-        if verdict is not EgressVerdict.PERMITTED:
+        if serving.verdict is not EgressVerdict.PERMITTED:
             # Not a judge outage: nothing was asked and nothing failed.
             # Returning ``None`` leaves the session un-watermarked, so a sweep
             # over a route declared local distils it.
-            _record_egress_skip(report, digest, verdict)
+            _record_egress_skip(report, digest, serving.verdict)
             return None
+        inherited = serving.inherited
     distill_result = distill.distill_session(llm_client, digest)
     if distill_result.outcome is distill.DistillOutcome.UNAVAILABLE:
         report.sessions_judge_unavailable += 1
@@ -856,6 +981,9 @@ def _capture_session(
     survivors = _gate_candidates(candidates, report, discards)
     for candidate in survivors:
         candidate.doc_id = capture_doc_id(source_system, candidate.content)
+        candidate.inherited_sensitivity = _label_to_stamp(
+            registry, candidate.doc_id, inherited
+        )
 
     if reconcile_enabled:
         return reconcile_pass.adjudicate(
@@ -910,7 +1038,38 @@ def _write_records(
     counts = sync_report.counts()
     report.memories_written += counts["ingested"] + counts["updated"]
     report.memories_skipped_unchanged += counts["skipped_unchanged"]
+    _count_label_inherited(report, records, sync_report)
     report.warnings.extend(sync_report.warnings)
+
+
+def _stamped_label(record: SyncRecord) -> Sensitivity | None:
+    """The label ``record`` was built to be written under, if it inherits one."""
+    stamp = record.handler_metadata.get(DATA_CLASSIFICATION_KEY)
+    if isinstance(stamp, Mapping) and stamp.get("classified_by") == [
+        SESSION_INHERIT_CLASSIFIER
+    ]:
+        return sensitivity_of(record.handler_metadata)
+    return None
+
+
+def _count_label_inherited(
+    report: CaptureReport, records: list[SyncRecord], sync_report: CorpusSyncReport
+) -> None:
+    """Count the written (or, in a dry run, planned) records that carry a stamp.
+
+    Read off the write seam's own outcomes, so a record that failed or was
+    skipped as unchanged is not counted, and a dry run counts what the live
+    sweep would write.
+    """
+    labels = {r.doc_id: _stamped_label(r) for r in records}
+    for outcome in sync_report.files:
+        level = labels.get(outcome.doc_id)
+        if level is None or outcome.action == "skip":
+            continue
+        report.memories_label_inherited += 1
+        report.memories_label_inherited_by_level[level] = (
+            report.memories_label_inherited_by_level.get(level, 0) + 1
+        )
 
 
 def _landed_of(

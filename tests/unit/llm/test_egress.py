@@ -879,3 +879,100 @@ def test_a_lazy_gate_whose_store_opens_as_none_never_permits() -> None:
     )
 
     assert gate.stored_verdict("doc") is EgressVerdict.UNREADABLE
+
+
+class TestJudgeServed:
+    """``judge_served``: the verdict and the label a result of served ids inherits.
+
+    The one read behind a session capture's egress screen and the label its
+    memory carries, so the two cannot disagree. Unlike ``cited_verdict`` it
+    answers with the true level on a local gate too.
+    """
+
+    @pytest.mark.parametrize("local", [True, False], ids=["local", "cloud"])
+    def test_the_strictest_label_above_internal_is_inherited_on_every_route(
+        self, store: SQLiteDocumentStore, local: bool
+    ) -> None:
+        store.put("plain", "body", {})
+        store.put("conf", "body", _label("confidential"))
+        store.put("restr", "body", _label("restricted"))
+        gate = EgressGate(store, local=local)
+
+        judged = gate.judge_served(["plain", "conf", "restr"])
+
+        assert judged.inherited == "restricted"
+        assert judged.unreadable is False
+        # The true verdict, not the route's: a local route does not refuse it.
+        assert judged.verdict is EgressVerdict.WITHHELD
+
+    @pytest.mark.parametrize("local", [True, False], ids=["local", "cloud"])
+    @pytest.mark.parametrize("level", [None, "public", "internal"])
+    def test_nothing_above_internal_inherits_nothing(
+        self, store: SQLiteDocumentStore, local: bool, level: str | None
+    ) -> None:
+        store.put("doc", "body", _label(level) if level else {})
+
+        judged = EgressGate(store, local=local).judge_served(["doc", "entity:x"])
+
+        assert judged.verdict is EgressVerdict.PERMITTED
+        assert judged.inherited is None
+        assert judged.unreadable is False
+
+    def test_no_ids_inherit_nothing(self, store: SQLiteDocumentStore) -> None:
+        judged = EgressGate(store, local=True).judge_served([])
+
+        assert (judged.verdict, judged.inherited) == (EgressVerdict.PERMITTED, None)
+
+    def test_a_chunk_takes_the_label_of_its_parent_on_a_local_gate(
+        self, store: SQLiteDocumentStore
+    ) -> None:
+        store.put("par", "body", _label("confidential"))
+
+        judged = EgressGate(store, local=True).judge_served([chunk_doc_id("par", 0)])
+
+        assert judged.inherited == "confidential"
+
+    def test_an_orphan_chunk_is_withheld_and_restricted_even_on_a_local_gate(
+        self, store: SQLiteDocumentStore
+    ) -> None:
+        """A local gate would read it ``internal``; a label may not."""
+        orphan = chunk_doc_id("gone", 0)
+
+        local = EgressGate(store, local=True)
+        judged = local.judge_served([orphan])
+
+        assert local.stored_verdict(orphan) is EgressVerdict.PERMITTED
+        assert judged.verdict is EgressVerdict.WITHHELD
+        assert judged.inherited == "restricted"
+        assert judged.unreadable is False
+
+    @pytest.mark.parametrize("local", [True, False], ids=["local", "cloud"])
+    def test_a_store_that_cannot_answer_is_unreadable_and_restricted(
+        self, store: SQLiteDocumentStore, local: bool
+    ) -> None:
+        store.put("ok", "body", {})
+        flaky = _FlakyStore(store, {"down": RuntimeError("store down")})
+
+        judged = EgressGate(flaky, local=local).judge_served(["ok", "down"])  # type: ignore[arg-type]
+
+        assert judged.verdict is EgressVerdict.UNREADABLE
+        assert judged.inherited == "restricted"
+        assert judged.unreadable is True
+
+    def test_a_readable_label_is_kept_beside_an_unreadable_item(
+        self, store: SQLiteDocumentStore
+    ) -> None:
+        """The unreadable flag survives a withhold, so a retry is still seen."""
+        store.put("conf", "body", _label("confidential"))
+        flaky = _FlakyStore(store, {"down": RuntimeError("store down")})
+
+        judged = EgressGate(flaky, local=False).judge_served(["down", "conf"])  # type: ignore[arg-type]
+
+        assert judged.verdict is EgressVerdict.WITHHELD
+        assert judged.unreadable is True
+
+    def test_a_gate_with_no_store_cannot_answer_for_a_stored_row(self) -> None:
+        judged = EgressGate(None, local=False).judge_served(["doc"])
+
+        assert judged.verdict is EgressVerdict.UNREADABLE
+        assert judged.unreadable is True
