@@ -509,8 +509,9 @@ def save_knowledge(
             Requires ``content`` or ``evidence_ref``. The old entity and its
             evidence document are marked superseded by the new evidence
             document, so a pack holding both serves only the new version; an
-            evidence document that cannot be marked (chunked, archived, or
-            superseded by something else) is left unchanged and named in the
+            evidence document that cannot be marked (chunked, archived,
+            superseded by something else, or a ``trace-summary:`` row, which
+            the trace embed worker owns) is left unchanged and named in the
             reply. Refused, with nothing written, if the id is unknown, a
             document, archived, or already superseded by something else.
         sensitivity: Optional label for the evidence document created from

@@ -296,9 +296,18 @@ def _t_doc_skip(
     something else. The tool reports the document it left. A document above the
     caller's ``clearance`` is reported as ``no such document``, the same words a
     missing one gets, and is never stamped.
+
+    A summary row under the trace-summary prefix is left too (#1076): the
+    trace embed worker owns it, and the write seam would refuse the stamp
+    after the entity was already stamped, leaving a call that errors on
+    every re-send. It is read on the id alone, before the lookup, so the
+    answer is the same whether or not the row exists or is readable. The
+    write guard itself is untouched.
     """
     if t_doc is None:
         return None
+    if is_trace_summary_doc_id(t_doc):
+        return "it belongs to the trace embed worker"
     doc = visible_document(docs, t_doc, clearance=clearance)
     if doc is None:
         return "no such document"

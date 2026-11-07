@@ -894,6 +894,125 @@ def test_trace_summary_refusal_leaves_the_worker_row_byte_identical(temp_registr
     assert LIFECYCLE_KEY not in _meta(reg, TRACE_SUMMARY_TARGET)
 
 
+#: What the reply says of an old entity whose evidence document is a worker's
+#: summary row (#1076): left alone, like a chunked document, not refused.
+_SUMMARY_EVIDENCE_LINE = (
+    f"Evidence document {TRACE_SUMMARY_TARGET} left unchanged "
+    "(it belongs to the trace embed worker)"
+)
+
+
+@pytest.mark.parametrize("row_present", [True, False], ids=["row", "no-row"])
+def test_save_knowledge_over_a_summary_evidence_document_leaves_it_alone(
+    temp_registry, row_present
+):
+    # The entity N points at a worker-owned summary row through evidence_ref,
+    # which the tool accepts. Superseding N used to pass the plan, stamp N,
+    # then raise when the reserved-prefix write guard refused the stamp on
+    # the summary row, and every re-send failed the same way (#1076).
+    reg = temp_registry
+    docs = reg.knowledge.document_store
+    if row_present:
+        _put(
+            reg,
+            TRACE_SUMMARY_TARGET,
+            T_TEXT,
+            source_system="trace_embed",
+            trace_id="zf-trace",
+        )
+    _node(reg, "zf-node", evidence_ref=TRACE_SUMMARY_TARGET)
+
+    def snapshot() -> str:
+        return json.dumps(docs.get(TRACE_SUMMARY_TARGET), sort_keys=True, default=str)
+
+    before = snapshot()
+    seen = _event_ids(reg, EventType.MUTATION_EXECUTED)
+
+    reply = save_knowledge(name=NAME, content=X_TEXT, supersedes="zf-node")
+
+    _, z = _entity_ids(reply)
+    lines = reply.splitlines()
+    assert f"Superseded: zf-node -> {z}" in lines
+    assert _SUMMARY_EVIDENCE_LINE in lines
+    assert f"Superseded: {TRACE_SUMMARY_TARGET} -> {z}" not in lines
+    assert _props(reg, "zf-node")[LIFECYCLE_KEY] == _stamp(z)
+    assert snapshot() == before
+    assert _mutations_on(reg, seen, TRACE_SUMMARY_TARGET) == []
+    assert [p["operation"] for p in _mutations_on(reg, seen, "zf-node")] == [
+        "entity.update"
+    ]
+
+
+def test_a_summary_evidence_ref_is_accepted_and_its_supersession_resends_clean(
+    temp_registry,
+):
+    # The sequence the defect needs, end to end through the tool: file N with
+    # evidence_ref at the summary row, then supersede N. A re-send of the same
+    # call finds the stamp in place and answers the same lines.
+    reg = temp_registry
+    _put(reg, TRACE_SUMMARY_TARGET, T_TEXT, source_system="trace_embed")
+    first = save_knowledge(name=NAME, evidence_ref=TRACE_SUMMARY_TARGET)
+    n_old, doc = _entity_ids(first)
+    assert doc == TRACE_SUMMARY_TARGET
+    before = reg.knowledge.document_store.get(TRACE_SUMMARY_TARGET)
+
+    reply = save_knowledge(name=NAME, content=X_TEXT, supersedes=n_old)
+    _, z = _entity_ids(reply)
+    assert _SUMMARY_EVIDENCE_LINE in reply.splitlines()
+    assert _props(reg, n_old)[LIFECYCLE_KEY] == _stamp(z)
+
+    again = save_knowledge(name=NAME, content=X_TEXT, supersedes=n_old)
+    assert _SUMMARY_EVIDENCE_LINE in again.splitlines()
+    assert reg.knowledge.document_store.get(TRACE_SUMMARY_TARGET) == before
+    assert LIFECYCLE_KEY not in _meta(reg, TRACE_SUMMARY_TARGET)
+
+
+def test_the_write_guard_still_refuses_a_stamp_on_a_summary_row(temp_registry):
+    # The skip is a plan decision, not a loosening: a stamp aimed at the row
+    # is still refused where it is written, and writes nothing.
+    from trellis.mcp import supersession
+
+    reg = temp_registry
+    docs = reg.knowledge.document_store
+    _put(reg, TRACE_SUMMARY_TARGET, T_TEXT, source_system="trace_embed")
+    before = json.dumps(docs.get(TRACE_SUMMARY_TARGET), sort_keys=True, default=str)
+
+    error = supersession.supersede_document(
+        reg,
+        doc_id=TRACE_SUMMARY_TARGET,
+        successor="zf-successor",
+        requested_by="mcp:save_knowledge",
+        clearance="restricted",
+    )
+
+    assert error is not None
+    assert "trace embed worker" in error
+    assert (
+        json.dumps(docs.get(TRACE_SUMMARY_TARGET), sort_keys=True, default=str)
+        == before
+    )
+    assert LIFECYCLE_KEY not in _meta(reg, TRACE_SUMMARY_TARGET)
+
+
+@pytest.mark.parametrize(
+    "t_doc",
+    ["Trace-Summary:zf-trace", "my-trace-summary:zf-trace", "trace-summary-zf-trace"],
+)
+def test_an_evidence_id_beside_the_reserved_prefix_is_still_stamped(
+    temp_registry, t_doc
+):
+    # The skip reads the exact, case-sensitive prefix and nothing else.
+    reg = temp_registry
+    _put(reg, t_doc, T_TEXT)
+    _node(reg, "zf-node", evidence_ref=t_doc)
+
+    reply = save_knowledge(name=NAME, content=X_TEXT, supersedes="zf-node")
+
+    _, z = _entity_ids(reply)
+    assert f"Superseded: {t_doc} -> {z}" in reply.splitlines()
+    assert declared_successor(_meta(reg, t_doc)) == z
+
+
 @pytest.mark.parametrize(
     "target",
     ["Trace-Summary:zf-trace", "my-trace-summary:zf-trace", "trace-summary-zf-trace"],

@@ -181,7 +181,7 @@
       }
      ],
      "default": null,
-     "description": "Optional id of an existing entity this one replaces.\nRequires ``content`` or ``evidence_ref``. The old entity and its\nevidence document are marked superseded by the new evidence\ndocument, so a pack holding both serves only the new version; an\nevidence document that cannot be marked (chunked, archived, or\nsuperseded by something else) is left unchanged and named in the\nreply. Refused, with nothing written, if the id is unknown, a\ndocument, archived, or already superseded by something else."
+     "description": "Optional id of an existing entity this one replaces.\nRequires ``content`` or ``evidence_ref``. The old entity and its\nevidence document are marked superseded by the new evidence\ndocument, so a pack holding both serves only the new version; an\nevidence document that cannot be marked (chunked, archived,\nsuperseded by something else, or a ``trace-summary:`` row, which\nthe trace embed worker owns) is left unchanged and named in the\nreply. Refused, with nothing written, if the id is unknown, a\ndocument, archived, or already superseded by something else."
     },
     "sensitivity": {
      "anyOf": [
