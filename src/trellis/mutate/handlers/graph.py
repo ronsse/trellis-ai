@@ -78,6 +78,29 @@ def _refuse_precedent_namespace_type(
     raise ValidationError(msg, errors=[msg], code=code)
 
 
+def _refuse_precedent_namespace_create(*, node_id: str, code: str) -> None:
+    """Refuse an ``entity.create`` at ``node_id`` when it is under the namespace.
+
+    The last of the namespace refusals ``entity.create`` applies, so a command
+    that breaks a narrower rule is answered with that rule's code first (an
+    existing precedent's lifecycle or retype, a caller-set
+    ``source_excerpt_status``, a type other than ``precedent``). What reaches
+    this one is a plain ``precedent`` create, or an upsert over an existing
+    precedent, from a command that is not the promotion: the namespace belongs
+    to the reviewed promotion alone (#1080). The caller has already ruled the
+    promotion out and an ``if_absent`` skip over an existing node (which
+    writes nothing), so this judges only the id.
+    """
+    if not is_promoted_precedent_document(node_id):
+        return
+    msg = (
+        f"entity.create refuses {node_id}: ids under {PRECEDENT_ENTITY_ID_PREFIX} "
+        "belong to promoted precedents, which only the reviewed promotion "
+        "writes; use entity.update to edit one"
+    )
+    raise ValidationError(msg, errors=[msg], code=code)
+
+
 def _refuse_node_evidence_ref(
     registry: StoreRegistry,
     properties: Mapping[str, Any],
@@ -244,6 +267,21 @@ class EntityCreateHandler:
     ``precedent_namespace_type_via_entity_create``: the serve-time check that
     judges a precedent by its source's label reads the ``precedent`` type, so
     a node there under another type sits outside it (#1080).
+
+    **And only the promotion creates there at all.** An ``entity.create`` at an
+    id under ``precedent://learning/`` from a command without the mark, of any
+    type and over an absent or an existing node, is refused with
+    ``precedent_namespace_via_entity_create``. An ``if_absent`` placeholder over
+    an existing node still writes nothing and is not refused. ``entity.update``
+    of an existing precedent is not affected: it never needed the mark.
+
+    **Refusal order, most specific code first.** For one command the codes are
+    checked as: ``entity_create_retypes_existing_precedent`` and
+    ``entity_create_over_existing_precedent`` (the existing precedent's own
+    rules), ``precedent_excerpt_status_via_entity_create``,
+    ``precedent_namespace_type_via_entity_create``, then
+    ``precedent_namespace_via_entity_create``, which is what remains of the
+    namespace once the narrower rules have passed.
     """
 
     def __init__(
@@ -352,6 +390,11 @@ class EntityCreateHandler:
                     node_id=node_id,
                     node_type=entity_type,
                     code="precedent_namespace_type_via_entity_create",
+                )
+                # Last, so the narrower codes above win. What is left is a
+                # ``precedent`` the promotion did not write (#1080).
+                _refuse_precedent_namespace_create(
+                    node_id=node_id, code="precedent_namespace_via_entity_create"
                 )
 
             stored_properties = (

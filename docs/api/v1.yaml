@@ -7696,7 +7696,15 @@ paths:
 
         starting ``trace-summary:``, for every caller: that namespace is the
 
-        trace-embed worker''s, and a row there makes it skip the trace for good. A
+        trace-embed worker''s, and a row there makes it skip the trace for good. So
+
+        is an ``item_id`` starting ``precedent://learning/``, for every caller: that
+
+        namespace is the reviewed promotion''s, whose own vector row is written in
+
+        process with its document, and a row there that names no document would be
+
+        served as a promoted precedent carrying the caller''s text. A
 
         row''s ``metadata`` may not carry a raw ``data_classification`` (422), whoever
 
