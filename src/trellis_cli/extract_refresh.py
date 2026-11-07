@@ -716,11 +716,13 @@ def refresh(  # noqa: PLR0912, PLR0915 - CLI dispatch with explicit branching by
                 f"  UC symlink scope:  {escape(summary['unity_catalog_scope'])}",
                 soft_wrap=True,
             )
+        # Counts by reason with no total: the uc_storage_* reasons count written
+        # rows, not skips, and one mention can count under two reasons.
         skipped = summary["skipped_rows"]
         if skipped:
             reasons = ", ".join(f"{name}={count}" for name, count in skipped.items())
             console.print(
-                f"  Skipped rows:      {sum(skipped.values())} ({escape(reasons)})",
+                f"  Skipped rows:      {escape(reasons)}",
                 soft_wrap=True,
             )
         _print_results(results, outcome.first_failure, width=19)

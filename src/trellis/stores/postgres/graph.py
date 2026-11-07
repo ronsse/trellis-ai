@@ -552,6 +552,52 @@ class PostgresGraphStore(PostgresStoreBase, GraphStore):
                 )
         return True
 
+    def create_node_if_absent(
+        self,
+        node_id: str,
+        node_type: str,
+        properties: dict[str, Any],
+        *,
+        node_role: str = "semantic",
+        generation_spec: dict[str, Any] | None = None,
+        document_ids: list[str] | None = None,
+    ) -> bool:
+        validate_node_role_args(node_role, generation_spec)
+        validate_document_ids(document_ids)
+        now = utc_now()
+        version: dict[str, Any] = {
+            "version_id": generate_ulid(),
+            "node_id": node_id,
+            "node_type": node_type,
+            "node_role": node_role,
+            "generation_spec": (
+                json.dumps(generation_spec, allow_nan=False)
+                if generation_spec is not None
+                else None
+            ),
+            "document_ids": (
+                json.dumps(document_ids, allow_nan=False)
+                if document_ids is not None
+                else None
+            ),
+            "properties": json.dumps(properties, allow_nan=False),
+            "created_at": now,
+            "updated_at": now,
+            "valid_from": now,
+            "valid_to": None,
+        }
+        # ``_NODE_CURRENT_INDEX`` is the arbiter: of two writers that both see
+        # no current row, the one that commits second inserts nothing, and
+        # ``rowcount`` says which this call was.
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO nodes ({', '.join(_NODE_COLUMNS)})"
+                f" VALUES ({', '.join(['%s'] * len(_NODE_COLUMNS))})"
+                " ON CONFLICT (node_id) WHERE valid_to IS NULL DO NOTHING",
+                tuple(version[column] for column in _NODE_COLUMNS),
+            )
+            return bool(cur.rowcount == 1)
+
     def _fetch_current_node_for_update(
         self, conn: psycopg.Connection, node_id: str
     ) -> dict[str, Any] | None:

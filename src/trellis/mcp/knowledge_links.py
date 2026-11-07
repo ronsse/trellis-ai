@@ -608,11 +608,14 @@ def _mint_domain(
     key derived from the id, which answers a second mint of the same domain
     DUPLICATE.  The key protects a retry or a serial save, since it is
     recorded only after a mint succeeds.  ``if_absent`` is the guard for a
-    writer that holds no key, such as a trace.  It is a read before a write
-    inside the handler, not an atomic store operation, so it narrows the
-    window to that one gap rather than closing it: two saves truly concurrent
-    inside it can both write (the same ``minted_by``, possibly another
-    spelling of the name), and a trace landing inside it is still replaced.
+    writer that holds no key, such as a trace.  The handler writes the node
+    only if the id is still absent (``create_node_if_absent``), so a trace
+    landing between the read above and the write is kept, not replaced.  On
+    SQLite and Postgres that is one atomic insert and two concurrent mints
+    cannot both write.  The Bolt backends (Neo4j, ArcadeDB) do the check and
+    the insert in one statement without a uniqueness constraint behind it, so
+    two saves truly concurrent there can both write (the same ``minted_by``,
+    possibly another spelling of the name).
     """
     spec = _domain_mint_spec(value)
     if spec is None:

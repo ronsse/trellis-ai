@@ -29,6 +29,7 @@ import structlog
 
 from trellis.core.precedent_document import (
     PRECEDENT_ENTITY_ID_PREFIX,
+    PROMOTION_COMMAND_MARK,
     is_promoted_precedent_document,
 )
 from trellis.learning.artifacts import LEARNING_CANDIDATES_FILENAME
@@ -2084,6 +2085,9 @@ def submit_learning_promotion(
         },
         target_type="entity",
         requested_by=requested_by,
+        # The one writer allowed to stamp ``source_excerpt_status``: the
+        # handler refuses it from any command without this reserved mark.
+        metadata={PROMOTION_COMMAND_MARK: True},
     )
     entity_result = executor.execute(entity_cmd)
     if entity_result.status != CommandStatus.SUCCESS:

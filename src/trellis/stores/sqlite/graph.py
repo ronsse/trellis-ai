@@ -561,6 +561,56 @@ class SQLiteGraphStore(SQLiteStoreBase, GraphStore):
             )
         return True
 
+    def create_node_if_absent(
+        self,
+        node_id: str,
+        node_type: str,
+        properties: dict[str, Any],
+        *,
+        node_role: str = "semantic",
+        generation_spec: dict[str, Any] | None = None,
+        document_ids: list[str] | None = None,
+    ) -> bool:
+        validate_node_role_args(node_role, generation_spec)
+        validate_document_ids(document_ids)
+        now_iso = utc_now().isoformat()
+        conn = self._conn
+        with conn:
+            # One INSERT ... SELECT: the absence check and the insert run
+            # under the write lock the statement takes, so a writer that
+            # committed first is seen and nothing is inserted.
+            cursor = conn.execute(
+                """
+                INSERT INTO nodes
+                    (version_id, node_id, node_type, node_role,
+                     generation_spec_json, document_ids_json,
+                     properties_json, created_at, updated_at,
+                     valid_from, valid_to)
+                SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM nodes WHERE node_id = ? AND valid_to IS NULL
+                )
+                """,
+                (
+                    generate_ulid(),
+                    node_id,
+                    node_type,
+                    node_role,
+                    json.dumps(generation_spec, allow_nan=False)
+                    if generation_spec is not None
+                    else None,
+                    json.dumps(document_ids, allow_nan=False)
+                    if document_ids is not None
+                    else None,
+                    json.dumps(properties, allow_nan=False),
+                    now_iso,
+                    now_iso,
+                    now_iso,
+                    node_id,
+                ),
+            )
+        return cursor.rowcount == 1
+
     def upsert_nodes_bulk(self, nodes: list[dict[str, Any]]) -> list[str]:
         # ``executemany`` + a single commit, branched on whether any row
         # in the batch already has a current version. The previous

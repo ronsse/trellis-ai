@@ -1032,11 +1032,14 @@ class TestSaveKnowledge:
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Force the graph write to fail *after* the evidence doc is created.
-        monkeypatch.setattr(
-            temp_registry.knowledge.graph_store,
-            "upsert_node",
-            MagicMock(side_effect=StoreError("graph down")),
-        )
+        # A fresh entity.create writes through create_node_if_absent; patch
+        # upsert_node too so a handler that moves back to it still fails here.
+        for write in ("create_node_if_absent", "upsert_node"):
+            monkeypatch.setattr(
+                temp_registry.knowledge.graph_store,
+                write,
+                MagicMock(side_effect=StoreError("graph down")),
+            )
 
         with pytest.raises(McpError):
             save_knowledge("doomed", content="evidence that will orphan")

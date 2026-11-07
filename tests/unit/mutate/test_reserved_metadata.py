@@ -29,7 +29,7 @@ class TestEachReservedKeyIsRefused:
         assert excinfo.value.key == key
         assert key in str(excinfo.value)
 
-    def test_the_reserved_set_is_exactly_the_five_documented_keys(self) -> None:
+    def test_the_reserved_set_is_exactly_the_six_documented_keys(self) -> None:
         # Pinned so a future addition or removal is a deliberate edit to
         # this test, not a silent drift in the guard's coverage.
         assert (
@@ -40,6 +40,7 @@ class TestEachReservedKeyIsRefused:
                     "key_name",
                     "write_provenance",
                     "handler_warnings",
+                    "learning_promotion",
                 }
             )
             == RESERVED_COMMAND_METADATA_KEYS

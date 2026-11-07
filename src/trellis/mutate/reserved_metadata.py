@@ -22,6 +22,12 @@ stamp rather than treated as opaque decoration --
   emit passes ``Command.metadata`` through today, so nothing reads this
   key off a command yet; it stays reserved so that a future pass-through
   cannot let a caller choose which build an event claims.
+* ``learning_promotion`` -- the mark the reviewed-promotion writer
+  (:func:`trellis.learning.scoring.submit_learning_promotion`) puts on its
+  ``entity.create``. ``EntityCreateHandler`` lets a precedent's
+  ``source_excerpt_status`` through only when it finds it, and a serve-time
+  check trusts that stamp to exempt a precedent from its source's label, so
+  a caller-planted mark would forge the exemption (#1080).
 * ``handler_warnings`` -- read by
   :func:`trellis.mutate.executor._handler_warnings` and surfaced verbatim
   on ``CommandResult.warnings``; a caller-planted list would appear in the
@@ -48,6 +54,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from trellis.core.precedent_document import PROMOTION_COMMAND_MARK
+
 #: Keys the executor, a handler, or the write-provenance stamp read off
 #: ``Command.metadata`` as authoritative rather than as opaque caller
 #: decoration. See the module docstring for what reads each one and why
@@ -59,6 +67,7 @@ RESERVED_COMMAND_METADATA_KEYS: frozenset[str] = frozenset(
         "key_name",
         "write_provenance",
         "handler_warnings",
+        PROMOTION_COMMAND_MARK,
     }
 )
 
