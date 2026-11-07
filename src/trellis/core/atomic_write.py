@@ -105,7 +105,9 @@ def _resolve_link(path: Path) -> Path:
     and every caller of :func:`atomic_write_text` is written against ``OSError``
     (the trace-embed watermark logs one and carries on), so the loop would escape
     them all. The message and the cause are kept; ``errno`` is ``ELOOP``, as the
-    kernel reports it for the same link.
+    kernel reports it for the same link. From 3.13 ``resolve()`` returns the
+    looping path without raising, and the ``stat()`` in :func:`atomic_write_text`
+    raises the kernel's ``ELOOP`` before anything is replaced.
     """
     try:
         return path.resolve()
