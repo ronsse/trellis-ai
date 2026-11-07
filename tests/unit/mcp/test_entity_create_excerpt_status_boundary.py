@@ -21,6 +21,7 @@ import pytest
 import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.core.precedent_document import (
+    PRECEDENT_ENTITY_ID_PREFIX,
     PROMOTION_COMMAND_MARK,
     SOURCE_EXCERPT_STATUS_KEY,
 )
@@ -156,3 +157,77 @@ class TestIfAbsentAsAnAgentSendsIt:
         node = graph.get_node("n1")
         assert node is not None
         assert node["properties"] == {"name": "Old"}
+
+
+class TestThePrecedentNamespaceKeepsItsType:
+    """The type refusals hold through ``execute_mutation`` (#1080).
+
+    The tool has no caller metadata, so a mark smuggled inside ``args`` exempts
+    nothing.
+
+    Defective subject: drop the namespace check in ``EntityCreateHandler`` or the
+    retype check in ``EntityUpdateHandler`` and the matching test stores the node.
+    """
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {},
+            {"metadata": {PROMOTION_COMMAND_MARK: True}},
+            {PROMOTION_COMMAND_MARK: True},
+        ],
+        ids=["plain", "metadata-in-args", "mark-in-args"],
+    )
+    def test_a_create_under_another_type_is_rejected_and_audited(
+        self, temp_registry: StoreRegistry, extra: dict[str, Any]
+    ) -> None:
+        node_id = f"{PRECEDENT_ENTITY_ID_PREFIX}p1"
+
+        payload = json.loads(
+            execute_mutation(
+                operation="entity.create",
+                args={
+                    "entity_type": "concept",
+                    "entity_id": node_id,
+                    "name": "Pooling",
+                    **extra,
+                },
+            )
+        )
+
+        assert payload["status"] == "rejected", payload
+        rejected = temp_registry.operational.event_log.get_events(
+            event_type=EventType.MUTATION_REJECTED
+        )
+        assert [e.payload["reason"] for e in rejected] == [
+            "precedent_namespace_type_via_entity_create"
+        ]
+        assert temp_registry.knowledge.graph_store.get_node(node_id) is None
+
+    def test_a_stamp_stored_on_a_concept_cannot_ride_a_retype_to_precedent(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        created = json.loads(
+            execute_mutation(
+                operation="entity.create",
+                args={
+                    "entity_type": "concept",
+                    "entity_id": "n1",
+                    "name": "Pooling",
+                    "properties": {SOURCE_EXCERPT_STATUS_KEY: "source_labelled"},
+                },
+            )
+        )
+        assert created["status"] == "success", created
+
+        payload = json.loads(
+            execute_mutation(
+                operation="entity.update",
+                args={"entity_id": "n1", "entity_type": "precedent"},
+            )
+        )
+
+        assert payload["status"] == "rejected", payload
+        node = temp_registry.knowledge.graph_store.get_node("n1")
+        assert node is not None
+        assert node["node_type"] == "concept"

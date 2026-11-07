@@ -9,6 +9,7 @@ import structlog
 from trellis.core.error_sanitize import describe_validation_error
 from trellis.core.ids import generate_ulid
 from trellis.core.precedent_document import (
+    PRECEDENT_ENTITY_ID_PREFIX,
     PROMOTION_COMMAND_MARK,
     SOURCE_EXCERPT_STATUS_KEY,
     is_promoted_precedent_document,
@@ -51,6 +52,30 @@ logger = structlog.get_logger(__name__)
 #: not make tells the two apart by this prefix (``save_knowledge``'s domain
 #: mint), so the handler and its readers share one spelling.
 ENTITY_LEFT_ALONE_MESSAGE = "Entity left alone, already exists (if_absent)"
+
+
+def _refuse_precedent_namespace_type(
+    *, writer: str, node_id: str, node_type: str, code: str
+) -> None:
+    """Refuse a write that leaves ``node_id`` in the namespace as ``node_type``.
+
+    The read gate (``PrecedentClearance``) judges a node by its ``precedent``
+    type, but the namespace is judged by id: a node under
+    ``precedent://learning/`` stored as another type is left out of a
+    ``/graph/search`` page without being subtracted from its ``total`` or the
+    facets. Only the reviewed promotion writes there, and it writes a
+    ``precedent``, so every other writer is refused (#1080). The caller has
+    already ruled the promotion out; this judges only the id and the type.
+    """
+    if node_type == "precedent" or not is_promoted_precedent_document(node_id):
+        return
+    msg = (
+        f"{writer} refuses entity_type {node_type!r} at {node_id}: ids under "
+        f"{PRECEDENT_ENTITY_ID_PREFIX} belong to promoted precedents, and the "
+        "serve-time check that judges a precedent by its source's label reads "
+        "only nodes typed 'precedent'"
+    )
+    raise ValidationError(msg, errors=[msg], code=code)
 
 
 def _refuse_node_evidence_ref(
@@ -212,6 +237,13 @@ class EntityCreateHandler:
     (``PROMOTION_COMMAND_MARK``) that carries it, over an existing precedent,
     as a ``precedent`` entity or at an id in the precedent namespace, is
     refused with ``precedent_excerpt_status_via_entity_create``.
+
+    **The precedent namespace holds only precedents.** An ``entity_type``
+    other than ``precedent`` at an id under ``precedent://learning/``, from a
+    command without that mark, is refused with
+    ``precedent_namespace_type_via_entity_create``: the serve-time check that
+    judges a precedent by its source's label reads the ``precedent`` type, so
+    a node there under another type sits outside it (#1080).
     """
 
     def __init__(
@@ -309,6 +341,17 @@ class EntityCreateHandler:
                 )
                 raise ValidationError(
                     msg, errors=[msg], code="precedent_excerpt_status_via_entity_create"
+                )
+
+            # Only the promotion writes under ``precedent://learning/``, and it
+            # writes a ``precedent``: any other type there would sit outside
+            # the serve-time check that is keyed on the type (#1080).
+            if not is_promotion:
+                _refuse_precedent_namespace_type(
+                    writer="entity.create",
+                    node_id=node_id,
+                    node_type=entity_type,
+                    code="precedent_namespace_type_via_entity_create",
                 )
 
             stored_properties = (
@@ -450,6 +493,16 @@ class EntityUpdateHandler:
     reason recorded. Refusing step 1 outright closes it before step 2 is
     ever reached; the ``entity_type == "precedent"`` keying above is the
     second, independent guard for the same end state.
+
+    **A caller cannot move a stored ``source_excerpt_status`` onto a
+    precedent, or leave the precedent namespace under another type** (#1080).
+    ``source_excerpt_status`` is an ordinary property on a non-precedent node,
+    so retyping such a node to ``precedent`` is refused with
+    ``precedent_retype_excerpt_status_via_entity_update``, and a write that
+    would leave a node under ``precedent://learning/`` with a type other than
+    ``precedent`` is refused with ``precedent_namespace_type_via_entity_update``.
+    Both are judged on the version the write replaces, and both exempt only a
+    command carrying the promotion's reserved mark (``PROMOTION_COMMAND_MARK``).
     """
 
     def __init__(
@@ -536,9 +589,40 @@ class EntityUpdateHandler:
                 msg, errors=[msg], code="precedent_excerpt_status_via_entity_update"
             )
 
+        # The reviewed promotion's own command (see ``PROMOTION_COMMAND_MARK``);
+        # the two checks below exempt it, as ``entity.create``'s do.
+        is_promotion = command.metadata.get(PROMOTION_COMMAND_MARK) is True
+
         def update(existing: dict[str, Any]) -> dict[str, Any]:
             # Judged against the version being replaced, so a retry after a
             # concurrent write compares with the row it would overwrite.
+            if not is_promotion:
+                # A non-precedent node can already hold the stamp (it is an
+                # ordinary property there), and retyping it to precedent would
+                # put a caller-set value where serving trusts it (#1080). The
+                # same-call case above only sees a stamp in this command.
+                if (
+                    supplied_entity_type == "precedent"
+                    and existing["node_type"] != "precedent"
+                    and SOURCE_EXCERPT_STATUS_KEY in existing["properties"]
+                ):
+                    msg = (
+                        f"entity.update refuses to retype {entity_id} to "
+                        f"'precedent': it already carries properties."
+                        f"{SOURCE_EXCERPT_STATUS_KEY}, which only a promotion "
+                        "may state and a serve-time check trusts"
+                    )
+                    raise ValidationError(
+                        msg,
+                        errors=[msg],
+                        code="precedent_retype_excerpt_status_via_entity_update",
+                    )
+                _refuse_precedent_namespace_type(
+                    writer="entity.update",
+                    node_id=entity_id,
+                    node_type=supplied_entity_type or existing["node_type"],
+                    code="precedent_namespace_type_via_entity_update",
+                )
             _refuse_node_evidence_ref(
                 self._registry,
                 supplied_properties,
