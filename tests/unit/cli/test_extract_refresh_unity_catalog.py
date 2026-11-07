@@ -281,8 +281,11 @@ class TestSkippedRows:
             data = json.loads(result.stdout.strip())
             assert data["skipped_rows"] == {"lineage_without_two_tables": 2}
         else:
-            assert "Skipped rows:" in plain(result.stdout)
-            assert "2 (lineage_without_two_tables=2)" in plain(result.stdout)
+            text = plain(result.stdout)
+            assert "Skipped rows:" in text
+            assert "lineage_without_two_tables=2" in text
+            # No total: a uc_storage_* reason counts written rows, not skips.
+            assert "2 (lineage_without_two_tables=2)" not in text
 
     def test_a_skip_does_not_change_the_exit_code(self, tmp_path: Path) -> None:
         export = self._skipping_export(tmp_path)
