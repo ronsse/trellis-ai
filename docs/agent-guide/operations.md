@@ -6921,14 +6921,17 @@ When an agent finishes the task, it calls `record_feedback` with the copied IDs:
 **The minimal call.** `pack_id` plus `helpful_item_ids` and/or `unhelpful_item_ids`, with no `rating`
 and no `success`, is a valid call on the MCP tool, `POST /packs/{pack_id}/feedback` and
 `TrellisClient.record_feedback`. The server derives the rating as the helpful share of the named pack
-items, `len(helpful) / (len(helpful) + len(unhelpful))` over distinct ids, and `success` follows from it
-through the 0.5 threshold:
+items, `len(helpful) / (len(helpful) + len(unhelpful))` over distinct ids, and `success` follows from it:
+a derived rating must be *above* 0.5 to count as a success (an explicit `rating` of 0.5 still does):
 
 | Call cites | `rating` | `success` |
 |---|---|---|
 | only `unhelpful_item_ids` | 0.0 | false |
-| one helpful, one unhelpful | 0.5 | true |
+| one helpful, one unhelpful | 0.5 | false |
+| one id in both lists | 0.5 | false |
+| two helpful, one unhelpful | 0.67 | true |
 | only `helpful_item_ids` | 1.0 | true |
+| only `ignored_item_ids` | none (payload 0.0) | false |
 
 A derived rating carries `rating_derived: true` in the `FEEDBACK_RECORDED` payload and in the
 `pack_feedback.jsonl` row, so a reader can tell it from a grade; the key is absent when the caller
@@ -6943,9 +6946,14 @@ number is.
 - `followed_advisory_ids` and `ignored_item_ids` do not count in the share. An advisory is guidance the
   agent acted on, not a verdict on a served item (it is never a member of the pack's `injected_item_ids`),
   and ignored scores nothing yet.
-- A call naming no pack item at all (no ids, or advisory ids only) has nothing to derive from, so it
-  keeps its earlier effect: `success` true, `rating` 1.0, no marker. Refusing it would turn a call that
-  is valid today on every surface into an error.
+- A derived even split is no net evidence of help, so it is not a win (#1208); an id named in both
+  lists counts on each side and lands there too.
+- A call naming only `ignored_item_ids` (and no followed advisory) derives no rating, but the agent
+  used nothing it was shown, so it records `success` false, payload `rating` 0.0, no marker (#1208).
+  Pack-level `success` never demotes an item: demotion needs per-item `unhelpful` citations.
+- A call naming no pack item at all (no ids, or advisory ids only, with or without ignored ids) has
+  nothing to derive from, so it keeps its earlier effect: `success` true, `rating` 1.0, no marker.
+  Refusing it would turn a call that is valid today on every surface into an error.
 
 Before #1194 every such call recorded `rating` 1.0, so an unhelpful-only grade counted as a win.
 `FEEDBACK_RECORDED` rows written before then cannot be told apart from a grade of 1.0. Pass a `rating`

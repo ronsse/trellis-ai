@@ -53,11 +53,13 @@ def _jsonl_rows(registry: StoreRegistry) -> list[dict[str, Any]]:
 
 
 #: ``(helpful, unhelpful, rating, success)`` for each derived case. A mixed call
-#: lands on exactly ``SUCCESS_RATING_THRESHOLD`` and so counts as a success.
+#: lands on exactly ``SUCCESS_RATING_THRESHOLD``, and a derived rating must be
+#: above it to count as a success (#1208).
 DERIVED_CASES = [
     pytest.param(["a", "b"], [], 1.0, True, id="helpful-only"),
     pytest.param([], ["x"], 0.0, False, id="unhelpful-only"),
-    pytest.param(["a"], ["x"], 0.5, True, id="mixed"),
+    pytest.param(["a"], ["x"], 0.5, False, id="mixed"),
+    pytest.param(["a", "b"], ["x"], 2 / 3, True, id="mostly-helpful"),
     pytest.param(["a"], ["x", "y", "z"], 0.25, False, id="mostly-unhelpful"),
 ]
 
@@ -102,8 +104,12 @@ class TestMcp:
             pack_id="pack_min", helpful_item_ids=["a"], unhelpful_item_ids=["x"]
         )
         assert reply.startswith(
-            "Feedback recorded (positive, rating 0.50, derived from the cited ids)"
+            "Feedback recorded (negative, rating 0.50, derived from the cited ids)"
         )
+
+        reply = record_feedback(pack_id="pack_min", ignored_item_ids=["i"])
+        assert reply.startswith("Feedback recorded (negative")
+        assert "derived" not in reply
 
     def test_the_jsonl_row_carries_the_marker_too(
         self, temp_registry: StoreRegistry
