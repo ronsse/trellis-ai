@@ -15,6 +15,7 @@ import contextlib
 import os
 import shutil
 import subprocess
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ import pytest
 
 from tests.integration._live_server import repo_src_pythonpath
 from tests.pg_scratch import configured_dsn, scratch_dsn
+from trellis.ops import schema_migrate
 from trellis.ops.backup_postgres import DUMPED, run_pg_dump
 from trellis.ops.schema_migrate import (
     VERSION_TABLE,
@@ -204,6 +206,137 @@ class TestPostgresMigrateSeesOnlyBaseTables:
         assert graph.status == "unrecognized"
         assert report.status == "error"
         registry.close()
+
+
+def _on_search_path(dsn: str, *schemas: str) -> str:
+    """The DSN with the session's ``search_path`` set, as a deployment sets it."""
+    from psycopg.conninfo import make_conninfo
+
+    return make_conninfo(dsn, options=f"-c search_path={','.join(schemas)}")
+
+
+@pytest.fixture
+def three_schemas(dsn: str) -> Iterator[tuple[str, str, str]]:
+    """``(first, second, off)``: three schemas made here and dropped here.
+
+    The names carry a random suffix, so nothing the database already holds can
+    be touched, and only these three are dropped.
+    """
+    import psycopg
+
+    suffix = uuid.uuid4().hex[:8]
+    names = (
+        f"trellis_sp_first_{suffix}",
+        f"trellis_sp_second_{suffix}",
+        f"trellis_sp_off_{suffix}",
+    )
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        for name in names:
+            conn.execute(f"CREATE SCHEMA {name}")
+    try:
+        yield names
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            for name in names:
+                conn.execute(f"DROP SCHEMA IF EXISTS {name} CASCADE")
+
+
+def _execute(dsn: str, *statements: str) -> None:
+    import psycopg
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        for statement in statements:
+            conn.execute(statement)
+
+
+def _current_schema(dsn: str) -> str:
+    import psycopg
+
+    with psycopg.connect(dsn) as conn:
+        return conn.execute("SELECT current_schema()").fetchone()[0]
+
+
+class TestPostgresInspectFollowsSearchPath:
+    """The inspect reads the tables the connection's ``search_path`` reaches.
+
+    ``current_schema()`` is the first existing schema on the path, so reading
+    ``pg_tables`` through it saw nothing of a later one. The stores' own SQL
+    names its tables unqualified and resolves them through the whole path, so
+    the inspect has to resolve them the same way. The query's text is pinned in
+    ``test_schema_migrate.py``; these cases run it.
+    """
+
+    def test_a_store_in_a_later_schema_on_the_path_reads_present(
+        self, dsn: str, three_schemas: tuple[str, str, str], tmp_path: Path
+    ) -> None:
+        first, second, _off = three_schemas
+        on_path = _on_search_path(dsn, first, second)
+        _execute(dsn, f"CREATE TABLE {second}.documents (x INTEGER)")
+        assert _current_schema(on_path) == first, "the first schema is empty"
+        registry = _registry(tmp_path, on_path)
+
+        report = run_migrate(registry, apply=False)
+
+        doc = _by_store(report)["document"]
+        assert (doc.status, doc.current_version) == ("current", 1)
+        registry.close()
+
+    def test_a_store_in_a_schema_off_the_path_reads_absent(
+        self, dsn: str, three_schemas: tuple[str, str, str], tmp_path: Path
+    ) -> None:
+        first, second, off = three_schemas
+        _execute(dsn, f"CREATE TABLE {off}.documents (x INTEGER)")
+        registry = _registry(tmp_path, _on_search_path(dsn, first, second))
+
+        report = run_migrate(registry, apply=False)
+
+        assert _by_store(report)["document"].status == "absent"
+        registry.close()
+
+    def test_a_view_earlier_on_the_path_shadows_the_stores_table(
+        self, dsn: str, three_schemas: tuple[str, str, str], tmp_path: Path
+    ) -> None:
+        """The store's unqualified ``documents`` would resolve to the view, so
+        the table behind it is not the store's and the store reads absent."""
+        first, second, _off = three_schemas
+        _execute(
+            dsn,
+            f"CREATE VIEW {first}.documents AS SELECT 1 AS x",
+            f"CREATE TABLE {second}.documents (x INTEGER)",
+        )
+        registry = _registry(tmp_path, _on_search_path(dsn, first, second))
+
+        report = run_migrate(registry, apply=False)
+
+        assert _by_store(report)["document"].status == "absent"
+        registry.close()
+
+    def test_the_version_record_is_read_from_the_schema_the_path_reaches_first(
+        self, dsn: str, three_schemas: tuple[str, str, str]
+    ) -> None:
+        """Two schemas each hold the store and a version record; the one that
+        answers is the first on the path, and swapping the path swaps it."""
+        first, second, _off = three_schemas
+        for schema, version in ((first, 3), (second, 5)):
+            _execute(
+                dsn,
+                f"CREATE TABLE {schema}.documents (x INTEGER)",
+                f"CREATE TABLE {schema}.{VERSION_TABLE} (store TEXT NOT NULL,"
+                " version INTEGER NOT NULL, description TEXT NOT NULL,"
+                " applied_at TEXT NOT NULL, PRIMARY KEY (store, version))",
+                f"INSERT INTO {schema}.{VERSION_TABLE} VALUES"  # noqa: S608
+                f" ('document', {version}, 'seed', 'now')",
+            )
+
+        def inspect(*path: str) -> tuple[frozenset[str], int | None]:
+            db = schema_migrate._PostgresDb(_on_search_path(dsn, *path), writable=False)
+            try:
+                return db.inspect("document")
+            finally:
+                db.close()
+
+        assert inspect(first, second) == (frozenset({"documents"}), 3)
+        assert inspect(second, first) == (frozenset({"documents"}), 5)
 
 
 class TestPostgresMigrate:

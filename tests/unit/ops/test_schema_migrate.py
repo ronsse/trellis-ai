@@ -616,10 +616,10 @@ class TestPostgresInspectReadsBaseTablesOnly:
         store living in a later one read ``absent``. ``pg_table_is_visible`` is
         what the store's own unqualified table names resolve by.
 
-        The live leg that creates a store behind a second schema was not run
-        here; this pins the query's text, and the SQL was run by hand against a
-        throwaway Postgres 16 (views excluded, partitioned tables included,
-        shadowed names once, ``pg_catalog`` left out).
+        This pins the query's text. The behaviour is run against a real
+        Postgres by ``TestPostgresInspectFollowsSearchPath`` in
+        ``test_postgres_ops_live.py`` (a store in a later schema, a schema off
+        the path, a view that shadows the table).
         """
         conn, _tables = self.inspect()
 
