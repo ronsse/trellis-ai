@@ -189,7 +189,7 @@ ACCESS_LOG_ENV = "TRELLIS_ACCESS_LOG"
 #: Link-or-mint on ``save_knowledge`` and alias binding on extraction
 #: (:mod:`trellis.mcp.knowledge_links`,
 #: :func:`trellis.extract.commands.result_to_batch`).
-#: **Default off, and it must stay off until the serving freeze lifts**: turned
+#: **Default off, because turning it on is a serving change**: turned
 #: on, ``save_knowledge`` mints a ``domain:<slug>`` node for a domain that has
 #: none, attaches to an existing same-named node instead of creating a
 #: duplicate, resolves ``relates_to`` through external-system aliases and
@@ -205,9 +205,10 @@ KNOWLEDGE_LINK_OR_MINT_ENV = "TRELLIS_KNOWLEDGE_LINK_OR_MINT"
 #: Opt-in: end every MCP retrieval reply that names a pack (``get_context``,
 #: ``search`` and the sectioned tools, ``get_items`` when given a pack id) with
 #: one line saying how to grade it, from
-#: :func:`trellis_wire.loop_text.grading_trailer`.  The line is added text in a
-#: reply an agent reads, so it is part of the holdout's treatment environment:
-#: leave it off until the serving freeze lifts.  Read with the shared
+#: :func:`trellis_wire.loop_text.grading_trailer`.  **Default off, because the
+#: line is added text in a reply an agent reads**: turning it on changes what
+#: every reader of a pack sees, a pack holdout's subjects included, so a
+#: deployment enables it deliberately.  Read with the shared
 #: ``TRUTHY`` spellings; unset, blank or unrecognised leaves it off, and off
 #: every reply is byte-identical to a build without the knob.
 GRADING_TRAILER_ENV = "TRELLIS_GRADING_TRAILER"

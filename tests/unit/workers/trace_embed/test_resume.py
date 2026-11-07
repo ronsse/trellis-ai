@@ -172,14 +172,15 @@ class TestInterruptedPassResumes:
     ) -> None:
         """One unrenderable trace must not stall every newer one forever.
 
-        It goes on the retry list (so it is attempted again), but the traces
-        after it are embedded on the *same* pass — a stop-the-world design would
-        leave the newest work unreachable until someone fixed the bad row.
+        The traces after it are embedded on the *same* pass, and the cursor
+        moves past it: a trace with no prose at all renders to nothing under
+        every setting, so there is nothing a later pass could do for it. It is
+        counted once and not listed, where a retry-list slot would make every
+        pass ``partial`` for a trace no pass can embed.
         """
         traces = seed_traces(registry, 6)
         # A trace with nothing to render: no intent, no outcome summary, no
-        # step errors. The renderer returns "" and the driver refuses to
-        # advance past it.
+        # step errors. The renderer returns "".
         broken = traces[2]
         raw = broken.model_copy(update={"intent": "", "outcome": None, "steps": []})
         registry.operational.trace_store._conn.execute(
@@ -191,23 +192,21 @@ class TestInterruptedPassResumes:
         report = run_trace_embed_pass(registry, watermark_path=watermark_path)
         assert report.skipped_empty == 1
         assert report.embedded == 5, "later traces are embedded despite the gap"
+        assert report.retry_pending == 0
 
         saved = TraceEmbedWatermark(watermark_path)
         assert saved.cursor == TraceCursor(
             created_at=traces[5].created_at, trace_id=traces[5].trace_id
         )
-        assert saved.retry == (
-            TraceCursor(created_at=broken.created_at, trace_id=broken.trace_id),
-        )
+        assert saved.retry == ()
 
-        # A re-run attempts the broken trace again, and only it: the traces
-        # after it are behind the cursor now.
+        # A re-run has nothing left to attempt: the broken trace is behind the
+        # cursor and not on the list.
         again = run_trace_embed_pass(registry, watermark_path=watermark_path)
-        assert again.scanned == 1
-        assert again.skipped_empty == 1
-        assert again.skipped_existing == 0
-        assert again.embedded == 0
-        assert again.retry_pending == 1
+        assert again.scanned == 0
+        assert again.skipped_empty == 0
+        assert again.retry_pending == 0
+        assert again.to_dict()["status"] == "ok"
 
 
 class TestStateIsTheAuthority:

@@ -19,6 +19,7 @@ posture, not a refactor.
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 import tempfile
@@ -57,7 +58,8 @@ def atomic_write_text(path: Path, text: str) -> None:
     "move the file to the canonical path" advice both
     :func:`~trellis.stores.advisory_source.resolve_advisory_path` and
     :func:`~trellis.mutate.policy_source.resolve_policy_path` give.
-    ``write_text`` followed the link; this keeps that.
+    ``write_text`` followed the link; this keeps that. A link that loops
+    raises ``OSError`` (``ELOOP``), like any other write that cannot land.
 
     One limit worth naming: ``os.replace`` cannot rename onto a
     *single-file* bind mount (``EBUSY``). The reference deployment mounts
@@ -65,7 +67,7 @@ def atomic_write_text(path: Path, text: str) -> None:
     deployment that mounts the file itself must switch to mounting the
     directory.
     """
-    target = path.resolve() if path.is_symlink() else path
+    target = _resolve_link(path) if path.is_symlink() else path
     fd, tmp_name = tempfile.mkstemp(
         dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
     )
@@ -94,6 +96,21 @@ def atomic_write_text(path: Path, text: str) -> None:
                 tmp_path.unlink(missing_ok=True)
 
     _fsync_directory(target.parent)
+
+
+def _resolve_link(path: Path) -> Path:
+    """Follow a symlink, reporting a loop as ``OSError`` on every Python version.
+
+    Before 3.13, :meth:`Path.resolve` raises ``RuntimeError`` for a looping link,
+    and every caller of :func:`atomic_write_text` is written against ``OSError``
+    (the trace-embed watermark logs one and carries on), so the loop would escape
+    them all. The message and the cause are kept; ``errno`` is ``ELOOP``, as the
+    kernel reports it for the same link.
+    """
+    try:
+        return path.resolve()
+    except RuntimeError as exc:
+        raise OSError(errno.ELOOP, str(exc), str(path)) from exc
 
 
 def _fsync_directory(directory: Path) -> None:

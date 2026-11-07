@@ -22,7 +22,7 @@ from tests.cli_output import plain
 from tests.redaction_tombstone import make_tombstone
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.mutate.commands import OperationRegistry
-from trellis.schemas.trace import TraceStep
+from trellis.schemas.trace import Trace, TraceStep
 from trellis_cli.worker import worker_app
 from trellis_workers.trace_embed import (
     TraceCursor,
@@ -285,15 +285,114 @@ class TestAPermanentOutcomeLeavesTheList:
         assert settled.to_dict()["status"] == "ok"
 
 
-class TestAnEmptyRenderIsHeldNotRefused:
-    """``skipped_empty`` is not a permanent outcome, so it stays on the list.
+def _store_blank(registry, trace) -> Trace:
+    """Replace *trace* in the store with a blank-intent twin; return the twin.
 
-    A trace is immutable, but what it renders to is not a function of the trace
-    alone: ``include_step_errors`` is a per-pass setting. A trace whose only
-    prose is a step error renders to nothing under ``--no-step-errors`` and to a
-    summary otherwise, so a later pass can embed what an earlier one could not.
-    Advancing past it as a permanent refusal would skip that trace for good.
+    The twin goes through ``Trace`` validation and ``append``, the way
+    ``ingest trace`` writes one: ``Trace.intent`` is a bare ``str``, so nothing
+    refuses it. The original row is deleted first only because the store will
+    not take a second trace under the same id.
     """
+    blank = Trace.model_validate(
+        trace.model_dump(mode="json") | {"intent": "", "outcome": None, "steps": []}
+    )
+    store = registry.operational.trace_store
+    store._conn.execute("DELETE FROM traces WHERE trace_id = ?", (trace.trace_id,))
+    store._conn.commit()
+    store.append(blank)
+    return blank
+
+
+class TestAnEmptyRenderIsHeldNotRefused:
+    """What a trace renders to depends on ``include_step_errors``, a per-pass setting.
+
+    A trace whose only prose is a step error renders to nothing under
+    ``--no-step-errors`` and to a summary otherwise, so a later pass can embed
+    what an earlier one could not: that one stays on the list, and advancing
+    past it would skip it for good.
+
+    A trace that renders to nothing *with* step errors on has nothing a setting
+    or a later pass could change (the renderer reads only the immutable trace),
+    so it is counted and passed, and takes no list slot.
+    """
+
+    def test_a_blank_trace_is_counted_and_passed_not_listed(
+        self, registry, watermark_path, recorder
+    ) -> None:
+        traces = seed_traces(registry, 3)
+        blank = _store_blank(registry, traces[1])
+
+        first = run_trace_embed_pass(registry, watermark_path=watermark_path)
+        assert first.skipped_empty == 1
+        assert first.embedded == 2
+        assert first.retry_pending == 0
+        assert first.failures == [
+            {
+                "trace_id": blank.trace_id,
+                "error": "rendered summary was empty even with step errors; "
+                "not retried",
+            }
+        ]
+        assert first.to_dict()["status"] == "partial", "the pass that meets it says so"
+        saved = TraceEmbedWatermark(watermark_path)
+        assert saved.cursor == _entry(traces[2]), "the cursor moved past it"
+        assert saved.retry == (), "and it holds no slot"
+        assert _embedded(registry, traces) == {traces[0].trace_id, traces[2].trace_id}
+
+        later = run_trace_embed_pass(registry, watermark_path=watermark_path)
+        assert later.scanned == 0
+        assert later.skipped_empty == 0
+        assert later.retry_pending == 0
+        assert later.to_dict()["status"] == "ok"
+
+    def test_a_blank_trace_is_passed_under_no_step_errors_too(
+        self, registry, watermark_path, recorder
+    ) -> None:
+        """Re-rendered with step errors on, it is still empty: nothing to wait for."""
+        traces = seed_traces(registry, 2)
+        _store_blank(registry, traces[0])
+
+        report = run_trace_embed_pass(
+            registry, watermark_path=watermark_path, include_step_errors=False
+        )
+        assert report.skipped_empty == 1
+        assert report.retry_pending == 0
+        saved = TraceEmbedWatermark(watermark_path)
+        assert saved.cursor == _entry(traces[1])
+        assert saved.retry == ()
+
+    def test_a_blank_trace_already_on_the_list_leaves_it(
+        self, registry, watermark_path, recorder
+    ) -> None:
+        """A list written before the fix holds the slot; the next pass frees it."""
+        traces = seed_traces(registry, 2)
+        blank = _store_blank(registry, traces[0])
+        stuck = TraceEmbedWatermark(watermark_path)
+        stuck.advance_to(_entry(traces[1]))
+        stuck.set_retry([_entry(blank)])
+        stuck.save()
+
+        report = run_trace_embed_pass(registry, watermark_path=watermark_path)
+        assert report.skipped_empty == 1
+        assert report.retry_pending == 0
+        assert TraceEmbedWatermark(watermark_path).retry == ()
+
+        settled = run_trace_embed_pass(registry, watermark_path=watermark_path)
+        assert settled.skipped_empty == 0
+        assert settled.to_dict()["status"] == "ok"
+
+    def test_a_dry_run_counts_a_blank_trace_and_writes_nothing(
+        self, registry, watermark_path, recorder
+    ) -> None:
+        traces = seed_traces(registry, 2)
+        _store_blank(registry, traces[0])
+
+        report = run_trace_embed_pass(
+            registry, watermark_path=watermark_path, dry_run=True
+        )
+        assert report.skipped_empty == 1
+        assert report.retry_pending == 0
+        assert not watermark_path.exists()
 
     def test_a_trace_empty_only_without_step_errors_is_listed_then_embedded(
         self, registry, watermark_path, recorder
