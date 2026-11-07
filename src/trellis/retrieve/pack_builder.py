@@ -4065,10 +4065,11 @@ class PackBuilder:
         under :data:`SENSITIVITY_REJECTION_REASON`, and one whose lookup failed
         under :data:`SENSITIVITY_UNREADABLE_REJECTION_REASON`, so an outage is
         counted apart from a label that said no. Nothing is rewritten. A
-        ``restricted`` caller, a builder with no document store, and a pool with
-        no precedent in it pass through untouched.
+        ``restricted`` caller and a pool with no precedent in it pass through
+        untouched. A builder with no document store cannot judge a precedent's
+        own row or its source, so it withholds one as unreadable (#1080).
         """
-        if clearance == "restricted" or self._document_store is None:
+        if clearance == "restricted":
             return items, []
         if not any(is_promoted_precedent_document(i.item_id) for i in items):
             return items, []

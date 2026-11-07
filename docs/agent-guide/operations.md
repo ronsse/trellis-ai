@@ -3431,16 +3431,28 @@ hold the excerpt and carry no label (#1080):
 | `GET /entities/{id}` | 404 for the entity; absent from `subgraph.nodes`, with the edges that touch it |
 | `GET /documents/{id}` | 404, as a missing document |
 | `GET /search` | left out of `results` |
-| `POST /packs`, `POST /packs/sectioned` | withheld at the collect seam, so every strategy is covered, and recorded in `rejected_items` and the pack's withheld line under reason `sensitivity` |
+| `GET /documents` (list, and the `q` search) | left out of `documents`, and not counted in `count` or `total` |
+| `GET /graph/search` (the entity listing) | left out of `results`; `total` and `GET /graph/search/facets` still count it (below) |
+| `GET /graph/history` (a node's versions) | 404, as a missing entity; judged once, by the newest version |
+| MCP `get_items` | reported `not found`, as a missing id |
+| MCP `get_graph` | `entity not found` for the root; a withheld neighbour is left out with the edges that touch it |
+| MCP `get_file_context` | left out of the path's documents and entities |
+| MCP `search` | left out; counted on the pack's `Withheld` line |
+| `POST /packs`, `POST /packs/sectioned` | withheld at the collect seam, so every strategy is covered, and recorded in `rejected_items` and the pack's withheld line under reason `sensitivity`; a builder wired with no document store withholds it as `sensitivity_unreadable` |
 | `GET /precedents/domains` | not counted |
 
 A lookup that fails (the source's document row or the precedent's graph node
 cannot be read) withholds too, failing closed. A pack counts it under its own
 reason, `sensitivity_unreadable`, apart from `sensitivity` (a label that said
 no); the other routes log `precedent_source_lookup_failed`. Nothing is
-rewritten. Not covered: `GET /documents` and `GET /entities` listings,
-`GET /entities/{id}/versions`, MCP `get_items`, `search`, `get_graph` and
-`get_file_context`, and a pack built by a caller that wires no document store.
+rewritten. A store where no document carries a label serves every route above as
+it did before the judgement. The reads it adds are bounded: per distinct
+promoted precedent a request meets, at most one graph-node read and two document
+reads (the precedent's own row and its source), each id judged once per request;
+a request that meets no precedent adds none, and a `restricted` caller adds none.
+Not covered: the `total` of `GET /graph/search` and its facets, which count a
+withheld precedent (a count, no text), and a precedent's chunks (judged on their
+own row only, as on `GET /search`).
 
 ```bash
 trellis retrieve precedents [--domain DOMAIN] [--limit N] [--format text|json]

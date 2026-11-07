@@ -4495,6 +4495,11 @@ paths:
         that id.
 
 
+        A promoted precedent is judged by its source''s label as well as its own
+
+        (#1080) and is absent the same way: no row, and ``total`` does not count it.
+
+
         Each row carries ``label`` (``sensitivity``, ``stored``, ``corrupt``,
 
         ``external_readable``), computed from the stored row before a public-only
@@ -5435,7 +5440,13 @@ paths:
 
         ``document_ids``, ``evidence_ref`` property or ``lifecycle.superseded_by``
 
-        names a document the caller may not read is served without that id.'
+        names a document the caller may not read is served without that id. A
+
+        promoted precedent the caller may not read (its own row or its source above
+
+        the caller''s clearance, or a lookup that failed) answers 404 as a missing
+
+        entity does, whatever version asks (#1080).'
       operationId: get_node_history_api_v1_graph_history_get
       parameters:
       - description: Node ID to fetch SCD-2 history for
@@ -5477,7 +5488,16 @@ paths:
 
         names a document the caller may not read is served without that id.
 
-        ``total`` and the page are unchanged.'
+        ``total`` and the page are unchanged.
+
+
+        A promoted precedent the caller may not read (its own row or its source
+
+        above the caller''s clearance, or a lookup that failed) is left out of the
+
+        page (#1080). ``total`` is the store''s match count and still counts it, so
+
+        that page can be shorter than ``limit``.'
       operationId: search_entities_api_v1_graph_search_get
       parameters:
       - description: A case-insensitive substring of the name, node_id or node_type

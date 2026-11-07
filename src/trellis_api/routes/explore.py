@@ -257,6 +257,9 @@ def list_documents(
     ``updates_doc_id`` names a document the key may not read is served without
     that id.
 
+    A promoted precedent is judged by its source's label as well as its own
+    (#1080) and is absent the same way: no row, and ``total`` does not count it.
+
     Each row carries ``label`` (``sensitivity``, ``stored``, ``corrupt``,
     ``external_readable``), computed from the stored row before a public-only
     caller's metadata is cut down, so the label is shown whoever asks and is
@@ -295,6 +298,11 @@ def list_documents(
     registry = get_registry()
     store = registry.knowledge.document_store
     gate = DocumentClearance(store, request_clearance(ctx))
+    # A promoted precedent is judged by its source's label as well as its own
+    # (#1080): the predicate every route asks, applied where the gate is.
+    precedents = PrecedentClearance(
+        store, gate.clearance, registry.knowledge.graph_store
+    )
     if is_public_only(gate.clearance):
         # A chunk is never served to a key that reads only ``public``.
         include_chunks = False
@@ -303,12 +311,18 @@ def list_documents(
         # so the capture holds public rows only: no hidden match can sit in it,
         # move a score or shorten a page. Exact unless the read hit its ceiling.
         read = PublicRead(store)
-        matches = [row for row, _score in public_keyword_rows(store, q, read=read)]
+        matches = [
+            row
+            for row, _score in public_keyword_rows(store, q, read=read)
+            if precedents.verdict_of(row["doc_id"]) is None
+        ]
         total_exact = not read.truncated
         total = len(matches)
         docs = matches[offset : offset + limit]
     elif q:
-        matches, total_exact = _search_readable(store, gate, q, include_chunks)
+        matches, total_exact = _search_readable(
+            store, gate, q, include_chunks, precedents=precedents
+        )
         total = len(matches)
         docs = matches[offset : offset + limit]
     elif gate.clearance != "restricted":
@@ -322,10 +336,17 @@ def list_documents(
                 ),
             )
         if is_public_only(gate.clearance):
-            docs, total, total_exact = _list_public(store, offset=offset, limit=limit)
+            docs, total, total_exact = _list_public(
+                store, offset=offset, limit=limit, precedents=precedents
+            )
         else:
             docs, total, total_exact = _list_readable(
-                store, gate, offset=offset, limit=limit, include_chunks=include_chunks
+                store,
+                gate,
+                offset=offset,
+                limit=limit,
+                include_chunks=include_chunks,
+                precedents=precedents,
             )
     else:
         docs = store.list_documents(
@@ -353,7 +374,11 @@ def list_documents(
 
 
 def _list_public(
-    store: Any, *, offset: int, limit: int
+    store: Any,
+    *,
+    offset: int,
+    limit: int,
+    precedents: PrecedentClearance | None = None,
 ) -> tuple[list[dict[str, Any]], int, bool]:
     """One page of the public documents: ``(page, total, exact)``.
 
@@ -364,6 +389,8 @@ def _list_public(
     """
     read = PublicRead(store)
     rows = read.rows
+    if precedents is not None:
+        rows = [r for r in rows if precedents.verdict_of(r["doc_id"]) is None]
     return rows[offset : offset + limit], len(rows), not read.truncated
 
 
@@ -374,6 +401,7 @@ def _list_readable(
     offset: int,
     limit: int,
     include_chunks: bool,
+    precedents: PrecedentClearance | None = None,
 ) -> tuple[list[dict[str, Any]], int, bool]:
     """One page of the documents the gate permits: ``(page, total, exact)``.
 
@@ -387,7 +415,8 @@ def _list_readable(
     the first readable row past the page and reports ``offset + limit + 1``
     as an inexact total; a store that runs out first reports its exact
     readable count. Neither the store's own row count nor anything about a
-    hidden row reaches the result.
+    hidden row reaches the result. A promoted precedent ``precedents`` bars
+    (#1080) is a hidden row here.
     """
     need = offset + limit
     page: list[dict[str, Any]] = []
@@ -401,6 +430,8 @@ def _list_readable(
         for doc in batch:
             if not gate.permits(doc["doc_id"], doc.get("metadata")):
                 continue
+            if precedents is not None and precedents.verdict_of(doc["doc_id"]):
+                continue
             if offset <= seen < need:
                 page.append(doc)
             seen += 1
@@ -411,7 +442,12 @@ def _list_readable(
 
 
 def _search_readable(
-    store: Any, gate: DocumentClearance, q: str, include_chunks: bool
+    store: Any,
+    gate: DocumentClearance,
+    q: str,
+    include_chunks: bool,
+    *,
+    precedents: PrecedentClearance | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """The search matches the gate permits, and whether they are all of them.
 
@@ -429,7 +465,12 @@ def _search_readable(
     bound = _SEARCH_SCAN_LIMIT
     while True:
         found = store.search(q, limit=bound, include_chunks=include_chunks)
-        readable = [m for m in found if gate.permits(m["doc_id"], m.get("metadata"))]
+        readable = [
+            m
+            for m in found
+            if gate.permits(m["doc_id"], m.get("metadata"))
+            and (precedents is None or precedents.verdict_of(m["doc_id"]) is None)
+        ]
         if len(found) < bound:
             return (
                 readable[:_SEARCH_SCAN_LIMIT],
@@ -739,11 +780,23 @@ def get_node_history(
 
     A node carries no label, so every version is served; a version whose
     ``document_ids``, ``evidence_ref`` property or ``lifecycle.superseded_by``
-    names a document the caller may not read is served without that id.
+    names a document the caller may not read is served without that id. A
+    promoted precedent the caller may not read (its own row or its source above
+    the caller's clearance, or a lookup that failed) answers 404 as a missing
+    entity does, whatever version asks (#1080).
     """
     registry = get_registry()
     versions = registry.knowledge.graph_store.get_node_history(entity_id)
     if not versions:
+        raise HTTPException(status_code=404, detail=f"Entity not found: {entity_id}")
+    # The newest version names the source the precedent is judged by; judged
+    # once, so an older version is withheld with it, never served on its own.
+    precedents = PrecedentClearance(
+        registry.knowledge.document_store,
+        request_clearance(ctx),
+        registry.knowledge.graph_store,
+    )
+    if precedents.verdict_of(entity_id, versions[0]) is not None:
         raise HTTPException(status_code=404, detail=f"Entity not found: {entity_id}")
     versions = conceal_node_pointers(
         versions, registry.knowledge.document_store, request_clearance(ctx)

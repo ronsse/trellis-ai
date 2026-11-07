@@ -2,16 +2,14 @@
 
 A precedent stored by a real promotion, whose source is relabelled
 ``restricted`` afterwards, is read back through ``get_lessons`` and
-``get_items`` by a ``read`` caller and by a ``restricted`` one. ``get_items`` is
-pinned as a known gap (strict xfail): it serves the document at the precedent's
-id, whose text carries the source's id, title and excerpt.
+``get_items`` by a ``read`` caller and by a ``restricted`` one. ``get_items``
+resolves the document at the precedent's id first, whose text carries the
+source's id, title and excerpt, so it asks the same predicate (#1080).
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-
-import pytest
 
 import trellis.mcp.server as server_mod
 from tests.promoted_precedent import (
@@ -50,15 +48,6 @@ def test_get_lessons_withholds_the_row_below_the_label(
     assert FAMILY in above
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "get_items resolves the document stored at the precedent's id before "
-        "the node, and that document's text names the source's id, title and "
-        "opening excerpt. A relabel after promotion leaves it readable. Drop "
-        "this marker with the fix."
-    ),
-)
 def test_get_items_serves_nothing_derived_from_the_source(
     temp_registry: StoreRegistry,
 ) -> None:
@@ -68,3 +57,6 @@ def test_get_items_serves_nothing_derived_from_the_source(
         below = get_items([precedent_id])
     for needle in (SOURCE_ID, SOURCE_TITLE, SOURCE_EXCERPT):
         assert needle not in below, needle
+    with as_http(RESTRICTED):
+        above = get_items([precedent_id])
+    assert SOURCE_TITLE in above

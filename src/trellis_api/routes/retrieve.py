@@ -425,6 +425,11 @@ def search_entities(
     ``document_ids``, ``evidence_ref`` property or ``lifecycle.superseded_by``
     names a document the caller may not read is served without that id.
     ``total`` and the page are unchanged.
+
+    A promoted precedent the caller may not read (its own row or its source
+    above the caller's clearance, or a lookup that failed) is left out of the
+    page (#1080). ``total`` is the store's match count and still counts it, so
+    that page can be shorter than ``limit``.
     """
     registry = get_registry()
     store = registry.knowledge.graph_store
@@ -438,9 +443,15 @@ def search_entities(
         limit=limit,
         offset=offset,
     )
-    rows = conceal_node_pointers(
-        rows, registry.knowledge.document_store, request_clearance(ctx)
-    )
+    clearance = request_clearance(ctx)
+    if clearance != "restricted" and any(
+        is_promoted_precedent_document(r["node_id"]) for r in rows
+    ):
+        precedents = PrecedentClearance(
+            registry.knowledge.document_store, clearance, store
+        )
+        rows = [r for r in rows if precedents.verdict_of(r["node_id"], r) is None]
+    rows = conceal_node_pointers(rows, registry.knowledge.document_store, clearance)
     results = [
         {
             "entity_id": row["node_id"],
