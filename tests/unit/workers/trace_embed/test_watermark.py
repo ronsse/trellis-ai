@@ -107,6 +107,26 @@ class TestSaveIsDurable:
         wm.save()
         assert TraceEmbedWatermark(path).cursor == _cursor(5)
 
+    def test_a_symlink_loop_at_the_path_is_swallowed_like_any_failed_write(
+        self, tmp_path
+    ) -> None:
+        """Before Python 3.13 ``Path.resolve`` raises ``RuntimeError`` for a
+        loop, and only ``OSError`` is caught here: a real loop stands in for
+        the staged ``OSError`` above, and must not fail the pass either."""
+        path = tmp_path / "wm.json"
+        other = tmp_path / "other.json"
+        path.symlink_to(other)
+        other.symlink_to(path)
+
+        wm = TraceEmbedWatermark(path)
+        wm.advance_to(_cursor(5))
+        wm.save()
+
+        assert wm.cursor == _cursor(5)
+        assert path.is_symlink()
+        assert other.is_symlink()
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["other.json", "wm.json"]
+
 
 class TestFailsSafe:
     def test_a_corrupt_file_degrades_to_a_full_rescan(self, tmp_path) -> None:

@@ -617,8 +617,8 @@ _SPECS: tuple[SettingSpec, ...] = (
             "identity (dbt unique_id, OpenLineage namespace/name) as an "
             "alias, bind-if-absent and never rebound. A minted domain node "
             "is something graph seeding resolves, so turning this on "
-            "changes which packs seed the graph axis: leave it off until "
-            "the serving freeze lifts. Off writes exactly what earlier "
+            "changes which packs seed the graph axis, so it is a serving "
+            "change and off by default. Off writes exactly what earlier "
             "builds wrote."
         ),
         surfaces=("mcp", "cli"),
@@ -627,7 +627,8 @@ _SPECS: tuple[SettingSpec, ...] = (
         risk_note=(
             "A minted domain node changes which packs seed the graph axis, "
             "and the new nodes and aliases are written to the live graph. "
-            "Leave off until the serving freeze lifts and the readout is in."
+            "Off by default: it is a serving change as well as a write "
+            "change, so enable it deliberately."
         ),
         group="ingest_tagging",
         settings_live=True,
@@ -644,17 +645,18 @@ _SPECS: tuple[SettingSpec, ...] = (
             "given a pack id) ends with one line telling the reader how to "
             "grade that pack: the pack id and the minimal record_feedback "
             "call. The line is added text in a reply an agent reads, so "
-            "turning this on changes what a subject of the holdout sees: "
-            "leave it off until the serving freeze lifts. Off, every reply "
-            "is byte-identical to a build without the knob."
+            "turning this on changes what every reader of a pack sees, a "
+            "pack holdout's subjects included, so it is off by default. "
+            "Off, every reply is byte-identical to a build without the "
+            "knob."
         ),
         surfaces=("mcp",),
         restart_required=False,
         risk="caution",
         risk_note=(
             "Adds a line to every pack reply, which is part of the "
-            "treatment environment of a running holdout. Leave off until "
-            "the serving freeze lifts and the readout is in. A minimal "
+            "treatment environment of a running holdout. Off by default; "
+            "enable it deliberately. A minimal "
             "record_feedback call without a rating has the server derive "
             "one from the cited ids, so the trailer names rating."
         ),

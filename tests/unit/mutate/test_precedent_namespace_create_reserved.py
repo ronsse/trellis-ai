@@ -32,7 +32,14 @@ from trellis.core.precedent_document import (
 from trellis.errors import ValidationError
 from trellis.learning.scoring import submit_learning_promotion
 from trellis.mutate import build_curate_executor
-from trellis.mutate.commands import Command, CommandResult, CommandStatus, Operation
+from trellis.mutate.commands import (
+    OUTCOME_LEFT_ALONE,
+    OUTCOME_METADATA_KEY,
+    Command,
+    CommandResult,
+    CommandStatus,
+    Operation,
+)
 from trellis.mutate.handlers import EntityCreateHandler, EntityUpdateHandler
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
@@ -283,7 +290,8 @@ class TestAnIfAbsentPlaceholderOverANodeWritesNothing:
         result = _execute(registry, _create(if_absent=True))
 
         assert result.status == CommandStatus.SUCCESS
-        assert "left alone" in result.message
+        # The closed outcome field is the contract; the message is for people.
+        assert result.metadata[OUTCOME_METADATA_KEY] == OUTCOME_LEFT_ALONE
         assert _rejection_reasons(registry) == []
         node = _node(registry)
         assert node["properties"] == {"name": "Old", "keep": "me"}
