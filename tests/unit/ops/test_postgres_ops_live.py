@@ -23,7 +23,7 @@ from typing import Any
 import pytest
 
 from tests.integration._live_server import repo_src_pythonpath
-from tests.pg_scratch import configured_dsn, scratch_dsn
+from tests.pg_scratch import configured_dsn, require_scratch_database, scratch_dsn
 from trellis.ops import schema_migrate
 from trellis.ops.backup_postgres import DUMPED, run_pg_dump
 from trellis.ops.schema_migrate import (
@@ -224,6 +224,7 @@ def three_schemas(dsn: str) -> Iterator[tuple[str, str, str]]:
     """
     import psycopg
 
+    require_scratch_database(dsn)
     suffix = uuid.uuid4().hex[:8]
     names = (
         f"trellis_sp_first_{suffix}",
