@@ -30,6 +30,12 @@ job, not this sweep's.
 
 **Unreadable is skipped and counted,** not raised: a store that cannot answer must
 not turn into a ``restricted`` summary nobody lowers. The next sweep tries again.
+That holds for a citation that becomes unreadable *after* the sweep read it, too:
+the write re-judges the citations, and in ``embed="none"`` mode the handler refuses
+the write on an unreadable one rather than stamp ``restricted``
+(:data:`~trellis_workers.trace_embed.handler.CITATIONS_UNREADABLE_CODE`). The summary
+keeps its label and the sweep counts it under ``unreadable``. A citation raised in
+between is not refused: the write's later read stands when it is the stricter.
 """
 
 from __future__ import annotations
@@ -41,7 +47,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trellis.core.document_write import is_redaction_tombstone
-from trellis.llm.egress import EgressGate, EgressVerdict
+from trellis.llm.egress import EgressGate
 from trellis.mutate.commands import CommandStatus
 from trellis.schemas.classification import (
     DATA_CLASSIFICATION_KEY,
@@ -50,8 +56,10 @@ from trellis.schemas.classification import (
     sensitivity_rank,
 )
 from trellis_workers.trace_embed.handler import (
+    CITATIONS_UNREADABLE_CODE,
     CITED_LABEL_CLASSIFIER,
     build_trace_summary_command,
+    judgement_unreadable,
 )
 from trellis_workers.trace_embed.render import (
     DOC_ID_PREFIX,
@@ -192,9 +200,7 @@ def restamp_summaries(
         # label, which would hide an unreadable citation behind a withhold.
         unlabelled = {k: v for k, v in metadata.items() if k != DATA_CLASSIFICATION_KEY}
         judgement = egress.judge_summary(doc_id, unlabelled, open_trace_store)
-        # Not the verdict alone: a withholding citation hides an unreadable one
-        # there, and the unreadable one's ``restricted`` is then in ``inherited``.
-        if judgement.unreadable or judgement.verdict is EgressVerdict.UNREADABLE:
+        if judgement_unreadable(judgement):
             result.unreadable += 1
             continue
         inherited = judgement.inherited
@@ -214,6 +220,18 @@ def restamp_summaries(
                 embed_mode="none",
             )
         )
+        if (
+            outcome.status is CommandStatus.REJECTED
+            and outcome.metadata.get("rejection_reason") == CITATIONS_UNREADABLE_CODE
+        ):
+            # A citation read cleanly above could not be read inside the write,
+            # which refused rather than stamp the ``restricted`` an unreadable
+            # citation gives (a raise-only sweep would never take it back down).
+            # Unreadable, not failed: nothing is wrong with the write, and the
+            # next sweep judges the summary again.
+            result.raised -= 1
+            result.unreadable += 1
+            continue
         if outcome.status is not CommandStatus.SUCCESS:
             result.raised -= 1
             result.failed += 1

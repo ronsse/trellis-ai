@@ -59,6 +59,17 @@ set), next to the sensitivity.
 (:mod:`trellis_workers.trace_embed.restamp`), because a summary that already has a
 vector is never rewritten by the pass above. It uses this handler in
 ``embed="none"`` mode.
+
+**A restamp write never fails closed to ``restricted``; it aborts.** The pass may
+stamp ``restricted`` for a citation it cannot read, because its next attempt
+re-judges and replaces that derived stamp. A restamp only raises and never lowers,
+so a ``restricted`` written because a citation became unreadable between the
+sweep's read and this write would stay for good, although the sweep justified only
+the label it read. In ``embed="none"`` mode the write is refused instead
+(:data:`CITATIONS_UNREADABLE_CODE`): the summary keeps its label, the sweep counts
+it unreadable, and the next sweep retries. A citation that is *raised* in between is
+not refused: the later read is the newer one, and a stricter label it justifies
+stands.
 """
 
 from __future__ import annotations
@@ -66,6 +77,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from trellis.errors import ValidationError
 from trellis.llm.egress import EgressGate, EgressVerdict, SummaryJudgement
 from trellis.mutate.commands import Command, Operation
 from trellis.mutate.handlers import EvidenceIngestHandler
@@ -85,7 +97,12 @@ if TYPE_CHECKING:
     from trellis.stores.base.trace import TraceStore
     from trellis.stores.registry import StoreRegistry
 
-__all__ = ["TraceSummaryIngestHandler", "build_trace_summary_command"]
+__all__ = [
+    "CITATIONS_UNREADABLE_CODE",
+    "TraceSummaryIngestHandler",
+    "build_trace_summary_command",
+    "judgement_unreadable",
+]
 
 #: ``Command.requested_by`` for every write this worker makes — the
 #: ``<surface>:<verb>`` convention from :class:`Command`.
@@ -96,6 +113,22 @@ REQUESTED_BY = "worker:embed-traces"
 #: (:meth:`TraceSummaryIngestHandler._enforce_clearance`); a label anyone else set
 #: carries another name and is never replaced.
 CITED_LABEL_CLASSIFIER = "trace-summary:cited"
+
+#: The ``ValidationError.code`` of a restamp write refused because the trace or a
+#: citation could not be read. It is the ``MUTATION_REJECTED`` reason and the
+#: result's ``rejection_reason``, which is how the sweep tells this refusal from a
+#: failed write.
+CITATIONS_UNREADABLE_CODE = "trace_summary_citations_unreadable"
+
+
+def judgement_unreadable(judgement: SummaryJudgement) -> bool:
+    """Whether the trace or a citation of a summary could not be read.
+
+    Not the verdict alone: a citation that withholds the summary hides an
+    unreadable one there, and the unreadable one's ``restricted`` is then in
+    ``inherited``. One predicate, so the sweep and the write cannot differ.
+    """
+    return judgement.unreadable or judgement.verdict is EgressVerdict.UNREADABLE
 
 
 def _is_cited_stamp(metadata: object) -> bool:
@@ -194,8 +227,18 @@ class TraceSummaryIngestHandler(EvidenceIngestHandler):
         stored row, so a rewrite replaces it: a relabel up or down, or a citation
         that stopped being unreadable, leaves the label the citations now give.
         Nothing is added when no citation is labelled above ``internal``.
+
+        A restamp write (``embed="none"``) refuses instead of stamping the
+        ``restricted`` an unreadable citation gives: see the module docstring.
+        The first write and the pass keep failing closed.
         """
         self._judgement = self._judge(doc_id, metadata)
+        if self._embed == "none" and judgement_unreadable(self._judgement):
+            msg = (
+                "a cited document of this trace summary could not be read; "
+                "its label is left as it is and the next restamp sweep retries"
+            )
+            raise ValidationError(msg, code=CITATIONS_UNREADABLE_CODE)
         inherited = self._judgement.inherited
         if inherited is None or sensitivity_rank(inherited) <= sensitivity_rank(
             sensitivity_of(metadata)
