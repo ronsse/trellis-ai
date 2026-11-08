@@ -9,7 +9,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from trellis.core.document_write import put_document
+from trellis.llm.egress import EgressGate
 from trellis.mutate.commands import Command, Operation
 from trellis.mutate.handlers.classification import ClassificationSetHandler
 from trellis.schemas.classification import DATA_CLASSIFICATION_KEY
@@ -175,6 +178,190 @@ def test_an_unreadable_citation_is_counted_not_raised_and_retried(
     )
 
     assert (again.restamp_raised, again.restamp_unreadable) == (1, 0)
+    assert _stored_label(registry, trace)["sensitivity"] == "confidential"
+
+
+def _between_the_sweeps_read_and_the_write(monkeypatch, change) -> None:
+    """Run ``change`` once, right after the sweep judges a summary.
+
+    The sweep's judgement is the first ``judge_summary`` call of a pass with no
+    new traces; the handler's re-judge inside the write is the second. ``change``
+    lands between them.
+    """
+    real = EgressGate.judge_summary
+    pending = [change]
+
+    def judge_then_change(self, *args, **kwargs):
+        judgement = real(self, *args, **kwargs)
+        if pending:
+            pending.pop()()
+        return judgement
+
+    monkeypatch.setattr(EgressGate, "judge_summary", judge_then_change)
+
+
+def test_a_citation_unreadable_after_the_sweeps_read_does_not_leave_restricted(
+    registry, watermark_path, recorder, monkeypatch
+) -> None:
+    """#1208: the sweep read ``confidential``, the write's re-read raised.
+
+    The handler used to fail closed on a citation it could not read, and a sweep
+    only ever raises, so the ``restricted`` it stamped stayed for good although the
+    sweep justified only ``confidential``. The write now keeps the label the sweep
+    judged, and the sweep counts the summary unreadable, so the next one re-judges.
+    """
+    _store_document(registry, "doc-a", None)
+    trace = _embedded_summary(registry, watermark_path, "doc-a")
+    _store_document(registry, "doc-a", "confidential")
+    before_sweep = datetime.now(UTC)
+    with monkeypatch.context() as patched:
+        _between_the_sweeps_read_and_the_write(
+            patched, lambda: _raise_for(patched, registry, "doc-a")
+        )
+        report = _sweep(registry, watermark_path)
+
+    # The label first: it is the defect, and the counts below follow from it.
+    stored = _stored_label(registry, trace)
+    assert stored["sensitivity"] == "confidential"
+    assert stored["classified_by"] == [CITED_LABEL_CLASSIFIER]
+    assert (report.restamp_raised, report.restamp_unreadable) == (1, 1)
+    assert report.restamp_failed == 0
+    assert report.failures == []
+    assert report.to_dict()["status"] == "partial"
+    # Marked like any sweep, so the retry waits for the interval.
+    assert not TraceEmbedWatermark(watermark_path).restamp_due(
+        before_sweep, timedelta(0)
+    )
+    # The vector row carries the label too, as for any raise.
+    vector = registry.knowledge.vector_store.get(trace_summary_doc_id(trace.trace_id))
+    assert vector["metadata"][DATA_CLASSIFICATION_KEY]["sensitivity"] == "confidential"
+
+    again = _sweep(registry, watermark_path)
+
+    assert (again.restamp_scanned, again.restamp_raised) == (1, 0)
+    assert (again.restamp_unreadable, again.restamp_failed) == (0, 0)
+    assert again.to_dict()["status"] == "ok"
+    assert _stored_label(registry, trace)["sensitivity"] == "confidential"
+
+
+def test_a_citation_that_stays_unreadable_never_makes_the_summary_restricted(
+    registry, watermark_path, recorder, monkeypatch
+) -> None:
+    _store_document(registry, "doc-a", None)
+    trace = _embedded_summary(registry, watermark_path, "doc-a")
+    _store_document(registry, "doc-a", "confidential")
+    with monkeypatch.context() as patched:
+        _between_the_sweeps_read_and_the_write(
+            patched, lambda: _raise_for(patched, registry, "doc-a")
+        )
+        _sweep(registry, watermark_path)
+    with monkeypatch.context() as patched:
+        _raise_for(patched, registry, "doc-a")
+        again = _sweep(registry, watermark_path)
+
+    # The sweep's own read is unreadable now: skipped and counted, label untouched.
+    assert (again.restamp_raised, again.restamp_unreadable) == (0, 1)
+    assert _stored_label(registry, trace)["sensitivity"] == "confidential"
+
+
+def test_a_label_a_person_set_is_raised_in_place_when_the_reread_is_unreadable(
+    registry, watermark_path, recorder, monkeypatch
+) -> None:
+    _store_document(registry, "doc-a", None)
+    trace = _embedded_summary(registry, watermark_path, "doc-a")
+    summary_id = trace_summary_doc_id(trace.trace_id)
+    _person_sets(registry, summary_id, "internal")
+    person_label = _stored_label(registry, trace)
+    _store_document(registry, "doc-a", "confidential")
+    with monkeypatch.context() as patched:
+        _between_the_sweeps_read_and_the_write(
+            patched, lambda: _raise_for(patched, registry, "doc-a")
+        )
+        report = _sweep(registry, watermark_path)
+
+    assert (report.restamp_raised, report.restamp_unreadable) == (1, 1)
+    stored = _stored_label(registry, trace)
+    assert stored["sensitivity"] == "confidential"
+    assert stored["classified_by"] == [
+        *person_label["classified_by"],
+        CITED_LABEL_CLASSIFIER,
+    ]
+
+
+@pytest.mark.parametrize("reread_unreadable", [False, True])
+def test_a_refused_raise_is_failed_not_unreadable_and_never_lowers_a_label(
+    registry, watermark_path, recorder, monkeypatch, reread_unreadable
+) -> None:
+    """A person labels the summary ``restricted`` after the sweep read it.
+
+    The write would lower that label, so the clearance rule refuses it. A refusal
+    is a failed raise, whatever the cause of it: not the unreadable path, which is
+    for a write that went through.
+    """
+    _store_document(registry, "doc-a", None)
+    trace = _embedded_summary(registry, watermark_path, "doc-a")
+    summary_id = trace_summary_doc_id(trace.trace_id)
+    _store_document(registry, "doc-a", "confidential")
+
+    def person_then_fault() -> None:
+        _person_sets(registry, summary_id, "restricted")
+        if reread_unreadable:
+            _raise_for(patched, registry, "doc-a")
+
+    with monkeypatch.context() as patched:
+        _between_the_sweeps_read_and_the_write(patched, person_then_fault)
+        report = _sweep(registry, watermark_path)
+
+    assert (report.restamp_raised, report.restamp_unreadable) == (0, 0)
+    assert report.restamp_failed == 1
+    assert [f["trace_id"] for f in report.failures] == [trace.trace_id]
+    assert report.failures[0]["status"] == "rejected"
+    assert report.to_dict()["status"] == "partial"
+    assert _stored_label(registry, trace)["sensitivity"] == "restricted"
+
+
+def test_a_citation_raised_after_the_sweeps_read_gets_the_later_stricter_label(
+    registry, watermark_path, recorder, monkeypatch
+) -> None:
+    """The write re-reads on purpose: a stricter label than the sweep's wins.
+
+    The sweep read ``confidential``; by the write the citation is ``restricted``.
+    The handler's read is the newer one and the label it stamps is justified by a
+    citation, so it stands (the next sweep would have written the same).
+    """
+    _store_document(registry, "doc-a", None)
+    trace = _embedded_summary(registry, watermark_path, "doc-a")
+    _store_document(registry, "doc-a", "confidential")
+    with monkeypatch.context() as patched:
+        _between_the_sweeps_read_and_the_write(
+            patched, lambda: _store_document(registry, "doc-a", "restricted")
+        )
+        report = _sweep(registry, watermark_path)
+
+    assert (report.restamp_raised, report.restamp_unreadable) == (1, 0)
+    assert report.to_dict()["status"] == "ok"
+    stored = _stored_label(registry, trace)
+    assert stored["sensitivity"] == "restricted"
+    assert stored["classified_by"] == [CITED_LABEL_CLASSIFIER]
+
+
+def test_a_citation_lowered_after_the_sweeps_read_keeps_the_sweeps_label(
+    registry, watermark_path, recorder, monkeypatch
+) -> None:
+    """A lowered label is never applied by a sweep: the stale read stands.
+
+    Over-withholding is the safe direction, and a person lowers the stamp.
+    """
+    _store_document(registry, "doc-a", None)
+    trace = _embedded_summary(registry, watermark_path, "doc-a")
+    _store_document(registry, "doc-a", "confidential")
+    with monkeypatch.context() as patched:
+        _between_the_sweeps_read_and_the_write(
+            patched, lambda: _store_document(registry, "doc-a", None)
+        )
+        report = _sweep(registry, watermark_path)
+
+    assert (report.restamp_raised, report.restamp_unreadable) == (1, 0)
     assert _stored_label(registry, trace)["sensitivity"] == "confidential"
 
 
