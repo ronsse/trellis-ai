@@ -30,6 +30,15 @@ job, not this sweep's.
 
 **Unreadable is skipped and counted,** not raised: a store that cannot answer must
 not turn into a ``restricted`` summary nobody lowers. The next sweep tries again.
+That holds for a citation that becomes unreadable *after* the sweep read it, too,
+except that the label the sweep judged is already justified, so it is written: the
+write re-judges the citations, and in ``embed="none"`` mode an unreadable re-read
+keeps the sweep's label instead of stamping ``restricted``
+(:data:`~trellis_workers.trace_embed.handler.RESTAMP_UNVERIFIED_WARNING`). The summary
+is counted ``raised`` and ``unreadable``, so the sweep is unclean and the next one
+re-judges it; a citation raised in between is caught there, because a sweep only
+raises. When the re-read is clean, the write's own fresher verdict wins, stricter
+or not.
 """
 
 from __future__ import annotations
@@ -41,7 +50,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from trellis.core.document_write import is_redaction_tombstone
-from trellis.llm.egress import EgressGate, EgressVerdict
+from trellis.llm.egress import EgressGate
 from trellis.mutate.commands import CommandStatus
 from trellis.schemas.classification import (
     DATA_CLASSIFICATION_KEY,
@@ -51,7 +60,9 @@ from trellis.schemas.classification import (
 )
 from trellis_workers.trace_embed.handler import (
     CITED_LABEL_CLASSIFIER,
+    RESTAMP_UNVERIFIED_WARNING,
     build_trace_summary_command,
+    judgement_unreadable,
 )
 from trellis_workers.trace_embed.render import (
     DOC_ID_PREFIX,
@@ -84,7 +95,9 @@ class RestampResult:
     scanned: int = 0
     #: Summaries raised (in a dry run, the ones that would be).
     raised: int = 0
-    #: Summaries whose citations could not all be read; left as they were.
+    #: Summaries whose citations could not all be read: left as they were, or,
+    #: when only the write's own re-read failed, written with the label this sweep
+    #: judged (those are in ``raised`` too).
     unreadable: int = 0
     #: Raises the executor did not accept.
     failed: int = 0
@@ -192,9 +205,7 @@ def restamp_summaries(
         # label, which would hide an unreadable citation behind a withhold.
         unlabelled = {k: v for k, v in metadata.items() if k != DATA_CLASSIFICATION_KEY}
         judgement = egress.judge_summary(doc_id, unlabelled, open_trace_store)
-        # Not the verdict alone: a withholding citation hides an unreadable one
-        # there, and the unreadable one's ``restricted`` is then in ``inherited``.
-        if judgement.unreadable or judgement.verdict is EgressVerdict.UNREADABLE:
+        if judgement_unreadable(judgement):
             result.unreadable += 1
             continue
         inherited = judgement.inherited
@@ -230,4 +241,9 @@ def restamp_summaries(
                 status=outcome.status.value,
                 message=outcome.message,
             )
+        elif any(w.startswith(RESTAMP_UNVERIFIED_WARNING) for w in outcome.warnings):
+            # The write could not read a citation the sweep had read, so it kept
+            # the label the sweep judged. Written, but not verified: counted
+            # unreadable so the sweep is unclean and the next one re-judges it.
+            result.unreadable += 1
     return result
