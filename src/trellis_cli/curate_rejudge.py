@@ -8,12 +8,14 @@ revisits those memories once the pair may be sent, through
 :func:`trellis.mcp.reconcile_rejudge.rejudge_withheld`; the verdict logic is
 reconcile-on-write's own.
 
-Report-only by default, like ``curate prune``: the judge is called and the
-verdicts are counted, and nothing is written until ``--apply``. Nothing is
-deleted. The exit code is non-zero only for an operational failure (a store that
-cannot be read, or a verdict that could not be written); a pair that is still
-withheld, or a judge that did not answer, is a count, never an exit code. It is
-not scheduled by anything.
+Report-only by default, like ``curate prune``: it finds each memory, re-finds
+its near-duplicate and screens the pair through the egress gate, then stops. The
+judge is not called, so nothing is spent and no text leaves the host; the pairs
+``--apply`` would judge are counted as ``would_judge``. Nothing is written until
+``--apply``, and nothing is deleted. The exit code is non-zero only for an
+operational failure (a store that cannot be read, or a verdict that could not be
+written); a pair that is still withheld, or a judge that did not answer, is a
+count, never an exit code. It is not scheduled by anything.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ _TEXT_ROWS: tuple[tuple[str, str], ...] = (
     ("no_longer_pending", "no longer pending (judged, changed or gone)"),
     ("still_withheld", "still withheld (route not local, side labelled): not sent"),
     ("no_candidate", "no older current near-duplicate left"),
+    ("would_judge", "would be judged by --apply (report-only: judge not called)"),
     ("judged", "judged"),
     ("applied", "applied"),
     ("judge_failures", "judge failures (left pending)"),
@@ -60,8 +63,9 @@ def rejudge_withheld_command(
     apply: bool = typer.Option(
         False,
         "--apply",
-        help="Write the verdicts. Without this the command is report-only: the "
-        "judge is called and verdicts are counted, and nothing is written.",
+        help="Judge the pairs and write the verdicts. Without this the command is "
+        "report-only: the judge is not called, the pairs it would judge are "
+        "counted, and nothing is written.",
     ),
     max_items: int = typer.Option(
         500, "--max-items", min=1, help="Cap on pending memories examined in one run."
@@ -80,15 +84,22 @@ def rejudge_withheld_command(
     an addendum. A NOOP is recorded and the newer row is left current. A
     judged row is not found again. A promoted precedent's row is never stamped.
 
-    Report-only by default; pass ``--apply`` to write. Exits non-zero only when
-    a store cannot be read or a verdict cannot be written.
+    Report-only by default: the judge is not called (nothing is spent or sent),
+    and the pairs ``--apply`` would judge are counted as ``would_judge``. Pass
+    ``--apply`` to judge and write. Exits non-zero only when a store cannot be
+    read or a verdict cannot be written.
     """
     failed = False
     report: RejudgeReport | None = None
     error: str | None = None
     code = EXIT_OK
     try:
-        report = rejudge_withheld(_get_registry(), apply=apply, max_items=max_items)
+        report = rejudge_withheld(
+            _get_registry(),
+            clearance="restricted",  # trusted: operator CLI
+            apply=apply,
+            max_items=max_items,
+        )
         failed = report.apply_failures > 0
         code = EXIT_STORE if failed else EXIT_OK
     except TrellisError as exc:
@@ -115,8 +126,8 @@ def rejudge_withheld_command(
             )
         if not apply:
             console.print(
-                "[yellow]Report-only: nothing was written. Re-run with --apply "
-                "to write the verdicts.[/yellow]"
+                "[yellow]Report-only: the judge was not called and nothing was "
+                "written. Re-run with --apply to judge and write.[/yellow]"
             )
 
     # Below the format branch: both formats exit alike

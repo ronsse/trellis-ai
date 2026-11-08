@@ -60,6 +60,7 @@ from trellis.llm.json_response import (
     parse_json_response,
 )
 from trellis.llm.types import Message
+from trellis.retrieve.sensitivity import DocumentClearance
 from trellis.schemas.classification import Lifecycle
 from trellis.schemas.memory_op import (
     InputDigest,
@@ -69,6 +70,7 @@ from trellis.schemas.memory_op import (
 
 if TYPE_CHECKING:
     from trellis.llm.protocol import LLMClient
+    from trellis.schemas.classification import Sensitivity
     from trellis.stores.base.document import DocumentStore
     from trellis.stores.base.event_log import EventLog
     from trellis.stores.base.vector import VectorStore
@@ -579,6 +581,25 @@ def mark_document_superseded(
         preserve_updated_at=True,
     )
     return None
+
+
+def candidate_is_cleared(
+    document_store: DocumentStore,
+    candidate_id: str,
+    stored: dict[str, Any],
+    clearance: Sensitivity,
+) -> bool:
+    """Whether a caller holding *clearance* may be shown the stored candidate.
+
+    The one clearance test for a near-duplicate handed to the judge, shared by
+    ``save_memory`` (``_gather_reconcile_candidate``) and the re-judge sweep
+    (:mod:`trellis.mcp.reconcile_rejudge`), so the two cannot drift. *stored* is
+    the candidate's row; a chunk id is judged by its parent as well
+    (:class:`~trellis.retrieve.sensitivity.DocumentClearance`).
+    """
+    return DocumentClearance(document_store, clearance).permits(
+        candidate_id, stored.get("metadata")
+    )
 
 
 # ---------------------------------------------------------------------------

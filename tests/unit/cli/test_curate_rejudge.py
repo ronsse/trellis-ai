@@ -128,10 +128,28 @@ class TestReportOnlyByDefault:
         assert result.exit_code == EXIT_OK
         assert payload["status"] == "ok"
         assert payload["dry_run"] is True
-        assert (payload["judged"], payload["applied"]) == (1, 0)
-        assert judge.calls == 1
+        # The pair is one --apply would judge; report-only does not call the judge.
+        assert (payload["would_judge"], payload["judged"], payload["applied"]) == (
+            1,
+            0,
+            0,
+        )
+        assert judge.calls == 0
         assert {d: docs.get(d) for d in ("old", "new")} == before
         assert len(registry.operational.event_log.get_events(limit=100)) == events
+
+    def test_the_text_report_names_the_same_counter(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, judge: _Judge
+    ) -> None:
+        _install(monkeypatch, tmp_path, local=True)
+
+        result = _invoke("--format", "text")
+
+        out = plain(result.output)
+        assert result.exit_code == EXIT_OK
+        assert "would be judged by --apply" in out
+        assert "judge was not called" in out
+        assert judge.calls == 0
 
     def test_apply_writes_and_the_next_run_finds_nothing(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, judge: _Judge

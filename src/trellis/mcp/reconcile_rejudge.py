@@ -21,20 +21,28 @@ marker nor the event names the near-duplicate the judge would have been shown
 the ``egress_withheld`` events, keeps those whose row still reads ``skipped``
 and ``current`` (that is the idempotency: a judged row carries its verdict's
 marker and is not found again), and re-finds the near-duplicate with the same
-MinHash index and threshold the write path uses, restricted to older rows that
-are still current, because the judge is told which memory is new.
+MinHash threshold the write path uses, restricted to older rows that are still
+current (the judge is told which memory is new) and to rows the caller's
+clearance may read, by the write path's own test
+(:func:`~trellis.mcp.reconcile.candidate_is_cleared`). The threshold matches;
+the seeded population can be wider than the write path's index held, and the
+sweep walks past a refused or younger match to the next, so it may pick an older
+candidate the write path never saw.
 
 **The egress gate is asked again, per pair, as it stands now** (
 :func:`_pair_permitted`): a pair whose route is still not local and whose side
 is still labelled stays pending, is counted, and is never sent. A re-label or a
 route newly declared local is what releases a pair.
 
-Nothing is deleted. Report-only is the default: the judge is still called (the
-verdict counts are real) but no row, lifecycle or event is written until
-``apply`` is set. NOOP is recorded as a verdict and does not stale-mark the
-newer row: the judge said the memory adds nothing, not that it is replaced, and
-``superseded_by`` is a claim the judge never made. The row stays current; the
-report counts it under ``judged_by_verdict["noop"]``.
+Nothing is deleted. Report-only is the default and stops before the judge: it
+finds each memory, re-finds its candidate, screens the pair through the egress
+gate (local and free) and counts what ``apply`` would judge as ``would_judge``.
+It sends nothing and writes no row, lifecycle or event, because a verdict that
+is thrown away would spend a model call and, on a permitted non-local route,
+send text off-host for nothing. NOOP is recorded as a verdict and does not
+stale-mark the newer row: the judge said the memory adds nothing, not that it is
+replaced, and ``superseded_by`` is a claim the judge never made. The row stays
+current; the report counts it under ``judged_by_verdict["noop"]``.
 """
 
 from __future__ import annotations
@@ -61,6 +69,7 @@ from trellis.mcp.reconcile import (
     ReconcileDecision,
     ReconcileFallbackReason,
     ReconcileOutcome,
+    candidate_is_cleared,
     configured_model_id,
     emit_reconcile_degraded,
     emit_reconcile_verdict,
@@ -75,6 +84,7 @@ from trellis.schemas.memory_op import REF_TYPE_DOCUMENT
 from trellis.stores.base.event_log import EventType
 
 if TYPE_CHECKING:
+    from trellis.schemas.classification import Sensitivity
     from trellis.stores.base.document import DocumentStore
     from trellis.stores.base.vector import VectorStore
     from trellis.stores.registry import StoreRegistry
@@ -114,7 +124,11 @@ class RejudgeReport(TrellisModel):
     still_withheld: int = 0
     #: Pending, but no older current near-duplicate exists any more.
     no_candidate: int = 0
-    #: The judge answered (fail-open fallbacks are ``judge_failures``).
+    #: Report-only: pairs the gate permits and ``apply`` would send to the judge.
+    #: The judge was not called. Always ``0`` under ``apply``.
+    would_judge: int = 0
+    #: The judge answered (fail-open fallbacks are ``judge_failures``). Always
+    #: ``0`` in report-only mode, which does not call it.
     judged: int = 0
     judged_by_verdict: dict[str, int] = Field(
         default_factory=lambda: dict.fromkeys(_VERDICT_KEYS, 0)
@@ -179,15 +193,19 @@ def _created(doc: dict[str, Any]) -> datetime | None:
 
 
 def _older_current_candidate(
-    index: MinHashIndex, document_store: DocumentStore, doc: dict[str, Any]
+    index: MinHashIndex,
+    document_store: DocumentStore,
+    doc: dict[str, Any],
+    clearance: Sensitivity,
 ) -> ReconcileCandidate | None:
-    """The nearest older, current near-duplicate of *doc*, or ``None``.
+    """The nearest older, current, readable near-duplicate of *doc*, or ``None``.
 
     The judge is told which memory is new, so a row created after *doc* is not
     a candidate for it: it would be superseded by an older fact. Order is
     ``(created_at, doc_id)``, so two rows stamped alike are never each other's
     older. A row whose age cannot be read is not a candidate: the direction of
-    a supersession is not one to guess.
+    a supersession is not one to guess. A row above *clearance* is not a
+    candidate either, by the write path's own test (:func:`candidate_is_cleared`).
     """
     doc_id = doc["doc_id"]
     own = _created(doc)
@@ -201,6 +219,8 @@ def _older_current_candidate(
         if stamp is None or (stamp, match_id) >= (own, doc_id):
             continue
         if lifecycle_state_of(other.get("metadata")) != "current":
+            continue
+        if not candidate_is_cleared(document_store, match_id, other, clearance):
             continue
         return ReconcileCandidate(
             doc_id=match_id, content=other["content"], similarity=float(similarity)
@@ -290,6 +310,37 @@ def _judge_pair(
     )
 
 
+def _screen_or_judge(
+    gate: EgressGate,
+    document_store: DocumentStore,
+    judge: _LazyJudgeClient,
+    doc: dict[str, Any],
+    candidate: ReconcileCandidate,
+    *,
+    apply: bool,
+    timeout: float,
+    model_id: str,
+) -> tuple[bool, ReconcileOutcome | None]:
+    """``(permitted, outcome)`` for one pair.
+
+    Under *apply* the pair goes to :func:`_judge_pair`. Report-only screens the
+    pair through the same predicate and stops, so the outcome is ``None``: the
+    judge is not called, nothing is spent and nothing leaves the host.
+    """
+    if apply:
+        outcome = _judge_pair(
+            gate,
+            document_store,
+            judge,
+            doc,
+            candidate,
+            timeout=timeout,
+            model_id=model_id,
+        )
+        return outcome is not None, outcome
+    return _pair_permitted(gate, document_store, doc, candidate), None
+
+
 def _candidate_changed(
     document_store: DocumentStore, candidate: ReconcileCandidate
 ) -> bool:
@@ -367,27 +418,60 @@ def _apply_verdict(
     _write_marker(document_store, vector_store, fresh, marked)
 
     if decision is ReconcileDecision.SUPERSEDE:
-        refusal = mark_document_superseded(
-            document_store,
-            old_doc_id=candidate.doc_id,
-            new_doc_id=doc_id,
-            vector_store=vector_store,
-        )
+        try:
+            refusal = mark_document_superseded(
+                document_store,
+                old_doc_id=candidate.doc_id,
+                new_doc_id=doc_id,
+                vector_store=vector_store,
+            )
+        except Exception:
+            # A raise (say, "database is locked") is not a refusal, but it leaves
+            # the same claim with no stamp behind it. Without this the row no
+            # longer reads ``skipped`` and the next run never judges it again.
+            try:
+                _release_claim(document_store, vector_store, fresh, base)
+            except Exception:
+                # The row keeps its claim (the crash window the module notes);
+                # the error that brought us here is the one to report.
+                logger.exception("rejudge_claim_rollback_failed", doc_id=doc_id)
+            raise
         if refusal is not None:
             return _withdraw_claim(
                 registry, fresh, base, outcome, refusal, report, vector_store
             )
 
     report.applied += 1
-    emit_reconcile_verdict(
-        event_log,
-        outcome=outcome,
-        new_content=doc["content"],
-        candidate=candidate,
-        subject_ref_type=REF_TYPE_DOCUMENT,
-        subject_ref_id=_verdict_subject(decision, candidate, doc_id),
-    )
+    try:
+        emit_reconcile_verdict(
+            event_log,
+            outcome=outcome,
+            new_content=doc["content"],
+            candidate=candidate,
+            subject_ref_type=REF_TYPE_DOCUMENT,
+            subject_ref_id=_verdict_subject(decision, candidate, doc_id),
+        )
+    except Exception:
+        # GRACEFUL-DEGRADATION: the verdict is written; only its audit event is
+        # missing. Counting the row a failure would send the next run to judge a
+        # pair it has already applied.
+        logger.exception(
+            "rejudge_verdict_event_failed", doc_id=doc_id, decision=decision.value
+        )
     return decision.value
+
+
+def _release_claim(
+    document_store: DocumentStore,
+    vector_store: VectorStore | None,
+    fresh: dict[str, Any],
+    base: dict[str, Any],
+    marker: str = MARKER_SKIPPED,
+) -> None:
+    """Put the row back as it was before the SUPERSEDE claim, under *marker*."""
+    restored = {k: v for k, v in base.items() if k != SUPERSEDES_DOC_KEY}
+    restored[RECONCILIATION_KEY] = marker
+    _write_marker(document_store, vector_store, fresh, restored)
 
 
 def _withdraw_claim(
@@ -408,13 +492,14 @@ def _withdraw_claim(
     the row goes back to ``skipped`` and the next run looks for another
     candidate.
     """
-    document_store = registry.knowledge.document_store
     protected = refusal is ReconcileFallbackReason.TARGET_PROTECTED
-    restored = {k: v for k, v in base.items() if k != SUPERSEDES_DOC_KEY}
-    restored[RECONCILIATION_KEY] = (
-        marker_for_fallback(refusal) if protected else MARKER_SKIPPED
+    _release_claim(
+        registry.knowledge.document_store,
+        vector_store,
+        fresh,
+        base,
+        marker_for_fallback(refusal) if protected else MARKER_SKIPPED,
     )
-    _write_marker(document_store, vector_store, fresh, restored)
     if not protected:
         report.candidate_changed += 1
         return "candidate_changed"
@@ -437,15 +522,24 @@ def _withdraw_claim(
 def rejudge_withheld(
     registry: StoreRegistry,
     *,
+    clearance: Sensitivity,
     apply: bool = False,
     max_items: int = 500,
 ) -> RejudgeReport:
     """Re-judge every memory stored under ``egress_withheld`` that still can be.
 
-    Report-only unless *apply*. See the module docstring for what is read, what
-    is asked of the egress gate and what is written. Never raises for a judge
-    problem (it is counted and the row stays pending) or a refused write of one
-    row (counted as ``apply_failures``); a store that cannot be read raises.
+    Report-only unless *apply*, and report-only never calls the judge. See the
+    module docstring for what is read, what is asked of the egress gate and what
+    is written. Never raises for a judge problem (it is counted and the row stays
+    pending) or a refused write of one row (counted as ``apply_failures``); a
+    store that cannot be read raises.
+
+    *clearance* is the document clearance of whoever runs the sweep, with no
+    default so a caller cannot forget to name one: a candidate above it is never
+    chosen, as on the write path. The CLI is trusted-local and passes
+    ``"restricted"``. ``current_clearance()`` is the MCP caller's and reads
+    ``"internal"`` outside a request, which would hide every labelled candidate,
+    so the sweep does not read it itself.
     """
     report = RejudgeReport(apply=apply)
     document_store = registry.knowledge.document_store
@@ -472,27 +566,38 @@ def rejudge_withheld(
         if index is None:
             index = MinHashIndex()
             _seed_minhash_index(index, document_store, max_docs=_INDEX_MAX_DOCS)
-        candidate = _older_current_candidate(index, document_store, doc)
+        candidate = _older_current_candidate(index, document_store, doc, clearance)
         if candidate is None:
             report.no_candidate += 1
             report.rows.append(RejudgeRow(doc_id=doc_id, outcome="no_candidate"))
             continue
 
-        outcome = _judge_pair(
+        permitted, outcome = _screen_or_judge(
             gate,
             document_store,
             judge,
             doc,
             candidate,
+            apply=apply,
             timeout=timeout,
             model_id=model_id,
         )
-        if outcome is None:
+        if not permitted:
             report.still_withheld += 1
             report.rows.append(
                 RejudgeRow(
                     doc_id=doc_id,
                     outcome="still_withheld",
+                    candidate_id=candidate.doc_id,
+                )
+            )
+            continue
+        if outcome is None:
+            report.would_judge += 1
+            report.rows.append(
+                RejudgeRow(
+                    doc_id=doc_id,
+                    outcome="would_judge",
                     candidate_id=candidate.doc_id,
                 )
             )
@@ -510,16 +615,14 @@ def rejudge_withheld(
 
         report.judged += 1
         report.judged_by_verdict[outcome.decision.value] += 1
-        row_outcome = "would_" + outcome.decision.value
-        if apply:
-            try:
-                row_outcome = _apply_verdict(registry, doc, candidate, outcome, report)
-            except Exception:
-                # GRACEFUL-DEGRADATION: one refused write must not stop the
-                # sweep; the row keeps its marker and is retried next run.
-                logger.exception("rejudge_apply_failed", doc_id=doc_id)
-                report.apply_failures += 1
-                row_outcome = "apply_failed"
+        try:
+            row_outcome = _apply_verdict(registry, doc, candidate, outcome, report)
+        except Exception:
+            # GRACEFUL-DEGRADATION: one refused write must not stop the sweep;
+            # the row is back to pending and is retried next run.
+            logger.exception("rejudge_apply_failed", doc_id=doc_id)
+            report.apply_failures += 1
+            row_outcome = "apply_failed"
         report.rows.append(
             RejudgeRow(
                 doc_id=doc_id,

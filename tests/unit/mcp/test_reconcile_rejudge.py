@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from typing import Any
 
 import pytest
@@ -22,11 +23,12 @@ import trellis.mcp.tools.memory as memory_tools_mod
 import trellis.mcp.wiring as wiring_mod
 from tests.llm_routes import TierRoutedRegistry, per_consumer_config
 from tests.unit.mcp.conftest import unwrap_tool
+from trellis.core.document_write import put_document
 from trellis.llm.routing import LLMConsumer
 from trellis.llm.types import LLMResponse
 from trellis.mcp.reconcile import ReconcileFallbackReason
 from trellis.mcp.reconcile_rejudge import RejudgeReport, rejudge_withheld
-from trellis.schemas.classification import lifecycle_state_of
+from trellis.schemas.classification import DATA_CLASSIFICATION_KEY, lifecycle_state_of
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -176,7 +178,7 @@ class TestSupersedeIsAppliedOnce:
         client = _verdict("supersede")
         judge.client = client
 
-        report = rejudge_withheld(local, apply=True)
+        report = rejudge_withheld(local, clearance="restricted", apply=True)
 
         docs = local.knowledge.document_store
         assert (report.found, report.judged, report.applied) == (1, 1, 1)
@@ -197,7 +199,7 @@ class TestSupersedeIsAppliedOnce:
         assert judged.payload["subject_ref"]["ref_id"] == base_id
         assert _BASE not in json.dumps(judged.payload)
 
-        again = rejudge_withheld(local, apply=True)
+        again = rejudge_withheld(local, clearance="restricted", apply=True)
 
         assert (again.found, again.no_longer_pending, again.judged) == (1, 1, 0)
         assert client.calls == 1
@@ -215,7 +217,7 @@ class TestEgressIsAskedAgain:
         judge.client = client = _verdict("supersede")
         before = _snapshot(non_local)
 
-        report = rejudge_withheld(non_local, apply=True)
+        report = rejudge_withheld(non_local, clearance="restricted", apply=True)
 
         assert (report.found, report.still_withheld, report.judged) == (1, 1, 0)
         assert report.rows[0].doc_id == new_id
@@ -236,16 +238,68 @@ class TestEgressIsAskedAgain:
         _base_id, new_id = _withhold(monkeypatch, non_local, near_label=None)
         judge.client = client = _verdict("supersede")
 
-        report = rejudge_withheld(non_local, apply=True)
+        report = rejudge_withheld(non_local, clearance="restricted", apply=True)
 
         assert (report.found, report.still_withheld) == (1, 1)
         assert report.rows[0].doc_id == new_id
         assert client.calls == 0
         assert judge.built == 0
 
+    def test_the_new_memorys_own_label_withholds_when_only_it_is_labelled(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        non_local: TierRoutedRegistry,
+        judge: _Builder,
+    ) -> None:
+        """A is re-labelled down to ``internal``; the route stays non-local.
+
+        The older side is then sendable, so the gate's verdict on the pair rests
+        on B's own label alone. B is still ``confidential``.
+        """
+        base_id, new_id = _withhold(monkeypatch, non_local)
+        docs = non_local.knowledge.document_store
+        older = docs.get(base_id)
+        relabelled = {
+            **older["metadata"],
+            DATA_CLASSIFICATION_KEY: {
+                **older["metadata"][DATA_CLASSIFICATION_KEY],
+                "sensitivity": "internal",
+            },
+        }
+        put_document(
+            docs, None, base_id, older["content"], relabelled, preserve_updated_at=True
+        )
+        judge.client = client = _verdict("supersede")
+        before = _snapshot(non_local)
+
+        report = rejudge_withheld(non_local, clearance="restricted", apply=True)
+
+        assert (report.found, report.still_withheld, report.judged) == (1, 1, 0)
+        assert report.rows[0].doc_id == new_id
+        assert client.calls == 0
+        assert judge.built == 0
+        assert _snapshot(non_local) == before
+
+    @pytest.mark.parametrize("apply", [False, True])
+    def test_a_refused_pair_is_counted_the_same_in_report_only(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        non_local: TierRoutedRegistry,
+        judge: _Builder,
+        apply: bool,
+    ) -> None:
+        _withhold(monkeypatch, non_local)
+        judge.client = client = _verdict("supersede")
+
+        report = rejudge_withheld(non_local, clearance="restricted", apply=apply)
+
+        assert (report.still_withheld, report.would_judge) == (1, 0)
+        assert client.calls == 0
+        assert judge.built == 0
+
 
 class TestReportOnlyWritesNothing:
-    def test_the_default_calls_the_judge_and_writes_no_row_or_event(
+    def test_the_default_never_calls_the_judge_and_writes_nothing(
         self,
         monkeypatch: pytest.MonkeyPatch,
         non_local: TierRoutedRegistry,
@@ -257,23 +311,130 @@ class TestReportOnlyWritesNothing:
         before = _snapshot(local)
         events_before = len(local.operational.event_log.get_events(limit=1000))
 
-        report = rejudge_withheld(local)
+        report = rejudge_withheld(local, clearance="restricted")
 
         assert report.apply is False
-        assert (report.judged, report.applied) == (1, 0)
-        assert report.judged_by_verdict["supersede"] == 1
-        assert report.rows[0].outcome == "would_supersede"
-        assert client.calls == 1
+        # The pair is one `--apply` would judge, and it is counted as such.
+        assert (report.would_judge, report.judged, report.applied) == (1, 0, 0)
+        assert report.judged_by_verdict["supersede"] == 0
+        assert report.judge_failures == 0
+        assert report.rows[0].outcome == "would_judge"
+        assert report.rows[0].candidate_id == base_id
+        # Nothing was sent and no client was built: no model call is spent.
+        assert client.calls == 0
+        assert judge.built == 0
         assert _snapshot(local) == before
         assert len(local.operational.event_log.get_events(limit=1000)) == events_before
         assert (
             lifecycle_state_of(local.knowledge.document_store.get(base_id)["metadata"])
             == "current"
         )
-        # And the verdict it counted is still there to apply.
-        applied = rejudge_withheld(local, apply=True)
-        assert applied.applied == 1
+        # `--apply` then judges the same pair, once.
+        applied = rejudge_withheld(local, clearance="restricted", apply=True)
+        assert (applied.would_judge, applied.judged, applied.applied) == (0, 1, 1)
         assert new_id == applied.rows[0].doc_id
+        assert client.calls == 1
+
+
+class TestASeamThatRaises:
+    def test_the_claim_is_released_and_a_later_run_judges_the_pair(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        non_local: TierRoutedRegistry,
+        local: TierRoutedRegistry,
+        judge: _Builder,
+    ) -> None:
+        """A raise (not a refusal) from the stamp must not strand the pair.
+
+        The successor's ``supersedes_doc_id`` claim is written before the stamp.
+        Left behind by a raise, it would make the row read as judged and the next
+        run would report ``no_longer_pending`` and never look at the pair again.
+        """
+        base_id, new_id = _withhold(monkeypatch, non_local)
+        judge.client = _verdict("supersede")
+        real = rejudge_mod.mark_document_superseded
+
+        def locked(*_a: Any, **_k: Any) -> None:
+            msg = "database is locked"
+            raise sqlite3.OperationalError(msg)
+
+        monkeypatch.setattr(rejudge_mod, "mark_document_superseded", locked)
+
+        report = rejudge_withheld(local, clearance="restricted", apply=True)
+
+        docs = local.knowledge.document_store
+        assert (report.apply_failures, report.applied) == (1, 0)
+        assert report.rows[0].outcome == "apply_failed"
+        meta = docs.get(new_id)["metadata"]
+        assert meta["reconciliation"] == "skipped"
+        assert "supersedes_doc_id" not in meta
+        assert lifecycle_state_of(docs.get(base_id)["metadata"]) == "current"
+        assert _events(local, EventType.MEMORY_OP_JUDGED) == []
+
+        monkeypatch.setattr(rejudge_mod, "mark_document_superseded", real)
+        retry = rejudge_withheld(local, clearance="restricted", apply=True)
+
+        assert (retry.no_longer_pending, retry.judged, retry.applied) == (0, 1, 1)
+        assert lifecycle_state_of(docs.get(base_id)["metadata"]) == "superseded"
+        assert docs.get(new_id)["metadata"]["reconciliation"] == "supersede"
+
+
+class TestAnEventThatFailsAfterTheWrite:
+    def test_an_applied_verdict_is_counted_applied_not_failed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        non_local: TierRoutedRegistry,
+        local: TierRoutedRegistry,
+        judge: _Builder,
+    ) -> None:
+        base_id, new_id = _withhold(monkeypatch, non_local)
+        judge.client = _verdict("supersede")
+
+        def broken(*_a: Any, **_k: Any) -> None:
+            msg = "event log is down"
+            raise OSError(msg)
+
+        monkeypatch.setattr(rejudge_mod, "emit_reconcile_verdict", broken)
+
+        report = rejudge_withheld(local, clearance="restricted", apply=True)
+
+        docs = local.knowledge.document_store
+        assert (report.applied, report.apply_failures) == (1, 0)
+        assert report.rows[0].outcome == "supersede"
+        assert lifecycle_state_of(docs.get(base_id)["metadata"]) == "superseded"
+        assert docs.get(new_id)["metadata"]["reconciliation"] == "supersede"
+        # The write stands, so the next run does not judge the pair again.
+        again = rejudge_withheld(local, clearance="restricted", apply=True)
+        assert (again.no_longer_pending, again.judged) == (1, 0)
+
+
+class TestCandidateClearance:
+    def test_an_older_row_above_the_callers_clearance_is_never_the_candidate(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        non_local: TierRoutedRegistry,
+        local: TierRoutedRegistry,
+        judge: _Builder,
+    ) -> None:
+        """The write path's filter: the judge is not shown what is unreadable."""
+        base_id, new_id = _withhold(monkeypatch, non_local, near_label=None)
+        judge.client = client = _verdict("supersede")
+        before = _snapshot(local)
+
+        report = rejudge_withheld(local, clearance="internal", apply=True)
+
+        assert (report.found, report.no_candidate, report.judged) == (1, 1, 0)
+        assert report.rows[0].outcome == "no_candidate"
+        assert client.calls == 0
+        assert _snapshot(local) == before
+
+        # The same pair is a candidate for a caller who may read it.
+        cleared = rejudge_withheld(local, clearance="confidential", apply=True)
+
+        assert (cleared.no_candidate, cleared.judged, cleared.applied) == (0, 1, 1)
+        assert cleared.rows[0].candidate_id == base_id
+        assert client.calls == 1
+        assert new_id == cleared.rows[0].doc_id
 
 
 class TestJudgeFailureIsFailOpen:
@@ -297,7 +458,7 @@ class TestJudgeFailureIsFailOpen:
         judge.client = client
         before = _snapshot(local)
 
-        report = rejudge_withheld(local, apply=True)
+        report = rejudge_withheld(local, clearance="restricted", apply=True)
 
         assert (report.judge_failures, report.judged, report.applied) == (1, 0, 0)
         assert report.apply_failures == 0
@@ -308,7 +469,7 @@ class TestJudgeFailureIsFailOpen:
         )
 
         judge.client = _verdict("supersede")
-        retry = rejudge_withheld(local, apply=True)
+        retry = rejudge_withheld(local, clearance="restricted", apply=True)
 
         assert (retry.judge_failures, retry.applied) == (0, 1)
         assert (
@@ -330,7 +491,7 @@ class TestVerdictsNeverDelete:
         base_id, new_id = _withhold(monkeypatch, non_local)
         judge.client = _verdict(decision)
 
-        report = rejudge_withheld(local, apply=True)
+        report = rejudge_withheld(local, clearance="restricted", apply=True)
 
         docs = local.knowledge.document_store
         assert (report.applied, report.judged_by_verdict[decision]) == (1, 1)
@@ -345,7 +506,7 @@ class TestVerdictsNeverDelete:
         assert judged.payload["decision"] == decision
         expected = new_id if decision == "add" else base_id
         assert judged.payload["subject_ref"]["ref_id"] == expected
-        assert rejudge_withheld(local, apply=True).judged == 0
+        assert rejudge_withheld(local, clearance="restricted", apply=True).judged == 0
 
 
 class TestProtectedTarget:
@@ -374,7 +535,7 @@ class TestProtectedTarget:
         precedent_before = docs.get(_PRECEDENT_ID)
         judge.client = _verdict("supersede")
 
-        report = rejudge_withheld(local, apply=True)
+        report = rejudge_withheld(local, clearance="restricted", apply=True)
 
         assert (report.found, report.target_protected, report.applied) == (1, 1, 0)
         assert docs.get(_PRECEDENT_ID) == precedent_before
@@ -389,7 +550,7 @@ class TestProtectedTarget:
         ]
         assert [e.payload["judge_failure"] for e in degraded] == [False]
         # A protected row is a settled answer: it is not judged again.
-        assert rejudge_withheld(local, apply=True).judged == 0
+        assert rejudge_withheld(local, clearance="restricted", apply=True).judged == 0
 
 
 class TestMovedWhileJudging:
@@ -407,7 +568,7 @@ class TestMovedWhileJudging:
             on_call=lambda: docs.put(base_id, "The candidate changed underneath us."),
         )
 
-        report = rejudge_withheld(local, apply=True)
+        report = rejudge_withheld(local, clearance="restricted", apply=True)
 
         assert (report.candidate_changed, report.applied) == (1, 0)
         assert docs.get(new_id)["metadata"]["reconciliation"] == "skipped"
@@ -427,9 +588,11 @@ class TestRunCap:
         save_memory(_NEAR_2, sensitivity="confidential")
         judge.client = client = _verdict("noop")
 
-        report: RejudgeReport = rejudge_withheld(local, apply=True, max_items=1)
+        report: RejudgeReport = rejudge_withheld(
+            local, clearance="restricted", apply=True, max_items=1
+        )
 
         assert (report.found, report.deferred, report.judged) == (2, 1, 1)
         assert client.calls == 1
-        rest = rejudge_withheld(local, apply=True, max_items=1)
+        rest = rejudge_withheld(local, clearance="restricted", apply=True, max_items=1)
         assert (rest.found, rest.no_longer_pending, rest.judged) == (2, 1, 1)
