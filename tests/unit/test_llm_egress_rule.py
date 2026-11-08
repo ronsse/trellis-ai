@@ -127,6 +127,11 @@ _CAPTURE_RECONCILE = Entry(
     "adjudicate",
     via="_load_existing",
 )
+# The sweep re-asks the predicate for each pair, in ``_judge_pair`` directly above
+# the only send, before any client is built (#1134).
+_REJUDGE_WITHHELD = Entry(
+    "trellis/mcp/reconcile_rejudge.py", "_judge_pair", via="_pair_permitted"
+)
 # ``mine`` hands traces to ``_ask_llm`` that ``plan`` picked, and ``plan`` screens
 # them through ``_screen_for_route``, which asks the predicate.
 _MINER_MINE = Entry(
@@ -160,6 +165,7 @@ _GATED: dict[tuple[str, str], tuple[Entry, ...]] = {
     ("trellis/mcp/reconcile.py", "judge_reconcile"): (
         _SERVER_RECONCILE,
         _CAPTURE_RECONCILE,
+        _REJUDGE_WITHHELD,
     ),
     ("trellis_workers/session_capture/distill.py", "distill_session"): (
         _CAPTURE_DISTILL,
@@ -212,14 +218,15 @@ _CONSTRUCT_ONLY: dict[tuple[str, str], str] = {
 #: Hand-read off ``src/``: extract, enrich, judge_reconcile, distill, _ask_llm,
 #: _ask_judge.
 _SENDER_FLOOR = 6
-#: Hand-read: two extraction sites, enrich batch, shadow item, two reconcile,
-#: the miner's plan, the capture distillation, the pack judge.
-_ENTRY_FLOOR = 9
-#: Hand-read: judge_reconcile x2, run_memory_extraction x2, EnrichmentService x2,
+#: Hand-read: two extraction sites, enrich batch, shadow item, three reconcile
+#: (the write path, the capture pass, the re-judge sweep), the miner's plan, the
+#: capture distillation, the pack judge.
+_ENTRY_FLOOR = 10
+#: Hand-read: judge_reconcile x3, run_memory_extraction x2, EnrichmentService x2,
 #: build_llm_facet_classifier x1, LLMExtractor x1, LLMFacetClassifier x1,
 #: distill_session x1, ``_ask_llm`` x1 (in ``PrecedentMiner.mine``),
 #: ``_ask_judge`` x1 (in ``judge_window``).
-_SINK_CALL_FLOOR = 12
+_SINK_CALL_FLOOR = 13
 #: Hand-read: ``trellis worker mine-precedents`` builds the only ``PrecedentMiner``.
 _MINER_CONSTRUCTION_FLOOR = 1
 

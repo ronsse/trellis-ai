@@ -32,6 +32,7 @@ from trellis.mcp.reconcile import (
     ReconcileDecision,
     ReconcileFallbackReason,
     ReconcileOutcome,
+    candidate_is_cleared,
     configured_model_id,
     emit_reconcile_degraded,
     emit_reconcile_verdict,
@@ -63,7 +64,6 @@ from trellis.mutate import (
 )
 from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
 from trellis.retrieve.sensitivity import (
-    DocumentClearance,
     OverwriteRefusedError,
     refuse_overwrite,
 )
@@ -609,9 +609,7 @@ def _gather_reconcile_candidate(
     doc = document_store.get(match_id)
     if doc is None:
         return None
-    if not DocumentClearance(document_store, current_clearance()).permits(
-        match_id, doc.get("metadata")
-    ):
+    if not candidate_is_cleared(document_store, match_id, doc, current_clearance()):
         return None
     return ReconcileCandidate(
         doc_id=match_id, content=doc["content"], similarity=float(similarity)

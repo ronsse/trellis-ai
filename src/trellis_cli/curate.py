@@ -2087,3 +2087,7 @@ def evaluate_precedent_demotion(
 from trellis_cli import curate_precedent_gate  # noqa: E402
 
 curate_precedent_gate.register(curate_app)
+
+from trellis_cli import curate_rejudge  # noqa: E402
+
+curate_rejudge.register(curate_app)
