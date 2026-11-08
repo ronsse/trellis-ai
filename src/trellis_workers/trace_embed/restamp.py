@@ -30,12 +30,15 @@ job, not this sweep's.
 
 **Unreadable is skipped and counted,** not raised: a store that cannot answer must
 not turn into a ``restricted`` summary nobody lowers. The next sweep tries again.
-That holds for a citation that becomes unreadable *after* the sweep read it, too:
-the write re-judges the citations, and in ``embed="none"`` mode the handler refuses
-the write on an unreadable one rather than stamp ``restricted``
-(:data:`~trellis_workers.trace_embed.handler.CITATIONS_UNREADABLE_CODE`). The summary
-keeps its label and the sweep counts it under ``unreadable``. A citation raised in
-between is not refused: the write's later read stands when it is the stricter.
+That holds for a citation that becomes unreadable *after* the sweep read it, too,
+except that the label the sweep judged is already justified, so it is written: the
+write re-judges the citations, and in ``embed="none"`` mode an unreadable re-read
+keeps the sweep's label instead of stamping ``restricted``
+(:data:`~trellis_workers.trace_embed.handler.RESTAMP_UNVERIFIED_WARNING`). The summary
+is counted ``raised`` and ``unreadable``, so the sweep is unclean and the next one
+re-judges it; a citation raised in between is caught there, because a sweep only
+raises. When the re-read is clean, the write's own fresher verdict wins, stricter
+or not.
 """
 
 from __future__ import annotations
@@ -56,8 +59,8 @@ from trellis.schemas.classification import (
     sensitivity_rank,
 )
 from trellis_workers.trace_embed.handler import (
-    CITATIONS_UNREADABLE_CODE,
     CITED_LABEL_CLASSIFIER,
+    RESTAMP_UNVERIFIED_WARNING,
     build_trace_summary_command,
     judgement_unreadable,
 )
@@ -92,7 +95,9 @@ class RestampResult:
     scanned: int = 0
     #: Summaries raised (in a dry run, the ones that would be).
     raised: int = 0
-    #: Summaries whose citations could not all be read; left as they were.
+    #: Summaries whose citations could not all be read: left as they were, or,
+    #: when only the write's own re-read failed, written with the label this sweep
+    #: judged (those are in ``raised`` too).
     unreadable: int = 0
     #: Raises the executor did not accept.
     failed: int = 0
@@ -220,18 +225,6 @@ def restamp_summaries(
                 embed_mode="none",
             )
         )
-        if (
-            outcome.status is CommandStatus.REJECTED
-            and outcome.metadata.get("rejection_reason") == CITATIONS_UNREADABLE_CODE
-        ):
-            # A citation read cleanly above could not be read inside the write,
-            # which refused rather than stamp the ``restricted`` an unreadable
-            # citation gives (a raise-only sweep would never take it back down).
-            # Unreadable, not failed: nothing is wrong with the write, and the
-            # next sweep judges the summary again.
-            result.raised -= 1
-            result.unreadable += 1
-            continue
         if outcome.status is not CommandStatus.SUCCESS:
             result.raised -= 1
             result.failed += 1
@@ -248,4 +241,9 @@ def restamp_summaries(
                 status=outcome.status.value,
                 message=outcome.message,
             )
+        elif any(w.startswith(RESTAMP_UNVERIFIED_WARNING) for w in outcome.warnings):
+            # The write could not read a citation the sweep had read, so it kept
+            # the label the sweep judged. Written, but not verified: counted
+            # unreadable so the sweep is unclean and the next one re-judges it.
+            result.unreadable += 1
     return result

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from trellis.core.document_write import put_document
 from trellis.llm.egress import EgressGate
 from trellis.mutate.commands import Command, Operation
@@ -203,10 +205,10 @@ def test_a_citation_unreadable_after_the_sweeps_read_does_not_leave_restricted(
 ) -> None:
     """#1208: the sweep read ``confidential``, the write's re-read raised.
 
-    The handler fails closed on a citation it cannot read, and a sweep only ever
-    raises, so a ``restricted`` stamp written here would stay for good although the
-    sweep only meant ``confidential``. The write is aborted instead: the summary
-    keeps its label, the sweep counts it unreadable, and the next sweep retries.
+    The handler used to fail closed on a citation it could not read, and a sweep
+    only ever raises, so the ``restricted`` it stamped stayed for good although the
+    sweep justified only ``confidential``. The write now keeps the label the sweep
+    judged, and the sweep counts the summary unreadable, so the next one re-judges.
     """
     _store_document(registry, "doc-a", None)
     trace = _embedded_summary(registry, watermark_path, "doc-a")
@@ -219,8 +221,10 @@ def test_a_citation_unreadable_after_the_sweeps_read_does_not_leave_restricted(
         report = _sweep(registry, watermark_path)
 
     # The label first: it is the defect, and the counts below follow from it.
-    assert _stored_label(registry, trace) is None
-    assert (report.restamp_raised, report.restamp_unreadable) == (0, 1)
+    stored = _stored_label(registry, trace)
+    assert stored["sensitivity"] == "confidential"
+    assert stored["classified_by"] == [CITED_LABEL_CLASSIFIER]
+    assert (report.restamp_raised, report.restamp_unreadable) == (1, 1)
     assert report.restamp_failed == 0
     assert report.failures == []
     assert report.to_dict()["status"] == "partial"
@@ -228,21 +232,46 @@ def test_a_citation_unreadable_after_the_sweeps_read_does_not_leave_restricted(
     assert not TraceEmbedWatermark(watermark_path).restamp_due(
         before_sweep, timedelta(0)
     )
+    # The vector row carries the label too, as for any raise.
+    vector = registry.knowledge.vector_store.get(trace_summary_doc_id(trace.trace_id))
+    assert vector["metadata"][DATA_CLASSIFICATION_KEY]["sensitivity"] == "confidential"
 
     again = _sweep(registry, watermark_path)
 
-    assert (again.restamp_raised, again.restamp_unreadable) == (1, 0)
+    assert (again.restamp_scanned, again.restamp_raised) == (1, 0)
+    assert (again.restamp_unreadable, again.restamp_failed) == (0, 0)
     assert again.to_dict()["status"] == "ok"
     assert _stored_label(registry, trace)["sensitivity"] == "confidential"
 
 
-def test_an_unreadable_write_leaves_a_label_a_person_set_alone(
+def test_a_citation_that_stays_unreadable_never_makes_the_summary_restricted(
+    registry, watermark_path, recorder, monkeypatch
+) -> None:
+    _store_document(registry, "doc-a", None)
+    trace = _embedded_summary(registry, watermark_path, "doc-a")
+    _store_document(registry, "doc-a", "confidential")
+    with monkeypatch.context() as patched:
+        _between_the_sweeps_read_and_the_write(
+            patched, lambda: _raise_for(patched, registry, "doc-a")
+        )
+        _sweep(registry, watermark_path)
+    with monkeypatch.context() as patched:
+        _raise_for(patched, registry, "doc-a")
+        again = _sweep(registry, watermark_path)
+
+    # The sweep's own read is unreadable now: skipped and counted, label untouched.
+    assert (again.restamp_raised, again.restamp_unreadable) == (0, 1)
+    assert _stored_label(registry, trace)["sensitivity"] == "confidential"
+
+
+def test_a_label_a_person_set_is_raised_in_place_when_the_reread_is_unreadable(
     registry, watermark_path, recorder, monkeypatch
 ) -> None:
     _store_document(registry, "doc-a", None)
     trace = _embedded_summary(registry, watermark_path, "doc-a")
     summary_id = trace_summary_doc_id(trace.trace_id)
     _person_sets(registry, summary_id, "internal")
+    person_label = _stored_label(registry, trace)
     _store_document(registry, "doc-a", "confidential")
     with monkeypatch.context() as patched:
         _between_the_sweeps_read_and_the_write(
@@ -250,10 +279,45 @@ def test_an_unreadable_write_leaves_a_label_a_person_set_alone(
         )
         report = _sweep(registry, watermark_path)
 
-    assert (report.restamp_raised, report.restamp_unreadable) == (0, 1)
+    assert (report.restamp_raised, report.restamp_unreadable) == (1, 1)
     stored = _stored_label(registry, trace)
-    assert stored["sensitivity"] == "internal"
-    assert CITED_LABEL_CLASSIFIER not in stored["classified_by"]
+    assert stored["sensitivity"] == "confidential"
+    assert stored["classified_by"] == [
+        *person_label["classified_by"],
+        CITED_LABEL_CLASSIFIER,
+    ]
+
+
+@pytest.mark.parametrize("reread_unreadable", [False, True])
+def test_a_refused_raise_is_failed_not_unreadable_and_never_lowers_a_label(
+    registry, watermark_path, recorder, monkeypatch, reread_unreadable
+) -> None:
+    """A person labels the summary ``restricted`` after the sweep read it.
+
+    The write would lower that label, so the clearance rule refuses it. A refusal
+    is a failed raise, whatever the cause of it: not the unreadable path, which is
+    for a write that went through.
+    """
+    _store_document(registry, "doc-a", None)
+    trace = _embedded_summary(registry, watermark_path, "doc-a")
+    summary_id = trace_summary_doc_id(trace.trace_id)
+    _store_document(registry, "doc-a", "confidential")
+
+    def person_then_fault() -> None:
+        _person_sets(registry, summary_id, "restricted")
+        if reread_unreadable:
+            _raise_for(patched, registry, "doc-a")
+
+    with monkeypatch.context() as patched:
+        _between_the_sweeps_read_and_the_write(patched, person_then_fault)
+        report = _sweep(registry, watermark_path)
+
+    assert (report.restamp_raised, report.restamp_unreadable) == (0, 0)
+    assert report.restamp_failed == 1
+    assert [f["trace_id"] for f in report.failures] == [trace.trace_id]
+    assert report.failures[0]["status"] == "rejected"
+    assert report.to_dict()["status"] == "partial"
+    assert _stored_label(registry, trace)["sensitivity"] == "restricted"
 
 
 def test_a_citation_raised_after_the_sweeps_read_gets_the_later_stricter_label(

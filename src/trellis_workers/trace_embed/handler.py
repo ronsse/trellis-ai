@@ -60,16 +60,20 @@ set), next to the sensitivity.
 vector is never rewritten by the pass above. It uses this handler in
 ``embed="none"`` mode.
 
-**A restamp write never fails closed to ``restricted``; it aborts.** The pass may
-stamp ``restricted`` for a citation it cannot read, because its next attempt
-re-judges and replaces that derived stamp. A restamp only raises and never lowers,
-so a ``restricted`` written because a citation became unreadable between the
-sweep's read and this write would stay for good, although the sweep justified only
-the label it read. In ``embed="none"`` mode the write is refused instead
-(:data:`CITATIONS_UNREADABLE_CODE`): the summary keeps its label, the sweep counts
-it unreadable, and the next sweep retries. A citation that is *raised* in between is
-not refused: the later read is the newer one, and a stricter label it justifies
-stands.
+**A restamp write never fails closed to ``restricted``; it keeps the sweep's label.**
+The pass may stamp ``restricted`` for a citation it cannot read, because its next
+attempt re-judges and replaces that derived stamp. A restamp only raises and never
+lowers, so a ``restricted`` written because a citation became unreadable between
+the sweep's read and this write would stay for good, although the sweep justified
+only the label it read. In ``embed="none"`` mode, when this write's re-read of the
+citations is unreadable, the write goes ahead with the metadata the sweep passed,
+whose label is the one the sweep judged (always stricter than the stored one, and
+never lowered: :meth:`TraceSummaryIngestHandler._enforce_clearance` still refuses a
+write below a label a person set). The result then carries a
+:data:`RESTAMP_UNVERIFIED_WARNING` entry, which the sweep counts as unreadable, so
+the next sweep re-judges the summary; a citation raised in between is caught there,
+because the sweep only raises. When the re-read is clean, this handler's own fresher
+verdict wins, as it does in the pass.
 """
 
 from __future__ import annotations
@@ -77,7 +81,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from trellis.errors import ValidationError
 from trellis.llm.egress import EgressGate, EgressVerdict, SummaryJudgement
 from trellis.mutate.commands import Command, Operation
 from trellis.mutate.handlers import EvidenceIngestHandler
@@ -98,7 +101,7 @@ if TYPE_CHECKING:
     from trellis.stores.registry import StoreRegistry
 
 __all__ = [
-    "CITATIONS_UNREADABLE_CODE",
+    "RESTAMP_UNVERIFIED_WARNING",
     "TraceSummaryIngestHandler",
     "build_trace_summary_command",
     "judgement_unreadable",
@@ -114,11 +117,12 @@ REQUESTED_BY = "worker:embed-traces"
 #: carries another name and is never replaced.
 CITED_LABEL_CLASSIFIER = "trace-summary:cited"
 
-#: The ``ValidationError.code`` of a restamp write refused because the trace or a
-#: citation could not be read. It is the ``MUTATION_REJECTED`` reason and the
-#: result's ``rejection_reason``, which is how the sweep tells this refusal from a
-#: failed write.
-CITATIONS_UNREADABLE_CODE = "trace_summary_citations_unreadable"
+#: The prefix of the ``CommandResult.warnings`` entry a restamp write
+#: (``embed="none"``) leaves when its own re-read of the citations was unreadable
+#: and it wrote the label the sweep had judged. The handler returns a fixed
+#: ``(id, message)``, and the message is for people, so the sweep matches this
+#: instead.
+RESTAMP_UNVERIFIED_WARNING = "restamp_citations_unreadable"
 
 
 def judgement_unreadable(judgement: SummaryJudgement) -> bool:
@@ -204,6 +208,26 @@ class TraceSummaryIngestHandler(EvidenceIngestHandler):
         self._judgement: SummaryJudgement = SummaryJudgement(
             verdict=EgressVerdict.UNREADABLE, inherited="restricted"
         )
+        #: Whether the command in hand was a restamp write whose re-read of the
+        #: citations was unreadable; reset at the start of each command.
+        self._restamp_reread_unreadable = False
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        """The core write, plus a warning when a restamp's re-read was unreadable."""
+        self._restamp_reread_unreadable = False
+        written = super().handle(command)
+        if self._restamp_reread_unreadable:
+            warning = (
+                f"{RESTAMP_UNVERIFIED_WARNING}: a cited document could not be read "
+                "when the label was written; the label the sweep judged was kept "
+                "and the next sweep re-judges it"
+            )
+            existing = command.metadata.get("handler_warnings")
+            if isinstance(existing, list):
+                existing.append(warning)
+            else:
+                command.metadata["handler_warnings"] = [warning]
+        return written
 
     def _judge(self, doc_id: str, metadata: dict[str, Any]) -> SummaryJudgement:
         """The summary's verdict and inherited label, from one read of its citations."""
@@ -228,17 +252,15 @@ class TraceSummaryIngestHandler(EvidenceIngestHandler):
         that stopped being unreadable, leaves the label the citations now give.
         Nothing is added when no citation is labelled above ``internal``.
 
-        A restamp write (``embed="none"``) refuses instead of stamping the
-        ``restricted`` an unreadable citation gives: see the module docstring.
-        The first write and the pass keep failing closed.
+        A restamp write (``embed="none"``) that cannot read a citation does not
+        stamp the ``restricted`` that gives: it returns ``metadata`` as the sweep
+        built it, with the label the sweep judged, and flags the result (see the
+        module docstring). The first write and the pass keep failing closed.
         """
         self._judgement = self._judge(doc_id, metadata)
         if self._embed == "none" and judgement_unreadable(self._judgement):
-            msg = (
-                "a cited document of this trace summary could not be read; "
-                "its label is left as it is and the next restamp sweep retries"
-            )
-            raise ValidationError(msg, code=CITATIONS_UNREADABLE_CODE)
+            self._restamp_reread_unreadable = True
+            return metadata
         inherited = self._judgement.inherited
         if inherited is None or sensitivity_rank(inherited) <= sensitivity_rank(
             sensitivity_of(metadata)
