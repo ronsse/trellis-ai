@@ -22,6 +22,7 @@ from typing import Any
 
 import structlog
 import typer
+from rich.markup import escape
 
 from trellis.errors import TrellisError
 from trellis.mcp.reconcile_rejudge import RejudgeReport, rejudge_withheld
@@ -101,7 +102,7 @@ def rejudge_withheld_command(
         else:
             emit_json(_payload(report, failed=failed))
     elif report is None:
-        console.print(f"[red]{error}[/red]", markup=True, soft_wrap=True)
+        console.print(f"[red]{escape(error or '')}[/red]", soft_wrap=True)
     else:
         for field, label in _TEXT_ROWS:
             console.print(f"  {getattr(report, field):>5}  {label}")

@@ -215,7 +215,7 @@ class TestOperationalFailureExitsAlikeInBothFormats:
         self, monkeypatch: pytest.MonkeyPatch, fmt: str
     ) -> None:
         def boom(*_a: Any, **_k: Any) -> None:
-            msg = "event log unreadable"
+            msg = "event log unreadable [type=missing, loc=x]"
             raise StoreError(msg)
 
         monkeypatch.setattr(command_mod, "_get_registry", object)
@@ -226,3 +226,6 @@ class TestOperationalFailureExitsAlikeInBothFormats:
         assert result.exit_code == EXIT_STORE
         if fmt == "json":
             assert json.loads(result.output)["status"] == "error"
+        else:
+            # Rich would delete a bracketed word from unescaped exception text.
+            assert "[type=missing, loc=x]" in plain(result.output)
