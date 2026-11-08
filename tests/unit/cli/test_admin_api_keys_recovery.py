@@ -14,6 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 import trellis_cli.stores as cli_stores
+from tests.cli_output import plain
 from trellis.mutate.policy_source import resolve_policy_path
 from trellis.stores.base.api_key import ApiKeyRecord
 from trellis_cli.exit_codes import EXIT_OK, EXIT_STORE, EXIT_VALIDATION
@@ -93,8 +94,8 @@ def test_a_corrupt_policy_file_blocks_the_cli_and_names_the_file(fmt: str) -> No
 def test_the_refusal_text_is_the_text_it_always_was() -> None:
     result = _invoke(["api-keys", "revoke", "ffffffffffff"])
     assert result.exit_code == EXIT_VALIDATION
-    assert "Cannot revoke 'ffffffffffff': unknown key id." in result.output
-    assert "Cannot change" not in result.output
+    assert "Cannot revoke 'ffffffffffff': unknown key id." in plain(result.output)
+    assert "Cannot change" not in plain(result.output)
 
 
 @pytest.mark.parametrize("name", ["a" * 121, "bad\nname", "bad\x1b[2Jname"])
@@ -115,5 +116,7 @@ def test_a_stored_name_with_control_characters_prints_safely() -> None:
     )
     result = _invoke(["api-keys", "list"])
     assert result.exit_code == EXIT_OK
-    assert "\x1b" not in result.output
-    assert "a\\x1b[bold]b" in result.output
+    # Raw, not ``plain``: ``strip_ansi`` would delete a leaked ``\x1b[b`` too.
+    # Rich's own styling is numeric SGR, so this needle is the name alone.
+    assert "\x1b[bold]" not in result.output
+    assert "a\\x1b[bold]b" in plain(result.output)
