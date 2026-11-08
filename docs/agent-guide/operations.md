@@ -4531,6 +4531,10 @@ route is `GET /api/v1/analyze/intent-families` with `days`, `since`, `until` and
 `limit` query params (admin scope, 60 s cache like every report), and the same
 payload as `--format json`.
 
+### `trellis analyze session-repeats`
+
+Read-only measurement for #1208: how often a later pack of one session serves a near-duplicate sibling (a different id, MinHash-similar text at the pack builder's own threshold) of an item an earlier pack already served, beside exact repeats, chunk siblings, fresh and unreadable items, with estimated tokens per class (`trellis analyze session-repeats [--days N] [--window-minutes M] [--format text|json] [--no-meta-trace]`; held-out packs dropped, text output carries counts and an opaque session handle only, and it changes no serving).
+
 ### `trellis analyze replay`
 
 Read-only counterfactual over the window's already-served packs: the same

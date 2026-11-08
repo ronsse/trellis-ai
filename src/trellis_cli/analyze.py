@@ -4991,3 +4991,9 @@ from trellis_cli.analyze_intent_families import (  # noqa: E402
 )
 
 _reg_intent_families(analyze_app)
+
+from trellis_cli.analyze_session_repeats import (  # noqa: E402
+    register as _reg_session_repeats,
+)
+
+_reg_session_repeats(analyze_app)
