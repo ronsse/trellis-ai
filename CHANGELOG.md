@@ -4,6 +4,12 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-09
+
+The first published release since 0.9.0. Neither 0.10.0 nor 0.10.1 reached PyPI
+(0.10.1 was prepared but never tagged), so 0.11.0 carries both sections below as
+well as this one.
+
 ### Added
 
 - **`trellis curate rejudge-withheld`: a sweep that re-judges memories reconcile-on-write stored under `egress_withheld` (#1134).** With the reconcile route not declared local, `save_memory` stores a pair with a side labelled above `internal` as a plain ADD marked `skipped` and nothing ever revisited it, so both rows stayed current. The sweep finds those memories from their `RECONCILE_DEGRADED` events, asks the egress gate again for each pair as it stands (a pair still not permitted stays pending, is counted and is not sent) and judges the rest with the existing `judge_reconcile`. The candidate is re-found through a MinHash index at the write path's threshold and filtered by the write path's own clearance test; the threshold matches but the seeded population can be wider, so the sweep may pick an older candidate the write path never saw. Verdicts go through the write path's seams, replace the `skipped` marker so a row is not judged twice, and emit `MEMORY_OP_JUDGED`: SUPERSEDE stale-marks the older row (never a delete), UPDATE links it, NOOP is recorded and stamps nothing, and a promoted precedent's row is never stamped. Report-only by default and it never calls the judge: it counts the pairs `--apply` would judge as `would_judge` (same name in the JSON and the text report), so it spends no model call and sends no text off-host; `--apply` judges and writes. A SUPERSEDE whose stamp raises takes its claim back to `skipped`, so the pair is found again. The exit code is non-zero only for an operational failure, identical in both formats. Not scheduled. Serving does not change until the sweep is run with `--apply`.
@@ -236,7 +242,8 @@ All notable changes to Trellis will be documented in this file.
 ## [0.10.1] - 2026-11-04
 
 0.10.0 was tagged but never published: its release build failed type-checking on
-Python 3.12. 0.10.1 is 0.10.0 plus the fixes below.
+Python 3.12. 0.10.1 is 0.10.0 plus the fixes below. It was never tagged either; its
+contents ship in 0.11.0.
 
 ### Fixed
 
