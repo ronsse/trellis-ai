@@ -17,7 +17,7 @@ import json
 from typing import Any
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 import trellis.mcp.server as server_mod
 import trellis.mcp.tools.memory as memory_tools_mod
@@ -59,7 +59,7 @@ class TestExecutorEscapeIsSanitized:
         self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _force_executor_explosion(monkeypatch)
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_memory(content="whatever content")
         message = excinfo.value.error.message
         data = json.dumps(excinfo.value.error.data)

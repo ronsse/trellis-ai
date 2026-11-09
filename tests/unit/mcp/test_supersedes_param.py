@@ -5,7 +5,7 @@ withholds an item whose ``lifecycle`` names a successor present in the same
 pool, and until #613 no writer produced that stamp. These tests drive the
 real tools, read the pack an agent would be served, and pin every refusal to
 "nothing was written" — the message has to say so itself, because an
-``McpError`` reaching a client through ``call_tool`` keeps only its text.
+``MCPError`` reaching a client through ``call_tool`` keeps only its text.
 
 ``trellis.mcp.supersession`` is imported inside the tests that use it
 directly, never at module level, so the control arms still run on a tree
@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from mcp.types import INVALID_PARAMS
 
 import trellis.mcp.auth as auth_mod
@@ -832,7 +832,7 @@ def test_refusal_writes_nothing_and_says_so(temp_registry, case):
     mutations = _event_ids(reg, EventType.MUTATION_EXECUTED)
     rejections = _event_ids(reg, EventType.WRITE_REJECTED)
 
-    with pytest.raises(McpError) as excinfo:
+    with pytest.raises(MCPError) as excinfo:
         tool(**prepared.kwargs)
 
     error = excinfo.value.error
@@ -858,7 +858,7 @@ def test_refusal_writes_nothing_and_says_so(temp_registry, case):
 
 
 def _refusal_of(target: str) -> tuple[int, str, dict[str, Any]]:
-    with pytest.raises(McpError) as excinfo:
+    with pytest.raises(MCPError) as excinfo:
         save_memory(X_TEXT, supersedes=target)
     error = excinfo.value.error
     return error.code, error.message, error.data
@@ -1117,7 +1117,7 @@ def test_create_failure_reports_applied_stamps_and_resend_finishes(temp_registry
     nodes_before = graph.count_nodes()
     _write_policy(reg, "entity.create")
 
-    with pytest.raises(McpError) as excinfo:
+    with pytest.raises(MCPError) as excinfo:
         save_knowledge(name=NAME, content=X_TEXT, supersedes=n_old)
 
     error = excinfo.value.error
@@ -1185,7 +1185,7 @@ def test_exact_hit_stamp_failure_is_an_error_not_a_success(temp_registry):
     t_before = reg.knowledge.document_store.get(t)
     _write_policy(reg, "evidence.ingest")
 
-    with pytest.raises(McpError) as excinfo:
+    with pytest.raises(MCPError) as excinfo:
         save_memory(X_TEXT, supersedes=t)
 
     error = excinfo.value.error
@@ -1205,7 +1205,7 @@ def test_node_stamp_failure_creates_no_entity(temp_registry):
     nodes_before = graph.count_nodes()
     _write_policy(reg, "entity.update")
 
-    with pytest.raises(McpError) as excinfo:
+    with pytest.raises(MCPError) as excinfo:
         save_knowledge(name=NAME, content=X_TEXT, supersedes=n_old)
 
     error = excinfo.value.error
@@ -1232,7 +1232,7 @@ def test_node_stamp_is_governed_by_a_policy_on_the_node_type(temp_registry):
         reg, "entity.update", PolicyScope(level="entity_type", value="zf-rig")
     )
 
-    with pytest.raises(McpError) as excinfo:
+    with pytest.raises(MCPError) as excinfo:
         save_knowledge(name=NAME, content=X_TEXT, supersedes=n_old)
 
     assert excinfo.value.error.code == MUTATION_FAILED

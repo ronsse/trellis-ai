@@ -33,7 +33,7 @@ import json
 from typing import TYPE_CHECKING
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 import trellis.mcp.server as server_mod
 import trellis.mcp.tools.experience_knowledge as experience_tools_mod
@@ -108,7 +108,7 @@ class TestPydanticSitesDescribeNotQuote:
         hostile_json = json.dumps(
             {"source": {"leak": HOSTILE}, "intent": "x", "context": {}}
         )
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_experience(hostile_json)
         message = excinfo.value.error.message
         assert HOSTILE not in message
@@ -130,7 +130,7 @@ class TestPydanticSitesDescribeNotQuote:
         assert "float_type" in payload["message"]
 
     def test_execute_mutation_invalid_idempotency_key_drops_the_value(self) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             execute_mutation(
                 operation="link.create",
                 args={},
@@ -251,7 +251,7 @@ class TestResultMessage:
                 }
             ],
         }
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_experience(json.dumps(trace))
         err = excinfo.value.error
         assert HOSTILE not in err.message
@@ -265,7 +265,7 @@ class TestResultMessage:
         """``_raise_create_failed`` (``save_knowledge``'s entity-create
         failure) called directly with a hostile result."""
         hostile_result = _result(status, f"constraint violated: api_key={HOSTILE}")
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             _raise_create_failed(hostile_result, None, supersedes=None, applied=[])
         err = excinfo.value.error
         assert HOSTILE not in err.message
@@ -280,7 +280,7 @@ class TestResultMessage:
         called directly with a stub executor; the failure branch runs
         before ``registry``/``document_store`` are ever touched."""
         hostile_result = _result(status, f"constraint violated: api_key={HOSTILE}")
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             _store_new_memory(
                 temp_registry,
                 _StubExecutor(hostile_result),
@@ -403,7 +403,7 @@ class TestEvidencePointerDescribesNotQuote:
     ``ensure_evidence_document`` (``trellis/mutate/evidence.py``) wraps a
     non-SUCCESS ``evidence.ingest`` ``CommandResult.message`` whole in a
     ``MutationError``; ``_resolve_evidence_pointer`` used to quote that
-    exception raw in both the McpError message and its ``data["message"]``
+    exception raw in both the MCPError message and its ``data["message"]``
     echo — the last of the roster's hand-read sites this follow-up sweep
     did not originally close.
     """
@@ -423,7 +423,7 @@ class TestEvidencePointerDescribesNotQuote:
             "build_curate_executor",
             lambda *args, **kwargs: _StubExecutor(hostile_result),
         )
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_knowledge(name="probe-entity", content="some evidence prose")
         err = excinfo.value.error
         assert HOSTILE not in err.message

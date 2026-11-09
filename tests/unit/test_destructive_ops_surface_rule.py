@@ -40,7 +40,7 @@ from fastapi.testclient import TestClient
 from fastmcp.server.auth import AccessToken
 from fastmcp.server.context import reset_transport, set_transport
 from mcp.server.auth.middleware.auth_context import AuthenticatedUser, auth_context_var
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 import trellis.mcp.auth as mcp_auth_mod
 import trellis.mcp.wiring as wiring_mod
@@ -210,7 +210,7 @@ def mcp_registry(tmp_path: Path) -> Iterator[Any]:
 @pytest.mark.parametrize("operation", DESTRUCTIVE_OPS, ids=str)
 class TestEveryDestructiveOperationNeedsAdminOverMcp:
     def test_refused_below_admin(self, mcp_registry: Any, operation: Operation) -> None:
-        with _as_http(scopes=[SCOPE_MUTATE]), pytest.raises(McpError) as excinfo:
+        with _as_http(scopes=[SCOPE_MUTATE]), pytest.raises(MCPError) as excinfo:
             execute_mutation(operation=operation.value, args={})
         assert excinfo.value.error.code == POLICY_DENIED
         assert excinfo.value.error.data == {"operation": operation.value}
@@ -218,7 +218,7 @@ class TestEveryDestructiveOperationNeedsAdminOverMcp:
     def test_admin_passes_the_gate(
         self, mcp_registry: Any, operation: Operation
     ) -> None:
-        """Admin reaches the executor -- an ``McpError`` here would have
+        """Admin reaches the executor -- an ``MCPError`` here would have
 
         to be something other than ``POLICY_DENIED`` (e.g.
         ``INVALID_PARAMS`` for a missing required arg), never the scope
@@ -227,7 +227,7 @@ class TestEveryDestructiveOperationNeedsAdminOverMcp:
         with _as_stdio():
             try:
                 execute_mutation(operation=operation.value, args={})
-            except McpError as exc:
+            except MCPError as exc:
                 # No raise is expected here: the op may legitimately succeed
                 # or fail for reasons unrelated to scope, so this only
                 # forbids POLICY_DENIED rather than requiring an exception.
@@ -305,7 +305,7 @@ class TestAnUnclassifiedOperationFailsClosedOverMcp:
     def test_refused_below_admin(
         self, mcp_registry: Any, unclassify_label_add: Operation
     ) -> None:
-        with _as_http(scopes=[SCOPE_MUTATE]), pytest.raises(McpError) as excinfo:
+        with _as_http(scopes=[SCOPE_MUTATE]), pytest.raises(MCPError) as excinfo:
             execute_mutation(operation=unclassify_label_add.value, args={})
         assert excinfo.value.error.code == POLICY_DENIED
         assert excinfo.value.error.data == {"operation": unclassify_label_add.value}
@@ -316,5 +316,5 @@ class TestAnUnclassifiedOperationFailsClosedOverMcp:
         with _as_stdio():
             try:
                 execute_mutation(operation=unclassify_label_add.value, args={})
-            except McpError as exc:
+            except MCPError as exc:
                 assert exc.error.code != POLICY_DENIED, exc.error.message  # noqa: PT017

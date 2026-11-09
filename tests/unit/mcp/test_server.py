@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import structlog
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 from structlog.testing import capture_logs
 
@@ -103,7 +103,7 @@ search = unwrap_tool(_search)
 class TestGetContext:
     def test_empty_intent_raises_invalid_params(self) -> None:
         for arg in ("", "   "):
-            with pytest.raises(McpError) as excinfo:
+            with pytest.raises(MCPError) as excinfo:
                 get_context(arg)
             assert excinfo.value.error.code == INVALID_PARAMS
             assert "intent must not be empty" in excinfo.value.error.message
@@ -350,14 +350,14 @@ class TestGetContextRetrievalPhase:
         return events[0].payload
 
     def test_unknown_value_raises_invalid_params(self) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             get_context("deploy platform", retrieval_phase="bogus")
         assert excinfo.value.error.code == INVALID_PARAMS
         assert "retrieval_phase" in excinfo.value.error.message
         assert excinfo.value.error.data == {"retrieval_phase": "bogus"}
 
     def test_unknown_value_raises_invalid_params_on_sectioned_path(self) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             get_context(
                 "deploy platform",
                 retrieval_phase="bogus",
@@ -370,7 +370,7 @@ class TestGetContextRetrievalPhase:
         self, temp_registry: StoreRegistry
     ) -> None:
         temp_registry.knowledge.document_store.put("doc1", "deploy the platform")
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             get_context("deploy platform", retrieval_phase="bogus")
         events = temp_registry.operational.event_log.get_events(
             event_type=EventType.PACK_ASSEMBLED, limit=10
@@ -560,20 +560,20 @@ class TestSaveExperience:
         payload = json.loads(doc.split("Example valid trace:\n", maxsplit=1)[1])
         payload["definitely_not_a_trace_field"] = "anything"
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_experience(json.dumps(payload))
 
         assert excinfo.value.error.code == INVALID_PARAMS
 
     def test_empty_trace_raises_invalid_params(self) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_experience("")
         assert excinfo.value.error.code == INVALID_PARAMS
         assert "trace_json must not be empty" in excinfo.value.error.message
         assert excinfo.value.error.data == {"field": "trace_json"}
 
     def test_invalid_json_raises_invalid_params(self) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_experience("not valid json")
         assert excinfo.value.error.code == INVALID_PARAMS
         assert "invalid trace JSON" in excinfo.value.error.message
@@ -584,7 +584,7 @@ class TestSaveExperience:
         assert "error_class" in excinfo.value.error.data
 
     def test_invalid_trace_schema_raises_invalid_params(self) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_experience('{"foo": "bar"}')
         assert excinfo.value.error.code == INVALID_PARAMS
 
@@ -704,7 +704,7 @@ class TestSaveExperience:
 
 class TestSaveKnowledge:
     def test_empty_name_raises_invalid_params(self) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_knowledge("")
         assert excinfo.value.error.code == INVALID_PARAMS
         assert "name must not be empty" in excinfo.value.error.message
@@ -989,7 +989,7 @@ class TestSaveKnowledge:
         # A stale/hallucinated doc id must be rejected BEFORE any mutation —
         # attaching it would create the permanent dangling graph pointer the
         # pointer-not-prose invariant forbids.
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_knowledge("finding", evidence_ref="doc-hallucinated-42")
         assert excinfo.value.error.code == INVALID_PARAMS
         assert "does not reference an existing document" in (
@@ -1041,7 +1041,7 @@ class TestSaveKnowledge:
                 MagicMock(side_effect=StoreError("graph down")),
             )
 
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             save_knowledge("doomed", content="evidence that will orphan")
 
         # Doc-first ordering guarantee: the orphan doc exists (findable,
@@ -1080,7 +1080,7 @@ class TestSaveKnowledge:
             encoding="utf-8",
         )
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_knowledge("blocked", content="policy-protected evidence")
 
         assert excinfo.value.error.code == MUTATION_FAILED
@@ -1095,7 +1095,7 @@ class TestSaveKnowledge:
 
 class TestSaveMemory:
     def test_empty_content_raises_invalid_params(self) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_memory("")
         assert excinfo.value.error.code == INVALID_PARAMS
         assert "content must not be empty" in excinfo.value.error.message
@@ -1175,7 +1175,7 @@ class TestSaveMemory:
             encoding="utf-8",
         )
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_memory("policy must stop this memory")
 
         assert excinfo.value.error.code == MUTATION_FAILED
@@ -1196,7 +1196,7 @@ class TestSaveMemory:
         unrecoverable write the caller's error made look recoverable.
         Once the document store also refuses, nothing durable lands.
         """
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             save_memory(
                 "memory content with non-finite metadata",
                 metadata={"score": float("nan")},
@@ -1434,7 +1434,7 @@ class TestSaveMemoryEmbedOnIngest:
         time must not fail ``save_memory`` for a memory that was already
         durably stored. Before the fix, ``run_embed_on_ingest``
         let that ``ConfigError`` propagate straight out of the hook, past
-        the "fail-soft" comment at its own call site, into an McpError for
+        the "fail-soft" comment at its own call site, into an MCPError for
         a write that had already landed — inviting a client retry of an
         already-stored memory."""
         from unittest.mock import PropertyMock
@@ -1938,14 +1938,14 @@ class TestBuildLlmClientRouting:
 
 class TestGetGraph:
     def test_empty_entity_id_raises_invalid_params(self) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             get_graph("")
         assert excinfo.value.error.code == INVALID_PARAMS
         assert "entity_id must not be empty" in excinfo.value.error.message
         assert excinfo.value.error.data == {"field": "entity_id"}
 
     def test_not_found_raises_resource_not_found(self) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             get_graph("nonexistent")
         assert excinfo.value.error.code == RESOURCE_NOT_FOUND
         assert "entity not found" in excinfo.value.error.message.lower()
@@ -1973,12 +1973,12 @@ class TestGetGraph:
 
 class TestRecordFeedback:
     def test_missing_ids_raises_invalid_params(self) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             record_feedback(success=True)
         assert excinfo.value.error.code == INVALID_PARAMS
         assert "one of trace_id or pack_id" in excinfo.value.error.message
         assert excinfo.value.error.data == {"fields": ["trace_id", "pack_id"]}
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             record_feedback("", "", success=True)
 
     def test_positive_feedback(self) -> None:
@@ -2045,7 +2045,7 @@ class TestRecordFeedback:
 
 class TestSearch:
     def test_empty_query_raises_invalid_params(self) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             search("")
         assert excinfo.value.error.code == INVALID_PARAMS
         assert "query must not be empty" in excinfo.value.error.message
@@ -2218,13 +2218,13 @@ class TestFlatContextRendersAdvisories:
 
 class TestGetSectionedContext:
     def test_empty_intent_raises_invalid_params(self) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             get_sectioned_context("", sections=[{"name": "S1"}])
         assert excinfo.value.error.code == INVALID_PARAMS
         assert "intent must not be empty" in excinfo.value.error.message
 
     def test_empty_sections_raises_invalid_params(self) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             get_sectioned_context("intent", sections=[])
         assert excinfo.value.error.code == INVALID_PARAMS
         assert "sections must not be empty" in excinfo.value.error.message
@@ -2375,7 +2375,7 @@ class TestGetLessons:
 class TestGetObjectiveContext:
     def test_empty_intent_raises_invalid_params(self) -> None:
         for arg in ("", "   "):
-            with pytest.raises(McpError) as excinfo:
+            with pytest.raises(MCPError) as excinfo:
                 get_objective_context(arg)
             assert excinfo.value.error.code == INVALID_PARAMS
             assert "intent must not be empty" in excinfo.value.error.message
@@ -2407,7 +2407,7 @@ class TestGetObjectiveContext:
     def test_assembly_failure_raises_internal_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A pack-builder failure surfaces as ``McpError(INTERNAL_ERROR)``
+        """A pack-builder failure surfaces as ``MCPError(INTERNAL_ERROR)``
         with the original ``RuntimeError`` chained via ``__cause__``."""
 
         def _boom(_registry: object) -> None:
@@ -2415,7 +2415,7 @@ class TestGetObjectiveContext:
             raise RuntimeError(msg)
 
         monkeypatch.setattr(context_tools_mod, "_build_pack_builder", _boom)
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             get_objective_context("anything")
         err = excinfo.value
         assert err.error.code == INTERNAL_ERROR
@@ -2435,7 +2435,7 @@ class TestGetObjectiveContext:
 class TestGetTaskContext:
     def test_empty_intent_raises_invalid_params(self) -> None:
         for arg in ("", "   "):
-            with pytest.raises(McpError) as excinfo:
+            with pytest.raises(MCPError) as excinfo:
                 get_task_context(arg)
             assert excinfo.value.error.code == INVALID_PARAMS
             assert "intent must not be empty" in excinfo.value.error.message
@@ -2462,8 +2462,8 @@ class TestGetTaskContext:
     def test_invalid_entity_ids_type_raises_internal_error(self) -> None:
         # ``entity_ids`` is typed ``list[str] | None``; passing a non-list
         # like an int triggers a TypeError/ValidationError that the outer
-        # try/except wraps as ``McpError(INTERNAL_ERROR)``.
-        with pytest.raises(McpError) as excinfo:
+        # try/except wraps as ``MCPError(INTERNAL_ERROR)``.
+        with pytest.raises(MCPError) as excinfo:
             get_task_context("intent", entity_ids=42)  # type: ignore[arg-type]
         assert excinfo.value.error.code == INTERNAL_ERROR
 
@@ -2475,7 +2475,7 @@ class TestGetTaskContext:
             raise RuntimeError(msg)
 
         monkeypatch.setattr(context_tools_mod, "_build_pack_builder", _boom)
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             get_task_context("anything")
         err = excinfo.value
         assert err.error.code == INTERNAL_ERROR
@@ -2494,7 +2494,7 @@ class TestGetSectionedContextErrors:
     def test_invalid_section_schema_raises_internal_error(self) -> None:
         """A section dict missing the required ``name`` key fails Pydantic
         validation; the outer wrapper surfaces this as INTERNAL_ERROR."""
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             get_sectioned_context(
                 "intent",
                 sections=[{"retrieval_affinities": ["domain_knowledge"]}],
@@ -2509,7 +2509,7 @@ class TestGetSectionedContextErrors:
             raise RuntimeError(msg)
 
         monkeypatch.setattr(context_tools_mod, "_build_pack_builder", _boom)
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             get_sectioned_context(
                 "intent",
                 sections=[
@@ -3095,7 +3095,7 @@ class TestMainShutdown:
 #
 # These tests exercise the loud-failure contract from the silent-fallback
 # cleanup track: store-layer outages inside a tool handler must surface
-# as ``McpError`` with a meaningful JSON-RPC ``code`` and the original
+# as ``MCPError`` with a meaningful JSON-RPC ``code`` and the original
 # exception chained via ``__cause__``. They complement the per-tool
 # error-path tests above by force-feeding store failures from outside
 # and asserting on the resulting structured error.
@@ -3122,7 +3122,7 @@ def _patch_method_to_raise(
 
 
 class TestStructuredErrorContract:
-    """Each test covers a different ``McpError`` category. The combined
+    """Each test covers a different ``MCPError`` category. The combined
     set demonstrates the four codes the contract exposes:
 
     * ``INVALID_PARAMS`` — pre-flight validation.
@@ -3190,7 +3190,7 @@ class TestStructuredErrorContract:
             RuntimeError("graph store down"),
         )
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             get_context("anything")
         err = excinfo.value
         assert err.error.code == INTERNAL_ERROR
@@ -3204,7 +3204,7 @@ class TestStructuredErrorContract:
         """Invalid trace JSON surfaces as INVALID_PARAMS with the
         offending field name in ``data`` so a programmatic agent can
         switch on the field without parsing the prose message."""
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_experience("not-json")
         err = excinfo.value
         assert err.error.code == INVALID_PARAMS
@@ -3217,7 +3217,7 @@ class TestStructuredErrorContract:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """If the executor returns a non-success ``CommandResult``, the
-        tool raises ``McpError(MUTATION_FAILED, …)`` rather than the old
+        tool raises ``MCPError(MUTATION_FAILED, …)`` rather than the old
         ``"Error: Failed to store trace — ..."`` string."""
         from trellis.mutate import CommandStatus
 
@@ -3254,7 +3254,7 @@ class TestStructuredErrorContract:
         }
         from trellis.mcp.server import MUTATION_FAILED as _MUTATION_FAILED
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_experience(json.dumps(trace))
         err = excinfo.value
         assert err.error.code == _MUTATION_FAILED
@@ -3268,7 +3268,7 @@ class TestStructuredErrorContract:
         """``get_graph`` for an unknown entity uses the app-layer
         ``RESOURCE_NOT_FOUND`` code, not the catch-all INTERNAL_ERROR.
         Agents differentiate "ask for a different entity" from "retry later"."""
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             get_graph("zorblax-not-real")
         err = excinfo.value
         assert err.error.code == RESOURCE_NOT_FOUND
@@ -3299,7 +3299,7 @@ class TestStructuredErrorContract:
 
         monkeypatch.setattr(temp_registry.operational.event_log, "emit", _boom)
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_memory("unique memory content for emission failure test")
         err = excinfo.value
         assert err.error.code == INTERNAL_ERROR
@@ -3375,7 +3375,7 @@ class TestStructuredErrorContract:
 
         monkeypatch.setattr(MutationExecutor, "execute", _boom)
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_memory("unique content for a non-emit pipeline failure")
         err = excinfo.value
         assert err.error.code == INTERNAL_ERROR
@@ -3410,7 +3410,7 @@ class TestStructuredErrorContract:
             temp_registry.knowledge.document_store, "list_documents", _boom
         )
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_memory("content that triggers minhash seed")
         err = excinfo.value
         assert err.error.code == INTERNAL_ERROR
@@ -3508,7 +3508,7 @@ class TestStructuredErrorContract:
         """The ``data`` payload lists every field involved in the
         validation rule (one-of), not just the singular ``field`` key.
         Agents can render a clearer prompt from this."""
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             record_feedback(success=True)
         err = excinfo.value
         assert err.error.code == INVALID_PARAMS
@@ -3520,7 +3520,7 @@ class TestStructuredErrorContract:
         from trellis.mcp.server import execute_mutation as _em
 
         em = unwrap_tool(_em)
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             em(operation="link.create", args="not a dict")  # type: ignore[arg-type]
         err = excinfo.value
         assert err.error.code == INVALID_PARAMS

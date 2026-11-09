@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 import trellis.mcp.server as server_mod
 from tests.redaction_tombstone import make_tombstone, tombstone_metadata
@@ -45,7 +45,7 @@ def test_save_memory_over_a_tombstone_is_refused_and_names_the_ways_out(
 ) -> None:
     """Defective subject: drop the tombstone check in ``put_document`` and the
     save returns normally with the redacted id written back."""
-    with pytest.raises(McpError) as excinfo:
+    with pytest.raises(MCPError) as excinfo:
         save_memory(content=NEW_TEXT, doc_id=DOC_ID)
 
     message = excinfo.value.error.message

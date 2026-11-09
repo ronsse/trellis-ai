@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from mcp.types import INVALID_PARAMS
 
 from tests.unit.mcp.conftest import unwrap_tool
@@ -154,7 +154,7 @@ class TestGradedRating:
 
     def test_rating_out_of_range_raises_invalid_params(self) -> None:
         for bad in (-0.1, 1.5):
-            with pytest.raises(McpError) as excinfo:
+            with pytest.raises(MCPError) as excinfo:
                 record_feedback(pack_id="pack_1", rating=bad)
             assert excinfo.value.error.code == INVALID_PARAMS
             assert "rating must be between 0.0 and 1.0" in excinfo.value.error.message
@@ -165,7 +165,7 @@ class TestGradedRating:
         self, bad: int, expected: float
     ) -> None:
         """A ``/10`` or ``/100`` score gets a converted guess, same error code."""
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             record_feedback(pack_id="pack_1", rating=bad)
         assert excinfo.value.error.code == INVALID_PARAMS
         assert f"did you mean {expected}?" in excinfo.value.error.message
@@ -173,7 +173,7 @@ class TestGradedRating:
 
     def test_rating_far_out_of_range_gets_no_guess(self) -> None:
         """A rating with no plausible unit stays a plain range error."""
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             record_feedback(pack_id="pack_1", rating=-1)
         assert excinfo.value.error.code == INVALID_PARAMS
         assert excinfo.value.error.message == "rating must be between 0.0 and 1.0"
@@ -421,7 +421,7 @@ class TestPackAttributionRequirement:
         monkeypatch.setenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", "1")
         self._serve_pack(temp_registry, "pack_a", ["doc_1", "doc_2"])
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             record_feedback(pack_id="pack_a", rating=0.4)
 
         assert excinfo.value.error.code == INVALID_PARAMS
@@ -455,7 +455,7 @@ class TestPackAttributionRequirement:
         )
         self._serve_pack(temp_registry, "pack_a", ["doc_1", "doc_2"])
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             record_feedback(pack_id="pack_a", rating=0.4)
 
         data = excinfo.value.error.data
@@ -578,7 +578,7 @@ class TestPackAttributionRequirement:
         monkeypatch.setenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", "1")
         self._serve_pack(temp_registry, "pack_a", ["doc_1"])
 
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             record_feedback(pack_id="pack_a", rating=0.4)
 
         rejections = temp_registry.operational.event_log.get_events(
@@ -664,7 +664,7 @@ class TestIgnoredDoesNotSatisfyPackAttribution:
         monkeypatch.delenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", raising=False)
         self._serve_pack(temp_registry, "pack_a")
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             record_feedback(
                 pack_id="pack_a", rating=0.4, ignored_item_ids=["doc_1", "doc_2"]
             )
@@ -683,7 +683,7 @@ class TestIgnoredDoesNotSatisfyPackAttribution:
         monkeypatch.delenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", raising=False)
         self._serve_pack(temp_registry, "pack_a")
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             record_feedback(pack_id="pack_a", rating=0.4, ignored_item_ids=["doc_1"])
 
         message = excinfo.value.error.message
@@ -741,7 +741,7 @@ class TestIgnoredDoesNotSatisfyPackAttribution:
 
         try:
             record_feedback(pack_id="pack_a", rating=0.4, **kwargs)
-        except McpError:
+        except MCPError:
             recorded = None
         else:
             (recorded,) = _payloads(temp_registry)
@@ -820,7 +820,7 @@ class TestBodiedAttributionRequirement:
             ["doc_4"],
         )
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             record_feedback(pack_id="pack_b", rating=0.5, helpful_item_ids=["doc_1"])
 
         data = excinfo.value.error.data
@@ -858,7 +858,7 @@ class TestBodiedAttributionRequirement:
             ["doc_4"],
         )
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             record_feedback(pack_id="pack_b", rating=0.5, helpful_item_ids=["doc_1"])
 
         data = excinfo.value.error.data
@@ -900,7 +900,7 @@ class TestBodiedAttributionRequirement:
         monkeypatch.setenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", "1")
         self._serve(temp_registry, "pack_b", ["doc_1"], [])
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             record_feedback(
                 pack_id="pack_b", rating=0.5, followed_advisory_ids=["adv_1"]
             )
@@ -957,7 +957,7 @@ class TestBodiedAttributionRequirement:
         monkeypatch.setenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", "1")
         self._serve(temp_registry, "pack_b", ["doc_1", "doc_2"])
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             record_feedback(pack_id="pack_b", rating=0.5, helpful_item_ids=["doc_1"])
 
         data = excinfo.value.error.data
@@ -1022,7 +1022,7 @@ class TestBodiedAttributionRequirement:
         monkeypatch.setenv("TRELLIS_REQUIRE_BODIED_ATTRIBUTION", "1")
         self._serve(temp_registry, "pack_b", ["doc_1", "doc_2"], [])
 
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             record_feedback(pack_id="pack_b", rating=0.5, helpful_item_ids=["doc_1"])
 
         (rejection,) = temp_registry.operational.event_log.get_events(
@@ -1045,7 +1045,7 @@ class TestBodiedAttributionRequirement:
         monkeypatch.setenv("TRELLIS_REQUIRE_PACK_ATTRIBUTION", "1")
         self._serve(temp_registry, "pack_b", ["doc_1", "doc_2", "doc_3"], ["doc_3"])
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             record_feedback(pack_id="pack_b", rating=0.5)
 
         data = excinfo.value.error.data
@@ -1117,7 +1117,7 @@ class TestBodiedAttributionRequirement:
         bodied = lookup_pack_bodied_item_ids(event_log, pack.pack_id)
         assert len(bodied) == 2
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             record_feedback(pack_id=pack.pack_id, rating=0.5)
 
         data = excinfo.value.error.data

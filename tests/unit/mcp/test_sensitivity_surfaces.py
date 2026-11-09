@@ -14,7 +14,7 @@ import pytest
 from fastmcp.server.auth import AccessToken
 from fastmcp.server.context import reset_transport, set_transport
 from mcp.server.auth.middleware.auth_context import AuthenticatedUser, auth_context_var
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 import trellis.mcp.server as server_mod
 import trellis.mcp.tools.memory as memory_tools_mod
@@ -212,7 +212,7 @@ class TestProducer:
     def test_a_read_ingest_key_cannot_label_above_its_clearance(
         self, temp_registry: StoreRegistry
     ) -> None:
-        with as_http(["read", "ingest"]), pytest.raises(McpError, match="clearance"):
+        with as_http(["read", "ingest"]), pytest.raises(MCPError, match="clearance"):
             save_memory("quarterly vault seal rotation notes", sensitivity="restricted")
         assert temp_registry.knowledge.document_store.count(include_chunks=True) == 0, (
             "a refused save must write nothing"
@@ -235,18 +235,18 @@ class TestProducer:
     ) -> None:
         with as_http(["ingest", "confidential"]):
             assert "Memory saved" in save_memory("one doc", sensitivity="confidential")
-            with pytest.raises(McpError, match="clearance"):
+            with pytest.raises(MCPError, match="clearance"):
                 save_memory("another doc", sensitivity="restricted")
 
     def test_an_unknown_label_is_refused(self, temp_registry: StoreRegistry) -> None:
-        with as_http(ADMIN), pytest.raises(McpError, match="sensitivity"):
+        with as_http(ADMIN), pytest.raises(MCPError, match="sensitivity"):
             save_memory("some content", sensitivity="top-secret")
 
     def test_a_raw_label_in_metadata_is_refused(
         self, temp_registry: StoreRegistry
     ) -> None:
         """Otherwise the clearance check has a side door."""
-        with as_http(["read", "ingest"]), pytest.raises(McpError, match="sensitivity"):
+        with as_http(["read", "ingest"]), pytest.raises(MCPError, match="sensitivity"):
             save_memory("some content", metadata=label("restricted"))
 
     def test_no_label_leaves_the_stored_metadata_untouched(
@@ -294,7 +294,7 @@ class TestProducer:
     ) -> None:
         with as_http(ADMIN):
             save_memory("shared sentence about queues and replicas")
-            with pytest.raises(McpError, match="lower"):
+            with pytest.raises(MCPError, match="lower"):
                 save_memory(
                     "shared sentence about queues and replicas",
                     sensitivity="restricted",
@@ -315,7 +315,7 @@ class TestProducer:
     def test_save_knowledge_label_above_clearance_is_refused(
         self, temp_registry: StoreRegistry
     ) -> None:
-        with as_http(["ingest"]), pytest.raises(McpError, match="clearance"):
+        with as_http(["ingest"]), pytest.raises(MCPError, match="clearance"):
             save_knowledge(
                 "VaultSeal", content="seal rotation", sensitivity="restricted"
             )
@@ -323,7 +323,7 @@ class TestProducer:
     def test_save_knowledge_refuses_a_label_without_content(
         self, temp_registry: StoreRegistry
     ) -> None:
-        with as_http(ADMIN), pytest.raises(McpError, match="sensitivity"):
+        with as_http(ADMIN), pytest.raises(MCPError, match="sensitivity"):
             save_knowledge("VaultSeal", sensitivity="restricted")
 
     def test_save_knowledge_cannot_point_at_an_unreadable_document(
@@ -331,9 +331,9 @@ class TestProducer:
     ) -> None:
         """Linking to it must be indistinguishable from a missing id."""
         with as_http(READ):
-            with pytest.raises(McpError) as hidden:
+            with pytest.raises(MCPError) as hidden:
                 save_knowledge("X", evidence_ref="doc-secret")
-            with pytest.raises(McpError) as missing:
+            with pytest.raises(MCPError) as missing:
                 save_knowledge("X", evidence_ref="doc-ghost")
         assert str(hidden.value).replace("doc-secret", "I") == str(
             missing.value
@@ -359,7 +359,7 @@ class TestOverwriteOfALabelledDocument:
     def test_a_key_below_the_label_cannot_replace_the_document(
         self, seeded: StoreRegistry
     ) -> None:
-        with as_http(WRITER), pytest.raises(McpError, match="clearance") as refused:
+        with as_http(WRITER), pytest.raises(MCPError, match="clearance") as refused:
             save_memory(REPLACEMENT, doc_id="doc-secret")
         stored = self._stored(seeded)
         assert stored["content"] == SECRET_TEXT
@@ -372,7 +372,7 @@ class TestOverwriteOfALabelledDocument:
     ) -> None:
         chunk_id = chunk_doc_id("doc-secret", 0)
         seeded.knowledge.document_store.put(chunk_id, SECRET_TEXT, {})
-        with as_http(WRITER), pytest.raises(McpError):
+        with as_http(WRITER), pytest.raises(MCPError):
             save_memory(REPLACEMENT, doc_id="doc-secret")
         with as_http(READ):
             withheld = get_items([chunk_id])
@@ -383,7 +383,7 @@ class TestOverwriteOfALabelledDocument:
         )
 
     def test_a_cleared_key_may_not_lower_the_label(self, seeded: StoreRegistry) -> None:
-        with as_http([*RESTRICTED, "ingest"]), pytest.raises(McpError, match="lower"):
+        with as_http([*RESTRICTED, "ingest"]), pytest.raises(MCPError, match="lower"):
             save_memory(REPLACEMENT, doc_id="doc-secret")
         stored = self._stored(seeded)
         assert stored["content"] == SECRET_TEXT
@@ -392,7 +392,7 @@ class TestOverwriteOfALabelledDocument:
     def test_a_cleared_key_may_not_lower_it_to_a_lower_named_label(
         self, seeded: StoreRegistry
     ) -> None:
-        with as_http(ADMIN), pytest.raises(McpError, match="lower"):
+        with as_http(ADMIN), pytest.raises(MCPError, match="lower"):
             save_memory(REPLACEMENT, doc_id="doc-secret", sensitivity="confidential")
         assert sensitivity_of(self._stored(seeded)["metadata"]) == "restricted"
 
@@ -471,8 +471,8 @@ class TestAttributionRefusalNamesOnlyReadableIds:
         )
 
     @staticmethod
-    def _refusal(**kwargs: Any) -> McpError:
-        with pytest.raises(McpError) as excinfo:
+    def _refusal(**kwargs: Any) -> MCPError:
+        with pytest.raises(MCPError) as excinfo:
             record_feedback(rating=0.4, **kwargs)
         return excinfo.value
 
@@ -513,7 +513,7 @@ class TestAttributionRefusalNamesOnlyReadableIds:
         assert "Feedback recorded" in result
 
         self._serve(seeded, "pack_b", ["doc-secret"])
-        with as_http(ADMIN), pytest.raises(McpError):
+        with as_http(ADMIN), pytest.raises(MCPError):
             record_feedback(pack_id="pack_b", rating=0.4)
 
     def test_the_bodied_refusal_counts_and_names_only_readable_ids(

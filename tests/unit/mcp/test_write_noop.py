@@ -17,7 +17,7 @@ import re
 from typing import Any
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 import trellis.mcp.rejections as rejections_mod
 import trellis.mcp.server as server_mod
@@ -164,7 +164,7 @@ class TestFuzzyDuplicate:
         save_memory(_OLD)
         other = _doc_id(save_memory(_OTHER))
 
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             save_memory(_NEAR, supersedes=other)
 
         assert _noops(temp_registry) == []
@@ -214,7 +214,7 @@ class TestADuplicateThatStampsSupersedes:
         save_memory(_OTHER)
         _deny(reg, "evidence.ingest")
 
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             save_memory(_OTHER, supersedes=target)
 
         assert _noops(reg) == []

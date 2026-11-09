@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
@@ -33,11 +33,11 @@ def _seed_file_memory(registry: StoreRegistry) -> None:
 
 class TestGetFileContextTool:
     def test_empty_paths_raises_invalid_params(self) -> None:
-        with pytest.raises(McpError, match="paths"):
+        with pytest.raises(MCPError, match="paths"):
             get_file_context(paths=[])
 
     def test_blank_paths_raise_invalid_params(self) -> None:
-        with pytest.raises(McpError, match="paths"):
+        with pytest.raises(MCPError, match="paths"):
             get_file_context(paths=["", "   "])
 
     def test_returns_documents_and_linked_entities(

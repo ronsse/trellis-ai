@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from mcp.types import ErrorData
 from pydantic import ValidationError
 
@@ -124,7 +124,7 @@ class _SanitizeUncaughtToolErrors(Middleware):
     ``mask_error_details`` defaults to ``False``), embedding ``str(e)`` raw
     — a Postgres DETAIL line or a Neo4j constraint message included. The 14
     sites ``_exception_detail`` already covers (#765) raise an
-    already-sanitized ``McpError`` from inside their own ``try/except``, so
+    already-sanitized ``MCPError`` from inside their own ``try/except``, so
     by the time FastMCP wraps it here the embedded text is already safe. A
     tool with no ``try/except`` at all (``save_knowledge``'s and
     ``save_experience``'s own ``executor.execute`` calls) has nothing
@@ -138,7 +138,7 @@ class _SanitizeUncaughtToolErrors(Middleware):
 
     * ``cause is None`` — a tool (or FastMCP itself) raised ``ToolError``
       directly; its author already chose the message.
-    * ``isinstance(cause, McpError)`` — one of the 14 sites above (``McpError``
+    * ``isinstance(cause, MCPError)`` — one of the 14 sites above (``MCPError``
       is not a ``fastmcp.exceptions.FastMCPError`` subclass, so it reaches
       this same generic wrap already-safe); re-running ``_exception_detail``
       would be redundant and, for a validation message that is the caller's
@@ -167,12 +167,12 @@ class _SanitizeUncaughtToolErrors(Middleware):
             name = context.message.name
             prefix = f"Error calling tool {name!r}:"
             if isinstance(cause, PublicReadBusyError):
-                raise McpError(
+                raise MCPError.from_error_data(
                     ErrorData(
                         code=PUBLIC_READ_BUSY,
-                        # The wire carries ``isError`` and this text only (the
-                        # SDK renders any handler exception as ``str(exc)``), so
-                        # the reason and the retry hint are in the text too.
+                        # From ``mcp`` 2.x this crosses the wire as a JSON-RPC
+                        # error with ``code`` and ``data`` intact; the reason and
+                        # the retry hint stay in the text for text-only clients.
                         message=(
                             f"public_read_busy: {cause.message} "
                             f"(retry_after_seconds={cause.retry_after})"
@@ -185,7 +185,7 @@ class _SanitizeUncaughtToolErrors(Middleware):
                 ) from cause
             if (
                 cause is None
-                or isinstance(cause, McpError)
+                or isinstance(cause, MCPError)
                 or not str(exc).startswith(prefix)
             ):
                 raise

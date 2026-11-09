@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from mcp.types import INVALID_PARAMS
 
 import trellis.mcp.server as server_mod
@@ -44,8 +44,8 @@ BASE = "The staging gateway listens on port 9450 for inbound sync jobs."
 NEAR = "The staging gateway listens on port 9451 for inbound sync jobs."
 
 
-def _refused(**kwargs: Any) -> McpError:
-    with as_http(MUTATE), pytest.raises(McpError) as err:
+def _refused(**kwargs: Any) -> MCPError:
+    with as_http(MUTATE), pytest.raises(MCPError) as err:
         save_memory(**kwargs)
     assert err.value.error.code == INVALID_PARAMS
     return err.value
@@ -135,7 +135,7 @@ class TestAPointerKeyIsRefused:
 
     def test_stdio_is_held_to_the_same_rule(self, temp_registry: StoreRegistry) -> None:
         before = _footprint(temp_registry, "doc-old")
-        with as_stdio(), pytest.raises(McpError) as err:
+        with as_stdio(), pytest.raises(MCPError) as err:
             save_memory(
                 content=NEW, doc_id="doc-old", metadata={LIFECYCLE_KEY: SUPERSEDED}
             )

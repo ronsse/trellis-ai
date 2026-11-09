@@ -15,7 +15,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from mcp.types import INVALID_PARAMS
 
 import trellis.mcp.server as server_mod
@@ -49,8 +49,8 @@ def _run(args: dict[str, Any]) -> dict[str, Any]:
     return json.loads(execute_mutation(operation="evidence.ingest", args=args))
 
 
-def _refused(args: dict[str, Any]) -> McpError:
-    with as_http(MUTATE), pytest.raises(McpError) as err:
+def _refused(args: dict[str, Any]) -> MCPError:
+    with as_http(MUTATE), pytest.raises(MCPError) as err:
         execute_mutation(operation="evidence.ingest", args=args)
     assert err.value.error.code == INVALID_PARAMS
     return err.value
@@ -139,7 +139,7 @@ class TestAWithholdingLifecycleIsRefused:
 
     def test_stdio_is_held_to_the_same_rule(self, temp_registry: StoreRegistry) -> None:
         before = _footprint(temp_registry, "doc-old")
-        with as_stdio(), pytest.raises(McpError) as err:
+        with as_stdio(), pytest.raises(MCPError) as err:
             execute_mutation(
                 operation="evidence.ingest",
                 args=_ingest({LIFECYCLE_KEY: SUPERSEDED}, doc_id="doc-old"),
@@ -217,7 +217,7 @@ class TestTheCheckJudgesTheDocumentTheCommandWrites:
         documents = temp_registry.knowledge.document_store
         documents.put(derived, OLD, {"evidence_ref": REF})
 
-        with as_http(MUTATE), pytest.raises(McpError) as err:
+        with as_http(MUTATE), pytest.raises(MCPError) as err:
             execute_mutation(
                 operation="evidence.ingest",
                 args=self._keyed("doc-elsewhere"),
@@ -246,7 +246,7 @@ class TestTheCheckJudgesTheDocumentTheCommandWrites:
         self, temp_registry: StoreRegistry
     ) -> None:
         before = _footprint(temp_registry)
-        with as_http(MUTATE), pytest.raises(McpError) as err:
+        with as_http(MUTATE), pytest.raises(MCPError) as err:
             execute_mutation(
                 operation="evidence.ingest",
                 args=self._keyed(REF),

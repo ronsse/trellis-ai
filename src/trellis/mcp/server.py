@@ -2,9 +2,9 @@
 
 Error contract
 --------------
-Tool handlers raise :class:`mcp.shared.exceptions.McpError` rather than
+Tool handlers raise :class:`mcp.shared.exceptions.MCPError` rather than
 returning ``"Error: …"`` strings or dict-shape error payloads. The
-FastMCP runtime forwards ``McpError`` directly through the JSON-RPC
+FastMCP runtime forwards ``MCPError`` directly through the JSON-RPC
 transport so clients see a structured error object with a stable
 ``code`` plus a human-readable ``message``. This is the loud-failure
 contract from the silent-fallback cleanup track (C2 Phase 3):
@@ -26,7 +26,7 @@ contract from the silent-fallback cleanup track (C2 Phase 3):
 
 Pre-flight validation returns no longer use string sentinels; callers
 that previously did ``if result.startswith("Error:")`` need to catch
-``McpError`` instead. The contract is documented in
+``MCPError`` instead. The contract is documented in
 ``docs/design/adr-mcp-contract.md`` and the per-site audit lives in
 ``audit/silent_fallbacks_2026-05.md``.
 

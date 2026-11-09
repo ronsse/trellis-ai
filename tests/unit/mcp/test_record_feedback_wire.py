@@ -1,6 +1,6 @@
 """What a client reads back from ``record_feedback``, through the wire.
 
-``McpError.data`` never reaches an MCP client: FastMCP folds the error into
+``MCPError.data`` never reaches an MCP client: FastMCP folds the error into
 the text of the tool result. So a refusal that says "the served ids are
 available" has to put them in its *message*, and a note on the reply has to be
 in the reply. Asserting on the raised exception, as ``test_record_feedback.py``

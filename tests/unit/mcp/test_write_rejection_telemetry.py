@@ -8,7 +8,7 @@ rejections in production transcripts with zero backend visibility.
 from __future__ import annotations
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 import trellis.mcp.server as server_mod
 from trellis.stores.base.event_log import EventType
@@ -37,7 +37,7 @@ class TestSaveExperienceTelemetry:
             ' "outcome": {"status": "success", "artifacts": ["a"]},'
             ' "context": {"domain": "d"}}'
         )
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_experience(trace_json=bad)
 
         (event,) = _rejection_events(temp_registry)
@@ -52,14 +52,14 @@ class TestSaveExperienceTelemetry:
         self, temp_registry: StoreRegistry
     ) -> None:
         bad = '{"source": "claude-code", "intent": "x", "context": {"domain": "d"}}'
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_experience(trace_json=bad)
         assert "workflow" in excinfo.value.error.message
         (event,) = _rejection_events(temp_registry)
         assert event.payload["rejections"][0]["kind"] == "enum"
 
     def test_empty_trace_json_is_recorded(self, temp_registry: StoreRegistry) -> None:
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             save_experience(trace_json="  ")
         (event,) = _rejection_events(temp_registry)
         assert event.payload["rejections"][0]["kind"] == "empty_required"
@@ -77,7 +77,7 @@ class TestSaveExperienceTelemetry:
 
 class TestOtherWriteTools:
     def test_save_memory_empty_content(self, temp_registry: StoreRegistry) -> None:
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             save_memory(content="   ")
         (event,) = _rejection_events(temp_registry)
         assert event.payload["tool"] == "save_memory"
@@ -86,21 +86,21 @@ class TestOtherWriteTools:
     def test_save_knowledge_dangling_evidence_ref(
         self, temp_registry: StoreRegistry
     ) -> None:
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             save_knowledge(name="thing", evidence_ref="doc-does-not-exist")
         (event,) = _rejection_events(temp_registry)
         assert event.payload["tool"] == "save_knowledge"
         assert event.payload["rejections"][0]["kind"] == "dangling_reference"
 
     def test_record_feedback_no_target(self, temp_registry: StoreRegistry) -> None:
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             record_feedback()
         (event,) = _rejection_events(temp_registry)
         assert event.payload["tool"] == "record_feedback"
         assert event.payload["rejections"][0]["kind"] == "missing"
 
     def test_record_feedback_bad_rating(self, temp_registry: StoreRegistry) -> None:
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             record_feedback(trace_id="t1", rating=1.5)
         (event,) = _rejection_events(temp_registry)
         assert event.payload["rejections"][0]["loc"] == "rating"

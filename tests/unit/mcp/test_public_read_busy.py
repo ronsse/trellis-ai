@@ -3,14 +3,17 @@
 The refusal is a typed ``PublicReadBusyError`` raised below the tool. FastMCP
 wraps whatever a tool does not catch as ``ToolError(...) from exc``, and the
 sanitising middleware would then render the cause as text, losing the reason and
-the retry hint. It re-raises this one as an ``McpError`` carrying
+the retry hint. It re-raises this one as an ``MCPError`` carrying
 ``PUBLIC_READ_BUSY`` and ``data.retry_after_seconds``.
 
-What reaches a client is narrower than the ``McpError``: the SDK renders any
-exception a tool call raises as ``isError`` plus ``str(exc)``, so ``code`` and
-``data`` do not cross the wire. The text therefore carries the reason and the
-retry hint (``public_read_busy: ... (retry_after_seconds=N)``), and the tests
-below pin both the error the middleware builds and the text a client reads.
+What reaches a client is that ``MCPError`` itself. Under ``mcp`` 1.x the SDK
+rendered any exception a tool call raised as ``isError`` plus ``str(exc)``, so
+``code`` and ``data`` did not cross the wire; from ``mcp`` 2.x an ``MCPError``
+raised by the middleware goes out as a JSON-RPC error with its ``code`` and
+``data`` intact. The message still carries the reason and the retry hint
+(``public_read_busy: ... (retry_after_seconds=N)``) for clients that read only
+the text, and the tests below pin the error the middleware builds and the
+error a client receives.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 import trellis.mcp.server as server_mod
 from tests.unit.mcp.test_sensitivity_surfaces import as_http
@@ -56,15 +59,21 @@ async def _outcome(app: FastMCP, name: str, args: dict[str, Any]) -> Any:
     async with Client(app) as client:
         try:
             return await client.call_tool(name, args, raise_on_error=False)
-        except McpError as exc:
+        except MCPError as exc:
             return exc
 
 
 def _wire_text(outcome: Any) -> str:
-    """The text of the error result a client reads (it is all the wire carries)."""
-    assert not isinstance(outcome, McpError), outcome
-    assert outcome.is_error, outcome
-    return str(outcome.content[0].text)
+    """The message of the refusal a client receives, after checking its code and data.
+
+    The refusal crosses the wire as a JSON-RPC error (``mcp`` 2.x), so the client
+    gets the structured ``code`` and ``data`` as well as the text.
+    """
+    assert isinstance(outcome, MCPError), outcome
+    assert outcome.error.code == PUBLIC_READ_BUSY
+    assert outcome.error.data["reason"] == "public_read_busy"
+    assert isinstance(outcome.error.data["retry_after_seconds"], int)
+    return str(outcome.error.message)
 
 
 class TestTheMiddlewareRendersTheRefusal:
@@ -76,7 +85,7 @@ class TestTheMiddlewareRendersTheRefusal:
             )
 
         context = SimpleNamespace(message=SimpleNamespace(name="probe"))
-        with pytest.raises(McpError) as caught:
+        with pytest.raises(MCPError) as caught:
             await server_mod._SanitizeUncaughtToolErrors().on_call_tool(
                 context,  # type: ignore[arg-type]
                 refused,
@@ -112,7 +121,7 @@ class TestTheMiddlewareRendersTheRefusal:
             raise StoreError(UNAVAILABLE)
 
         result = await _outcome(app, "probe", {})
-        assert not isinstance(result, McpError)
+        assert not isinstance(result, MCPError)
         assert result.is_error
         assert "store unavailable" in result.content[0].text
         assert "public_read_busy" not in result.content[0].text
@@ -149,5 +158,5 @@ class TestARealToolOverTheLimit:
             result = await _outcome(
                 server_mod.mcp, "get_context", {"intent": "failover runbook"}
             )
-        assert not isinstance(result, McpError)
+        assert not isinstance(result, MCPError)
         assert not result.is_error

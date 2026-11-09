@@ -3,7 +3,7 @@ text rendered by ``render_exception_detail``.
 
 ``supersede_document``/``supersede_entity`` return the stamp's exception as
 an error string, which ``save_knowledge`` and ``save_memory`` put into an
-``McpError`` or a reply's warning. A ``TrellisError`` keeps its text; any
+``MCPError`` or a reply's warning. A ``TrellisError`` keeps its text; any
 other exception's text goes through the sanitizer. Clean text reading
 through on both paths is pinned by ``test_supersedes_param.py``'s
 ``test_a_stamp_that_raises_is_reported_not_raised``.
@@ -15,7 +15,7 @@ import re
 from typing import Any
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
@@ -95,7 +95,7 @@ def test_document_stamp_leak_reaches_mcp_caller_sanitized(
         skip=1,
     )
 
-    with pytest.raises(McpError) as excinfo:
+    with pytest.raises(MCPError) as excinfo:
         save_memory(X_TEXT, supersedes=t)
 
     message = excinfo.value.error.message
@@ -122,7 +122,7 @@ def test_entity_stamp_leak_reaches_mcp_caller_sanitized(
         skip=1,
     )
 
-    with pytest.raises(McpError) as excinfo:
+    with pytest.raises(MCPError) as excinfo:
         save_knowledge(name=NAME, content=X_TEXT, supersedes=n_old)
 
     message = excinfo.value.error.message
@@ -150,7 +150,7 @@ def test_trellis_error_stamp_text_reaches_mcp_caller_unchanged(
         skip=1,
     )
 
-    with pytest.raises(McpError) as excinfo:
+    with pytest.raises(MCPError) as excinfo:
         save_knowledge(name=NAME, content=X_TEXT, supersedes=n_old)
 
     message = excinfo.value.error.message

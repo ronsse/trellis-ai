@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
@@ -43,7 +43,7 @@ def _evidence_args(doc_id: str) -> dict:
 
 
 def test_save_memory_refuses_a_summary_id(temp_registry: StoreRegistry) -> None:
-    with pytest.raises(McpError) as excinfo:
+    with pytest.raises(MCPError) as excinfo:
         save_memory("a decoy under a summary id", doc_id=RESERVED_ID)
 
     assert "trace embed worker" in excinfo.value.error.message
@@ -76,7 +76,7 @@ def test_save_knowledge_mints_its_own_evidence_id(
 def test_save_knowledge_cannot_point_at_a_summary_id_that_does_not_exist(
     temp_registry: StoreRegistry,
 ) -> None:
-    with pytest.raises(McpError):
+    with pytest.raises(MCPError):
         save_knowledge("X", evidence_ref=RESERVED_ID)
 
     assert _nothing_stored(temp_registry, RESERVED_ID)

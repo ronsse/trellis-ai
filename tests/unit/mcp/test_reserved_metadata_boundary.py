@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
@@ -95,7 +95,7 @@ class TestSaveMemoryRefusesTheReservedPrecedentNamespace:
     def test_a_reserved_doc_id_is_rejected_and_nothing_is_stored(
         self, temp_registry: StoreRegistry
     ) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_memory("a generic note about widgets", doc_id=self.RESERVED_ID)
 
         assert "reserved precedent namespace" in excinfo.value.error.message
@@ -127,7 +127,7 @@ class TestSaveMemoryRefusesAMintedChunkId:
     def test_a_chunk_shaped_doc_id_is_rejected_and_nothing_is_stored(
         self, temp_registry: StoreRegistry
     ) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_memory("a generic note about sprockets", doc_id="notes#chunk-5")
 
         assert "shape of a chunk id" in excinfo.value.error.message
