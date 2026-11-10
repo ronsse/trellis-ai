@@ -4,11 +4,22 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-10
+
+The first published release since 0.9.0. The v0.11.0 tag's publish run failed at
+`mypy src/` and never reached PyPI, so 0.11.1 ships everything listed under 0.11.0,
+0.10.1 and 0.10.0 below, plus this fix.
+
+### Fixed
+
+- **`schema_migrate` no longer indexes a `None` row when reading the stored schema version (#1244).** `_PostgresDb` read `cur.fetchone()[0]` without a check; it now returns `None` when the query yields no row. Behaviour is unchanged for a store that has a version row.
+- **Type Check installs `.[dev,all]`, the same extras as the release workflow (#1244).** With `.[dev]` alone psycopg was not installed, mypy treated the cursor as `Any`, and the error above passed Type Check and failed the v0.10.0 and v0.11.0 publish runs instead. `make install-dev` and the setup line in `CLAUDE.md` now install the same extras.
+
 ## [0.11.0] - 2026-11-10
 
-The first published release since 0.9.0. Neither 0.10.0 nor 0.10.1 reached PyPI
-(0.10.1 was prepared but never tagged), so 0.11.0 carries both sections below as
-well as this one.
+Tagged but not published: the publish run failed at `mypy src/` (see 0.11.1).
+Neither 0.10.0 nor 0.10.1 reached PyPI either (0.10.1 was prepared but never
+tagged), so 0.11.0 carries both sections below as well as this one.
 
 **Upgrading:** the MCP server now runs on `fastmcp` 4 and `mcp` 2 (see Changed). A
 health check that sends `ping` at protocol `2026-07-28` must use `server/discover`.

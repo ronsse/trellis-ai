@@ -410,7 +410,8 @@ class _PostgresDb(_Db):
                     f"SELECT MAX(version) FROM {VERSION_TABLE} WHERE store = %s",  # noqa: S608
                     (store,),
                 )
-                version = cur.fetchone()[0]
+                row = cur.fetchone()
+                version = row[0] if row else None
         self._conn.rollback()
         return tables - {VERSION_TABLE}, version
 
