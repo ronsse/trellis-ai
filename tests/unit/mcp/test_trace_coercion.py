@@ -13,7 +13,7 @@ import json
 from typing import Any
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
@@ -206,7 +206,7 @@ class TestTheCoercionEvent:
 class TestWhatStaysRejected:
     @staticmethod
     def _rejection(trace: dict[str, Any]) -> str:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             save_experience(trace_json=json.dumps(trace))
         return str(excinfo.value)
 

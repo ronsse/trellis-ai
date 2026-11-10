@@ -73,7 +73,7 @@ def _resolve_operation(operation: str) -> Any:
         return Operation[operation]
     except KeyError:
         # GUARD: neither wire form nor enum name matched. Caller
-        # surfaces an INVALID_PARAMS McpError with the offending string.
+        # surfaces an INVALID_PARAMS MCPError with the offending string.
         return None
 
 
@@ -199,7 +199,7 @@ def execute_mutation(
         structured outcomes, not transport-layer errors.
 
     Raises:
-        McpError: With ``INVALID_PARAMS`` for pre-flight argument
+        MCPError: With ``INVALID_PARAMS`` for pre-flight argument
             issues (empty operation, unknown enum, non-dict args,
             ``Command`` construction failure, an ``evidence.ingest`` whose
             ``evidence.metadata`` sets a ``lifecycle`` other than

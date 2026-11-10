@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from mcp.types import INVALID_PARAMS
 
 from tests.unit.mcp.conftest import unwrap_tool
@@ -194,7 +194,7 @@ class TestIndexModeRetrieval:
     def test_index_with_sections_is_rejected(
         self, temp_registry: StoreRegistry
     ) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             get_context(
                 "failover runbook",
                 sections=[{"name": "All"}],
@@ -264,20 +264,20 @@ class TestGraphEvidencePointers:
 
 class TestGetItemsValidation:
     def test_empty_ids_rejected(self) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             get_items([])
         assert excinfo.value.error.code == INVALID_PARAMS
         assert excinfo.value.error.data == {"field": "item_ids"}
 
     def test_too_many_ids_rejected(self) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             get_items([f"d{i}" for i in range(51)])
         assert excinfo.value.error.code == INVALID_PARAMS
         assert "too many item_ids" in excinfo.value.error.message
 
     def test_blank_id_entries_rejected(self) -> None:
         for ids in (["ok", "   "], ["ok", ""]):
-            with pytest.raises(McpError) as excinfo:
+            with pytest.raises(MCPError) as excinfo:
                 get_items(ids)
             assert excinfo.value.error.code == INVALID_PARAMS
 

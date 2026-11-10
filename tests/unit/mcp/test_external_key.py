@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastmcp.server.auth import AccessToken, AuthContext
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 import trellis.mcp.server as server_mod
 import trellis.mcp.tools.context as context_tools_mod
@@ -215,7 +215,7 @@ class TestRefusedTools:
         self, seeded: StoreRegistry, name: str, call: object
     ) -> None:
         scopes = await _external_scopes(seeded)
-        with as_http(scopes), pytest.raises(McpError, match="external key") as err:
+        with as_http(scopes), pytest.raises(MCPError, match="external key") as err:
             call()  # type: ignore[operator]
         assert name in str(err.value)
         assert err.value.error.data == {"tool": name, "reason": "external_key"}

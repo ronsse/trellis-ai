@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
@@ -103,7 +103,7 @@ class TestSaveExperienceIsRatedOnItsTraceIngestCalls:
         for n in range(accepted):
             assert "Trace saved" in save_experience(trace_json=_trace(n))
         for _ in range(boundary):
-            with pytest.raises(McpError):
+            with pytest.raises(MCPError):
                 save_experience(trace_json=_BAD_TRACE)
 
     def test_a_call_the_policy_refuses_is_one_rejected_call(
@@ -113,7 +113,7 @@ class TestSaveExperienceIsRatedOnItsTraceIngestCalls:
         self._drive(reg, accepted=12, boundary=3)
         _deny(reg, "trace.ingest")
         for n in range(2):
-            with pytest.raises(McpError):
+            with pytest.raises(MCPError):
                 save_experience(trace_json=_trace(100 + n))
 
         stats = _report(reg).by_tool[_SURFACE]
@@ -136,7 +136,7 @@ class TestSaveExperienceIsRatedOnItsTraceIngestCalls:
         self._drive(reg, accepted=12, boundary=3)
         _deny(reg, "trace.ingest")
         for n in range(2):
-            with pytest.raises(McpError):
+            with pytest.raises(MCPError):
                 save_experience(trace_json=_trace(100 + n))
         _seed_unrelated_rejections(reg, 60)
 
@@ -157,7 +157,7 @@ class TestSaveExperienceIsRatedOnItsTraceIngestCalls:
         assert before["tool_attempts"] == 15
 
         _deny(reg, "trace.ingest")
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             save_experience(trace_json=_trace(100))
 
         after = _artifact_collision(_report(reg))

@@ -40,7 +40,7 @@ logger = structlog.get_logger(__name__)
 #: against a pathological pack, it is not a normal truncation point.
 _MAX_CITABLE_IDS_IN_ERROR = 60
 
-#: Most ids written into the *text* of an attribution refusal. ``McpError.data``
+#: Most ids written into the *text* of an attribution refusal. ``MCPError.data``
 #: (which carries up to :data:`_MAX_CITABLE_IDS_IN_ERROR`) is dropped by FastMCP
 #: before a client sees the result, so the message is the only place a caller
 #: can read them. Twenty is enough to choose among and keeps the text near a

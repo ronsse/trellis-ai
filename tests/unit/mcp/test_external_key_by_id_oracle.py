@@ -12,7 +12,7 @@ import sqlite3
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 import trellis.mcp.server as server_mod
 import trellis.mcp.wiring as wiring_mod
@@ -78,7 +78,7 @@ class TestAnUnparseableRowAnswersAsAMissingId:
         self, registry: StoreRegistry, shape: str
     ) -> None:
         insert_raw(registry.knowledge.document_store, CORRUPT_ID, *RAW_SHAPES[shape])
-        with as_http(["read"]), pytest.raises(McpError):
+        with as_http(["read"]), pytest.raises(MCPError):
             _fetch([CORRUPT_ID])
 
 
@@ -97,5 +97,5 @@ class TestAStoreFaultIsNotHidden:
         monkeypatch.setattr(registry.knowledge.document_store, "get", down)
         with as_http(["read", "external"]):
             for ids in ([CORRUPT_ID], [MISSING_ID], ["pub-1"]):
-                with pytest.raises(McpError):
+                with pytest.raises(MCPError):
                     _fetch(ids)

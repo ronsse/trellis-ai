@@ -239,7 +239,7 @@ def _get_memory_extractor(registry: StoreRegistry) -> Any:
                 llm_client=llm_client,
             )
         except Exception as exc:
-            # GRACEFUL-DEGRADATION: wrapped whole, McpError included (an
+            # GRACEFUL-DEGRADATION: wrapped whole, MCPError included (an
             # LLM-provider construction failure arrives as one). The save
             # that triggered this has already stored its document.
             logger.exception("memory_extractor_init_failed")

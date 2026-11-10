@@ -130,7 +130,7 @@ async def test_save_experience_validates_trace_json(
     The happy-path needs a full ``Trace`` schema instance which is
     unwieldy for a smoke test; the error path is the cheapest round-trip
     that proves the tool's argument decoder + JSON validator + the new
-    ``McpError`` propagation through FastMCP are all wired correctly.
+    ``MCPError`` propagation through FastMCP are all wired correctly.
     """
     from fastmcp.exceptions import ToolError
 
@@ -139,7 +139,7 @@ async def test_save_experience_validates_trace_json(
             "save_experience",
             {"trace_json": "not-valid-json"},
         )
-    # FastMCP wraps the server-side ``McpError`` into a ``ToolError``
+    # FastMCP wraps the server-side ``MCPError`` into a ``ToolError``
     # whose message carries the same text we set on ``ErrorData.message``.
     assert "trace JSON" in str(excinfo.value) or "invalid" in str(excinfo.value).lower()
 
@@ -183,7 +183,7 @@ async def test_get_lessons_returns_markdown(mcp_session: Client) -> None:
 
 async def test_get_graph_reports_missing_entity(mcp_session: Client) -> None:
     """``get_graph`` surfaces a missing-entity lookup as a structured
-    ``McpError(RESOURCE_NOT_FOUND, …)`` over JSON-RPC."""
+    ``MCPError(RESOURCE_NOT_FOUND, …)`` over JSON-RPC."""
     from fastmcp.exceptions import ToolError
 
     with pytest.raises(ToolError) as excinfo:

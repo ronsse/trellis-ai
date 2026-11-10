@@ -12,7 +12,7 @@ import json
 from typing import Any
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
@@ -48,7 +48,7 @@ class TestSaveExperience:
     def test_a_trace_the_parser_can_read_is_refused_by_the_store_write(
         self, temp_registry: StoreRegistry
     ) -> None:
-        with pytest.raises(McpError) as caught:
+        with pytest.raises(MCPError) as caught:
             save_experience(trace_json=_trace(MAX_TRACE_PAYLOAD_DEPTH + 1))
 
         assert "failed to store trace" in str(caught.value)
@@ -58,7 +58,7 @@ class TestSaveExperience:
     def test_a_trace_past_the_parser_limit_gets_a_hint_that_names_the_depth(
         self, temp_registry: StoreRegistry
     ) -> None:
-        with pytest.raises(McpError) as caught:
+        with pytest.raises(MCPError) as caught:
             save_experience(trace_json=_trace(250))
 
         text = str(caught.value)

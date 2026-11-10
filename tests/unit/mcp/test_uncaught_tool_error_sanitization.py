@@ -16,7 +16,7 @@ FastMCP's wrapping layer at all, so it cannot exercise this fix.
 
 ``TestCarveOutsLeaveTheirCauseUntouched`` below pins the three cases the
 middleware leaves alone by design. The dispatch tests above reach only one
-of them, the ``McpError`` from ``save_memory``'s caught path, and its text
+of them, the ``MCPError`` from ``save_memory``'s caught path, and its text
 is already sanitized, so they pass with any carve-out removed. Those tests
 build a fresh ``FastMCP`` instance with the middleware and synthetic probe
 tools, so no probe tool registers on the shared ``server_mod.mcp``.
@@ -30,7 +30,7 @@ import httpx
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from mcp.types import INVALID_PARAMS, ErrorData
 
 import trellis.mcp.server as server_mod
@@ -175,12 +175,12 @@ def _fresh_carve_out_app() -> FastMCP:
 
 class TestCarveOutsLeaveTheirCauseUntouched:
     """The three cases ``_SanitizeUncaughtToolErrors`` leaves alone by
-    design: ``cause is None``, an ``McpError`` cause, and a ``ToolError``
+    design: ``cause is None``, an ``MCPError`` cause, and a ``ToolError``
     whose text lacks FastMCP's ``"Error calling tool {name!r}:"`` prefix.
     Each must reach the caller exactly as FastMCP rendered it."""
 
     async def test_mcp_error_cause_is_not_resanitized(self) -> None:
-        """An ``McpError`` comes from a site that already rendered its text
+        """An ``MCPError`` comes from a site that already rendered its text
         through ``_exception_detail``, or echoes the caller's own input, so
         the middleware must not sanitize it again. The sanitizer would
         suppress this ``token=...`` text, so a second pass would show."""
@@ -189,7 +189,9 @@ class TestCarveOutsLeaveTheirCauseUntouched:
 
         @app.tool
         def probe_mcp_error() -> str:
-            raise McpError(ErrorData(code=INVALID_PARAMS, message=message))
+            raise MCPError.from_error_data(
+                ErrorData(code=INVALID_PARAMS, message=message)
+            )
 
         result = await _call("probe_mcp_error", {}, app)
         text = result.content[0].text

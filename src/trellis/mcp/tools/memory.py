@@ -6,7 +6,7 @@ import threading
 from typing import Any
 
 import structlog
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 from trellis.auth import SCOPE_INGEST
 from trellis.core.document_write import put_document
@@ -426,7 +426,7 @@ def save_memory(
                         similarity=round(similarity, 3),
                     )
                     return _fuzzy_duplicate_response(supersedes, match_id, similarity)
-        except McpError:
+        except MCPError:
             # _get_minhash_index already wrapped the cause structurally.
             raise
         except Exception as exc:
@@ -455,7 +455,7 @@ def save_memory(
             minhash_index = _get_minhash_index(registry)
             if minhash_index is not None:
                 minhash_index.add(stored_id, content)
-        except McpError:
+        except MCPError:
             raise
         except Exception as exc:
             logger.exception("save_memory_minhash_index_add_failed", doc_id=stored_id)
@@ -494,7 +494,7 @@ def _index_stored_memory(registry: StoreRegistry, stored_id: str, content: str) 
         minhash_index = _get_minhash_index(registry)
         if minhash_index is not None:
             minhash_index.add(stored_id, content)
-    except McpError:
+    except MCPError:
         raise
     except Exception as exc:
         logger.exception("save_memory_minhash_index_add_failed", doc_id=stored_id)

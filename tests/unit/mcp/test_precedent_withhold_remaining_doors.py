@@ -22,7 +22,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
@@ -141,7 +141,7 @@ def _call(door: str, scopes: list[str], entity_id: str) -> str:
     with as_http(scopes):
         try:
             return call(entity_id)
-        except McpError as exc:
+        except MCPError as exc:
             return f"MCP-ERROR {exc}"
 
 
@@ -250,7 +250,7 @@ class TestGetGraph:
     def test_a_withheld_root_is_the_not_found_a_missing_one_gets(
         self, temp_registry, precedent
     ):
-        with as_http(BELOW), pytest.raises(McpError, match="entity not found"):
+        with as_http(BELOW), pytest.raises(MCPError, match="entity not found"):
             get_graph(precedent)
 
     def test_a_withheld_neighbour_is_left_out_with_its_edges(

@@ -16,7 +16,7 @@ import pytest
 from fastmcp.server.auth import AccessToken
 from fastmcp.server.context import reset_transport, set_transport
 from mcp.server.auth.middleware.auth_context import AuthenticatedUser, auth_context_var
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 from pydantic import ValidationError
 from structlog.testing import capture_logs
@@ -495,7 +495,7 @@ class TestExecuteMutationErrors:
         self, temp_registry: StoreRegistry
     ) -> None:
         """An operation string that matches no enum member raises INVALID_PARAMS."""
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             execute_mutation(
                 operation="link.zorblax",
                 args={"source_id": "a", "target_id": "b", "edge_kind": "k"},
@@ -508,7 +508,7 @@ class TestExecuteMutationErrors:
     def test_empty_operation_raises_invalid_params(
         self, temp_registry: StoreRegistry
     ) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             execute_mutation(operation="   ", args={})
         assert excinfo.value.error.code == INVALID_PARAMS
         assert "operation must not be empty" in excinfo.value.error.message.lower()
@@ -518,7 +518,7 @@ class TestExecuteMutationErrors:
         self, temp_registry: StoreRegistry
     ) -> None:
         """``args`` must be a dict; bytes / list / scalar all rejected pre-flight."""
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             execute_mutation(operation="link.create", args="not-a-dict")  # type: ignore[arg-type]
         assert excinfo.value.error.code == INVALID_PARAMS
         assert "args must be a dict" in excinfo.value.error.message.lower()
@@ -545,7 +545,7 @@ class TestExecuteMutationErrors:
             lambda _r, **_kw: _ExplodingExecutor(),
         )
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             execute_mutation(
                 operation="link.create",
                 args={"source_id": "a", "target_id": "b", "edge_kind": "k"},
@@ -569,7 +569,7 @@ class TestExecuteMutationErrors:
             '{"polices": []}', encoding="utf-8"
         )
 
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             execute_mutation(
                 operation="link.create",
                 args={"source_id": "a", "target_id": "b", "edge_kind": "k"},
@@ -838,14 +838,14 @@ class TestScheduleAdminOperationsAreNotMcpReachable:
         assert payload["status"] == "failed"
         assert "no handler registered" in payload["message"].lower()
         assert "job.run_request" in payload["message"].lower()
-        # Not an McpError: a structured outcome, exactly like any other
+        # Not an MCPError: a structured outcome, exactly like any other
         # unhandled operation reaching this executor.
 
     def test_schedule_update_needs_admin_to_even_reach_no_handler(
         self, temp_registry: StoreRegistry
     ) -> None:
         # No admin scope: refused before the executor is ever built.
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             execute_mutation(operation="schedule.update", args={})
         assert excinfo.value.error.code == POLICY_DENIED
 
@@ -924,7 +924,7 @@ class TestSettingsUpdateIsUnreachable:
     def test_settings_update_without_admin_is_policy_denied(
         self, temp_registry: StoreRegistry
     ) -> None:
-        with pytest.raises(McpError) as excinfo:
+        with pytest.raises(MCPError) as excinfo:
             execute_mutation(
                 operation="settings.update",
                 args={"name": "pack_holdout_rate", "value": 0.9},
@@ -960,7 +960,7 @@ class TestExecuteMutationRequiresAdminForDestructiveOps:
         self, temp_registry: StoreRegistry
     ) -> None:
         node_id = self._redact_target(temp_registry)
-        with _as_http(scopes=[SCOPE_MUTATE]), pytest.raises(McpError) as excinfo:
+        with _as_http(scopes=[SCOPE_MUTATE]), pytest.raises(MCPError) as excinfo:
             execute_mutation(
                 operation="redaction.apply",
                 args={"target_id": node_id, "reason": "test"},
@@ -981,7 +981,7 @@ class TestExecuteMutationRequiresAdminForDestructiveOps:
 
     def test_http_with_no_token_is_refused(self, temp_registry: StoreRegistry) -> None:
         node_id = self._redact_target(temp_registry)
-        with _as_http(scopes=None), pytest.raises(McpError) as excinfo:
+        with _as_http(scopes=None), pytest.raises(MCPError) as excinfo:
             execute_mutation(
                 operation="redaction.apply",
                 args={"target_id": node_id, "reason": "test"},
@@ -1003,13 +1003,13 @@ class TestExecuteMutationRequiresAdminForDestructiveOps:
     def test_refused_call_emits_nothing_suggesting_the_mutation_ran(
         self, temp_registry: StoreRegistry
     ) -> None:
-        """The refusal is the tool's normal McpError shape, not a
+        """The refusal is the tool's normal MCPError shape, not a
 
         fabricated success-looking payload, and no ``REDACTION_APPLIED``
         event is emitted.
         """
         node_id = self._redact_target(temp_registry)
-        with _as_http(scopes=[SCOPE_MUTATE]), pytest.raises(McpError) as excinfo:
+        with _as_http(scopes=[SCOPE_MUTATE]), pytest.raises(MCPError) as excinfo:
             execute_mutation(
                 operation="redaction.apply",
                 args={"target_id": node_id, "reason": "test"},
@@ -1047,7 +1047,7 @@ class TestExecuteMutationScopeRefusalIsLogged:
             with (
                 _as_http(scopes=[SCOPE_MUTATE]),
                 capture_logs() as entries,
-                pytest.raises(McpError) as excinfo,
+                pytest.raises(MCPError) as excinfo,
             ):
                 execute_mutation(
                     operation="redaction.apply",

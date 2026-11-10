@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 from trellis.auth import SCOPE_READ
 from trellis.core.access_log import note_served_items
@@ -372,7 +372,7 @@ def get_items(
                 "budget_tokens": max_tokens,
             },
         )
-    except McpError:
+    except MCPError:
         raise
     except Exception as exc:
         logger.exception("get_items_failed")

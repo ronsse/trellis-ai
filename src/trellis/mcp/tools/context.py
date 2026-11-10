@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 from trellis.auth import SCOPE_READ
 from trellis.core.access_log import note_printed_items, note_served_items
@@ -282,7 +282,7 @@ def _flat_context(
             retrieval_phase=retrieval_phase,
             principal_id=current_principal_id(),
         )
-    except McpError:
+    except MCPError:
         raise
     except PublicReadBusyError:
         # A refused public read is not an assembly failure: it travels as
@@ -508,7 +508,7 @@ def _sectioned_context(
             budget=resolved_tokens,
             pack_id=sectioned_pack.pack_id,
         )
-    except McpError:
+    except MCPError:
         # Already structured by a deeper helper — let it propagate.
         raise
     except PublicReadBusyError:

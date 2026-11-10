@@ -375,7 +375,7 @@ class TestStateEvents:
         temp_registry: StoreRegistry,
     ) -> None:
         # ``_build_llm_client_from_env`` reports a provider construction
-        # failure as an ``McpError``; the resolution wraps whole, not by type.
+        # failure as an ``MCPError``; the resolution wraps whole, not by type.
         def provider_down(*_args: Any) -> None:
             server_mod._raise_internal(
                 "provider construction failed", data={"provider": "synthetic"}
@@ -388,7 +388,7 @@ class TestStateEvents:
             {
                 "state": "unavailable",
                 "reason": "build_failed",
-                "error_type": "McpError",
+                "error_type": "MCPError",
             }
         ]
 

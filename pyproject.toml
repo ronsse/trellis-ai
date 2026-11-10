@@ -43,7 +43,8 @@ dependencies = [
     # the moment the `mcp` bound was widened to `<3.0` — so a dependabot PR
     # titled "update mcp requirement" was a two-library major upgrade.
     # The two bounds move together, in one reviewed change, or not at all.
-    "fastmcp>=2.0,<5.0",
+    # Floor 4.0 is the first fastmcp on `mcp` 2.x (see the `mcp` floor below).
+    "fastmcp>=4.0,<5.0",
     # Declared because `trellis.mcp.server` imports `mcp.shared.exceptions`
     # and `mcp.types` **directly**. It arrived only through fastmcp's
     # transitive graph, and `fastmcp-slim` constrains `mcp<2.0` only under
@@ -52,16 +53,17 @@ dependencies = [
     # to `MCPError` and broke every test job while every local venv (on
     # 1.29.1) stayed green.
     #
-    # The upper bound is the 2.x rename, not a general aversion to it:
-    # lifting it is a real migration of `mcp/server.py`'s error contract and
-    # wants its own PR. Sized on #542, against a clean fastmcp-4 / mcp-2
-    # venv: `MCPError.__init__` takes `(code, message, data)` rather than an
-    # `ErrorData`, which all four `_raise_*` helpers construct, and 127
-    # `.error.code` / `.error.message` / `.error.data` reads across `src/`
-    # and `tests/` sit on the old attribute shape -- shimming the import
-    # alone leaves `tests/unit/mcp` at 66 failed / 406 passed.
-    # The floor matches what fastmcp-slim itself requires.
-    "mcp>=1.24,<2.0",
+    # Floor 2.0: the first `mcp` whose streamable-HTTP transport accepts
+    # protocol revision 2026-07-28, which claude.ai sends. On 1.x every such
+    # request was a 400 "Unsupported protocol version" (1.30.0 tops out at
+    # 2025-11-25), and a write with no fallback retry was lost. The 2.x
+    # migration was the `McpError` -> `MCPError` rename plus its
+    # `(code, message, data)` constructor; the `_raise_*` helpers build an
+    # `ErrorData` and go through `MCPError.from_error_data`, and `.error`
+    # still holds that `ErrorData`, so the `.error.code` reads are unchanged.
+    # fastmcp 4.0 is the first fastmcp on `mcp` 2.x, so the two floors move
+    # together.
+    "mcp>=2.0,<3.0",
     "fastapi>=0.115",
     # Both are imported directly (`starlette` in `trellis_api/app.py`,
     # `middleware.py` and `trellis/testing/inmemory.py`; `anyio.to_thread` in

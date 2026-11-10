@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, NoReturn
 
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
 from trellis.core.error_sanitize import render_exception_detail, sanitize_error_message
@@ -40,8 +40,10 @@ PUBLIC_READ_BUSY = -32004
 def _raise_invalid_params(
     message: str, *, data: dict[str, Any] | None = None
 ) -> NoReturn:
-    """Raise ``McpError(INVALID_PARAMS, …)`` — short for the common case."""
-    raise McpError(ErrorData(code=INVALID_PARAMS, message=message, data=data))
+    """Raise ``MCPError(INVALID_PARAMS, …)`` — short for the common case."""
+    raise MCPError.from_error_data(
+        ErrorData(code=INVALID_PARAMS, message=message, data=data)
+    )
 
 
 def _check_retrieval_phase(retrieval_phase: str | None) -> None:
@@ -67,33 +69,39 @@ def _raise_internal(
     cause: BaseException | None = None,
     data: dict[str, Any] | None = None,
 ) -> NoReturn:
-    """Raise ``McpError(INTERNAL_ERROR, …)`` chaining the cause if given.
+    """Raise ``MCPError(INTERNAL_ERROR, …)`` chaining the cause if given.
 
     Centralising this keeps the ``from exc`` chaining consistent — losing
     the chain hides the original traceback from operator logs.
     """
-    err = McpError(ErrorData(code=INTERNAL_ERROR, message=message, data=data))
+    err = MCPError.from_error_data(
+        ErrorData(code=INTERNAL_ERROR, message=message, data=data)
+    )
     if cause is not None:
         raise err from cause
     raise err
 
 
 def _raise_not_found(message: str, *, data: dict[str, Any] | None = None) -> NoReturn:
-    """Raise ``McpError(RESOURCE_NOT_FOUND, …)`` — app-layer code."""
-    raise McpError(ErrorData(code=RESOURCE_NOT_FOUND, message=message, data=data))
+    """Raise ``MCPError(RESOURCE_NOT_FOUND, …)`` — app-layer code."""
+    raise MCPError.from_error_data(
+        ErrorData(code=RESOURCE_NOT_FOUND, message=message, data=data)
+    )
 
 
 def _raise_mutation_failed(
     message: str, *, data: dict[str, Any] | None = None
 ) -> NoReturn:
-    """Raise ``McpError(MUTATION_FAILED, …)`` — app-layer code."""
-    raise McpError(ErrorData(code=MUTATION_FAILED, message=message, data=data))
+    """Raise ``MCPError(MUTATION_FAILED, …)`` — app-layer code."""
+    raise MCPError.from_error_data(
+        ErrorData(code=MUTATION_FAILED, message=message, data=data)
+    )
 
 
 def _raise_policy_denied(
     message: str, *, data: dict[str, Any] | None = None
 ) -> NoReturn:
-    """Raise ``McpError(POLICY_DENIED, …)`` — app-layer code.
+    """Raise ``MCPError(POLICY_DENIED, …)`` — app-layer code.
 
     For a scope decision made *before* anything reaches the executor —
     today, ``execute_mutation`` refusing a destructive operation without
@@ -101,7 +109,9 @@ def _raise_policy_denied(
     ran, which is why this is a different code from
     :func:`_raise_mutation_failed`.
     """
-    raise McpError(ErrorData(code=POLICY_DENIED, message=message, data=data))
+    raise MCPError.from_error_data(
+        ErrorData(code=POLICY_DENIED, message=message, data=data)
+    )
 
 
 def _refuse_public_caller(tool: str) -> None:

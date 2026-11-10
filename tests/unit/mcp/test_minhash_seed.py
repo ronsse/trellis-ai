@@ -31,7 +31,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 import trellis.mcp.server as server_mod
 import trellis.mcp.wiring as wiring_mod
@@ -409,7 +409,7 @@ class TestAFailedSeedIsNotCached:
         _enable(monkeypatch, max_docs=10)
         self._fail_after_the_first_page(store, monkeypatch)
 
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             server_mod._get_minhash_index(temp_registry)
 
         assert wiring_mod._minhash_index is None
@@ -433,9 +433,9 @@ class TestAFailedSeedIsNotCached:
         _enable(monkeypatch, max_docs=10)
         self._fail_after_the_first_page(store, monkeypatch)
 
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             server_mod._get_minhash_index(temp_registry)
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             server_mod._get_minhash_index(temp_registry)
 
     def test_a_later_call_seeds_completely_once_the_store_recovers(
@@ -452,7 +452,7 @@ class TestAFailedSeedIsNotCached:
         real = store.list_documents
         self._fail_after_the_first_page(store, monkeypatch)
 
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             server_mod._get_minhash_index(temp_registry)
         monkeypatch.setattr(store, "list_documents", real)
 
