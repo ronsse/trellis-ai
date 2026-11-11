@@ -74,9 +74,12 @@ The tag triggers `.github/workflows/publish.yml`. Watch it on the Actions tab.
 2. Confirm `pip install trellis-ai==X.Y.Z` works in a clean venv:
    ```bash
    python -m venv /tmp/trellis-test && /tmp/trellis-test/bin/pip install "trellis-ai==X.Y.Z"
-   /tmp/trellis-test/bin/trellis --version
-   /tmp/trellis-test/bin/trellis-mcp --help
+   /tmp/trellis-test/bin/python -c "import importlib.metadata as m; print(m.version('trellis-ai'))"
+   /tmp/trellis-test/bin/trellis --help
+   /tmp/trellis-test/bin/trellis-mcp </dev/null   # starts the stdio server and exits on EOF
    ```
+   `trellis` has no `--version` flag, and `trellis-mcp` ignores `--help` and starts
+   the server, so the checks above read the version from package metadata.
 3. Create the GitHub release: Releases → Draft a new release → choose tag `vX.Y.Z` → paste the matching CHANGELOG section → publish.
 4. Reset `## [Unreleased]` at the top of CHANGELOG.md for the next cycle.
 
