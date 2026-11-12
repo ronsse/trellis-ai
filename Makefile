@@ -20,8 +20,8 @@ setup: install-dev hooks ## One-shot first-time setup: install [dev] deps + regi
 install: ## Install package
 	uv pip install -e .
 
-install-dev: ## Install package with dev deps (mirrors CI)
-	uv pip install -e ".[dev]"
+install-dev: ## Install package with dev deps and all extras (mirrors Type Check and the release)
+	uv pip install -e ".[dev,all]"
 
 hooks: ## Install pre-commit git hooks (safe to re-run)
 	python -m pre_commit install --install-hooks

@@ -32,8 +32,8 @@ See [`docs/design/adr-terminology.md`](docs/design/adr-terminology.md) for the c
 ## Development Commands
 
 ```bash
-# Setup
-uv pip install -e ".[dev]"
+# Setup (`all` matches Type Check and the release; `.[dev]` alone hides psycopg types from mypy)
+uv pip install -e ".[dev,all]"
 trellis admin init
 
 # Quality
