@@ -18,9 +18,13 @@ Write semantics (ADR §4), applied per record:
 * **Moved** (new id, known content hash under this source's id prefix,
   move detection enabled) → re-keyed: stored under the new ``doc_id``,
   the old document tree deleted. Reported as a move, not a new ingest.
-  The one stored key a move carries is ``data_classification``, under this
-  run's metadata as an update merges it; every other stored key (content
-  tags, lifecycle, the chunk rows' own tags) is rebuilt from this run (#1132).
+  A move carries two stored keys, each under this run's metadata as an
+  update merges it: ``data_classification`` on the parent, and ``lifecycle``
+  on the parent and on each chunk row (chunk ``i`` takes the state of the old
+  chunk ``i``, the same bytes under the same chunker). Every other stored key
+  (content tags, the chunk rows' own tags) is rebuilt from this run (#1132).
+  A superseded successor's ``supersedes_doc_id`` is not rewritten: it keeps
+  naming the id the move deleted.
   Move detection is a file-corpus concern (content-derived ids); readers
   with content-independent ids (conversation uuids) disable it.
 * **Vanished** → deleted only when prune is on *and* the source is
@@ -95,7 +99,11 @@ from trellis.llm.egress import (
     may_reach_route,
 )
 from trellis.retrieve.embed_ingest_hook import run_embed_on_ingest
-from trellis.schemas.classification import DATA_CLASSIFICATION_KEY, sensitivity_of
+from trellis.schemas.classification import (
+    DATA_CLASSIFICATION_KEY,
+    LIFECYCLE_KEY,
+    sensitivity_of,
+)
 from trellis.schemas.document_metadata import DocumentMetadata
 from trellis.stores.base.event_log import EventType
 
@@ -109,6 +117,13 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 _PRUNE_PAGE_SIZE = 500
+
+#: The stored keys a move carries from the old parent row to the new one: the
+#: sensitivity label (#1132) and the lifecycle record (archived, superseded).
+#: Both are state of *these bytes*, which a move does not change, and both are
+#: read off the row by a gate (the read gate, the archived and superseded
+#: gates). Nothing else is carried; see the module docstring.
+_MOVE_CARRIED_KEYS = (DATA_CLASSIFICATION_KEY, LIFECYCLE_KEY)
 
 
 def sync_corpus(
@@ -593,22 +608,25 @@ def _apply_record(
         if not spans:
             metadata.pop("chunk_count", None)
     elif outcome.action == "move" and outcome.moved_from is not None:
-        # A move re-keys the same bytes, so the label stored on the old row is
-        # still the label of this text, and every gate reads it off the parent
-        # row. Carried *under* this run's metadata, the precedence an update
-        # gives every stored key: a label the handler or the operator supplies
-        # this run replaces it, whole record. Only this key, not the stored bag
-        # (see the module docstring), and a record that is present is carried as
-        # it stands, malformed included, so :func:`sensitivity_of` still reads
-        # it as restricted. Without it a moved document is served below its
-        # label and its text can reach a route that is not declared local
-        # (#1132).
+        # A move re-keys the same bytes, so the label and the lifecycle state
+        # stored on the old row are still those of this text, and every gate
+        # reads them off the row. Carried *under* this run's metadata, the
+        # precedence an update gives every stored key: a value the handler or
+        # the operator supplies this run replaces it, whole record. Only these
+        # keys, not the stored bag (see the module docstring), and a record
+        # that is present is carried as it stands, malformed included, so
+        # :func:`sensitivity_of` still reads a bad label as restricted. Without
+        # the label a moved document is served below it and its text can reach
+        # a route that is not declared local; without the lifecycle an archived
+        # or superseded one comes back current and is served again (#1132).
+        # ``preserve_updated_at`` below stays ``False``: the new id is an insert,
+        # where the flag is moot, so the moved row's clock starts at the move
+        # as it always has. Carrying the old clock is a separate change.
         stored_bag = _stored_metadata(doc_store.get(outcome.moved_from))
-        if DATA_CLASSIFICATION_KEY in stored_bag:
-            metadata = {
-                DATA_CLASSIFICATION_KEY: stored_bag[DATA_CLASSIFICATION_KEY],
-                **metadata,
-            }
+        metadata = {
+            **{k: stored_bag[k] for k in _MOVE_CARRIED_KEYS if k in stored_bag},
+            **metadata,
+        }
 
     # Classify-on-write: tag the FULL document once (not per chunk — a chunk in
     # isolation lacks the doc's structural cues, and StructuralClassifier would
@@ -672,6 +690,7 @@ def _apply_record(
         },
         mirror=mirror,
         report=report,
+        moved_from=outcome.moved_from if outcome.action == "move" else None,
     )
     if outcome.action == "update":
         _delete_surplus_chunks(
@@ -816,6 +835,7 @@ def _write_chunks(
     inherited_tags: dict[str, Any],
     mirror: _VectorMirrorTally,
     report: CorpusSyncReport,
+    moved_from: str | None = None,
 ) -> int:
     """Write (and embed) chunk documents; skip byte-identical chunks.
 
@@ -828,6 +848,12 @@ def _write_chunks(
     same contract the parent re-put honours: keys this run does not own (an
     earlier run's operator tags, a chunk-local flag) survive the re-put instead
     of being rebuilt away.
+
+    ``moved_from`` is the old parent id when the parent was just re-keyed. A
+    chunk row at the new id does not exist yet, so nothing is stored to merge;
+    the one key taken from the old chunk row of the same index is its
+    ``lifecycle`` (an archived chunk stays archived), as the parent carries its
+    own. Its tags are rebuilt from the parent, as for any new chunk (#1132).
 
     ``inherited_tags`` is the deliberate exception, and **how far the
     exception reaches depends on why the chunk is being written**. These two
@@ -894,6 +920,21 @@ def _write_chunks(
             report.warnings.append(_redaction_tombstone_warning(relpath, cid))
             continue
         stored = _stored_metadata(existing)
+        if moved_from is not None and existing is None:
+            # A moved file's chunk ``i`` takes the old chunk ``i``'s lifecycle
+            # state, so a chunk retention archived does not come back current.
+            # Only when the two hold the same bytes: the file's bytes match, but
+            # a chunker change since the old path's last sync shifts the spans,
+            # and then the stamp would land on other text. Only that key; a
+            # chunk's tags are rebuilt from the parent as before (#1132).
+            old_row = doc_store.get(chunk_doc_id(moved_from, span.index))
+            old = _stored_metadata(old_row)
+            if (
+                LIFECYCLE_KEY in old
+                and old_row is not None
+                and old_row.get("content_hash") == content_hash(chunk_content)
+            ):
+                stored = {LIFECYCLE_KEY: old[LIFECYCLE_KEY]}
         content_changed = existing is None or existing.get(
             "content_hash"
         ) != content_hash(chunk_content)
