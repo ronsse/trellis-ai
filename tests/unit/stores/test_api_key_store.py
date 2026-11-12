@@ -7,7 +7,7 @@ The Postgres section mirrors the gating in ``test_postgres_stores.py``:
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -146,6 +146,96 @@ class TestSQLiteApiKeyStore:
         s.close()
         s.close()
 
+    # -- expiry is compared as an instant, whatever offset it arrived in --------
+
+    @pytest.mark.parametrize(
+        ("offset_hours", "minutes_from_now", "clearing_is_allowed"),
+        [
+            # 5 minutes ago, written at +14:00: expired, so its expiry is frozen.
+            # Compared as text, "...T00:05+14:00" sorts after "...T10:05+00:00".
+            (14, -5, False),
+            # 5 minutes from now, written at -12:00: still live, so it may move.
+            # Compared as text it sorts before now and would read as expired.
+            (-12, 5, True),
+        ],
+    )
+    def test_an_expiry_at_a_non_utc_offset_is_compared_as_an_instant(
+        self,
+        store: SQLiteApiKeyStore,
+        offset_hours: int,
+        minutes_from_now: int,
+        clearing_is_allowed: bool,
+    ) -> None:
+        store.create(_record())
+        when = (datetime.now(UTC) + timedelta(minutes=minutes_from_now)).astimezone(
+            timezone(timedelta(hours=offset_hours))
+        )
+        assert store.update("abcdef123456", expires_at=when) is True
+        assert store.update("abcdef123456", expires_at=None) is clearing_is_allowed
+        stored = store.get("abcdef123456")
+        assert stored is not None
+        assert (stored.expires_at is None) is clearing_is_allowed
+        if not clearing_is_allowed:
+            assert stored.expires_at == when
+
+    def test_an_expiry_is_stored_in_utc_on_create_and_on_update(
+        self, store: SQLiteApiKeyStore, tmp_path
+    ) -> None:
+        east = timezone(timedelta(hours=14))
+        created = datetime(2999, 1, 1, 12, 0, tzinfo=east)
+        store.create(_record("created00001", expires_at=created))
+        store.create(_record("updated00001"))
+        assert store.update("updated00001", expires_at=created)
+        rows = committed_rows(
+            tmp_path / "api_keys.db",
+            "SELECT key_id, expires_at FROM trellis_api_keys ORDER BY key_id",
+        )
+        assert rows == [
+            ("created00001", "2998-12-31T22:00:00+00:00"),
+            ("updated00001", "2998-12-31T22:00:00+00:00"),
+        ]
+
+    def test_a_naive_expiry_is_refused_not_read_as_local_time(
+        self, store: SQLiteApiKeyStore
+    ) -> None:
+        store.create(_record())
+        naive = datetime.fromisoformat("2999-01-01T00:00:00")
+        with pytest.raises(ValueError, match="timezone-aware"):
+            store.update("abcdef123456", expires_at=naive)
+        assert store.get("abcdef123456").expires_at is None  # type: ignore[union-attr]
+
+    # -- a retire is conditional on the key having no expiry yet ----------------
+
+    def test_an_expiry_set_only_if_none_is_set_once(
+        self, store: SQLiteApiKeyStore
+    ) -> None:
+        store.create(_record())
+        first = datetime.now(UTC) + timedelta(hours=2)
+        second = datetime.now(UTC) + timedelta(days=30)
+        assert (
+            store.update("abcdef123456", expires_at=first, only_if_no_expiry=True)
+            is True
+        )
+        assert (
+            store.update("abcdef123456", expires_at=second, only_if_no_expiry=True)
+            is False
+        )
+        assert store.get("abcdef123456").expires_at == first  # type: ignore[union-attr]
+        # The condition is the caller's to ask for: a plain update still moves it.
+        assert store.update("abcdef123456", expires_at=second) is True
+        assert store.get("abcdef123456").expires_at == second  # type: ignore[union-attr]
+
+    def test_a_conditional_expiry_is_refused_on_a_revoked_key(
+        self, store: SQLiteApiKeyStore
+    ) -> None:
+        store.create(_record())
+        store.revoke("abcdef123456")
+        when = datetime.now(UTC) + timedelta(hours=1)
+        assert (
+            store.update("abcdef123456", expires_at=when, only_if_no_expiry=True)
+            is False
+        )
+
 
 # ======================================================================
 # Postgres (env-gated, mirrors test_postgres_stores.py)
@@ -203,3 +293,81 @@ class TestPostgresApiKeyStore:
         store.create(_record())
         assert store.revoke("abcdef123456") is True
         assert store.revoke("abcdef123456") is False
+
+    def test_an_expiry_set_only_if_none_is_set_once(self, store) -> None:
+        store.create(_record())
+        first = datetime.now(UTC) + timedelta(hours=2)
+        second = datetime.now(UTC) + timedelta(days=30)
+        assert store.update("abcdef123456", expires_at=first, only_if_no_expiry=True)
+        assert not store.update(
+            "abcdef123456", expires_at=second, only_if_no_expiry=True
+        )
+        assert store.get("abcdef123456").expires_at == first
+        store.revoke("abcdef123456")
+        assert not store.update(
+            "abcdef123456", expires_at=second, only_if_no_expiry=True
+        )
+
+
+class _FakeCursor:
+    def __init__(self, log: list[tuple[str, tuple]]) -> None:
+        self._log = log
+        self.rowcount = 1
+
+    def __enter__(self) -> _FakeCursor:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def execute(self, sql: str, params: tuple = ()) -> None:
+        self._log.append((" ".join(sql.split()), tuple(params)))
+
+
+class _FakeConnection:
+    def __init__(self, log: list[tuple[str, tuple]]) -> None:
+        self._log = log
+
+    def __enter__(self) -> _FakeConnection:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def cursor(self) -> _FakeCursor:
+        return _FakeCursor(self._log)
+
+
+class TestPostgresUpdateStatement:
+    """The statement the Postgres store sends, read without a database."""
+
+    @pytest.fixture
+    def sent(self) -> list[tuple[str, tuple]]:
+        pytest.importorskip("psycopg_pool")
+        return []
+
+    @pytest.fixture
+    def store(self, sent: list[tuple[str, tuple]]):
+        from trellis.stores.postgres.api_key import PostgresApiKeyStore
+
+        s = PostgresApiKeyStore.__new__(PostgresApiKeyStore)
+        s._conn = lambda: _FakeConnection(sent)  # type: ignore[method-assign]
+        return s
+
+    def test_a_retire_is_conditional_on_no_expiry_and_not_revoked(
+        self, store, sent
+    ) -> None:
+        when = datetime.now(UTC) + timedelta(hours=1)
+        store.update("abcdef123456", expires_at=when, only_if_no_expiry=True)
+        sql, params = sent[-1]
+        assert "WHERE key_id = %s AND revoked_at IS NULL AND expires_at IS NULL" in sql
+        assert params == (when, "abcdef123456")
+
+    def test_a_plain_expiry_update_keeps_the_frozen_expiry_guard(
+        self, store, sent
+    ) -> None:
+        when = datetime.now(UTC) + timedelta(hours=1)
+        store.update("abcdef123456", expires_at=when)
+        sql, _ = sent[-1]
+        assert "AND (expires_at IS NULL OR expires_at > %s)" in sql
+        assert "revoked_at IS NULL AND expires_at IS NULL" not in sql

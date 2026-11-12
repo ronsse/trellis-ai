@@ -6377,7 +6377,23 @@ otherwise), then retires the old key. The new token is printed once, like a mint
   the `expires_at` of a key that has already expired (`set-defaults` is unaffected),
   so no update path, rotation included, can bring one back. The key listing carries
   `expires_at` when one is set and an `expired` flag beside `revoked`, in the JSON and
-  the text table; the exit code of `list` is unchanged.
+  the text table; the exit code of `list` is unchanged. The SQLite store keeps
+  `expires_at` as UTC and compares instants, so an offset such as `+14:00` cannot make an
+  expired key look live; a naive (timezone-less) `expires_at` is refused by the store
+  and by the `api_key.update` operation (`invalid_expiry`).
+- **Two rotations of one key cannot both retire it.** The retire is one conditional
+  write: it applies only while the old key has no `expires_at` and is not revoked
+  (SQLite and Postgres alike, decided in the statement, not by a prior read). The
+  rotation that loses the race finds the key already retired, reports `partial` with
+  `retired: "still_valid"` and the reason `already_retired` (or `already_revoked`),
+  and leaves the first rotation's grace window as it was. Its freshly minted successor
+  is **kept, valid, with its token shown once**, exactly as for any failed retire:
+  the operator holds a token for a key that exists, and revoking it behind them would
+  be a second unreviewed change. Revoke whichever successor is not wanted by hand.
+- **A mint re-checks its `defaults`.** `api_key.mint` runs the same check as
+  `api_key.update` (non-empty, at most 120 characters, no control or non-printing
+  character), so a hand-built command cannot store a value the CLI or REST would refuse
+  (`invalid_defaults`).
 - **The exit code does not depend on `--format`.**
 
 ### The read tier of MCP tools

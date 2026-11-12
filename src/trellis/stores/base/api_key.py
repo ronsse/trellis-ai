@@ -115,6 +115,7 @@ class ApiKeyStore(ABC):
         *,
         defaults: ApiKeyDefaults | Unset | None = UNSET,
         expires_at: datetime | Unset | None = UNSET,
+        only_if_no_expiry: bool = False,
     ) -> bool:
         """Rewrite ``defaults`` and/or ``expires_at`` on a live key.
 
@@ -124,6 +125,12 @@ class ApiKeyStore(ABC):
         never revived by clearing or moving its expiry (a ``defaults`` rewrite
         alone is still allowed). Never touches the scopes, the name or the
         secret hash.
+
+        ``expires_at`` must be timezone-aware (a store compares instants, not
+        strings). ``only_if_no_expiry`` makes the write conditional, in the one
+        statement, on the key having no ``expires_at`` yet: it is how a rotation
+        retires a key, so two rotations that both read the key as live cannot
+        both write a window. It is read only together with an ``expires_at``.
         """
 
     @abstractmethod

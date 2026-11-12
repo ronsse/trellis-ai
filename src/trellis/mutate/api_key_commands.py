@@ -87,6 +87,7 @@ def build_update_command(
     *,
     defaults: ApiKeyDefaults | Unset | None = UNSET,
     expires_at: datetime | Unset | None = UNSET,
+    only_if_no_expiry: bool = False,
     requested_by: str,
     actor_key_id: str | None = None,
     actor_key_name: str | None = None,
@@ -94,13 +95,18 @@ def build_update_command(
     """The command rewriting ``key_id``'s defaults block and/or expiry.
 
     A field left at :data:`~trellis.stores.base.api_key.UNSET` is not sent, so
-    the handler leaves it alone; ``None`` clears it.
+    the handler leaves it alone; ``None`` clears it. ``only_if_no_expiry`` (with
+    an ``expires_at`` to set) makes the write conditional on the key having no
+    expiry yet, which is how a rotation retires a key without moving a window
+    another rotation already wrote.
     """
     args: dict[str, Any] = {"key_id": key_id}
     if not isinstance(defaults, Unset):
         args["defaults"] = defaults
     if not isinstance(expires_at, Unset):
         args["expires_at"] = expires_at
+    if only_if_no_expiry:
+        args["only_if_no_expiry"] = True
     return Command(
         operation=Operation.API_KEY_UPDATE,
         args=args,
@@ -228,6 +234,15 @@ def rotate_key(
     A revoked key, an expired key (rotation never revives one) and a key already
     in a grace period (a second rotation would mint another successor and move
     the window) are refused the same way, with nothing minted.
+
+    Two rotations can both pass that preflight, because it reads before either
+    has written. The retire is therefore conditional on the key still having no
+    expiry (and not being revoked), decided by the store in one statement. The
+    one that loses has already minted: its successor is handled as any failed
+    retire is, so it is kept and its token shown, ``retired="still_valid"`` and
+    ``failure`` the refused retire (``already_retired``, or ``already_revoked``
+    when the other rotation revoked). The successor is a real key whose token
+    the operator is shown once, so it is kept rather than revoked behind them.
     """
     old = store.get(old_key_id)
     if old is None:
@@ -260,6 +275,9 @@ def rotate_key(
         build_update_command(
             old_key_id,
             expires_at=expires_at,
+            # Conditional: if another rotation retired the key after the
+            # preflight read, this one leaves that window alone.
+            only_if_no_expiry=True,
             requested_by=requested_by,
             actor_key_id=actor_key_id,
             actor_key_name=actor_key_name,

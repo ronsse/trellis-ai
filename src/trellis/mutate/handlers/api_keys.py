@@ -26,6 +26,21 @@ def _api_key_actor(command: Command) -> dict[str, Any]:
     }
 
 
+def _check_defaults(defaults: ApiKeyDefaults) -> None:
+    """Refuse a defaults block holding a value a CLI or REST mint would refuse.
+
+    The one check both :class:`ApiKeyMintHandler` and :class:`ApiKeyUpdateHandler`
+    run, so a hand-built command cannot store a control character or a blank
+    value through either.
+    """
+    from trellis.auth import key_default_refusal  # noqa: PLC0415
+
+    for field, value in defaults.model_dump(exclude_none=True).items():
+        refusal = key_default_refusal(field, value)
+        if refusal is not None:
+            raise ValidationError(refusal, errors=[refusal], code="invalid_defaults")
+
+
 class ApiKeyMintHandler:
     """Persist one freshly generated API key and emit ``api_key.minted``.
 
@@ -33,9 +48,9 @@ class ApiKeyMintHandler:
     hands the handler only the :class:`~trellis.stores.base.api_key.ApiKeyRecord`,
     so the secret never enters the pipeline: the event, the result and the
     audit trail carry the key id, name and scopes, never the token or its hash.
-    The scope vocabulary and the ``external``-only-as-``read,external`` rule are
-    re-checked here with the same functions a mint uses, so a command built by
-    hand cannot mint what the CLI would refuse.
+    The scope vocabulary, the ``external``-only-as-``read,external`` rule and
+    the ``defaults`` values are re-checked here with the same functions a mint
+    uses, so a command built by hand cannot mint what the CLI would refuse.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
@@ -66,6 +81,8 @@ class ApiKeyMintHandler:
         if unknown or refusal is not None:
             msg = refusal or f"Unknown scope(s) {unknown!r}"
             raise ValidationError(msg, errors=[msg], code="invalid_scopes")
+        if record.defaults is not None:
+            _check_defaults(record.defaults)
         self._registry.operational.api_key_store.create(record)
         # The key is stored: from here the mint has happened, so a dead event
         # log is a warning on the result and never a failure (the token the
@@ -165,14 +182,19 @@ class ApiKeyUpdateHandler:
     through this handler. An unknown or revoked key is a
     :class:`ValidationError`, like revoke. The values are checked here with the
     same function a mint uses, so a hand-built command cannot store a default
-    the CLI would refuse.
+    the CLI would refuse, and an ``expires_at`` must be timezone-aware.
+
+    ``args["only_if_no_expiry"]`` (``True``) makes setting ``expires_at``
+    conditional on the key having none: a rotation's retire, which must not
+    move a window another rotation already wrote. A key that already has one
+    is refused as ``already_retired``.
     """
 
     def __init__(self, registry: StoreRegistry) -> None:
         self._registry = registry
 
     def handle(self, command: Command) -> tuple[str | None, str]:
-        from trellis.auth import key_default_refusal, key_is_expired  # noqa: PLC0415
+        from trellis.auth import key_is_expired  # noqa: PLC0415
 
         key_id = command.args["key_id"]
         if not isinstance(key_id, str) or not key_id:
@@ -187,12 +209,7 @@ class ApiKeyUpdateHandler:
             if not isinstance(defaults, ApiKeyDefaults):
                 msg = "api_key.update requires args['defaults'] to be an ApiKeyDefaults"
                 raise ValidationError(msg, errors=[msg], code="invalid_defaults")
-            for field, value in defaults.model_dump(exclude_none=True).items():
-                refusal = key_default_refusal(field, value)
-                if refusal is not None:
-                    raise ValidationError(
-                        refusal, errors=[refusal], code="invalid_defaults"
-                    )
+            _check_defaults(defaults)
         expires_at = command.args.get("expires_at", UNSET)
         if (
             expires_at is not UNSET
@@ -201,6 +218,20 @@ class ApiKeyUpdateHandler:
         ):
             msg = "api_key.update requires args['expires_at'] to be a datetime"
             raise ValidationError(msg, errors=[msg], code="invalid_expiry")
+        if isinstance(expires_at, datetime) and expires_at.utcoffset() is None:
+            # A naive instant is ambiguous, and one in the store makes every
+            # verify and every listing raise on the comparison with the clock.
+            msg = "api_key.update requires args['expires_at'] to be timezone-aware"
+            raise ValidationError(msg, errors=[msg], code="invalid_expiry")
+        only_if_no_expiry = command.args.get("only_if_no_expiry", False)
+        if only_if_no_expiry is not False and (
+            only_if_no_expiry is not True or not isinstance(expires_at, datetime)
+        ):
+            msg = (
+                "api_key.update accepts args['only_if_no_expiry'] only as True, "
+                "and only together with an 'expires_at' datetime"
+            )
+            raise ValidationError(msg, errors=[msg], code="invalid_update")
         store = self._registry.operational.api_key_store
         existing = store.get(key_id)
         if existing is None:
@@ -219,8 +250,24 @@ class ApiKeyUpdateHandler:
             )
             raise ValidationError(msg, errors=[msg], code="key_expired")
         if existing.revoked_at is not None or not store.update(
-            key_id, defaults=defaults, expires_at=expires_at
+            key_id,
+            defaults=defaults,
+            expires_at=expires_at,
+            only_if_no_expiry=only_if_no_expiry,
         ):
+            current = store.get(key_id) if only_if_no_expiry else None
+            if (
+                current is not None
+                and current.revoked_at is None
+                and current.expires_at is not None
+            ):
+                # Another retire won between this command's read and its write.
+                msg = (
+                    f"Cannot retire {key_id!r}: it is already retired, with an "
+                    f"expiry of {current.expires_at.isoformat()} set by another "
+                    "rotation or update. That expiry was left as it is."
+                )
+                raise ValidationError(msg, errors=[msg], code="already_retired")
             msg = f"Cannot update {key_id!r}: it is revoked."
             raise ValidationError(msg, errors=[msg], code="already_revoked")
         stored = store.get(key_id) or existing

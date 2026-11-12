@@ -7,7 +7,7 @@ is ever printed (failure messages only ever name key ids).
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -29,6 +29,7 @@ from trellis.mutate.api_key_commands import (
     rotate_key,
 )
 from trellis.mutate.commands import CommandResult, CommandStatus
+from trellis.stores.base.api_key import ApiKeyDefaults
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
@@ -673,3 +674,198 @@ def test_a_failed_migration_that_is_not_a_lost_race_still_raises(
 
     with pytest.raises(sqlite3.OperationalError, match=message):
         Failing(db)
+
+
+class TestAnUpdateRefusesANaiveExpiry:
+    def test_a_naive_expiry_is_refused_and_nothing_is_written(
+        self, registry: StoreRegistry
+    ) -> None:
+        token, key_id = _mint(registry)
+        naive = datetime.fromisoformat("2999-01-01T00:00:00")
+        result = build_api_keys_executor(registry).execute(
+            build_update_command(key_id, expires_at=naive, requested_by=ACTOR)
+        )
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "invalid_expiry"
+        store = registry.operational.api_key_store
+        assert store.get(key_id).expires_at is None  # type: ignore[union-attr]
+        assert verify_token(token, store) is not None
+        assert _events(registry, EventType.API_KEY_UPDATED) == []
+
+    def test_an_aware_expiry_at_any_offset_is_still_accepted(
+        self, registry: StoreRegistry
+    ) -> None:
+        _, key_id = _mint(registry)
+        later = (utc_now() + timedelta(hours=1)).astimezone(
+            timezone(timedelta(hours=-5))
+        )
+        result = build_api_keys_executor(registry).execute(
+            build_update_command(key_id, expires_at=later, requested_by=ACTOR)
+        )
+        assert result.status == CommandStatus.SUCCESS
+
+
+class TestAMintRechecksItsDefaults:
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            ApiKeyDefaults(agent_id="a\x1bb", domain="  "),
+            ApiKeyDefaults(agent_id="ok", domain="  "),
+            ApiKeyDefaults(agent_id="a\x1bb"),
+            ApiKeyDefaults(team="t" * 121),
+        ],
+    )
+    def test_a_hand_built_mint_with_a_bad_default_stores_nothing(
+        self, registry: StoreRegistry, bad: ApiKeyDefaults
+    ) -> None:
+        _, _, command = build_mint_command(
+            "k", "read", requested_by=ACTOR, defaults=bad
+        )
+        result = build_api_keys_executor(registry).execute(command)
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "invalid_defaults"
+        assert registry.operational.api_key_store.list() == []
+        assert _events(registry, EventType.API_KEY_MINTED) == []
+
+    def test_a_blank_only_block_in_a_hand_built_record_is_refused(
+        self, registry: StoreRegistry
+    ) -> None:
+        # ``build_mint_command`` drops a block that sets nothing, so a blank
+        # reaches the handler only on a record the caller assembled itself.
+        _, record, command = build_mint_command("k", "read", requested_by=ACTOR)
+        blank = record.model_copy(update={"defaults": ApiKeyDefaults(domain="  ")})
+        command = command.model_copy(update={"args": {"record": blank}})
+        result = build_api_keys_executor(registry).execute(command)
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "invalid_defaults"
+        assert registry.operational.api_key_store.list() == []
+
+    def test_mint_and_update_refuse_a_bad_block_with_the_same_words(
+        self, registry: StoreRegistry
+    ) -> None:
+        bad = ApiKeyDefaults(agent_id="a\x1bb", domain="  ")
+        execute = build_api_keys_executor(registry).execute
+        _, key_id = _mint(registry)
+        _, _, mint = build_mint_command("k2", "read", requested_by=ACTOR, defaults=bad)
+        minted = execute(mint)
+        updated = execute(
+            build_update_command(key_id, defaults=bad, requested_by=ACTOR)
+        )
+        assert minted.message == updated.message
+        assert minted.metadata["rejection_reason"] == "invalid_defaults"
+        assert updated.metadata["rejection_reason"] == "invalid_defaults"
+
+    def test_a_clean_block_still_mints(self, registry: StoreRegistry) -> None:
+        _, key_id = _mint(registry, domain="platform", agent_id="svc")
+        stored = registry.operational.api_key_store.get(key_id)
+        assert stored is not None
+        assert stored.defaults == ApiKeyDefaults(domain="platform", agent_id="svc")
+
+
+class TestTwoRotationsOfOneKey:
+    """Both read the key as live; only the first may write its grace window."""
+
+    def test_the_second_rotations_retire_is_refused_and_the_window_is_unchanged(
+        self, registry: StoreRegistry
+    ) -> None:
+        old_token, old_id = _mint(registry)
+        store = registry.operational.api_key_store
+        before_either = store.get(old_id)
+        execute = build_api_keys_executor(registry).execute
+
+        first = rotate_key(
+            store, execute, old_id, grace=timedelta(hours=2), requested_by=ACTOR
+        )
+        assert first.retired == "grace"
+        window = store.get(old_id).expires_at  # type: ignore[union-attr]
+        assert window == first.old_expires_at
+
+        class _ReadBeforeTheFirstWrote:
+            """A preflight read taken before the first rotation retired the key."""
+
+            def get(self, key_id: str) -> object:
+                return before_either
+
+        second = rotate_key(
+            _ReadBeforeTheFirstWrote(),  # type: ignore[arg-type]
+            execute,
+            old_id,
+            grace=timedelta(days=30),
+            requested_by=ACTOR,
+        )
+
+        # The existing partial-rotation outcome: the successor is kept and its
+        # token shown, the old key is reported as not retired by this rotation.
+        assert second.retired == "still_valid"
+        assert second.refusal is None
+        assert second.failure is not None
+        assert second.failure.status == CommandStatus.REJECTED
+        assert second.failure.metadata["rejection_reason"] == "already_retired"
+        assert second.token is not None
+        assert first.token is not None
+        assert verify_token(second.token, store) is not None
+        assert verify_token(first.token, store) is not None
+        # The grace window is the first rotation's, untouched.
+        assert store.get(old_id).expires_at == window  # type: ignore[union-attr]
+        assert verify_token(old_token, store) is not None
+        assert len(_events(registry, EventType.API_KEY_UPDATED)) == 1
+        assert len(_events(registry, EventType.API_KEY_MINTED)) == 3
+
+    def test_the_second_rotation_after_a_revoke_reports_the_key_revoked(
+        self, registry: StoreRegistry
+    ) -> None:
+        _, old_id = _mint(registry)
+        store = registry.operational.api_key_store
+        before_either = store.get(old_id)
+        execute = build_api_keys_executor(registry).execute
+        assert rotate_key(store, execute, old_id, requested_by=ACTOR).retired == (
+            "revoked"
+        )
+
+        class _ReadBeforeTheFirstWrote:
+            def get(self, key_id: str) -> object:
+                return before_either
+
+        second = rotate_key(
+            _ReadBeforeTheFirstWrote(),  # type: ignore[arg-type]
+            execute,
+            old_id,
+            grace=timedelta(hours=1),
+            requested_by=ACTOR,
+        )
+        assert second.retired == "still_valid"
+        assert second.failure is not None
+        assert second.failure.metadata["rejection_reason"] == "already_revoked"
+        assert store.get(old_id).expires_at is None  # type: ignore[union-attr]
+
+    def test_the_conditional_is_only_a_rotations_not_every_updates(
+        self, registry: StoreRegistry
+    ) -> None:
+        """An operator's own ``update`` may still move a live key's expiry."""
+        _, key_id = _mint(registry)
+        store = registry.operational.api_key_store
+        execute = build_api_keys_executor(registry).execute
+        soon = utc_now() + timedelta(hours=1)
+        later = utc_now() + timedelta(days=3)
+        assert execute(
+            build_update_command(key_id, expires_at=soon, requested_by=ACTOR)
+        ).status == (CommandStatus.SUCCESS)
+        assert execute(
+            build_update_command(key_id, expires_at=later, requested_by=ACTOR)
+        ).status == (CommandStatus.SUCCESS)
+        assert store.get(key_id).expires_at == later  # type: ignore[union-attr]
+
+    def test_the_flag_without_an_expiry_to_set_is_a_malformed_command(
+        self, registry: StoreRegistry
+    ) -> None:
+        _, key_id = _mint(registry)
+        result = build_api_keys_executor(registry).execute(
+            build_update_command(
+                key_id,
+                defaults=build_key_defaults(domain="d"),
+                only_if_no_expiry=True,
+                requested_by=ACTOR,
+            )
+        )
+        assert result.status == CommandStatus.REJECTED
+        assert result.metadata["rejection_reason"] == "invalid_update"

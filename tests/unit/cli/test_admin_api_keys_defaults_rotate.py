@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 from tests.cli_output import plain
 from trellis.auth import TOKEN_PREFIX, verify_token
 from trellis.core.base import utc_now
+from trellis.mutate.api_key_commands import build_update_command
 from trellis.mutate.commands import (
     Command,
     CommandResult,
@@ -417,3 +418,21 @@ class TestRotateRefusesEndingKeys:
         assert again.exit_code == EXIT_VALIDATION, _redacted(again.output)
         assert len(store.list()) == 2
         assert store.get(key_id).expires_at == window
+
+
+class TestANaiveExpiryNeverReachesTheListing:
+    def test_a_hand_built_naive_expiry_is_refused_and_list_still_works(self) -> None:
+        key = _create()
+        naive = datetime.fromisoformat("2999-01-01T00:00:00")
+        refused = cli_api_keys._execute(
+            build_update_command(
+                key["key_id"], expires_at=naive, requested_by="test:cli"
+            )
+        )
+        assert refused.status == CommandStatus.REJECTED
+        assert _stored(key["key_id"]).expires_at is None
+        for fmt in ("json", "text"):
+            listed = _invoke(["api-keys", "list", "--format", fmt])
+            assert listed.exit_code == EXIT_OK, _redacted(listed.output)
+        rows = json.loads(_invoke(["api-keys", "list", "--format", "json"]).stdout)
+        assert [r["key_id"] for r in rows["keys"]] == [key["key_id"]]

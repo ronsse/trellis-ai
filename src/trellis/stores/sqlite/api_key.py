@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 
 import structlog
 
@@ -94,7 +94,7 @@ class SQLiteApiKeyStore(SQLiteStoreBase, ApiKeyStore):
                         record.created_at.isoformat(),
                         record.revoked_at.isoformat() if record.revoked_at else None,
                         _dump_defaults(record.defaults),
-                        record.expires_at.isoformat() if record.expires_at else None,
+                        _utc_iso(record.expires_at) if record.expires_at else None,
                     ),
                 )
         except sqlite3.IntegrityError as exc:
@@ -135,6 +135,7 @@ class SQLiteApiKeyStore(SQLiteStoreBase, ApiKeyStore):
         *,
         defaults: ApiKeyDefaults | Unset | None = UNSET,
         expires_at: datetime | Unset | None = UNSET,
+        only_if_no_expiry: bool = False,
     ) -> bool:
         sets: list[str] = []
         params: list[str | None] = []
@@ -143,16 +144,22 @@ class SQLiteApiKeyStore(SQLiteStoreBase, ApiKeyStore):
             params.append(_dump_defaults(defaults))
         if not isinstance(expires_at, Unset):
             sets.append("expires_at = ?")
-            params.append(expires_at.isoformat() if expires_at else None)
+            params.append(_utc_iso(expires_at) if expires_at else None)
         if not sets:
             return self.get(key_id) is not None
         where = "key_id = ? AND revoked_at IS NULL"
         where_params: list[str | None] = [key_id]
         if not isinstance(expires_at, Unset):
-            # An expired key's expiry is frozen: clearing or moving it would
-            # revive a key that no longer verifies.
-            where += " AND (expires_at IS NULL OR expires_at > ?)"
-            where_params.append(utc_now().isoformat())
+            if only_if_no_expiry:
+                # A rotation's retire: it wins only against a key nobody has
+                # retired yet. Decided in this one statement, so two rotations
+                # that both read the key as live cannot both write a window.
+                where += " AND expires_at IS NULL"
+            else:
+                # An expired key's expiry is frozen: clearing or moving it
+                # would revive a key that no longer verifies.
+                where += " AND (expires_at IS NULL OR expires_at > ?)"
+                where_params.append(_utc_iso(utc_now()))
         with self._conn as conn:  # commits on success, rolls back on an exception
             cur = conn.execute(
                 f"UPDATE trellis_api_keys SET {', '.join(sets)} WHERE {where}",
@@ -194,6 +201,21 @@ class SQLiteApiKeyStore(SQLiteStoreBase, ApiKeyStore):
                 datetime.fromisoformat(row["expires_at"]) if row["expires_at"] else None
             ),
         )
+
+
+def _utc_iso(value: datetime) -> str:
+    """The stored form of an instant: UTC, so comparing the text compares time.
+
+    ``expires_at`` is compared in SQL as text. Offsets other than ``+00:00``
+    would order by their clock reading, not by the instant they name (the way
+    a Postgres ``TIMESTAMPTZ`` never does), so every value is normalised to UTC
+    on the way in. A naive value names no instant and is refused rather than
+    read as local time.
+    """
+    if value.utcoffset() is None:
+        msg = "expires_at must be a timezone-aware datetime"
+        raise ValueError(msg)
+    return value.astimezone(UTC).isoformat()
 
 
 def _dump_defaults(defaults: ApiKeyDefaults | None) -> str | None:
