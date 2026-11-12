@@ -296,3 +296,51 @@ class TestGetFileContext:
 
         assert SERVED in cleared
         assert SERVED not in below
+
+
+class TestAWithheldPrecedentIsNotNamedByAnotherNode:
+    """``get_graph`` and a fetched entity name the precedent only to a reader (#1232).
+
+    A pointer is an id with no text; the precedent's own row carries no label, so
+    only its source's label, which the read doors judge, says a caller may not
+    have it.
+    """
+
+    HOLDER = "node-holder"
+
+    @pytest.fixture
+    def holder(self, temp_registry: StoreRegistry, precedent: str) -> str:
+        temp_registry.knowledge.graph_store.upsert_node(
+            self.HOLDER,
+            "entity",
+            {"name": "holder note"},
+            document_ids=[ANCHOR, precedent],
+        )
+        return self.HOLDER
+
+    @pytest.mark.parametrize("tool", [get_graph, get_items], ids=["graph", "items"])
+    def test_named_to_a_cleared_caller_and_not_to_one_below_it(
+        self, temp_registry, precedent, holder, tool
+    ):
+        arg = holder if tool is get_graph else [holder]
+        with as_http(CLEARED):
+            cleared = str(tool(arg))
+        with as_http(BELOW):
+            below = str(tool(arg))
+
+        assert precedent in cleared, "the premise: a reader sees the id"
+        assert precedent not in below
+        assert ANCHOR in below, "a readable pointer is kept"
+
+    def test_a_precedent_nothing_withholds_is_still_named(
+        self, temp_registry, open_precedent
+    ):
+        temp_registry.knowledge.graph_store.upsert_node(
+            self.HOLDER,
+            "entity",
+            {"name": "holder note"},
+            document_ids=[ANCHOR, open_precedent],
+        )
+
+        with as_http(BELOW):
+            assert open_precedent in str(get_graph(self.HOLDER))

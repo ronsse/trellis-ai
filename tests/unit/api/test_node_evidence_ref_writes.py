@@ -560,3 +560,97 @@ class TestAnUpsertThatLeavesTheKeyOutKeepsThePointer:
         accepted, _ = _write(client, headers, "entity.update", OTHER)
         assert not accepted
         assert self._held(registry) == HELD
+
+
+class TestAnUnreadablePointerIsNotRevealed:
+    """A key that cannot read a node's pointer is not told the node holds one (#1057).
+
+    A different value on a node that holds a pointer is refused as "changed" only
+    to a key that can read the stored document. To any other key it is refused in
+    the words an unreadable target gets, which are also what a node that holds no
+    pointer answers, so the refusal does not say a pointer exists. The unchanged
+    value is still accepted, since a node read back and sent again must keep
+    working, and no refusal carries the stored id.
+    """
+
+    @pytest.mark.parametrize("door", DOORS)
+    @pytest.mark.parametrize("stored", [RESTRICTED_DOC, "doc-deleted-since"])
+    def test_a_different_value_reads_as_an_unreadable_target(
+        self, client, registry, door, stored
+    ):
+        _seed_node(registry, door, stored)
+        before = _footprint(registry)
+
+        accepted, message = _write(client, _headers(registry), door, "doc-nowhere")
+
+        assert not accepted
+        assert "does not name a document this credential can read" in message
+        assert "may not change" not in message
+        assert stored not in message
+        assert _footprint(registry) == before
+        assert _rejection_codes(registry) == [NODE_EVIDENCE_REF_UNREADABLE]
+
+    @pytest.mark.parametrize("door", DOORS)
+    def test_the_words_are_those_a_node_holding_none_answers(
+        self, client, registry, door
+    ):
+        """The same value, a node with and without a pointer, the same reply."""
+        _seed_node(registry, door, RESTRICTED_DOC)
+        _, with_pointer = _write(client, _headers(registry), door, "doc-nowhere")
+        _seed_node(registry, door)  # the same node, now holding no pointer
+        _, without_pointer = _write(client, _headers(registry), door, "doc-nowhere")
+
+        assert with_pointer == without_pointer
+
+    @pytest.mark.parametrize("door", ["entity.create", "entity.update"])
+    @pytest.mark.parametrize("bad", ["", 7])
+    def test_a_value_that_is_not_an_id_gets_the_not_an_id_words(
+        self, client, registry, door, bad
+    ):
+        _seed_node(registry, door, RESTRICTED_DOC)
+
+        accepted, message = _write(client, _headers(registry), door, bad)
+
+        assert not accepted
+        assert "needs evidence_ref to be the id of a document" in message
+        assert _rejection_codes(registry) == [NODE_EVIDENCE_REF_NOT_A_STRING]
+
+    @pytest.mark.parametrize("door", ["entity.create", "entity.update"])
+    def test_a_readable_different_value_is_refused_too(self, client, registry, door):
+        """Not accepted: that would overwrite a pointer the key cannot read."""
+        _seed_node(registry, door, RESTRICTED_DOC)
+
+        accepted, message = _write(client, _headers(registry), door, OTHER)
+
+        assert not accepted
+        assert RESTRICTED_DOC not in message
+        assert (
+            registry.knowledge.graph_store.get_node(NODE_ID)["properties"][
+                "evidence_ref"
+            ]
+            == RESTRICTED_DOC
+        )
+
+    @pytest.mark.parametrize("door", DOORS)
+    def test_a_key_that_can_read_it_gets_the_precise_refusal(
+        self, client, registry, door
+    ):
+        _seed_node(registry, door, RESTRICTED_DOC)
+
+        accepted, message = _write(
+            client, _headers(registry, CAN_WRITE_RESTRICTED), door, OTHER
+        )
+
+        assert not accepted
+        assert "may not change a node's evidence_ref once it is set" in message
+        assert RESTRICTED_DOC not in message
+        assert _rejection_codes(registry) == [NODE_EVIDENCE_REF_CHANGED]
+
+    @pytest.mark.parametrize("door", DOORS)
+    def test_the_unchanged_value_is_still_accepted(self, client, registry, door):
+        """Option (a), checking readability here too, would refuse this."""
+        _seed_node(registry, door, RESTRICTED_DOC)
+
+        accepted, message = _write(client, _headers(registry), door, RESTRICTED_DOC)
+
+        assert accepted, message

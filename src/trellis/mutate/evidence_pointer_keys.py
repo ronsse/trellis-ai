@@ -170,6 +170,31 @@ def pointer_key_refusal(
     return None
 
 
+def _unreadable_value_refusal(value: object, writer: str) -> NodeEvidenceRefRefusal:
+    """The refusal for an ``evidence_ref`` value naming no document the caller reads.
+
+    One builder for both places it is needed, so the words cannot drift apart: a
+    node that holds no pointer, and a node whose pointer the caller cannot read
+    (:func:`node_evidence_ref_refusal`). ``None`` reaches it only from the
+    second, where clearing a pointer the caller cannot read is refused too.
+    """
+    if value is not None and (not isinstance(value, str) or not value):
+        return NodeEvidenceRefRefusal(
+            NODE_EVIDENCE_REF_NOT_A_STRING,
+            f"{writer} needs evidence_ref to be the id of a document, a "
+            "non-empty string. Nothing was written",
+        )
+    shown = value[:_ECHO_LIMIT] if isinstance(value, str) else value
+    return NodeEvidenceRefRefusal(
+        NODE_EVIDENCE_REF_UNREADABLE,
+        f"{writer} evidence_ref {shown!r} does not name a "
+        "document this credential can read: a node's evidence_ref is "
+        "the document another item is superseded by, so it must exist. "
+        "Save the document first (MCP save_knowledge(evidence_ref=...) "
+        "checks this). Nothing was written",
+    )
+
+
 def node_evidence_ref_refusal(
     properties: Mapping[str, Any],
     *,
@@ -189,14 +214,21 @@ def node_evidence_ref_refusal(
     * A node that already holds an ``evidence_ref`` keeps it. The same value is
       accepted whether or not its document still exists (a node read back and
       sent again must keep working); any other value, ``null`` included, is
-      refused.
+      refused. A caller that can read the stored document is told the node
+      "may not change" it (:data:`NODE_EVIDENCE_REF_CHANGED`). One that cannot
+      (the document is above its clearance, or gone) is refused with the words
+      an unreadable target gets, so the refusal does not say the node holds a
+      pointer at all (#1057).
     * On a node that holds none, a value must be a non-empty string naming a
       document the caller may read under ``clearance``. A document that does not
       exist and one above the caller's clearance are refused with the same
       message, so a refusal does not tell a key that a document it may not read
       exists. ``null`` is accepted there: it points nowhere.
 
-    Neither refusal carries the stored value.
+    Neither refusal carries the stored value. A caller that can read some other
+    document still sees a refusal where a pointerless node would accept, and a
+    full-id guess equal to the stored value is accepted unread (the restore
+    form); both need that exact id, the posture ``evidence.ingest``'s 409 has.
     """
     if EVIDENCE_REF_KEY not in properties:
         return None
@@ -206,33 +238,30 @@ def node_evidence_ref_refusal(
         if stored_properties is not None
         else None
     )
-    refusal: NodeEvidenceRefRefusal | None = None
     if stored not in (None, ""):
-        if value != stored:
-            refusal = NodeEvidenceRefRefusal(
+        if value == stored:
+            return None
+        readable = (
+            isinstance(stored, str)
+            and visible_document(document_store, stored, clearance=clearance)
+            is not None
+        )
+        if readable:
+            return NodeEvidenceRefRefusal(
                 NODE_EVIDENCE_REF_CHANGED,
                 f"{writer} may not change a node's evidence_ref once it is set: "
                 "it names the document another item is superseded by, so a node "
                 "keeps the one it has. Sending the stored value again is "
                 "accepted. Nothing was written",
             )
-    elif value is not None:
-        if not isinstance(value, str) or not value:
-            refusal = NodeEvidenceRefRefusal(
-                NODE_EVIDENCE_REF_NOT_A_STRING,
-                f"{writer} needs evidence_ref to be the id of a document, a "
-                "non-empty string. Nothing was written",
-            )
-        elif visible_document(document_store, value, clearance=clearance) is None:
-            refusal = NodeEvidenceRefRefusal(
-                NODE_EVIDENCE_REF_UNREADABLE,
-                f"{writer} evidence_ref {value[:_ECHO_LIMIT]!r} does not name a "
-                "document this credential can read: a node's evidence_ref is "
-                "the document another item is superseded by, so it must exist. "
-                "Save the document first (MCP save_knowledge(evidence_ref=...) "
-                "checks this). Nothing was written",
-            )
-    return refusal
+        return _unreadable_value_refusal(value, writer)
+    if value is not None and (
+        not isinstance(value, str)
+        or not value
+        or visible_document(document_store, value, clearance=clearance) is None
+    ):
+        return _unreadable_value_refusal(value, writer)
+    return None
 
 
 def evidence_ingest_pointer_refusal(

@@ -479,14 +479,14 @@ def search_entities(
         offset=offset,
     )
     clearance = request_clearance(ctx)
+    precedents = PrecedentClearance(registry.knowledge.document_store, clearance, store)
     if clearance != "restricted":
-        precedents = PrecedentClearance(
-            registry.knowledge.document_store, clearance, store
-        )
         rows = [r for r in rows if precedents.verdict_of(r["node_id"], r) is None]
         if node_type in (None, PRECEDENT_NODE_TYPE):
             total -= _count_withheld_precedents(store, precedents, q)
-    rows = conceal_node_pointers(rows, registry.knowledge.document_store, clearance)
+    rows = conceal_node_pointers(
+        rows, registry.knowledge.document_store, clearance, precedents=precedents
+    )
     results = [
         {
             "entity_id": row["node_id"],
@@ -604,6 +604,7 @@ def get_entity(
         subgraph["edges"],
         registry.knowledge.document_store,
         clearance,
+        precedents=precedents,
     )
     node, *neighbours = nodes
     return {
