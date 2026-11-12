@@ -217,18 +217,138 @@ class TestRefusalsAreRecorded:
         assert event.payload["rejections"][0]["kind"] == "value"
         assert _count(temp_registry) == 0
 
+    @pytest.mark.parametrize(
+        ("kwargs", "sent"),
+        [
+            pytest.param(
+                {"summary": "   " + "a secret summary " * 600},
+                "a secret summary",
+                id="summary-over-the-cap",
+            ),
+            pytest.param(
+                {"summary": SUMMARY, "metadata": {"document_form": "private-form"}},
+                "private-form",
+                id="short-form",
+            ),
+            pytest.param(
+                {
+                    "summary": SUMMARY,
+                    "metadata": {"document_form": "secret-form-" + "f" * 5000},
+                },
+                "secret-form",
+                id="5000-character-form",
+            ),
+            pytest.param(
+                {"summary": SUMMARY, "metadata": {"summary": "a secret difference"}},
+                "a secret difference",
+                id="key-disagreement-summary",
+            ),
+            pytest.param(
+                {"uri": URI, "metadata": {"uri": "https://secret.example.test/x"}},
+                "secret.example.test",
+                id="key-disagreement-uri",
+            ),
+            pytest.param(
+                {"metadata": {"document_form": "reference", "summary": ["secret"]}},
+                "secret",
+                id="metadata-only-summary-of-the-wrong-type",
+            ),
+        ],
+    )
     def test_the_event_quotes_nothing_the_caller_sent(
-        self, temp_registry: StoreRegistry
+        self, temp_registry: StoreRegistry, kwargs: dict[str, Any], sent: str
     ) -> None:
         with pytest.raises(MCPError):
+            save_memory(BODY, **kwargs)
+
+        (event,) = _rejections(temp_registry)
+        assert sent not in str(event.payload)
+        assert len(str(event.payload)) < 1000
+
+    def test_the_caller_is_told_a_short_cut_of_a_long_form(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        form = "secret-form-" + "f" * 5000
+        with pytest.raises(MCPError) as caught:
+            save_memory(BODY, summary=SUMMARY, metadata={"document_form": form})
+
+        text = str(caught.value)
+        assert "names the form 'secret-form-" in text
+        assert form not in text
+        assert len(text) < 500
+
+    def test_a_bad_summary_only_in_metadata_is_refused_before_the_duplicate_check(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        save_memory(BODY)
+        assert _count(temp_registry) == 1
+
+        with pytest.raises(MCPError, match="limit is"):
             save_memory(
                 BODY,
-                summary="a secret summary " * 600,
-                metadata={"document_form": "private-form"},
+                metadata={
+                    "document_form": "reference",
+                    "summary": "s" * (EMBED_INPUT_CHAR_CAP + 1),
+                },
             )
 
         (event,) = _rejections(temp_registry)
-        assert "a secret summary" not in str(event.payload)
+        assert event.payload["rejections"][0]["loc"] == "summary"
+        assert _count(temp_registry) == 1
+
+    @pytest.mark.parametrize(
+        "summary", ["s" * (EMBED_INPUT_CHAR_CAP + 1), "   ", 7], ids=str
+    )
+    def test_a_bad_summary_only_in_metadata_on_a_new_body_is_recorded(
+        self, temp_registry: StoreRegistry, summary: Any
+    ) -> None:
+        with pytest.raises(MCPError):
+            save_memory(
+                BODY, metadata={"document_form": "reference", "summary": summary}
+            )
+
+        (event,) = _rejections(temp_registry)
+        assert event.payload["rejections"][0]["loc"] == "summary"
+        assert _count(temp_registry) == 0
+
+    def test_the_same_summary_through_the_parameter_is_recorded_alike(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        too_long = "s" * (EMBED_INPUT_CHAR_CAP + 1)
+        with pytest.raises(MCPError):
+            save_memory(BODY, summary=too_long)
+        with pytest.raises(MCPError):
+            save_memory(
+                BODY, metadata={"document_form": "reference", "summary": too_long}
+            )
+
+        first, second = _rejections(temp_registry)
+        assert first.payload["rejections"] == second.payload["rejections"]
+
+    def test_a_metadata_summary_on_another_form_is_still_accepted(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        long_summary = "s" * (EMBED_INPUT_CHAR_CAP + 1)
+        reply = save_memory(
+            BODY, metadata={"document_form": "note", "summary": long_summary}
+        )
+
+        doc = temp_registry.knowledge.document_store.get(_saved_id(reply))
+        assert doc is not None
+        assert doc["metadata"]["summary"] == long_summary
+        assert _rejections(temp_registry) == []
+
+    def test_a_good_metadata_summary_on_a_reference_is_accepted(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        reply = save_memory(
+            BODY, metadata={"document_form": "reference", "summary": SUMMARY}
+        )
+
+        doc = temp_registry.knowledge.document_store.get(_saved_id(reply))
+        assert doc is not None
+        assert doc["metadata"]["summary"] == SUMMARY
+        assert _rejections(temp_registry) == []
 
     def test_an_accepted_call_records_no_rejection(
         self, temp_registry: StoreRegistry

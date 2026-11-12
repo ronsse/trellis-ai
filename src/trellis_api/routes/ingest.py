@@ -38,7 +38,12 @@ from trellis.mutate.commands import (
 )
 from trellis.ops.write_health import record_trace_coercion
 from trellis.retrieve.lifecycle import EVIDENCE_REF_KEY
-from trellis.retrieve.reference import EXCERPT_SOURCE_KEY, URI_KEY, shape_vector_row
+from trellis.retrieve.reference import (
+    EXCERPT_SOURCE_KEY,
+    SUMMARY_KEY,
+    URI_KEY,
+    shape_vector_row,
+)
 from trellis.retrieve.strategies import DEFAULT_IMPORTANCE_DECAY_THRESHOLD
 from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.schemas.evidence import Evidence
@@ -333,8 +338,11 @@ def _vector_row_metadata(
     ``build_vector_row`` applies too) sets the ``content`` excerpt, drops the
     summary and stamps or strips the ``excerpt_source`` marker from the stored
     document alone, so a caller can neither forge the marker nor undo it. The
-    ``uri`` the link line shows is the document's like the keys below: copied
-    from it, or removed from the row when the document has none. The keys in
+    ``uri`` the link line shows and the ``summary`` are the document's like the
+    keys below: copied from it, or removed from the row when the document has
+    none (and a served summary is then dropped by ``shape_vector_row``), so a
+    reader that ran the reference rule on a row's metadata would not find a
+    summary the document never had. The keys in
     :data:`_DOCUMENT_IDENTITY_KEYS` (``node_role``, ``node_type``, ``agent_id``,
     ``document_form``, the flat ``content_type``, ``excerpt``) follow the mirrored
     keys' rule. Without this
@@ -354,6 +362,7 @@ def _vector_row_metadata(
             EVIDENCE_REF_KEY,
             *_DOCUMENT_IDENTITY_KEYS,
             URI_KEY,
+            SUMMARY_KEY,
         ):
             if key in source:
                 row[key] = source[key]

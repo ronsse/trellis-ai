@@ -72,13 +72,32 @@ def _refuse_memory_pointer_keys(metadata: dict[str, Any] | None) -> None:
         )
 
 
-class ReferenceFieldsError(ValueError):
-    """``save_memory``'s ``summary`` / ``uri`` were refused; ``field`` names the key."""
+#: How much of a caller-sent form string the refusal shown to that caller quotes.
+_FORM_SHOWN_CHARS = 40
 
-    def __init__(self, message: str, *, field: str) -> None:
+
+class ReferenceFieldsError(ValueError):
+    """``save_memory``'s ``summary`` / ``uri`` were refused; ``field`` names the key.
+
+    ``message`` is what the caller is told and may name a short cut of what they
+    sent. ``event_message`` is what the ``WRITE_REJECTED`` event stores: it quotes
+    nothing the caller sent, so a long string cannot be written into the log.
+    It is ``message`` when that already holds none.
+    """
+
+    def __init__(
+        self, message: str, *, field: str, event_message: str | None = None
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.field = field
+        self.event_message = event_message if event_message is not None else message
+
+
+def _shown(form: str) -> str:
+    """``form`` as a short, quoted cut, for a message to the caller who sent it."""
+    cut = form[:_FORM_SHOWN_CHARS]
+    return repr(cut) + ("..." if len(form) > _FORM_SHOWN_CHARS else "")
 
 
 def _with_reference_fields(
@@ -88,13 +107,16 @@ def _with_reference_fields(
 
     Both land flat under those keys. A parameter and a metadata key of the same
     name that disagree are refused, and so is a summary the write boundary would
-    refuse, here and before anything is read, so an exact-duplicate hit cannot
-    hide a bad one. The ``summary`` parameter means "store a reference": with no
+    refuse, whether it came as the parameter or sits in ``metadata`` of a
+    ``reference`` document, here and before anything is read, so an
+    exact-duplicate hit cannot hide a bad one. The ``summary`` parameter means
+    "store a reference": with no
     form named anywhere in the metadata it stamps ``document_form: "reference"``,
     the form that makes the summary what is embedded and shown, and a metadata
     form other than ``reference`` is a disagreement, refused naming that form
-    (a plain ``summary`` key on another form goes in ``metadata``). Neither
-    parameter given: the metadata is returned as it came.
+    (a plain ``summary`` key on another form goes in ``metadata``, and is
+    accepted there). Neither parameter given: the metadata is returned as it
+    came, after the same summary check.
 
     Raises:
         ReferenceFieldsError: the caller records the rejection and raises the
@@ -102,6 +124,9 @@ def _with_reference_fields(
             ``tool=`` the capture-surface roster reads stays in ``memory.py``).
     """
     if summary is None and uri is None:
+        problem = summary_refusal(metadata, limit=EMBED_INPUT_CHAR_CAP)
+        if problem is not None:
+            raise ReferenceFieldsError(problem, field=SUMMARY_KEY)
         return metadata
     bag = dict(metadata or {})
     for key, value in ((SUMMARY_KEY, summary), (URI_KEY, uri)):
@@ -116,12 +141,21 @@ def _with_reference_fields(
         if form is None:
             bag["document_form"] = REFERENCE_FORM
         elif form != REFERENCE_FORM:
-            msg = (
-                f"summary stores a reference document, but metadata names the form "
-                f"{form!r}; drop the form, or put the summary key in metadata "
+            tail = (
+                "; drop the form, or put the summary key in metadata "
                 "instead of the parameter"
             )
-            raise ReferenceFieldsError(msg, field="metadata.document_form")
+            msg = (
+                "summary stores a reference document, but metadata names the form "
+                f"{_shown(form)}{tail}"
+            )
+            event_msg = (
+                "summary stores a reference document, but metadata names "
+                f"another form{tail}"
+            )
+            raise ReferenceFieldsError(
+                msg, field="metadata.document_form", event_message=event_msg
+            )
     problem = summary_refusal(bag, limit=EMBED_INPUT_CHAR_CAP)
     if problem is not None:
         raise ReferenceFieldsError(problem, field=SUMMARY_KEY)

@@ -23,10 +23,11 @@ from fastapi.testclient import TestClient
 import trellis_api.app as app_module
 from trellis.auth import generate_api_key
 from trellis.llm.egress import EgressGate
-from trellis.retrieve.embed_ingest_hook import build_vector_row
+from trellis.retrieve.embed_ingest_hook import EMBED_INPUT_CHAR_CAP, build_vector_row
 from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.retrieve.formatters import format_pack_as_markdown
 from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.reference import summary_of
 from trellis.retrieve.strategies import SemanticSearch
 from trellis.stores.registry import StoreRegistry
 from trellis_api.app import create_app
@@ -249,6 +250,63 @@ class TestAPlainDocumentsRowCannotBeForged:
         row = _stored(registry, "doc-ref#chunk-0")
         assert "excerpt_source" not in row
         assert row["content"] == "one section of the handbook, embedded as itself"
+
+
+class TestACallersSummaryIsNeverKept:
+    """A row's ``summary`` is its document's, so the rule reads the same on both."""
+
+    def test_a_forged_summary_on_a_plain_documents_row_is_not_kept(
+        self, client, registry
+    ) -> None:
+        _post(client, registry, "doc-plain", {"summary": "forged summary"})
+
+        assert "summary" not in _stored(registry, "doc-plain")
+
+    def test_a_forged_summary_on_an_over_cap_references_row_is_not_kept(
+        self, client, registry
+    ) -> None:
+        registry.knowledge.document_store.put(
+            "doc-long",
+            BODY,
+            {**REFERENCE_META, "summary": "w " * EMBED_INPUT_CHAR_CAP},
+        )
+        assert (
+            summary_of(registry.knowledge.document_store.get("doc-long")["metadata"])
+            is None
+        )
+
+        _post(
+            client,
+            registry,
+            "doc-long",
+            {"document_form": "reference", "summary": "forged summary"},
+        )
+
+        row = _stored(registry, "doc-long")
+        assert row["summary"] == "w " * EMBED_INPUT_CHAR_CAP
+        assert "forged summary" not in str(row)
+        assert "excerpt_source" not in row
+        assert row["content"] == truncate_excerpt(BODY, EXCERPT_CHARS)
+
+    def test_a_references_summary_is_dropped_from_its_row_whatever_was_sent(
+        self, client, registry
+    ) -> None:
+        _post(client, registry, "doc-ref", {"summary": "forged summary"})
+
+        row = _stored(registry, "doc-ref")
+        assert "summary" not in row
+        assert row["excerpt_source"] == "summary"
+
+    def test_a_plain_documents_own_summary_is_the_one_kept(
+        self, client, registry
+    ) -> None:
+        registry.knowledge.document_store.put(
+            "doc-noted", BODY, {"title": "Noted", "summary": "its own note"}
+        )
+
+        _post(client, registry, "doc-noted", {"summary": "forged summary"})
+
+        assert _stored(registry, "doc-noted")["summary"] == "its own note"
 
 
 class TestNoStoredDocument:

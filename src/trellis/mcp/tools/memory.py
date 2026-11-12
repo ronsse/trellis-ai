@@ -328,7 +328,7 @@ def _reference_fields(
         _record_boundary_rejection(
             tool="save_memory",
             rejections=[
-                {"kind": "value", "loc": refusal.field, "msg": refusal.message}
+                {"kind": "value", "loc": refusal.field, "msg": refusal.event_message}
             ],
         )
         _raise_invalid_params(
