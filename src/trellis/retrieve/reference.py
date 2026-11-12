@@ -12,16 +12,24 @@ definition:
 
 * the embedder input and the vector row's excerpt
   (:func:`~trellis.retrieve.embed_ingest_hook.build_vector_row`, shared by the
-  live hook, the evidence handler and ``trellis admin reindex-vectors``);
+  live hook, the evidence handler and ``trellis admin reindex-vectors``), and
+  the row ``POST /vectors`` writes for a stored document, through the same
+  :func:`shape_vector_row`;
 * the pack excerpt on the axes that read the document row
   (:class:`~trellis.retrieve.strategies.KeywordSearch`, the public-only reads);
 * the link line a pack renders and the ``Source`` line ``get_items`` renders.
 
-A row is summary-served only when **all three** hold (:func:`summary_of`): its
-form is ``reference``, its ``summary`` is a non-empty string, and it is not a
-chunk. The form condition is required because ``summary`` is a common
-frontmatter key: a corpus file that carries one, and its chunks, embed and
-serve exactly as before. Anything else is untouched.
+A row is summary-served only when **all four** hold (:func:`summary_of`): its
+form is ``reference``, its ``summary`` is a non-empty string, that summary is at
+most :data:`~trellis.retrieve.embed_limits.EMBED_INPUT_CHAR_CAP` characters (it
+is embedded whole or not at all), and it is not a chunk. The rule reads stored
+metadata, so it applies to *any* non-chunk row that carries both the reference
+form and a string summary, whoever wrote it: a document already stored, and a
+corpus file whose frontmatter names both. Such a row's keyword excerpt changes
+at deploy and its embedding at its next re-embed. The form condition is required
+because ``summary`` is a common frontmatter key: a corpus file that carries
+``summary:`` and does not also name the reference form, and its chunks, embed
+and serve exactly as before. Anything else is untouched.
 
 ``excerpt_source`` is the one marker a summary-served item carries
 (:data:`EXCERPT_SOURCE_KEY`). The formatters key off it, never off the form or
@@ -33,6 +41,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from trellis.retrieve.embed_limits import (
+    EMBED_INPUT_CHAR_CAP,
+    VECTOR_METADATA_EXCERPT_CHARS,
+)
+from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.schemas.document_metadata import document_form_of
 
 if TYPE_CHECKING:
@@ -49,6 +62,7 @@ __all__ = [
     "is_summary_served",
     "pack_metadata",
     "served_text",
+    "shape_vector_row",
     "summary_link_line",
     "summary_of",
     "summary_refusal",
@@ -74,16 +88,21 @@ def summary_of(metadata: Mapping[str, Any] | None) -> str | None:
     """The stripped summary of a summary-served reference, else ``None``.
 
     The single predicate. ``None`` for a document of any other form, for a
-    reference with no usable summary, and for a chunk (it has ``parent_doc_id``),
-    so those behave exactly as they did before reference documents existed.
+    reference with no usable summary, for one whose summary is longer than
+    :data:`~trellis.retrieve.embed_limits.EMBED_INPUT_CHAR_CAP` (a summary is
+    embedded whole or the row is not summary-served, so no path embeds a cut
+    one), and for a chunk (it has ``parent_doc_id``), so those behave exactly as
+    they did before reference documents existed.
     """
     if not metadata or document_form_of(metadata) != REFERENCE_FORM:
         return None
     if metadata.get("parent_doc_id"):
         return None
     summary = metadata.get(SUMMARY_KEY)
-    if isinstance(summary, str) and summary.strip():
-        return summary.strip()
+    if isinstance(summary, str):
+        stripped = summary.strip()
+        if stripped and len(stripped) <= EMBED_INPUT_CHAR_CAP:
+            return stripped
     return None
 
 
@@ -114,6 +133,32 @@ def pack_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
         bag.pop(SUMMARY_KEY, None)
         bag[EXCERPT_SOURCE_KEY] = EXCERPT_SOURCE_SUMMARY
     return bag
+
+
+def shape_vector_row(
+    row: dict[str, Any], content: str, metadata: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """Set what a vector row says of its document's served text; return ``row``.
+
+    ``row`` is the row's metadata so far, ``content`` and ``metadata`` are the
+    *document's*, never the caller's. The row's ``content`` excerpt is cut from
+    :func:`served_text`. The marker is the row's to stamp from the document, so a
+    value already under its name is dropped and only a summary-served document
+    gets one; and a served summary is dropped from the row, because the excerpt
+    is already cut from it. Nothing else is touched. Both writers of a vector
+    row (:func:`~trellis.retrieve.embed_ingest_hook.build_vector_row` and
+    ``POST /vectors``) call this, so the two cannot disagree about it.
+    """
+    served = is_summary_served(metadata)
+    row.pop(EXCERPT_SOURCE_KEY, None)
+    if served:
+        row.pop(SUMMARY_KEY, None)
+    row["content"] = truncate_excerpt(
+        served_text(content, metadata), VECTOR_METADATA_EXCERPT_CHARS
+    )
+    if served:
+        row[EXCERPT_SOURCE_KEY] = EXCERPT_SOURCE_SUMMARY
+    return row
 
 
 def clean_uri(value: object) -> str | None:

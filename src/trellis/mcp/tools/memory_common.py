@@ -72,6 +72,15 @@ def _refuse_memory_pointer_keys(metadata: dict[str, Any] | None) -> None:
         )
 
 
+class ReferenceFieldsError(ValueError):
+    """``save_memory``'s ``summary`` / ``uri`` were refused; ``field`` names the key."""
+
+    def __init__(self, message: str, *, field: str) -> None:
+        super().__init__(message)
+        self.message = message
+        self.field = field
+
+
 def _with_reference_fields(
     metadata: dict[str, Any] | None, summary: str | None, uri: str | None
 ) -> dict[str, Any] | None:
@@ -80,10 +89,17 @@ def _with_reference_fields(
     Both land flat under those keys. A parameter and a metadata key of the same
     name that disagree are refused, and so is a summary the write boundary would
     refuse, here and before anything is read, so an exact-duplicate hit cannot
-    hide a bad one. A ``summary`` with no ``document_form`` anywhere in the
-    metadata stamps ``document_form: "reference"``, the form that makes the
-    summary what is embedded and shown. Neither parameter given: the metadata is
-    returned as it came.
+    hide a bad one. The ``summary`` parameter means "store a reference": with no
+    form named anywhere in the metadata it stamps ``document_form: "reference"``,
+    the form that makes the summary what is embedded and shown, and a metadata
+    form other than ``reference`` is a disagreement, refused naming that form
+    (a plain ``summary`` key on another form goes in ``metadata``). Neither
+    parameter given: the metadata is returned as it came.
+
+    Raises:
+        ReferenceFieldsError: the caller records the rejection and raises the
+            tool's invalid-params error (``save_memory`` does, so the literal
+            ``tool=`` the capture-surface roster reads stays in ``memory.py``).
     """
     if summary is None and uri is None:
         return metadata
@@ -92,18 +108,23 @@ def _with_reference_fields(
         if value is None:
             continue
         if key in bag and bag[key] != value:
-            _raise_invalid_params(
-                f"{key} was given as a parameter and in metadata, and they differ",
-                data={"field": key, "tool": "save_memory"},
-            )
+            msg = f"{key} was given as a parameter and in metadata, and they differ"
+            raise ReferenceFieldsError(msg, field=key)
         bag[key] = value
-    if summary is not None and document_form_of(bag) is None:
-        bag["document_form"] = REFERENCE_FORM
-    refusal = summary_refusal(bag, limit=EMBED_INPUT_CHAR_CAP)
-    if refusal is not None:
-        _raise_invalid_params(
-            refusal, data={"field": SUMMARY_KEY, "tool": "save_memory"}
-        )
+    if summary is not None:
+        form = document_form_of(bag)
+        if form is None:
+            bag["document_form"] = REFERENCE_FORM
+        elif form != REFERENCE_FORM:
+            msg = (
+                f"summary stores a reference document, but metadata names the form "
+                f"{form!r}; drop the form, or put the summary key in metadata "
+                "instead of the parameter"
+            )
+            raise ReferenceFieldsError(msg, field="metadata.document_form")
+    problem = summary_refusal(bag, limit=EMBED_INPUT_CHAR_CAP)
+    if problem is not None:
+        raise ReferenceFieldsError(problem, field=SUMMARY_KEY)
     return bag
 
 

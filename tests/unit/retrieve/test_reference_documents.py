@@ -2,9 +2,11 @@
 
 A reference document is one row: ``content`` is the full text,
 ``metadata["summary"]`` is the summary the caller wrote, ``metadata["uri"]`` is a
-link to the original. Only a row saved with the ``reference`` form **and** a
-summary is embedded and excerpted from the summary; every other row, including
-one that merely carries a ``summary`` or a ``uri``, behaves as it always did.
+link to the original. A non-chunk row carrying the ``reference`` form **and** a
+summary of at most ``EMBED_INPUT_CHAR_CAP`` characters is embedded and excerpted
+from the summary; every other row, including one that merely carries a
+``summary`` or a ``uri``, and a reference whose summary is over the cap, behaves
+as it always did.
 
 The guard tests at the bottom pass on ``main`` as well. They pin what must NOT
 change, so a mutant that widens the predicate fails one of them.
@@ -149,6 +151,21 @@ class TestUnchangedWhenNotASummaryServedReference:
         row, embedder = _row(chunk_meta, chunk_text)
         assert embedder.texts == [chunk_text]
         assert row["metadata"]["content"] == chunk_text
+        assert EXCERPT_SOURCE_KEY not in row["metadata"]
+
+    def test_a_summary_over_the_embed_cap_falls_back_to_the_whole_body(self) -> None:
+        # The embedder would see only the first EMBED_INPUT_CHAR_CAP characters of
+        # it, so it is not used at all (corpus sync does not run the write cap).
+        meta = {
+            "document_form": "reference",
+            "summary": "s" * (EMBED_INPUT_CHAR_CAP + 1),
+            "uri": URI,
+        }
+        row, embedder = _row(meta)
+        assert embedder.texts == [BODY[:EMBED_INPUT_CHAR_CAP]]
+        assert row["metadata"]["content"] == truncate_excerpt(
+            BODY, VECTOR_METADATA_EXCERPT_CHARS
+        )
         assert EXCERPT_SOURCE_KEY not in row["metadata"]
 
     @pytest.mark.parametrize("summary", [None, "", "   \n", 5, ["a summary"]])

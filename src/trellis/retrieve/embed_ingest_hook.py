@@ -61,14 +61,11 @@ import structlog
 from trellis.core.write_config import EMBED_ON_INGEST_FLAG, resolve_write_behaviour
 from trellis.errors import ConfigError
 from trellis.llm.egress import EgressGate, EgressVerdict, egress_reason
-from trellis.retrieve.excerpts import truncate_excerpt
-from trellis.retrieve.reference import (
-    EXCERPT_SOURCE_KEY,
-    EXCERPT_SOURCE_SUMMARY,
-    SUMMARY_KEY,
-    is_summary_served,
-    served_text,
+from trellis.retrieve.embed_limits import (
+    EMBED_INPUT_CHAR_CAP,
+    VECTOR_METADATA_EXCERPT_CHARS,
 )
+from trellis.retrieve.reference import served_text, shape_vector_row
 from trellis.schemas.classification import SHADOW_TAGS_KEY
 
 if TYPE_CHECKING:
@@ -94,19 +91,9 @@ __all__ = [
 # :mod:`trellis.core.write_config`, which owns the name and the parsing for
 # every write-behaviour knob. Off by default.
 
-#: Cap on the characters sent to the embedder. Embedding models have
-#: finite context windows (≈8k tokens for common models); 8000 chars
-#: (≈2k tokens) keeps every provider comfortably inside its window while
-#: covering far more content than a pack excerpt ever renders.
-EMBED_INPUT_CHAR_CAP = 8000
-
-#: Cap on the content excerpt stored in vector metadata. Matches
-#: :data:`~trellis.retrieve.excerpts.EXCERPT_MAX_CHARS`, which is what
-#: ``SemanticSearch`` renders into ``PackItem.excerpt``; storing more
-#: duplicates the document store to no benefit. The stored string is the
-#: *truncator's* output, so it is already ``<=`` this many characters —
-#: a boundary-aware, size-marked excerpt rather than a raw slice.
-VECTOR_METADATA_EXCERPT_CHARS = 500
+# ``EMBED_INPUT_CHAR_CAP`` and ``VECTOR_METADATA_EXCERPT_CHARS`` are defined in
+# :mod:`trellis.retrieve.embed_limits` (``reference`` needs them and this module
+# imports ``reference``) and re-exported here under their original names.
 
 
 def embed_on_ingest_enabled(registry: StoreRegistry | None = None) -> bool:
@@ -240,28 +227,18 @@ def build_vector_row(
     # A summary-served reference is embedded and excerpted from its summary,
     # not from the first ``EMBED_INPUT_CHAR_CAP`` characters of its body; every
     # other document, and every chunk, is read as it always was.
-    text = served_text(content, metadata)
-    summary_served = is_summary_served(metadata)
-    vector = embedding_fn(text[:EMBED_INPUT_CHAR_CAP])
+    vector = embedding_fn(served_text(content, metadata)[:EMBED_INPUT_CHAR_CAP])
+    # Shadow tags are a measurement-only record on the document (#321).
+    # Copying them here would duplicate them into a second store whose
+    # write path has no shadow awareness and which the promotion analyzer
+    # never reads — a copy that can only drift.
     row_metadata: dict[str, Any] = {
-        # Shadow tags are a measurement-only record on the document (#321).
-        # Copying them here would duplicate them into a second store whose
-        # write path has no shadow awareness and which the promotion analyzer
-        # never reads — a copy that can only drift. The marker is this row's
-        # to stamp, so a stored value under its name is never copied; and a
-        # served summary is not copied either, because the ``content`` excerpt
-        # below is cut from it.
-        **{
-            k: v
-            for k, v in (metadata or {}).items()
-            if k not in (SHADOW_TAGS_KEY, EXCERPT_SOURCE_KEY)
-            and not (summary_served and k == SUMMARY_KEY)
-        },
+        **{k: v for k, v in (metadata or {}).items() if k != SHADOW_TAGS_KEY},
         "doc_id": doc_id,
-        "content": truncate_excerpt(text, VECTOR_METADATA_EXCERPT_CHARS),
     }
-    if summary_served:
-        row_metadata[EXCERPT_SOURCE_KEY] = EXCERPT_SOURCE_SUMMARY
+    # What the row says of its served text (the excerpt, the marker, the
+    # withheld summary) is one rule shared with ``POST /vectors``.
+    shape_vector_row(row_metadata, content, metadata)
     row_metadata.setdefault("created_at", created_at or datetime.now(UTC).isoformat())
     return {"item_id": doc_id, "vector": vector, "metadata": row_metadata}
 

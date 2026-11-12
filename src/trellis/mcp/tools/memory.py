@@ -44,6 +44,7 @@ from trellis.mcp.reconcile import (
 )
 from trellis.mcp.rejections import _note_noop_call, _record_boundary_rejection
 from trellis.mcp.tools.memory_common import (
+    ReferenceFieldsError,
     _append_note,
     _match_readable,
     _refuse_label_below_request,
@@ -312,6 +313,29 @@ def _supersede_saved_memory(
     return f"Memory saved (supersedes {supersedes}): {stored_id}"
 
 
+def _reference_fields(
+    metadata: dict[str, Any] | None, summary: str | None, uri: str | None
+) -> dict[str, Any] | None:
+    """``save_memory``'s metadata with its ``summary`` and ``uri``, refusals recorded.
+
+    Recorded and raised here rather than in :mod:`trellis.mcp.tools.memory_common`,
+    so the rejection site carries the literal ``tool=`` the capture-surface roster
+    reads, as the empty-content refusal does.
+    """
+    try:
+        return _with_reference_fields(metadata, summary, uri)
+    except ReferenceFieldsError as refusal:
+        _record_boundary_rejection(
+            tool="save_memory",
+            rejections=[
+                {"kind": "value", "loc": refusal.field, "msg": refusal.message}
+            ],
+        )
+        _raise_invalid_params(
+            refusal.message, data={"field": refusal.field, "tool": "save_memory"}
+        )
+
+
 @mcp.tool(auth=trellis_scope(SCOPE_INGEST))
 def save_memory(
     content: str,
@@ -371,7 +395,7 @@ def save_memory(
 
     registry = _get_registry()
     metadata = _stamp_sensitivity(
-        _with_reference_fields(metadata, summary, uri), sensitivity, tool="save_memory"
+        _reference_fields(metadata, summary, uri), sensitivity, tool="save_memory"
     )
     executor = build_curate_executor(
         registry, evidence_embed="none", clearance=current_clearance()

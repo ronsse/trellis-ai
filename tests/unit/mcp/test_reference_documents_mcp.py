@@ -13,6 +13,7 @@ from mcp.shared.exceptions import MCPError
 import trellis.mcp.server as server_mod
 from tests.unit.mcp.conftest import unwrap_tool
 from trellis.retrieve.embed_ingest_hook import EMBED_INPUT_CHAR_CAP
+from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
 save_memory = unwrap_tool(server_mod.save_memory)
@@ -31,6 +32,16 @@ def _count(registry: StoreRegistry) -> int:
     return registry.knowledge.document_store.count(include_chunks=True)
 
 
+def _rejections(registry: StoreRegistry) -> list[Any]:
+    return [
+        event
+        for event in registry.operational.event_log.get_events(
+            event_type=EventType.WRITE_REJECTED, limit=50
+        )
+        if event.source == "mcp:save_memory"
+    ]
+
+
 class TestSaveMemory:
     def test_stores_both_keys_and_stamps_the_form(
         self, temp_registry: StoreRegistry
@@ -44,10 +55,65 @@ class TestSaveMemory:
         assert doc["metadata"]["uri"] == URI
         assert doc["metadata"]["document_form"] == "reference"
 
-    def test_a_named_form_is_not_overwritten(
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            {"document_form": "note"},
+            # A flat ``content_type`` outside the ContentType vocabulary reads as
+            # a form, so it is a named form too.
+            {"content_type": "handbook"},
+        ],
+    )
+    def test_a_named_non_reference_form_is_refused_naming_it(
+        self, temp_registry: StoreRegistry, metadata: dict[str, Any]
+    ) -> None:
+        form = next(iter(metadata.values()))
+        # The summary parameter means "store a reference", so another form is a
+        # disagreement, not something to write past: before this it stamped
+        # nothing, embedded the body, never used the summary and took any length.
+        with pytest.raises(MCPError, match=f"names the form '{form}'"):
+            save_memory(BODY, summary=SUMMARY, metadata=metadata)
+        assert _count(temp_registry) == 0
+
+    def test_an_over_long_summary_on_another_form_is_refused_too(
         self, temp_registry: StoreRegistry
     ) -> None:
-        reply = save_memory(BODY, summary=SUMMARY, metadata={"document_form": "note"})
+        with pytest.raises(MCPError, match="names the form 'note'"):
+            save_memory(
+                BODY,
+                summary="s" * (EMBED_INPUT_CHAR_CAP + 1),
+                metadata={"document_form": "note"},
+            )
+        assert _count(temp_registry) == 0
+
+    def test_the_form_reference_in_metadata_is_accepted(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        reply = save_memory(
+            BODY, summary=SUMMARY, metadata={"document_form": "reference"}
+        )
+        doc = temp_registry.knowledge.document_store.get(_saved_id(reply))
+        assert doc is not None
+        assert doc["metadata"]["document_form"] == "reference"
+        assert doc["metadata"]["summary"] == SUMMARY
+
+    def test_an_in_vocabulary_content_type_is_not_a_form_and_the_stamp_applies(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        # ``content_type: code`` is in the ContentType vocabulary, so it is
+        # a retrieval tag and names no form: the reference form is stamped.
+        reply = save_memory(BODY, summary=SUMMARY, metadata={"content_type": "code"})
+        doc = temp_registry.knowledge.document_store.get(_saved_id(reply))
+        assert doc is not None
+        assert doc["metadata"]["document_form"] == "reference"
+        assert doc["metadata"]["summary"] == SUMMARY
+
+    def test_a_plain_summary_key_on_another_form_goes_in_metadata(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        reply = save_memory(
+            BODY, metadata={"document_form": "note", "summary": SUMMARY}
+        )
         doc = temp_registry.knowledge.document_store.get(_saved_id(reply))
         assert doc is not None
         assert doc["metadata"]["document_form"] == "note"
@@ -117,6 +183,58 @@ class TestSaveMemory:
         assert doc is not None
         assert doc["metadata"]["summary"] == 7
         assert "document_form" not in doc["metadata"]
+
+
+class TestRefusalsAreRecorded:
+    """A refused summary or uri is a ``WRITE_REJECTED`` event, as an empty body is."""
+
+    @pytest.mark.parametrize(
+        ("kwargs", "loc"),
+        [
+            ({"summary": "   "}, "summary"),
+            ({"summary": "s" * (EMBED_INPUT_CHAR_CAP + 1)}, "summary"),
+            (
+                {"summary": SUMMARY, "metadata": {"summary": "another summary"}},
+                "summary",
+            ),
+            ({"uri": URI, "metadata": {"uri": "https://other.example.test/"}}, "uri"),
+            (
+                {"summary": SUMMARY, "metadata": {"document_form": "note"}},
+                "metadata.document_form",
+            ),
+        ],
+    )
+    def test_each_refusal_leaves_one_event(
+        self, temp_registry: StoreRegistry, kwargs: dict[str, Any], loc: str
+    ) -> None:
+        assert _rejections(temp_registry) == []
+
+        with pytest.raises(MCPError):
+            save_memory(BODY, **kwargs)
+
+        (event,) = _rejections(temp_registry)
+        assert event.payload["rejections"][0]["loc"] == loc
+        assert event.payload["rejections"][0]["kind"] == "value"
+        assert _count(temp_registry) == 0
+
+    def test_the_event_quotes_nothing_the_caller_sent(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        with pytest.raises(MCPError):
+            save_memory(
+                BODY,
+                summary="a secret summary " * 600,
+                metadata={"document_form": "private-form"},
+            )
+
+        (event,) = _rejections(temp_registry)
+        assert "a secret summary" not in str(event.payload)
+
+    def test_an_accepted_call_records_no_rejection(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        save_memory(BODY, summary=SUMMARY, uri=URI)
+        assert _rejections(temp_registry) == []
 
 
 class TestGetItems:

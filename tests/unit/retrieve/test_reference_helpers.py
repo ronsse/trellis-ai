@@ -9,11 +9,20 @@ from typing import Any
 
 import pytest
 
+from trellis.retrieve.embed_ingest_hook import EMBED_INPUT_CHAR_CAP
+from trellis.retrieve.embed_limits import (
+    EMBED_INPUT_CHAR_CAP as CAP_IN_LIMITS,
+)
+from trellis.retrieve.embed_limits import (
+    VECTOR_METADATA_EXCERPT_CHARS,
+)
+from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.retrieve.reference import (
     EXCERPT_SOURCE_KEY,
     clean_uri,
     fetched_body,
     served_text,
+    shape_vector_row,
     summary_link_line,
     summary_of,
     summary_refusal,
@@ -43,6 +52,66 @@ class TestPredicate:
         self, metadata: dict[str, Any] | None
     ) -> None:
         assert summary_of(metadata) is None
+
+
+class TestSummaryOverTheEmbedCap:
+    """A summary the embedder would cut is not summary-served (#1250).
+
+    Corpus sync does not run the write boundary's cap, so the predicate holds it:
+    a summary the embedder would see only in part falls back to the body, whole.
+    """
+
+    def test_the_cap_is_one_number(self) -> None:
+        assert CAP_IN_LIMITS == EMBED_INPUT_CHAR_CAP
+
+    def test_a_summary_at_the_cap_is_served(self) -> None:
+        summary = "s" * EMBED_INPUT_CHAR_CAP
+        assert summary_of({"document_form": "reference", "summary": summary}) == summary
+
+    def test_the_cap_is_on_the_stripped_summary(self) -> None:
+        padded = "  " + "s" * EMBED_INPUT_CHAR_CAP + "\n"
+        assert summary_of({"document_form": "reference", "summary": padded}) == (
+            "s" * EMBED_INPUT_CHAR_CAP
+        )
+
+    def test_a_summary_over_the_cap_is_not_served(self) -> None:
+        over = "s" * (EMBED_INPUT_CHAR_CAP + 1)
+        meta = {"document_form": "reference", "summary": over}
+        assert summary_of(meta) is None
+        assert served_text("the body", meta) == "the body"
+
+
+class TestShapeVectorRow:
+    BODY = "the body of a document " * 60
+
+    def test_a_summary_served_row_gets_the_summary_excerpt_and_the_marker(self) -> None:
+        meta = {"document_form": "reference", "summary": "a short summary", "uri": URI}
+        row = shape_vector_row(
+            {"summary": "a short summary", "content": "stale", "uri": URI},
+            self.BODY,
+            meta,
+        )
+        assert row["content"] == "a short summary"
+        assert row[EXCERPT_SOURCE_KEY] == "summary"
+        assert "summary" not in row
+        assert row["uri"] == URI
+
+    def test_any_other_row_gets_the_body_excerpt_and_no_marker(self) -> None:
+        row = shape_vector_row(
+            {EXCERPT_SOURCE_KEY: "summary", "summary": "kept", "content": "stale"},
+            self.BODY,
+            {"summary": "kept"},
+        )
+        assert row["content"] == truncate_excerpt(
+            self.BODY, VECTOR_METADATA_EXCERPT_CHARS
+        )
+        assert EXCERPT_SOURCE_KEY not in row
+        assert row["summary"] == "kept"
+
+    def test_the_row_is_returned_and_shaped_in_place(self) -> None:
+        row: dict[str, Any] = {}
+        assert shape_vector_row(row, "body", None) is row
+        assert row == {"content": "body"}
 
 
 class TestUriIsUntrusted:
