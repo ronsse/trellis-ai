@@ -15,6 +15,7 @@ from trellis.feedback.attribution import (
     PackScope,
     lookup_pack_items_by_strategy,
     lookup_pack_scope,
+    normalize_pack_id,
 )
 from trellis.feedback.models import PackFeedback
 from trellis.schemas.outcome import (
@@ -301,6 +302,11 @@ def record_feedback(
         ``feedback_id``, per-sink emission status, and any captured
         errors.
     """
+    # One stored form of the join key, whichever surface called: the event's
+    # ``pack_id`` and ``entity_id``, and the OutcomeEvent's ``pack_id``, below.
+    # (``PackFeedback.from_agent_signal`` does the same for the JSONL row.)
+    pack_id = normalize_pack_id(pack_id)
+
     log_path = Path(log_dir) / "pack_feedback.jsonl"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 

@@ -10,6 +10,7 @@ from typing import Any
 import structlog
 
 from trellis.core.ids import generate_prefixed_id
+from trellis.feedback.attribution import normalize_pack_id
 
 logger = structlog.get_logger(__name__)
 
@@ -256,6 +257,7 @@ class PackFeedback:
             succeeded = rating >= SUCCESS_RATING_THRESHOLD
 
         metadata: dict[str, Any] = {}
+        pack_id = normalize_pack_id(pack_id)
         if pack_id:
             metadata["pack_id"] = pack_id
         if trace_id:

@@ -1268,3 +1268,118 @@ class TestBulkDuplicateCurrentRows:
         assert failure["edges"] == len(self.EDGES)
         assert failure["error_type"] == "RuntimeError"
         assert failure["log_level"] == "warning"
+
+
+def _not_begun() -> _FakeNeo4jError:
+    """The error behind #1118, as ArcadeDB answers it over Bolt."""
+    return _FakeNeo4jError(
+        "Transaction not begun", "Neo.ClientError.Transaction.TransactionNotFound"
+    )
+
+
+class TestArcadeDBRetriesATransactionThatNeverBegan:
+    """``TransactionNotFound`` / "Transaction not begun" re-runs the whole write.
+
+    ArcadeDB answered one racing edge write with that error in a live-infra
+    run (#1118). It is a ``ClientError``, so the driver's managed retry does
+    not re-run it, and ``upsert_edges_bulk`` had no retry of its own. The
+    transaction never began, so nothing was written and a re-run from the
+    start is safe. Only that exact shape is retried: the same code also
+    carries ArcadeDB's duplicate-key violations, and a constraint violation
+    must still surface.
+    """
+
+    EDGES = ({"source_id": "a", "target_id": "b", "edge_type": "links_to"},)
+    ONE_ROW = ({"row_index": 0, "edge_id": "e0"},)
+
+    @staticmethod
+    def _bulk(store: BoltOpenCypherGraphStore, writes: list[Any]) -> MagicMock:
+        session = MagicMock()
+        session.execute_read.return_value = [{"node_id": "a"}, {"node_id": "b"}]
+        session.execute_write.side_effect = writes
+        store._driver.session.return_value.__enter__.return_value = session  # type: ignore[attr-defined]
+        # The post-commit duplicate re-read is not what is under test.
+        store._rows_with_duplicate_current_edges = MagicMock(  # type: ignore[method-assign]
+            return_value=set()
+        )
+        return session
+
+    def test_a_bulk_write_that_never_began_is_re_run(self) -> None:
+        store = _make_arcadedb_store()
+        session = self._bulk(store, [_not_begun(), self.ONE_ROW])
+
+        with capture_logs() as logs:
+            assert store.upsert_edges_bulk(list(self.EDGES)) == ["e0"]
+
+        assert session.execute_write.call_count == 2
+        retried = [e for e in logs if e["event"] == "arcadedb_transaction_not_begun"]
+        assert len(retried) == 1
+        assert retried[0]["log_level"] == "warning"
+
+    def test_a_bulk_write_that_never_begins_raises_after_the_bound(self) -> None:
+        store = _make_arcadedb_store()
+        session = self._bulk(
+            store, [_not_begun() for _ in range(_EDGE_CLAIM_RETRY_ATTEMPTS + 2)]
+        )
+
+        with pytest.raises(_FakeNeo4jError, match="not begun"):
+            store.upsert_edges_bulk(list(self.EDGES))
+
+        assert session.execute_write.call_count == _EDGE_CLAIM_RETRY_ATTEMPTS
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            # ArcadeDB's duplicate-key violation rides the same code.
+            _FakeNeo4jError(
+                "Duplicated key [[\"v1\"]] found on index 'Node[version_id]'",
+                "Neo.ClientError.Transaction.TransactionNotFound",
+            ),
+            _FakeNeo4jError(
+                "Node(1) already exists with label `Node`",
+                "Neo.ClientError.Schema.ConstraintValidationFailed",
+            ),
+            # Same message, other code: "exactly that error", not its text.
+            _FakeNeo4jError(
+                "Transaction not begun", "Neo.ClientError.Statement.SyntaxError"
+            ),
+            _FakeNeo4jError("boom", "Neo.ClientError.Statement.ArithmeticError"),
+        ],
+        ids=["duplicate-key", "constraint", "other-code", "other-client-error"],
+    )
+    def test_nothing_else_is_retried_on_the_bulk_path(
+        self, error: _FakeNeo4jError
+    ) -> None:
+        store = _make_arcadedb_store()
+        session = self._bulk(store, [error, self.ONE_ROW])
+
+        with pytest.raises(_FakeNeo4jError):
+            store.upsert_edges_bulk(list(self.EDGES))
+
+        assert session.execute_write.call_count == 1
+
+    def test_the_base_bolt_store_does_not_retry_a_bulk_write(self) -> None:
+        """Only ArcadeDB reports this error; a Neo4j deployment gets no widening."""
+        store = _make_store()
+        session = self._bulk(store, [_not_begun(), self.ONE_ROW])
+
+        with pytest.raises(_FakeNeo4jError):
+            store.upsert_edges_bulk(list(self.EDGES))
+
+        assert session.execute_write.call_count == 1
+
+    def test_a_single_edge_write_that_never_began_is_re_run(self) -> None:
+        store = _make_arcadedb_store()
+        execute_write = _arm_execute_write(
+            store, [_not_begun(), {"edge_id": "edge_01"}]
+        )
+
+        assert store.upsert_edge("src", "tgt", "race-rel", {}) == "edge_01"
+        assert execute_write.call_count == 2
+
+    def test_the_predicate_is_narrow(self) -> None:
+        store = _make_arcadedb_store()
+        assert store._is_edge_write_contention(_not_begun()) is True
+        assert store._is_edge_write_contention(_FakeNeo4jError("x", "y")) is False
+        # The base class never widens.
+        assert _make_store()._is_edge_write_contention(_not_begun()) is False

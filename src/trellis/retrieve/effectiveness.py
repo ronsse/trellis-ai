@@ -31,6 +31,7 @@ from trellis.classify.demotion_gate import (
 )
 from trellis.core.base import TrellisModel
 from trellis.core.pack_holdout import drop_holdout
+from trellis.feedback.attribution import event_pack_id
 from trellis.feedback.models import SUCCESS_RATING_THRESHOLD
 from trellis.learning.pack_observations import join_pack_feedback
 from trellis.schemas.advisory import DriftPattern
@@ -375,7 +376,7 @@ def analyze_effectiveness(
     pack_helpful: dict[str, set[str]] = {}
     pack_unhelpful: dict[str, set[str]] = {}
     for event in feedback_events:
-        pack_id = event.payload.get("pack_id") or event.entity_id
+        pack_id = event_pack_id(event)
         if not pack_id or pack_id not in pack_items:
             continue
         rating = event.payload.get("rating", 0.0)
@@ -786,7 +787,7 @@ def analyze_advisory_effectiveness(
 
     pack_feedback: dict[str, bool] = {}
     for event in feedback_events:
-        pack_id = event.payload.get("pack_id") or event.entity_id
+        pack_id = event_pack_id(event)
         if pack_id and pack_id in pack_advisories:
             rating = event.payload.get("rating", 0.0)
             pack_feedback[pack_id] = event.payload.get(
