@@ -36,6 +36,7 @@ import structlog
 from pydantic import Field, model_validator
 
 from trellis.core.base import TrellisModel
+from trellis.feedback.attribution import event_pack_id
 from trellis.schemas.document_metadata import document_form_of
 from trellis.schemas.pack import Pack, PackItem
 from trellis.stores.base.event_log import (
@@ -816,7 +817,7 @@ def analyze_dimension_predictiveness(  # noqa: PLR0912, PLR0915
     #: pack_id -> success_bool. Latest feedback wins when duplicated.
     pack_success: dict[str, bool] = {}
     for event in feedback_events:
-        pack_id = event.payload.get("pack_id") or event.entity_id
+        pack_id = event_pack_id(event)
         if not pack_id or pack_id not in pack_scores:
             continue
         explicit = event.payload.get("success")

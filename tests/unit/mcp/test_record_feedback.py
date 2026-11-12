@@ -254,6 +254,33 @@ class TestJsonlParity:
         assert _rows(temp_registry)[0]["metadata"]["pack_id"] == "pack_r3"
 
 
+class TestPackIdRecordedOneForm:
+    """A padded ``pack_id`` is recorded in the form the governed family uses."""
+
+    def test_padded_id_is_stripped_in_row_and_event(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        record_feedback(pack_id="  pack_padded\t", rating=0.6)
+
+        (row,) = _rows(temp_registry)
+        assert row["metadata"]["pack_id"] == "pack_padded"
+        (payload,) = _payloads(temp_registry)
+        assert payload["pack_id"] == "pack_padded"
+        assert payload["metadata"]["pack_id"] == "pack_padded"
+        (event,) = temp_registry.operational.event_log.get_events(
+            event_type=EventType.FEEDBACK_RECORDED, limit=10
+        )
+        assert event.entity_id == "pack_padded"
+
+    def test_reconcile_replays_the_stripped_id(
+        self, temp_registry: StoreRegistry
+    ) -> None:
+        record_feedback(pack_id=" pack_replay ", rating=0.6)
+
+        (signal,) = load_feedback_log(_log_dir(temp_registry))
+        assert signal.metadata["pack_id"] == "pack_replay"
+
+
 class TestFailingEventSink:
     """A sink outage degrades to the audit row; it never reaches the agent."""
 
