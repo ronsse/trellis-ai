@@ -8,9 +8,12 @@ construction: only a seeded stamp can stand in for a second process.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from trellis.core.pack_holdout import HOLDOUT_KEY
 from trellis.core.write_provenance import WRITE_PROVENANCE_KEY
@@ -31,8 +34,24 @@ NEW = {"version": "0.9.1.dev200+gbbbbbbb", "commit": "bbbbbbb"}
 OLD = {"version": "0.9.1.dev100+gaaaaaaa", "commit": "aaaaaaa"}
 
 
+_CLOCK: dict[str, datetime] = {}
+
+
 def _now() -> datetime:
-    return datetime.now(tz=UTC).replace(microsecond=0)
+    """One reading per test.
+
+    Every span asserted here is exact, and two readings of the wall clock can
+    fall either side of a second: rows written "20 hours ago" and "6 hours
+    ago" then sit 14 hours and one second apart.
+    """
+    return _CLOCK.setdefault("now", datetime.now(tz=UTC).replace(microsecond=0))
+
+
+@pytest.fixture(autouse=True)
+def _one_clock_reading_per_test() -> Iterator[None]:
+    _CLOCK.clear()
+    yield
+    _CLOCK.clear()
 
 
 def _pack(
