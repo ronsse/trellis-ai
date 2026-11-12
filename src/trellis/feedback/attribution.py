@@ -36,7 +36,7 @@ import structlog
 from trellis.stores.base.event_log import EventType
 
 if TYPE_CHECKING:
-    from trellis.stores.base.event_log import EventLog
+    from trellis.stores.base.event_log import Event, EventLog
 
 logger = structlog.get_logger(__name__)
 
@@ -505,6 +505,32 @@ def payload_pack_id(payload: dict[str, object]) -> str:
     """
     value = payload.get("pack_id")
     return value.strip() if isinstance(value, str) else ""
+
+
+def normalize_pack_id(value: str | None) -> str | None:
+    """A pack id in its one stored form: stripped, or ``None`` when none is left.
+
+    The writer-side spelling of what :func:`payload_pack_id` and the learning
+    join read: both feedback families record this form (the governed handler
+    always did; the ``PackFeedback`` family does through
+    :meth:`~trellis.feedback.models.PackFeedback.from_agent_signal` and
+    :func:`~trellis.feedback.recording.record_feedback`). A blank id is an
+    absent one, which is what the MCP tool already made of it.
+    """
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
+
+
+def event_pack_id(event: Event) -> str:
+    """The pack a ``FEEDBACK_RECORDED`` event grades, stripped, or ``""``.
+
+    The payload's ``pack_id``, else the event's ``entity_id`` -- the two keys
+    the readers join on -- each stripped, so a row recorded before the writers
+    agreed on one form (a padded id) joins to its ``PACK_ASSEMBLED`` row all
+    the same. ``""`` is the caller's "names no pack" and is skipped.
+    """
+    return payload_pack_id(event.payload or {}) or (event.entity_id or "").strip()
 
 
 def item_namespace(item_id: str) -> str:
