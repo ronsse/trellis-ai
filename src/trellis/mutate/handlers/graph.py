@@ -124,6 +124,7 @@ def _refuse_node_evidence_ref(
         document_store=registry.knowledge.document_store,
         clearance=clearance,
         writer=writer,
+        graph_store=registry.knowledge.graph_store,
     )
     if refusal is not None:
         raise ValidationError(
@@ -189,10 +190,12 @@ def _carry_held_evidence_ref(
 
     For the writers that replace a node's whole bag (``entity.create`` over an
     existing id, ``observation.record`` and ``measurement.record`` of an
-    existing id). A stored value
-    that is empty or ``None`` is not held and is not copied.
+    existing id) and for ``entity.update``'s merge. A stored value
+    that is empty or ``None`` is not held and is not copied. A supplied ``None``
+    counts as leaving it out: the rule accepts one only from a caller who cannot
+    read the held pointer (it is a no-op for them), so the pointer stays.
     """
-    if EVIDENCE_REF_KEY in properties or stored_properties is None:
+    if properties.get(EVIDENCE_REF_KEY) is not None or stored_properties is None:
         return
     held = stored_properties.get(EVIDENCE_REF_KEY)
     if held not in (None, ""):
@@ -679,6 +682,10 @@ class EntityUpdateHandler:
             # existing bag, then let an explicit ``name`` win.
             props: dict[str, Any] = dict(existing["properties"])
             props.update(supplied_properties)
+            # A ``null`` evidence_ref reaches here only from a caller who cannot
+            # read the pointer the node holds (a reader's is refused above); it
+            # is a no-op for them, so the stored pointer survives the merge.
+            _carry_held_evidence_ref(props, existing["properties"])
             if "name" in command.args:
                 props["name"] = command.args["name"]
             changes: dict[str, Any] = {"properties": props}

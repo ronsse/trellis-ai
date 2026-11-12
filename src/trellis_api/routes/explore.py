@@ -804,7 +804,14 @@ def get_node_history(
                 status_code=404, detail=f"Entity not found: {entity_id}"
             )
     versions = conceal_node_pointers(
-        versions, registry.knowledge.document_store, request_clearance(ctx)
+        versions,
+        registry.knowledge.document_store,
+        request_clearance(ctx),
+        precedents=PrecedentClearance(
+            registry.knowledge.document_store,
+            request_clearance(ctx),
+            registry.knowledge.graph_store,
+        ),
     )
     return {
         "status": "ok",

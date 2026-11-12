@@ -32,6 +32,7 @@ from trellis.mutate import (
     Operation,
     build_curate_executor,
 )
+from trellis.retrieve.precedents import PrecedentClearance
 from trellis.retrieve.sensitivity import conceal_node_pointers
 from trellis.schemas.measurement import Measurement
 from trellis.schemas.observation import Observation
@@ -152,8 +153,16 @@ def list_observations(
         properties=props or None,
         limit=limit,
     )
+    clearance = request_clearance(ctx)
     rows = conceal_node_pointers(
-        rows, registry.knowledge.document_store, request_clearance(ctx)
+        rows,
+        registry.knowledge.document_store,
+        clearance,
+        precedents=PrecedentClearance(
+            registry.knowledge.document_store,
+            clearance,
+            registry.knowledge.graph_store,
+        ),
     )
     return {"observations": [_projected_node(r) for r in rows]}
 
