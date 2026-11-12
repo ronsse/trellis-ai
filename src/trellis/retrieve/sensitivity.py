@@ -76,6 +76,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from trellis.core.precedent_document import is_promoted_precedent_document
 from trellis.retrieve.concentration import resolve_parent_id
 from trellis.retrieve.parent_verdicts import ParentVerdictCache
 from trellis.retrieve.withholding import summarize_withheld
@@ -94,6 +95,7 @@ from trellis.schemas.pack import PackItem
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 
+    from trellis.retrieve.precedents import PrecedentClearance
     from trellis.schemas.classification import Sensitivity
     from trellis.schemas.pack import RejectedItem
     from trellis.stores.base.document import DocumentStore
@@ -828,6 +830,8 @@ def conceal_node_pointers(
     nodes: Iterable[dict[str, Any]],
     document_store: DocumentStore | None,
     clearance: Sensitivity,
+    *,
+    precedents: PrecedentClearance | None = None,
 ) -> list[dict[str, Any]]:
     """``nodes`` as a caller at ``clearance`` may be shown them by a graph read.
 
@@ -853,8 +857,14 @@ def conceal_node_pointers(
     none, comes back as the same object. ``restricted`` does no reads, and a
     missing store leaves every node as it is. A response that serves edges too
     passes both to :func:`conceal_graph_pointers`, to be judged once.
+
+    ``precedents`` is the request's :class:`PrecedentClearance`, for a route that
+    holds one: a pointer that names a promoted precedent the caller may not be
+    served is dropped too (see :func:`conceal_graph_pointers`).
     """
-    return conceal_graph_pointers(nodes, (), document_store, clearance)[0]
+    return conceal_graph_pointers(
+        nodes, (), document_store, clearance, precedents=precedents
+    )[0]
 
 
 def _edge_pointers(edge: Mapping[str, Any]) -> set[str]:
@@ -902,6 +912,8 @@ def conceal_graph_pointers(
     edges: Iterable[dict[str, Any]],
     document_store: DocumentStore | None,
     clearance: Sensitivity,
+    *,
+    precedents: PrecedentClearance | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """``(nodes, edges)`` as a caller at ``clearance`` may be shown them.
 
@@ -912,6 +924,14 @@ def conceal_graph_pointers(
     name it, and none when no row names one. A row that names only readable
     ids, or none, comes back as the same object. ``restricted`` does no reads,
     and a missing store leaves every row as it is.
+
+    ``precedents`` (the request's :class:`PrecedentClearance`, ``None`` for a
+    surface that holds none) widens "unreadable" for an id in the promoted
+    precedent namespace: such an id is judged by that gate alone, the one the
+    read doors use, instead of by its own row alone, so a precedent whose source
+    the caller may not read is not named either (#1232). The gate's own row read
+    replaces this pass's, and it memoises per precedent, so a request that
+    already judged the precedent (a search hit, a neighbour) pays nothing more.
     """
     node_pool = list(nodes)
     edge_pool = list(edges)
@@ -924,7 +944,18 @@ def conceal_graph_pointers(
         named |= _edge_pointers(edge)
     if not named:
         return node_pool, edge_pool
-    hidden = _unreadable_pointers(document_store, named, clearance)
+    gated = (
+        {i for i in named if is_promoted_precedent_document(i)}
+        if precedents is not None
+        else set()
+    )
+    hidden = _unreadable_pointers(document_store, named - gated, clearance)
+    if precedents is not None:
+        # The judgement every precedent read door makes (``verdict_of``): the
+        # precedent's own row and the document its ``source_item_id`` names. A
+        # pointer is an id with no text, but it still says a precedent exists
+        # that this key may not read.
+        hidden |= {i for i in gated if precedents.verdict_of(i) is not None}
     if not hidden:
         return node_pool, edge_pool
     return (

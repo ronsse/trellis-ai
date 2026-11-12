@@ -30,6 +30,7 @@ from tests.unit.retrieve.test_precedent_listing_clearance import (
 )
 from trellis.auth import generate_api_key
 from trellis.retrieve.precedents import PrecedentClearance
+from trellis.schemas.well_known import OBSERVATION
 from trellis.stores.registry import StoreRegistry
 from trellis_api.app import create_app
 
@@ -434,3 +435,132 @@ class TestHistory:
         )
 
         assert resp.status_code == 200
+
+
+# -- the precedent's id in another node's pointers (#1232) --
+
+HOLDER = "node-holder"
+
+
+def _hold(registry: StoreRegistry, precedent_id: str) -> None:
+    """A node that names an open document and the precedent, at every pointer."""
+    registry.knowledge.graph_store.upsert_node(
+        HOLDER,
+        "entity",
+        {"name": "holder note", "evidence_ref": precedent_id},
+        document_ids=[OPEN, precedent_id],
+    )
+
+
+def _holder_search(client, headers) -> str:
+    resp = client.get(
+        "/api/v1/graph/search", params={"q": "holder note"}, headers=headers
+    )
+    assert resp.status_code == 200, resp.text
+    assert HOLDER in resp.text, "the holder is served; only its pointer is judged"
+    return str(resp.text)
+
+
+def _holder_history(client, headers) -> str:
+    resp = client.get(
+        "/api/v1/graph/history", params={"entity_id": HOLDER}, headers=headers
+    )
+    assert resp.status_code == 200, resp.text
+    return str(resp.text)
+
+
+def _holder_entity(client, headers) -> str:
+    resp = client.get(f"/api/v1/entities/{HOLDER}", headers=headers)
+    assert resp.status_code == 200, resp.text
+    return str(resp.text)
+
+
+HOLDER_DOORS: dict[str, Callable[..., str]] = {
+    "search": _holder_search,
+    "history": _holder_history,
+    "entity": _holder_entity,
+}
+
+
+@pytest.mark.parametrize("door", sorted(HOLDER_DOORS))
+class TestAWithheldPrecedentIsNotNamedByAnotherNode:
+    """A pointer is an id with no text, and it still says the precedent exists.
+
+    The precedent's own row carries no label, so the plain pointer judgement
+    reads it as readable at ``internal``; only the source's label, which the read
+    doors judge, says no.
+    """
+
+    def test_a_key_cleared_for_the_source_still_sees_the_id(
+        self, client, registry, precedent, door
+    ):
+        _hold(registry, precedent)
+
+        text = HOLDER_DOORS[door](client, _headers(registry, CLEARED))
+
+        assert precedent in text
+
+    def test_a_key_below_the_sources_label_does_not(
+        self, client, registry, precedent, door
+    ):
+        _hold(registry, precedent)
+        # The premise: the same node names the precedent to a key that may read it.
+        assert precedent in HOLDER_DOORS[door](client, _headers(registry, CLEARED))
+
+        text = HOLDER_DOORS[door](client, _headers(registry, BELOW))
+
+        assert precedent not in text
+        if door != "search":  # a search result serves no ``document_ids``
+            assert OPEN in text, "a readable pointer is kept"
+
+    def test_a_precedent_nothing_withholds_is_still_named(
+        self, client, registry, open_precedent, door
+    ):
+        _hold(registry, open_precedent)
+
+        text = HOLDER_DOORS[door](client, _headers(registry, BELOW))
+
+        assert open_precedent in text
+
+
+class TestAnObservationDoesNotNameAWithheldPrecedent:
+    """``GET /observations`` judges an observation's ``evidence_ref`` as the others do.
+
+    The node carries no label, so it is served; its ``evidence_ref`` names a
+    precedent whose source is labelled above a ``read`` key, which the plain
+    document read would call readable (the precedent's own row has no label).
+    """
+
+    @staticmethod
+    def _observe(registry: StoreRegistry, precedent_id: str) -> None:
+        registry.knowledge.graph_store.upsert_node(
+            "obs-1",
+            OBSERVATION,
+            {
+                "subject_entity_id": "subject-1",
+                "observer_agent_id": "agent-1",
+                "content": "p99 latency rose",
+                "evidence_ref": precedent_id,
+            },
+        )
+
+    def _listing(self, client, headers) -> str:
+        resp = client.get("/api/v1/observations", headers=headers)
+        assert resp.status_code == 200, resp.text
+        assert "obs-1" in resp.text, "the observation is served; its pointer is not"
+        return str(resp.text)
+
+    def test_named_to_a_cleared_key_and_not_to_one_below_it(
+        self, client, registry, precedent
+    ):
+        self._observe(registry, precedent)
+
+        assert precedent in self._listing(client, _headers(registry, CLEARED))
+        assert precedent not in self._listing(client, _headers(registry, BELOW))
+
+    def test_a_precedent_nothing_withholds_is_still_named(
+        self, client, registry, open_precedent
+    ):
+        self._observe(registry, open_precedent)
+
+        assert open_precedent in self._listing(client, _headers(registry, BELOW))

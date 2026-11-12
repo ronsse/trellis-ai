@@ -182,6 +182,7 @@ def get_graph(
         [node, *subgraph.get("nodes", [])],
         registry.knowledge.document_store,
         current_clearance(),
+        precedents=precedents,
     )
     subgraph = {**subgraph, "nodes": neighbours}
     result = format_subgraph_as_markdown(root, subgraph, max_tokens=max_tokens)
@@ -263,7 +264,10 @@ def _render_fetched_item(
         # The node is served; a pointer to a document above the caller's
         # clearance is not.
         (node,) = conceal_node_pointers(
-            [node], registry.knowledge.document_store, current_clearance()
+            [node],
+            registry.knowledge.document_store,
+            current_clearance(),
+            precedents=precedents,
         )
         return "entity", format_entity_as_markdown(node)
 
