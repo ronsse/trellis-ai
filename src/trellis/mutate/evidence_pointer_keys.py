@@ -40,8 +40,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
+from trellis.core.precedent_document import is_promoted_precedent_document
 from trellis.mutate.sensitivity_floor import visible_document
 from trellis.retrieve.lifecycle import EVIDENCE_REF_KEY
+from trellis.retrieve.precedents import PrecedentClearance
 from trellis.schemas.classification import LIFECYCLE_KEY, Lifecycle
 
 if TYPE_CHECKING:
@@ -50,6 +52,7 @@ if TYPE_CHECKING:
     from trellis.mutate.commands import Command
     from trellis.schemas.classification import Sensitivity
     from trellis.stores.base.document import DocumentStore
+    from trellis.stores.base.graph import GraphStore
 
 #: ``metadata`` keys a document write may not carry, with the refusal each gets.
 DOCUMENT_POINTER_REFUSALS: Final[dict[str, str]] = {
@@ -175,8 +178,7 @@ def _unreadable_value_refusal(value: object, writer: str) -> NodeEvidenceRefRefu
 
     One builder for both places it is needed, so the words cannot drift apart: a
     node that holds no pointer, and a node whose pointer the caller cannot read
-    (:func:`node_evidence_ref_refusal`). ``None`` reaches it only from the
-    second, where clearing a pointer the caller cannot read is refused too.
+    (:func:`node_evidence_ref_refusal`).
     """
     if value is not None and (not isinstance(value, str) or not value):
         return NodeEvidenceRefRefusal(
@@ -195,6 +197,30 @@ def _unreadable_value_refusal(value: object, writer: str) -> NodeEvidenceRefRefu
     )
 
 
+def _stored_pointer_readable(
+    stored: object,
+    *,
+    document_store: DocumentStore,
+    clearance: Sensitivity,
+    graph_store: GraphStore | None,
+) -> bool:
+    """Whether the caller can read the document a node's stored pointer names.
+
+    A promoted precedent carries no label of its own, so the plain read above
+    would call it readable whatever its source's label says. Its id is also
+    judged by the precedent read doors' verdict, so the refusal agrees with
+    what a graph read shows of the same property (#1232).
+    """
+    if not isinstance(stored, str):
+        return False
+    if visible_document(document_store, stored, clearance=clearance) is None:
+        return False
+    if not is_promoted_precedent_document(stored):
+        return True
+    gate = PrecedentClearance(document_store, clearance, graph_store)
+    return gate.verdict_of(stored) is None
+
+
 def node_evidence_ref_refusal(
     properties: Mapping[str, Any],
     *,
@@ -202,6 +228,7 @@ def node_evidence_ref_refusal(
     document_store: DocumentStore,
     clearance: Sensitivity,
     writer: str,
+    graph_store: GraphStore | None = None,
 ) -> NodeEvidenceRefRefusal | None:
     """The refusal for the ``evidence_ref`` a node write carries, or ``None``.
 
@@ -216,9 +243,13 @@ def node_evidence_ref_refusal(
       sent again must keep working); any other value, ``null`` included, is
       refused. A caller that can read the stored document is told the node
       "may not change" it (:data:`NODE_EVIDENCE_REF_CHANGED`). One that cannot
-      (the document is above its clearance, or gone) is refused with the words
-      an unreadable target gets, so the refusal does not say the node holds a
-      pointer at all (#1057).
+      (the document is above its clearance, or gone; for a promoted precedent,
+      its source is) is refused a different value with the words an unreadable
+      target gets, so the refusal does not say the node holds a pointer at all
+      (#1057). ``null`` from that caller is accepted, as it is on a node that
+      holds none: it is a no-op they cannot tell from one, and the writers keep
+      the stored pointer as it was (``graph_store`` lets a precedent's
+      judgement read its node; the handlers pass it).
     * On a node that holds none, a value must be a non-empty string naming a
       document the caller may read under ``clearance``. A document that does not
       exist and one above the caller's clearance are refused with the same
@@ -241,12 +272,12 @@ def node_evidence_ref_refusal(
     if stored not in (None, ""):
         if value == stored:
             return None
-        readable = (
-            isinstance(stored, str)
-            and visible_document(document_store, stored, clearance=clearance)
-            is not None
-        )
-        if readable:
+        if _stored_pointer_readable(
+            stored,
+            document_store=document_store,
+            clearance=clearance,
+            graph_store=graph_store,
+        ):
             return NodeEvidenceRefRefusal(
                 NODE_EVIDENCE_REF_CHANGED,
                 f"{writer} may not change a node's evidence_ref once it is set: "
@@ -254,7 +285,9 @@ def node_evidence_ref_refusal(
                 "keeps the one it has. Sending the stored value again is "
                 "accepted. Nothing was written",
             )
-        return _unreadable_value_refusal(value, writer)
+        # A ``null`` from a key that cannot read the pointer is the no-op a
+        # pointerless node accepts; the writers keep the stored value.
+        return None if value is None else _unreadable_value_refusal(value, writer)
     if value is not None and (
         not isinstance(value, str)
         or not value

@@ -18,6 +18,7 @@ from trellis.mcp.boundary import (
 )
 from trellis.mcp.wiring import _get_registry
 from trellis.mutate import Command, CommandStatus, Operation, build_curate_executor
+from trellis.retrieve.precedents import PrecedentClearance
 from trellis.retrieve.sensitivity import conceal_node_pointers
 
 logger = structlog.get_logger(__name__)
@@ -178,8 +179,16 @@ def query_observations(
 
     # A node carries no label, so every match is served; what is dropped is an
     # ``evidence_ref`` naming a document this caller may not read.
+    clearance = current_clearance()
     rows = conceal_node_pointers(
-        rows, registry.knowledge.document_store, current_clearance()
+        rows,
+        registry.knowledge.document_store,
+        clearance,
+        precedents=PrecedentClearance(
+            registry.knowledge.document_store,
+            clearance,
+            registry.knowledge.graph_store,
+        ),
     )
     projected: list[dict[str, Any]] = []
     for row in rows:

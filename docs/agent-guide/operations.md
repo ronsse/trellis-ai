@@ -6384,9 +6384,14 @@ above its own clearance, and cannot touch a document it may not read.**
   - `node_evidence_ref_changed`: the node already holds an `evidence_ref` the
     caller can read, and the value differs (`null` and `""` included). When the
     caller cannot read the document the stored value names (above its clearance,
-    or gone), a different value is refused as `node_evidence_ref_unreadable` (or
-    `node_evidence_ref_not_a_string`) instead, in the words a node holding no
-    pointer would get, so the refusal does not say that a pointer exists. A caller
+    or gone; for a promoted precedent, above its source's label, the judgement
+    the graph reads make), a different value is refused as
+    `node_evidence_ref_unreadable` (or `node_evidence_ref_not_a_string`) instead,
+    in the words a node holding no pointer would get, so the refusal does not say
+    that a pointer exists. A `null` from that caller is accepted, as a pointerless
+    node accepts it, and writes nothing to the pointer: the stored value is left as
+    it was (`entity.update`, `entity.create`; `observation.record` reads a `null`
+    as leaving it out). A caller
     that can write a document and send the stored id as a guess still has it
     accepted unread; that needs the full id and is the same accepted posture as
     the 409 on `POST /api/v1/documents`. Sending the stored value again is

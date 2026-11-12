@@ -34,6 +34,7 @@ from tests.unit.retrieve.test_precedent_listing_clearance import (
     relabel,
 )
 from trellis.retrieve.precedents import PrecedentClearance
+from trellis.schemas.well_known import OBSERVATION
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -44,6 +45,7 @@ get_items = unwrap_tool(server_mod.get_items)
 get_graph = unwrap_tool(server_mod.get_graph)
 get_file_context = unwrap_tool(server_mod.get_file_context)
 search = unwrap_tool(server_mod.search)
+query_observations = unwrap_tool(server_mod.query_observations)
 
 SOURCE = "doc-source"
 PATH = "svc/runbook.py"
@@ -344,3 +346,50 @@ class TestAWithheldPrecedentIsNotNamedByAnotherNode:
 
         with as_http(BELOW):
             assert open_precedent in str(get_graph(self.HOLDER))
+
+
+class TestAnObservationDoesNotNameAWithheldPrecedent:
+    """``query_observations`` judges an observation's ``evidence_ref`` as the others do.
+
+    The node carries no label, so it is served; its ``evidence_ref`` names a
+    precedent whose source is labelled above a ``read`` key, which the plain
+    document read would call readable (the precedent's own row has no label).
+    """
+
+    @pytest.fixture
+    def observation(self, temp_registry: StoreRegistry, precedent: str) -> str:
+        temp_registry.knowledge.graph_store.upsert_node(
+            "obs-1",
+            OBSERVATION,
+            {
+                "subject_entity_id": "subject-1",
+                "observer_agent_id": "agent-1",
+                "content": "p99 latency rose",
+                "evidence_ref": precedent,
+            },
+        )
+        return "obs-1"
+
+    def test_named_to_a_cleared_caller_and_not_to_one_below_it(
+        self, temp_registry, precedent, observation
+    ):
+        with as_http(CLEARED):
+            cleared = query_observations(subject_entity_id="subject-1")
+        with as_http(BELOW):
+            below = query_observations(subject_entity_id="subject-1")
+
+        assert precedent in cleared, "the premise: a reader sees the id"
+        assert observation in below, "the observation is served; its pointer is not"
+        assert precedent not in below
+
+    def test_a_precedent_nothing_withholds_is_still_named(
+        self, temp_registry, open_precedent
+    ):
+        temp_registry.knowledge.graph_store.upsert_node(
+            "obs-1",
+            OBSERVATION,
+            {"subject_entity_id": "subject-1", "evidence_ref": open_precedent},
+        )
+
+        with as_http(BELOW):
+            assert open_precedent in query_observations(subject_entity_id="subject-1")
