@@ -4,6 +4,10 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A feedback `pack_id` now has one stored form, and the readers that compared it raw read old rows the same way (#1130).** `trellis curate feedback` and `POST /feedback` always stripped `pack_id`; MCP `record_feedback`, `POST /packs/{pack_id}/feedback` and the SDK recorded it as given, so a padded id reached the JSONL row and the event and `analyze_effectiveness`, `analyze_advisory_effectiveness`, the quality-dimension evaluator and the advisory generator dropped the row where the learning join kept it. `PackFeedback.from_agent_signal` and `feedback.recording.record_feedback` now record the stripped id (a blank one is an absent one), and those four readers strip through `trellis.feedback.attribution.event_pack_id` before comparing, so feedback already recorded with a padded id counts. No pack changes; the holdout is untouched.
+
 ## [0.11.1] - 2026-11-10
 
 The first published release since 0.9.0. The v0.11.0 tag's publish run failed at

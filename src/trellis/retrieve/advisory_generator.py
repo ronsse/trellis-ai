@@ -76,6 +76,7 @@ from pydantic import Field
 from trellis.core.base import TrellisModel
 from trellis.core.pack_holdout import drop_holdout
 from trellis.core.settings_registry import get_setting, validate_value
+from trellis.feedback.attribution import event_pack_id
 from trellis.feedback.models import SUCCESS_RATING_THRESHOLD
 from trellis.retrieve.effectiveness import lift_vs_baseline
 from trellis.schemas.advisory import (
@@ -644,7 +645,7 @@ class AdvisoryGenerator:
         # Build pack_id → success mapping
         pack_success: dict[str, bool] = {}
         for event in feedback_events:
-            pack_id = event.payload.get("pack_id") or event.entity_id
+            pack_id = event_pack_id(event)
             if pack_id and pack_id in pack_data:
                 rating = event.payload.get("rating", 0.0)
                 pack_success[pack_id] = event.payload.get(
