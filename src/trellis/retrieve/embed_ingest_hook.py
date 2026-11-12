@@ -62,6 +62,13 @@ from trellis.core.write_config import EMBED_ON_INGEST_FLAG, resolve_write_behavi
 from trellis.errors import ConfigError
 from trellis.llm.egress import EgressGate, EgressVerdict, egress_reason
 from trellis.retrieve.excerpts import truncate_excerpt
+from trellis.retrieve.reference import (
+    EXCERPT_SOURCE_KEY,
+    EXCERPT_SOURCE_SUMMARY,
+    SUMMARY_KEY,
+    is_summary_served,
+    served_text,
+)
 from trellis.schemas.classification import SHADOW_TAGS_KEY
 
 if TYPE_CHECKING:
@@ -194,7 +201,9 @@ def build_vector_row(
     Args:
         doc_id: Document ID; becomes the vector ``item_id`` (1:1).
         content: Full document content. Input to the embedder is capped
-            at :data:`EMBED_INPUT_CHAR_CAP` chars; the stored ``content``
+            at :data:`EMBED_INPUT_CHAR_CAP` chars, and is the caller's summary
+            instead for a summary-served reference
+            (:func:`~trellis.retrieve.reference.summary_of`); the stored ``content``
             excerpt is truncated to
             :data:`VECTOR_METADATA_EXCERPT_CHARS` on a clean boundary.
         metadata: Document metadata, passed through so retrieval-side
@@ -228,16 +237,31 @@ def build_vector_row(
     verdict = egress.verdict(doc_id, metadata)
     if verdict is not EgressVerdict.PERMITTED:
         raise EmbedWithheldError(verdict)
-    vector = embedding_fn(content[:EMBED_INPUT_CHAR_CAP])
+    # A summary-served reference is embedded and excerpted from its summary,
+    # not from the first ``EMBED_INPUT_CHAR_CAP`` characters of its body; every
+    # other document, and every chunk, is read as it always was.
+    text = served_text(content, metadata)
+    summary_served = is_summary_served(metadata)
+    vector = embedding_fn(text[:EMBED_INPUT_CHAR_CAP])
     row_metadata: dict[str, Any] = {
         # Shadow tags are a measurement-only record on the document (#321).
         # Copying them here would duplicate them into a second store whose
         # write path has no shadow awareness and which the promotion analyzer
-        # never reads — a copy that can only drift.
-        **{k: v for k, v in (metadata or {}).items() if k != SHADOW_TAGS_KEY},
+        # never reads — a copy that can only drift. The marker is this row's
+        # to stamp, so a stored value under its name is never copied; and a
+        # served summary is not copied either, because the ``content`` excerpt
+        # below is cut from it.
+        **{
+            k: v
+            for k, v in (metadata or {}).items()
+            if k not in (SHADOW_TAGS_KEY, EXCERPT_SOURCE_KEY)
+            and not (summary_served and k == SUMMARY_KEY)
+        },
         "doc_id": doc_id,
-        "content": truncate_excerpt(content, VECTOR_METADATA_EXCERPT_CHARS),
+        "content": truncate_excerpt(text, VECTOR_METADATA_EXCERPT_CHARS),
     }
+    if summary_served:
+        row_metadata[EXCERPT_SOURCE_KEY] = EXCERPT_SOURCE_SUMMARY
     row_metadata.setdefault("created_at", created_at or datetime.now(UTC).isoformat())
     return {"item_id": doc_id, "vector": vector, "metadata": row_metadata}
 

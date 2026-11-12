@@ -283,3 +283,26 @@ class TestLegacyStoredDictsStillScore:
 
         assert TierMapper().matches_section(legacy, section)
         assert TierMapper().matches_section(current, section)
+
+
+class TestReferenceFields:
+    """``summary`` and ``uri`` are typed fields, not ``custom`` leftovers (#1250)."""
+
+    def test_summary_and_uri_round_trip_flat(self) -> None:
+        stored = {
+            "document_form": "reference",
+            "summary": "A short summary.",
+            "uri": "https://docs.example.test/x",
+        }
+        meta = DocumentMetadata.from_mapping(stored)
+
+        assert meta.summary == "A short summary."
+        assert meta.uri == "https://docs.example.test/x"
+        assert meta.custom == {}
+        assert meta.to_metadata() == stored
+
+    def test_both_are_optional(self) -> None:
+        meta = DocumentMetadata.from_mapping({"title": "T"})
+        assert meta.summary is None
+        assert meta.uri is None
+        assert "summary" not in meta.to_metadata()

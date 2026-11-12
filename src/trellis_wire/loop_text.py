@@ -95,6 +95,12 @@ MCP_INSTRUCTION_PARAGRAPHS: tuple[str, ...] = (
         "low `rating` is worth more than a polite high one."
     ),
     (
+        "To save a long reference document, call `save_memory(content=<full "
+        "text>, summary=<your own short summary>, uri=<link to the original>)`: "
+        "only the summary is embedded and shown in a pack, and `get_items` "
+        "returns the full text."
+    ),
+    (
         "The common failure is retrieval that never happens, not retrieval "
         "that returns nothing."
     ),

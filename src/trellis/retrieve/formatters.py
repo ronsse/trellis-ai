@@ -9,6 +9,7 @@ import structlog
 from trellis.core.hashing import estimate_tokens as _estimate_tokens
 from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.retrieve.file_context import MATCH_FILES_TOUCHED
+from trellis.retrieve.reference import summary_link_line
 from trellis.retrieve.withholding import WithholdingSummary, format_withholding_note
 from trellis.schemas.advisory import Advisory
 from trellis_wire.loop_text import feedback_call, is_pack_id
@@ -169,7 +170,8 @@ def format_pack_as_markdown(
         # breakdowns live in the PACK_ASSEMBLED telemetry for offline analysis.
         header = f"## [{item_type}] `{item_id}`"
 
-        block = f"{header}\n{excerpt}\n"
+        link = summary_link_line(item.get("metadata"))
+        block = f"{header}\n{excerpt}\n" + (f"{link}\n" if link else "")
         block_tokens = _estimate_tokens(block)
 
         if used + block_tokens > token_budget:
@@ -192,6 +194,9 @@ def format_pack_as_markdown(
             f"## [{first.get('item_type', 'item')}] `{first.get('item_id', '')}`"
         )
         lines.append(excerpt)
+        first_link = summary_link_line(first.get("metadata"))
+        if first_link:
+            lines.append(first_link)
         remaining = len(items) - 1
         if remaining > 0:
             lines.append(f"\n*[{remaining} more items omitted]*")
@@ -841,6 +846,9 @@ def format_sectioned_pack_as_markdown(
             # Score intentionally omitted — the RRF-fused value is ordinal, not
             # a calibrated relevance; see format_pack_as_markdown for rationale.
             block = f"- `{item_id}` ({item_type}): {excerpt}"
+            link = summary_link_line(item.get("metadata"))
+            if link:
+                block += f"\n  {link}"
             block_tokens = _estimate_tokens(block)
 
             if used + block_tokens > max_tokens:

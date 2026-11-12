@@ -29,6 +29,8 @@ from trellis.mutate.sensitivity_floor import (
     SENSITIVITY_FLOOR_POLICY_ID,
     refuse_written_label,
 )
+from trellis.retrieve.embed_ingest_hook import EMBED_INPUT_CHAR_CAP
+from trellis.retrieve.reference import summary_refusal
 from trellis.retrieve.sensitivity import OverwriteRefusedError, refuse_overwrite
 from trellis.schemas.classification import sensitivity_of
 from trellis.stores.registry import StoreRegistry
@@ -297,6 +299,12 @@ class EvidenceIngestHandler:
         metadata: dict[str, Any] = dict(raw_metadata or {})
         if isinstance(uri, str) and uri.strip():
             metadata.setdefault("uri", uri)
+        # A reference document's summary is embedded whole or not at all, so one
+        # that cannot be is refused here, before any write (#1250).
+        summary_problem = summary_refusal(metadata, limit=EMBED_INPUT_CHAR_CAP)
+        if summary_problem is not None:
+            msg = f"evidence.metadata.summary: {summary_problem}"
+            raise ValidationError(msg, code="evidence_ingest_shape")
 
         preserve_updated_at = evidence.get("preserve_updated_at", False)
         if not isinstance(preserve_updated_at, bool):

@@ -49,6 +49,7 @@ from trellis.mcp.tools.memory_common import (
     _refuse_label_below_request,
     _refuse_memory_pointer_keys,
     _stamp_sensitivity,
+    _with_reference_fields,
 )
 from trellis.mcp.wiring import (
     _build_llm_client,
@@ -318,6 +319,8 @@ def save_memory(
     doc_id: str | None = None,
     supersedes: str | None = None,
     sensitivity: str | None = None,
+    summary: str | None = None,
+    uri: str | None = None,
 ) -> str:
     """Store a document in the experience graph memory.
 
@@ -346,6 +349,10 @@ def save_memory(
             clearance are never served the document, and memory extraction is
             skipped for anything above ``internal``. A key can only label up
             to its own clearance (the ``confidential`` / ``restricted`` scope).
+        summary: Optional short summary you wrote of a long ``content``, at most
+            8000 characters. It is what is embedded and shown in a pack, and
+            ``get_items`` returns the full text. Stores a ``reference`` document.
+        uri: Optional link to the original, shown under the summary.
     """
     if not content or not content.strip():
         _record_boundary_rejection(
@@ -363,7 +370,9 @@ def save_memory(
     from trellis.core.hashing import content_hash  # noqa: PLC0415
 
     registry = _get_registry()
-    metadata = _stamp_sensitivity(metadata, sensitivity, tool="save_memory")
+    metadata = _stamp_sensitivity(
+        _with_reference_fields(metadata, summary, uri), sensitivity, tool="save_memory"
+    )
     executor = build_curate_executor(
         registry, evidence_embed="none", clearance=current_clearance()
     )

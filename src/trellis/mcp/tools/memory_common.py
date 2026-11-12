@@ -10,6 +10,13 @@ from typing import Any
 from trellis.mcp.auth import current_clearance
 from trellis.mcp.boundary import _raise_invalid_params
 from trellis.mutate.evidence_pointer_keys import pointer_key_refusal
+from trellis.retrieve.embed_ingest_hook import EMBED_INPUT_CHAR_CAP
+from trellis.retrieve.reference import (
+    REFERENCE_FORM,
+    SUMMARY_KEY,
+    URI_KEY,
+    summary_refusal,
+)
 from trellis.retrieve.sensitivity import (
     DocumentClearance,
     SensitivityLabelError,
@@ -20,6 +27,7 @@ from trellis.schemas.classification import (
     sensitivity_of,
     sensitivity_rank,
 )
+from trellis.schemas.document_metadata import document_form_of
 from trellis.stores.registry import StoreRegistry
 
 # ---------------------------------------------------------------------------
@@ -62,6 +70,41 @@ def _refuse_memory_pointer_keys(metadata: dict[str, Any] | None) -> None:
             refusal.message,
             data={"field": f"metadata.{refusal.key}", "tool": "save_memory"},
         )
+
+
+def _with_reference_fields(
+    metadata: dict[str, Any] | None, summary: str | None, uri: str | None
+) -> dict[str, Any] | None:
+    """``metadata`` with ``save_memory``'s ``summary`` and ``uri`` written into it.
+
+    Both land flat under those keys. A parameter and a metadata key of the same
+    name that disagree are refused, and so is a summary the write boundary would
+    refuse, here and before anything is read, so an exact-duplicate hit cannot
+    hide a bad one. A ``summary`` with no ``document_form`` anywhere in the
+    metadata stamps ``document_form: "reference"``, the form that makes the
+    summary what is embedded and shown. Neither parameter given: the metadata is
+    returned as it came.
+    """
+    if summary is None and uri is None:
+        return metadata
+    bag = dict(metadata or {})
+    for key, value in ((SUMMARY_KEY, summary), (URI_KEY, uri)):
+        if value is None:
+            continue
+        if key in bag and bag[key] != value:
+            _raise_invalid_params(
+                f"{key} was given as a parameter and in metadata, and they differ",
+                data={"field": key, "tool": "save_memory"},
+            )
+        bag[key] = value
+    if summary is not None and document_form_of(bag) is None:
+        bag["document_form"] = REFERENCE_FORM
+    refusal = summary_refusal(bag, limit=EMBED_INPUT_CHAR_CAP)
+    if refusal is not None:
+        _raise_invalid_params(
+            refusal, data={"field": SUMMARY_KEY, "tool": "save_memory"}
+        )
+    return bag
 
 
 def _match_readable(registry: StoreRegistry, doc_id: str) -> bool:

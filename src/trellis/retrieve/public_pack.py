@@ -31,6 +31,7 @@ from trellis.retrieve.public_rank import (
     public_label_filter,
     read_public_documents,
 )
+from trellis.retrieve.reference import served_text
 from trellis.retrieve.sensitivity import item_readable, public_metadata
 from trellis.retrieve.strategies import RECENCY_CLOCK_METADATA_KEY
 from trellis.schemas.pack import PackItem
@@ -76,7 +77,9 @@ def readable_stored_copy(
     row_metadata = {k: v for k, v in metadata.items() if k not in _STRATEGY_STAMP_KEYS}
     return item.model_copy(
         update={
-            "excerpt": truncate_excerpt(content, limit=excerpt_max_chars),
+            "excerpt": truncate_excerpt(
+                served_text(content, metadata), limit=excerpt_max_chars
+            ),
             "metadata": {**row_metadata, **stamps},
         }
     )
