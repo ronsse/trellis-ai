@@ -57,6 +57,16 @@ _REGISTRY_MIGRATIONS_KEY = f"{__name__}:provenance_migrations"
 #: shares this code and why that is affordable here.
 _GENERIC_ENGINE_ERROR_CODE = "Neo.DatabaseError.General.UnknownError"
 
+#: The code ArcadeDB gives a server that was asked to run in a transaction it
+#: never began. It is a ``ClientError``, so the driver's managed retry does
+#: not re-run it, and the same code also carries every duplicate-key
+#: violation, so the code alone says nothing about whether a re-run is safe.
+_TRANSACTION_NOT_FOUND_CODE = "Neo.ClientError.Transaction.TransactionNotFound"
+
+#: The message that, with :data:`_TRANSACTION_NOT_FOUND_CODE`, names the one
+#: shape that is safe to re-run (matched case-insensitively).
+_TRANSACTION_NOT_BEGUN_MESSAGE = "transaction not begun"
+
 
 #: ArcadeDB schema-typed properties for the edge provenance columns
 #: (Phase 3 of ``adr-graph-ontology.md`` §6.4 / item 2 of the
@@ -188,6 +198,39 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
             return True
         return getattr(exc, "code", None) == _GENERIC_ENGINE_ERROR_CODE
 
+    @staticmethod
+    def _is_transaction_not_begun(exc: Exception) -> bool:
+        """Return True when the server reports a transaction that never began.
+
+        ``upsert_edges_bulk`` raced a single-row ``upsert_edge`` and failed
+        once in a live-infra run with ``Neo.ClientError.Transaction.
+        TransactionNotFound``, message ``Transaction not begun`` (#1118).
+        The statement that failed was not captured and the failure did not
+        reproduce in 103 loops (1,030 races) of the same check, so what is
+        known is the error and that it escapes both edge write paths: it is
+        a ``ClientError``, which the driver's managed retry does not re-run.
+        A transaction that never began wrote nothing, so re-running the
+        whole write from the start is safe.
+
+        **Both halves must match.** ArcadeDB reports every commit-time
+        duplicate-key violation on this same code, with a message naming the
+        index; that one is a real violation (or, for ``EdgeClaim``, a lost
+        race :meth:`_is_edge_write_contention` already names). The code alone
+        would retry it, and the message alone would retry whatever else
+        happens to say this under another code.
+        """
+        if getattr(exc, "code", None) != _TRANSACTION_NOT_FOUND_CODE:
+            return False
+        message = str(getattr(exc, "message", "") or exc)
+        if _TRANSACTION_NOT_BEGUN_MESSAGE not in message.lower():
+            return False
+        logger.warning("arcadedb_transaction_not_begun", exc_message=message)
+        return True
+
+    def _is_bulk_edge_write_contention(self, exc: Exception) -> bool:
+        """Retry a bulk edge write only when its transaction never began."""
+        return self._is_transaction_not_begun(exc)
+
     def _is_edge_write_contention(self, exc: Exception) -> bool:
         """Widen the base ``EdgeClaim`` predicate over the generic error channel.
 
@@ -225,6 +268,8 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
         rather than silently retried away.
         """
         if super()._is_edge_write_contention(exc):
+            return True
+        if self._is_transaction_not_begun(exc):
             return True
         if getattr(exc, "code", None) == _GENERIC_ENGINE_ERROR_CODE:
             logger.warning(

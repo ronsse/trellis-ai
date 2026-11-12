@@ -4,6 +4,10 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **ArcadeDB edge writes re-run a transaction the server reports as never begun (#1118).** `Neo.ClientError.Transaction.TransactionNotFound` with the message `Transaction not begun` failed one racing bulk-versus-single edge write in a live-infra run. It is a `ClientError`, so the driver's managed retry does not re-run it; `upsert_edges_bulk` had no retry of its own and `upsert_edge` matched only the `EdgeClaim` duplicate-key shape of that code. Both now re-run the whole write, bounded at three attempts, on that exact code and message. A duplicate-key violation on the same code, any other `ClientError` and every non-ArcadeDB backend still raise at once. The failure did not reproduce in 103 loops (1,030 races) of the race check, so this is a fix by reading the retry paths, not by reproduction. A pack serves the same items either way.
+
 ## [0.11.1] - 2026-11-10
 
 The first published release since 0.9.0. The v0.11.0 tag's publish run failed at
