@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from trellis.core.document_write import put_document
+from trellis.ingest_corpus import chunker
 from trellis.ingest_corpus.models import SyncRecord, chunk_doc_id, corpus_doc_id
 from trellis.ingest_corpus.sync import sync_corpus, sync_records
 from trellis.mcp.reconcile import SUPERSEDES_DOC_KEY, mark_document_superseded
@@ -226,6 +227,37 @@ class TestArchivedFile:
         assert _lifecycle(registry, new_chunks[0])["state"] == "archived"
         assert _lifecycle(registry, NEW_ID) is None
         assert all(_lifecycle(registry, c) is None for c in new_chunks[1:])
+
+    def test_a_chunk_whose_text_moved_under_it_is_not_carried(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The file's bytes match, but a chunker change shifts the spans.
+
+        Index ``i`` then holds other text, so the archive stamp must not land
+        on it; only a chunk holding the old chunk ``i``'s exact text is carried.
+        """
+        registry = _registry(tmp_path)
+        root = _vault(tmp_path, _long_text())
+        sync_corpus(registry, root, source_system=SOURCE)
+        docs = registry.knowledge.document_store
+        old_chunks = _chunk_ids(registry, OLD_ID)
+        _archive(registry, old_chunks)
+        old_text = [docs.get(c)["content"] for c in old_chunks]
+
+        monkeypatch.setattr(chunker, "CHUNK_TARGET_CHARS", 1200)
+        monkeypatch.setattr(chunker, "CHUNK_MAX_CHARS", 1500)
+        _move(registry, root)
+
+        new_chunks = _chunk_ids(registry, NEW_ID)
+        shifted = 0
+        for i, cid in enumerate(new_chunks):
+            same_text = i < len(old_text) and docs.get(cid)["content"] == old_text[i]
+            if same_text:
+                assert _lifecycle(registry, cid)["state"] == "archived", cid
+            else:
+                shifted += 1
+                assert _lifecycle(registry, cid) is None, cid
+        assert shifted  # the chunker change really moved text under an index
 
     def test_the_semantic_axis_is_withheld_too(
         self, tmp_path: Path, semantic: None

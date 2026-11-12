@@ -921,12 +921,19 @@ def _write_chunks(
             continue
         stored = _stored_metadata(existing)
         if moved_from is not None and existing is None:
-            # A moved file's chunk ``i`` is the old chunk ``i`` (same bytes,
-            # same chunker), so it takes that row's lifecycle state: a chunk
-            # retention archived must not come back current. Only that key; a
+            # A moved file's chunk ``i`` takes the old chunk ``i``'s lifecycle
+            # state, so a chunk retention archived does not come back current.
+            # Only when the two hold the same bytes: the file's bytes match, but
+            # a chunker change since the old path's last sync shifts the spans,
+            # and then the stamp would land on other text. Only that key; a
             # chunk's tags are rebuilt from the parent as before (#1132).
-            old = _stored_metadata(doc_store.get(chunk_doc_id(moved_from, span.index)))
-            if LIFECYCLE_KEY in old:
+            old_row = doc_store.get(chunk_doc_id(moved_from, span.index))
+            old = _stored_metadata(old_row)
+            if (
+                LIFECYCLE_KEY in old
+                and old_row is not None
+                and old_row.get("content_hash") == content_hash(chunk_content)
+            ):
                 stored = {LIFECYCLE_KEY: old[LIFECYCLE_KEY]}
         content_changed = existing is None or existing.get(
             "content_hash"
