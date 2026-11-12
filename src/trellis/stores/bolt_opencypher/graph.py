@@ -117,6 +117,9 @@ detected. Only single-row writers take the claim: ``upsert_edges_bulk``
 does not (it would need a sorted per-row claim order across every row
 it writes, like Postgres's bulk edge path), so a bulk write racing
 another writer of the same edge can still leave two current rows (#1078).
+A bulk write is re-run whole only for an error its backend names
+(:meth:`_is_bulk_edge_write_contention`; ArcadeDB's ``Transaction not
+begun``, #1118), never for a ``ClientError`` as a class.
 On a backend that sets ``VERIFY_EDGE_WRITE_UNIQUENESS`` (ArcadeDB),
 ``upsert_edges_bulk`` therefore re-reads its triplets once the batch
 commits, in one read for the whole batch, and re-writes each triplet found
@@ -1392,6 +1395,46 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                     )
         raise last_error  # type: ignore[misc]
 
+    def _is_bulk_edge_write_contention(self, exc: Exception) -> bool:  # noqa: ARG002
+        """Return True when ``exc`` means a bulk edge write can be run again.
+
+        ``upsert_edges_bulk`` takes no ``EdgeClaim`` (see the module
+        docstring), so there is no claim race to name here. The base class
+        re-runs nothing; a backend widens this for an error it reports that
+        wrote nothing, as
+        :meth:`~trellis.stores.arcadedb.graph.ArcadeDBGraphStore._is_bulk_edge_write_contention`
+        does.
+        """
+        return False
+
+    def _execute_bulk_edge_write(
+        self,
+        session: Any,
+        tx_function: Callable[[ManagedTransaction], Any],
+    ) -> Any:
+        """Run a bulk edge write on ``session``, re-running it when it can be.
+
+        The whole transaction is re-run from the start, as in
+        :meth:`_execute_edge_claim_write`, and only for an error
+        :meth:`_is_bulk_edge_write_contention` names; anything else
+        propagates untouched, and exhausting the bound re-raises the last
+        error. A re-run reuses the caller's session, as the driver's own
+        managed retry does, so its bookmarks carry across. The last attempt
+        is outside the loop so its error propagates as it is.
+        """
+        for attempt in range(_ALIAS_CLAIM_RETRY_ATTEMPTS - 1):
+            try:
+                return session.execute_write(tx_function)
+            except Exception as exc:
+                if not self._is_bulk_edge_write_contention(exc):
+                    raise
+                logger.debug(
+                    "bulk_edge_write_retry",
+                    attempt=attempt + 1,
+                    attempts=_ALIAS_CLAIM_RETRY_ATTEMPTS,
+                )
+        return session.execute_write(tx_function)
+
     def _endpoints_have_a_version_row(self, *node_ids: str) -> bool:
         """Whether every id has a row of any version, current or closed.
 
@@ -2249,7 +2292,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                         if node_id not in valid_endpoints:
                             return _EndpointMiss(ids, i, end, node_id)
                 try:
-                    records: list[Any] = session.execute_write(_tx)
+                    records: list[Any] = self._execute_bulk_edge_write(session, _tx)
                 except _MissingEdgeRowError as exc:
                     spec = edges[exc.row_index]
                     return _EndpointMiss(
