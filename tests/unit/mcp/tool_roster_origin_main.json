@@ -259,6 +259,30 @@
      ],
      "default": null,
      "description": "Optional label (``public``, ``internal``,\n``confidential``, ``restricted``). Readers whose key lacks that\nclearance are never served the document, and memory extraction is\nskipped for anything above ``internal``. A key can only label up\nto its own clearance (the ``confidential`` / ``restricted`` scope)."
+    },
+    "summary": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional short summary you wrote of a long ``content``, at most\n8000 characters. It is what is embedded and shown in a pack, and\n``get_items`` returns the full text. Stores a ``reference`` document."
+    },
+    "uri": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional link to the original, shown under the summary."
     }
    },
    "required": [

@@ -383,6 +383,8 @@ The validated core of a stored document's metadata dict. Documents are stored wi
 | `content_tags` | `dict` or `null` | No | `null` | JSON dump of `ContentTags` |
 | `auto_importance` | `float` or `null` | No | `null` | Computed importance score |
 | `domain` | `list[string]`, `string`, or `null` | No | `null` | Operator-set domain (`--domain` / `--tag`) |
+| `summary` | `string` or `null` | No | `null` | Caller-written summary of a `reference` document; embedded and shown in a pack in place of the body (see *Reference documents* in `operations.md`). Other forms may carry the key; it changes nothing for them |
+| `uri` | `string` or `null` | No | `null` | Link to the original; a `reference` document's pack line and `get_items` reply show it |
 | `parent_doc_id` | `string` or `null` | No | `null` | Chunk's parent document id |
 | `chunk_index` / `chunk_count` | `int` or `null` | No | `null` | Chunk bookkeeping |
 | `char_span` | `list[int]` or `null` | No | `null` | `[start, end]` offsets of a chunk into its parent |

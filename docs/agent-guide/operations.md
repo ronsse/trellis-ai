@@ -1555,6 +1555,41 @@ trellis ingest evidence /tmp/evidence.json --format json
 
 A path that does not exist, a directory, an unreadable file, invalid JSON or a schema failure exits `2`, with the same JSON shape as `ingest trace`'s.
 
+The evidence's `uri`, when it has one, is stored in the document's metadata under `uri`. The file has no `summary` field, so this command cannot create a reference document (next section).
+
+### Reference documents (`save_memory(summary=, uri=)`)
+
+A long document is saved as **one row**: `content` is the full text, `metadata["summary"]` is a short summary the caller wrote, `metadata["uri"]` is a link to the original. Only the summary is embedded and shown in a pack; `get_items` returns the full text.
+
+```text
+save_memory(content=<full text>, summary=<your own short summary>, uri=<link to the original>)
+```
+
+Giving `summary` stamps `document_form: "reference"` when the metadata names no form. The parameter means "store a reference", so a `metadata` form other than `reference` (a `document_form`, or a flat `content_type` outside the ContentType vocabulary) is refused, naming the form found; a plain `summary` key on another form goes in `metadata`, not in the parameter. A parameter and a `metadata` key of the same name that disagree are refused too. Every one of these refusals, and an unusable `summary`, writes nothing and records a `WRITE_REJECTED` event, as an empty `content` does. Over REST or Python, write the same three keys flat: `{"document_form": "reference", "summary": "...", "uri": "..."}`.
+
+**When it applies.** A row is *summary-served* only when all four hold: `document_form` is `reference`, `summary` is a non-empty string, the stripped summary is at most the embed cap (8,000 characters), and the row is not a chunk (it has no `parent_doc_id`). A summary over the cap is no summary here (the embedder would see only a cut of it), so such a row is read as any other document. The rule is about the row, not the writer: it also applies to a row already stored this way and to a corpus file whose frontmatter names both the reference form (`document_form: reference`, or `content_type: reference`, which sync renames) and a `summary:`. A row stored this way changes its keyword excerpt at deploy and its embedding at its next re-embed. A corpus file whose frontmatter has a `summary:` and does not also name the reference form is untouched, and so are the chunks of any file. Corpus sync chunks a file longer than the embed cap and then embeds its chunks, not its parent, so the parent of a chunked reference is summary-served for keyword reads only. `trellis.retrieve.reference.summary_of` is the one definition.
+
+| Where | What a summary-served reference does |
+|-------|---------------------------------------|
+| Embedding (`build_vector_row`: the live hook, `EvidenceIngestHandler`, `trellis admin reindex-vectors`) | embeds the summary, not `content[:8000]`; the vector row's `content` excerpt is cut from the summary; the summary itself is not copied into the vector row's metadata |
+| Pack excerpt | cut from the summary on the keyword, semantic and public-only reads. Keyword search still matches the body, so a hit on a body term is served as the summary. A document cannot reach the graph axis, whose excerpts come from node properties |
+| Pack markdown | one line under the excerpt: ``Summary only. Source: `<uri>`. Full text: get_items.`` (no `Source:` without a `uri`). Index mode renders no such line |
+| `get_items` | ``Source: `<uri>` `` above the full body |
+
+A keyword pack item carries `metadata["excerpt_source"] = "summary"` in place of the summary, and the formatter reads only that marker. The key is reserved: a stored value is dropped and re-derived. `PACK_ASSEMBLED` rows are built from an allowlist of fields and never held the summary. The `MEMORY_STORED` event of a `save_memory` call carries the whole metadata, so it carries the summary.
+
+A `POST /vectors` row for a stored document is built from the document (`shape_vector_row`, the rule `build_vector_row` applies too), so a caller can neither undo the summary excerpt nor stamp `excerpt_source` or a `uri` on a document that is not a summary-served reference; the row's `uri` is the document's.
+
+**Write limits.** The evidence handler (both `save_memory` and `POST /evidence`) refuses a `reference` document, with nothing written, whose `summary` is not a string, is empty after stripping, or is longer than the embed cap (8,000 characters); the message states the length and the limit (`evidence_ingest_shape`). Corpus sync and the other document writers do not run this check, which is why the predicate holds the cap itself. The `uri` is untrusted: a pack and `get_items` render it on one line inside a code span with backticks escaped, and not at all when it is longer than 500 characters.
+
+**Known limits.**
+
+- Saving the same body again with a different summary is deduplicated by content hash: the first row is kept and the new summary is dropped.
+- The vector row is an embed-time snapshot. A later metadata-only write that changes `summary` does not re-embed; run `trellis admin reindex-vectors --force` to re-embed from the new summary.
+- `get_items` defaults to `max_tokens=4000` (about 16,000 characters). A longer body answers `over token budget` and names the id; re-fetch with a larger `max_tokens`.
+- The public-only read path serves the summary excerpt but renders no link line.
+- The summary is the caller's. Nothing here generates one or records who wrote it.
+
 ### `trellis ingest corpus`
 
 Sync a directory of `.md`/`.markdown` files (e.g. a notes vault) into

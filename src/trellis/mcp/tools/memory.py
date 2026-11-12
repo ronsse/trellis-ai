@@ -44,11 +44,13 @@ from trellis.mcp.reconcile import (
 )
 from trellis.mcp.rejections import _note_noop_call, _record_boundary_rejection
 from trellis.mcp.tools.memory_common import (
+    ReferenceFieldsError,
     _append_note,
     _match_readable,
     _refuse_label_below_request,
     _refuse_memory_pointer_keys,
     _stamp_sensitivity,
+    _with_reference_fields,
 )
 from trellis.mcp.wiring import (
     _build_llm_client,
@@ -311,6 +313,29 @@ def _supersede_saved_memory(
     return f"Memory saved (supersedes {supersedes}): {stored_id}"
 
 
+def _reference_fields(
+    metadata: dict[str, Any] | None, summary: str | None, uri: str | None
+) -> dict[str, Any] | None:
+    """``save_memory``'s metadata with its ``summary`` and ``uri``, refusals recorded.
+
+    Recorded and raised here rather than in :mod:`trellis.mcp.tools.memory_common`,
+    so the rejection site carries the literal ``tool=`` the capture-surface roster
+    reads, as the empty-content refusal does.
+    """
+    try:
+        return _with_reference_fields(metadata, summary, uri)
+    except ReferenceFieldsError as refusal:
+        _record_boundary_rejection(
+            tool="save_memory",
+            rejections=[
+                {"kind": "value", "loc": refusal.field, "msg": refusal.event_message}
+            ],
+        )
+        _raise_invalid_params(
+            refusal.message, data={"field": refusal.field, "tool": "save_memory"}
+        )
+
+
 @mcp.tool(auth=trellis_scope(SCOPE_INGEST))
 def save_memory(
     content: str,
@@ -318,6 +343,8 @@ def save_memory(
     doc_id: str | None = None,
     supersedes: str | None = None,
     sensitivity: str | None = None,
+    summary: str | None = None,
+    uri: str | None = None,
 ) -> str:
     """Store a document in the experience graph memory.
 
@@ -346,6 +373,10 @@ def save_memory(
             clearance are never served the document, and memory extraction is
             skipped for anything above ``internal``. A key can only label up
             to its own clearance (the ``confidential`` / ``restricted`` scope).
+        summary: Optional short summary you wrote of a long ``content``, at most
+            8000 characters. It is what is embedded and shown in a pack, and
+            ``get_items`` returns the full text. Stores a ``reference`` document.
+        uri: Optional link to the original, shown under the summary.
     """
     if not content or not content.strip():
         _record_boundary_rejection(
@@ -363,7 +394,9 @@ def save_memory(
     from trellis.core.hashing import content_hash  # noqa: PLC0415
 
     registry = _get_registry()
-    metadata = _stamp_sensitivity(metadata, sensitivity, tool="save_memory")
+    metadata = _stamp_sensitivity(
+        _reference_fields(metadata, summary, uri), sensitivity, tool="save_memory"
+    )
     executor = build_curate_executor(
         registry, evidence_embed="none", clearance=current_clearance()
     )

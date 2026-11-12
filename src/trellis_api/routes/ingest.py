@@ -37,9 +37,13 @@ from trellis.mutate.commands import (
     Operation,
 )
 from trellis.ops.write_health import record_trace_coercion
-from trellis.retrieve.embed_ingest_hook import VECTOR_METADATA_EXCERPT_CHARS
-from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.retrieve.lifecycle import EVIDENCE_REF_KEY
+from trellis.retrieve.reference import (
+    EXCERPT_SOURCE_KEY,
+    SUMMARY_KEY,
+    URI_KEY,
+    shape_vector_row,
+)
 from trellis.retrieve.strategies import DEFAULT_IMPORTANCE_DECAY_THRESHOLD
 from trellis.schemas.classification import LIFECYCLE_KEY
 from trellis.schemas.evidence import Evidence
@@ -327,8 +331,18 @@ def _vector_row_metadata(
 
     The row also says what its document is and what it says, and that is the
     document's too. ``content`` (the excerpt a semantic hit serves) is the
-    document's content cut to :data:`VECTOR_METADATA_EXCERPT_CHARS`, and
-    ``doc_id`` is the id, as ``build_vector_row`` writes them. The keys in
+    document's served text cut to the vector excerpt length, and ``doc_id`` is
+    the id, as ``build_vector_row`` writes them. The served text is the
+    document's summary for a summary-served reference and its body otherwise, and
+    :func:`~trellis.retrieve.reference.shape_vector_row` (the rule
+    ``build_vector_row`` applies too) sets the ``content`` excerpt, drops the
+    summary and stamps or strips the ``excerpt_source`` marker from the stored
+    document alone, so a caller can neither forge the marker nor undo it. The
+    ``uri`` the link line shows and the ``summary`` are the document's like the
+    keys below: copied from it, or removed from the row when the document has
+    none (and a served summary is then dropped by ``shape_vector_row``), so a
+    reader that ran the reference rule on a row's metadata would not find a
+    summary the document never had. The keys in
     :data:`_DOCUMENT_IDENTITY_KEYS` (``node_role``, ``node_type``, ``agent_id``,
     ``document_form``, the flat ``content_type``, ``excerpt``) follow the mirrored
     keys' rule. Without this
@@ -347,21 +361,22 @@ def _vector_row_metadata(
             *MIRRORED_METADATA_KEYS,
             EVIDENCE_REF_KEY,
             *_DOCUMENT_IDENTITY_KEYS,
+            URI_KEY,
+            SUMMARY_KEY,
         ):
             if key in source:
                 row[key] = source[key]
             else:
                 row.pop(key, None)
         content = stored.get("content")
-        row["content"] = truncate_excerpt(
-            content if isinstance(content, str) else "", VECTOR_METADATA_EXCERPT_CHARS
-        )
+        shape_vector_row(row, content if isinstance(content, str) else "", source)
         row["doc_id"] = item_id
     else:
         # The first pass refused these keys only if no document was there then.
         # One deleted since would let the caller's through, so they are dropped
-        # here (silently: the batch has already been judged).
-        for key in _ITEM_POINTER_KEYS:
+        # here (silently: the batch has already been judged). The marker is
+        # dropped for the same reason: no document says its excerpt is a summary.
+        for key in (*_ITEM_POINTER_KEYS, EXCERPT_SOURCE_KEY):
             row.pop(key, None)
     id_parent = chunk_parent_id(item_id)
     if id_parent is not None:

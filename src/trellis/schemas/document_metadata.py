@@ -147,6 +147,13 @@ class DocumentMetadata(TrellisModel):
     #: Operator-set domain (``--domain``/``--tag``). Scalar or list — the CLI
     #: writes a scalar, and ``retrieve/evaluate.py`` reads both.
     domain: list[str] | str | None = None
+    #: A short summary the caller wrote of a long document. For a document whose
+    #: form is ``reference`` it is what is embedded and shown in a pack, with the
+    #: full text kept in the row's content; see :mod:`trellis.retrieve.reference`.
+    summary: str | None = None
+    #: A link to the original of the document (evidence ``uri``). A pack shows it
+    #: under a summary-served reference's excerpt.
+    uri: str | None = None
     #: Chunk bookkeeping written by :mod:`trellis.ingest_corpus.sync`.
     parent_doc_id: str | None = None
     chunk_index: int | None = None

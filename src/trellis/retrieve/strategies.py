@@ -28,6 +28,7 @@ from trellis.retrieve.public_rank import (
     cosine,
     public_keyword_rows,
 )
+from trellis.retrieve.reference import pack_metadata, served_text
 from trellis.schemas.enums import EdgeKind
 from trellis.schemas.extraction import (
     EXTRACTION_STATUS_PROPERTY,
@@ -1551,11 +1552,12 @@ def _public_items(
                 item_id=doc_id,
                 item_type=item_type,
                 excerpt=truncate_excerpt(
-                    row.get("content", ""), limit=excerpt_max_chars
+                    served_text(row.get("content", ""), metadata),
+                    limit=excerpt_max_chars,
                 ),
                 relevance_score=score,
                 metadata={
-                    **metadata,
+                    **pack_metadata(metadata),
                     "source_strategy": strategy,
                     RECENCY_CLOCK_METADATA_KEY: recency.clock,
                 },
@@ -1707,11 +1709,12 @@ class KeywordSearch(SearchStrategy):
                     item_id=doc["doc_id"],
                     item_type="document",
                     excerpt=truncate_excerpt(
-                        doc.get("content", ""), limit=self._excerpt_max_chars
+                        served_text(doc.get("content", ""), metadata),
+                        limit=self._excerpt_max_chars,
                     ),
                     relevance_score=score,
                     metadata={
-                        **metadata,
+                        **pack_metadata(metadata),
                         # Both stamped after the splat, for the #433 reason:
                         # which clock this search read, and which strategy
                         # collected the item, are facts about the search, and

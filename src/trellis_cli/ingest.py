@@ -318,6 +318,8 @@ def ingest_evidence(
             {
                 "evidence_type": evidence.evidence_type,
                 "source_origin": evidence.source_origin,
+                # The link was accepted and never stored (#1250).
+                **({"uri": evidence.uri} if evidence.uri else {}),
             },
             preserve_updated_at=False,
             reingest_redacted=reingest_redacted,

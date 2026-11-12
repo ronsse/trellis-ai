@@ -35,6 +35,7 @@ from trellis.retrieve.formatters import (
 )
 from trellis.retrieve.lessons_pack import record_lessons_pack
 from trellis.retrieve.precedents import PrecedentClearance
+from trellis.retrieve.reference import fetched_body
 from trellis.retrieve.sensitivity import (
     DocumentClearance,
     conceal_node_pointers,
@@ -248,7 +249,7 @@ def _render_fetched_item(
         # label, so its source's label decides.
         if precedents.verdict_of(item_id) is not None:
             return None
-        return "document", doc.get("content", "")
+        return "document", fetched_body(doc.get("content", ""), doc.get("metadata"))
 
     if is_public_only(current_clearance()):
         # A graph node or a trace has no label to compare, so a public-only
