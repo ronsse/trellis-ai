@@ -13,12 +13,18 @@ Real SQLite stores, the real routes and handlers.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
+from tests.unit.retrieve.test_precedent_listing_clearance import (
+    BODY,
+    promote,
+    relabel,
+)
 from tests.unit.retrieve.test_sensitivity import label
 from trellis.auth import generate_api_key
 from trellis.mutate.evidence_pointer_keys import (
@@ -39,6 +45,7 @@ OTHER = "doc-other"
 RESTRICTED_DOC = "doc-secret"
 CAN_WRITE = ["read", "mutate"]
 CAN_WRITE_RESTRICTED = ["read", "mutate", "restricted"]
+CAN_WRITE_CONFIDENTIAL = ["read", "mutate", "confidential"]
 DOORS = ["entity.create", "entity.update", "observation.record"]
 
 
@@ -560,3 +567,223 @@ class TestAnUpsertThatLeavesTheKeyOutKeepsThePointer:
         accepted, _ = _write(client, headers, "entity.update", OTHER)
         assert not accepted
         assert self._held(registry) == HELD
+
+
+class TestAnUnreadablePointerIsNotRevealed:
+    """A key that cannot read a node's pointer is not told the node holds one (#1057).
+
+    A different value on a node that holds a pointer is refused as "changed" only
+    to a key that can read the stored document. To any other key it is refused in
+    the words an unreadable target gets, which are also what a node that holds no
+    pointer answers, so the refusal does not say a pointer exists. The unchanged
+    value is still accepted, since a node read back and sent again must keep
+    working, and no refusal carries the stored id.
+    """
+
+    @pytest.mark.parametrize("door", DOORS)
+    @pytest.mark.parametrize("stored", [RESTRICTED_DOC, "doc-deleted-since"])
+    def test_a_different_value_reads_as_an_unreadable_target(
+        self, client, registry, door, stored
+    ):
+        _seed_node(registry, door, stored)
+        before = _footprint(registry)
+
+        accepted, message = _write(client, _headers(registry), door, "doc-nowhere")
+
+        assert not accepted
+        assert "does not name a document this credential can read" in message
+        assert "may not change" not in message
+        assert stored not in message
+        assert _footprint(registry) == before
+        assert _rejection_codes(registry) == [NODE_EVIDENCE_REF_UNREADABLE]
+
+    @pytest.mark.parametrize("door", DOORS)
+    def test_the_words_are_those_a_node_holding_none_answers(
+        self, client, registry, door
+    ):
+        """The same value, a node with and without a pointer, the same reply."""
+        _seed_node(registry, door, RESTRICTED_DOC)
+        _, with_pointer = _write(client, _headers(registry), door, "doc-nowhere")
+        _seed_node(registry, door)  # the same node, now holding no pointer
+        _, without_pointer = _write(client, _headers(registry), door, "doc-nowhere")
+
+        assert with_pointer == without_pointer
+
+    @pytest.mark.parametrize("door", ["entity.create", "entity.update"])
+    @pytest.mark.parametrize("bad", ["", 7])
+    def test_a_value_that_is_not_an_id_gets_the_not_an_id_words(
+        self, client, registry, door, bad
+    ):
+        _seed_node(registry, door, RESTRICTED_DOC)
+
+        accepted, message = _write(client, _headers(registry), door, bad)
+
+        assert not accepted
+        assert "needs evidence_ref to be the id of a document" in message
+        assert _rejection_codes(registry) == [NODE_EVIDENCE_REF_NOT_A_STRING]
+
+    @pytest.mark.parametrize("door", ["entity.create", "entity.update"])
+    def test_a_readable_different_value_is_refused_too(self, client, registry, door):
+        """Not accepted: that would overwrite a pointer the key cannot read."""
+        _seed_node(registry, door, RESTRICTED_DOC)
+
+        accepted, message = _write(client, _headers(registry), door, OTHER)
+
+        assert not accepted
+        assert RESTRICTED_DOC not in message
+        assert (
+            registry.knowledge.graph_store.get_node(NODE_ID)["properties"][
+                "evidence_ref"
+            ]
+            == RESTRICTED_DOC
+        )
+
+    @pytest.mark.parametrize("door", DOORS)
+    def test_a_key_that_can_read_it_gets_the_precise_refusal(
+        self, client, registry, door
+    ):
+        _seed_node(registry, door, RESTRICTED_DOC)
+
+        accepted, message = _write(
+            client, _headers(registry, CAN_WRITE_RESTRICTED), door, OTHER
+        )
+
+        assert not accepted
+        assert "may not change a node's evidence_ref once it is set" in message
+        assert RESTRICTED_DOC not in message
+        assert _rejection_codes(registry) == [NODE_EVIDENCE_REF_CHANGED]
+
+    @pytest.mark.parametrize("door", DOORS)
+    def test_the_unchanged_value_is_still_accepted(self, client, registry, door):
+        """Option (a), checking readability here too, would refuse this."""
+        _seed_node(registry, door, RESTRICTED_DOC)
+
+        accepted, message = _write(client, _headers(registry), door, RESTRICTED_DOC)
+
+        assert accepted, message
+
+
+def _normalised(text: str) -> str:
+    """A reply with its generated ids removed, so two writes compare by shape."""
+    return re.sub(r"[0-9A-Z]{26}", "<id>", text)
+
+
+def _stored_pointer(registry) -> Any:
+    node = registry.knowledge.graph_store.get_node(NODE_ID)
+    assert node is not None
+    return node["properties"].get("evidence_ref")
+
+
+def _read_as_restricted(client, registry) -> str:
+    """The node as a key that can read the pointer sees it, over the entity route."""
+    resp = client.get(
+        f"/api/v1/entities/{NODE_ID}",
+        headers=_headers(registry, ["read", "restricted"]),
+    )
+    assert resp.status_code == 200, resp.text
+    return str(resp.text)
+
+
+class TestANullPointerIsANoOpToAKeyThatCannotReadTheStoredOne:
+    """``evidence_ref: null`` answers the same on a node with and without a pointer.
+
+    A refusal on only the node that holds one tells a key, with no guess needed,
+    that a pointer exists (#1057). The write is accepted as the no-op a pointerless
+    node gets, and the stored pointer is left exactly as it was: the key cannot
+    see it on read, so the state it observes is unchanged.
+    """
+
+    @pytest.mark.parametrize("door", ["entity.create", "entity.update"])
+    @pytest.mark.parametrize("stored", [RESTRICTED_DOC, "doc-deleted-since"])
+    def test_the_reply_is_the_one_a_pointerless_node_gives(
+        self, client, registry, door, stored
+    ):
+        _seed_node(registry, door, stored)
+        with_pointer = _write(client, _headers(registry), door, None)
+        _seed_node(registry, door)  # the same node, now holding no pointer
+        without_pointer = _write(client, _headers(registry), door, None)
+
+        assert with_pointer[0] is True, with_pointer[1]
+        assert with_pointer[0] == without_pointer[0]
+        assert _normalised(with_pointer[1]) == _normalised(without_pointer[1])
+
+    @pytest.mark.parametrize("door", ["entity.create", "entity.update"])
+    def test_the_stored_pointer_is_left_exactly_as_it_was(self, client, registry, door):
+        _seed_node(registry, door, RESTRICTED_DOC)
+
+        accepted, message = _write(client, _headers(registry), door, None)
+
+        assert accepted, message
+        assert _stored_pointer(registry) == RESTRICTED_DOC
+        assert RESTRICTED_DOC in _read_as_restricted(client, registry)
+
+    def test_observation_record_treats_null_as_leaving_it_out(self, client, registry):
+        _seed_node(registry, "observation.record", RESTRICTED_DOC)
+
+        accepted, message = _write(
+            client, _headers(registry), "observation.record", None
+        )
+
+        assert accepted, message
+        assert _stored_pointer(registry) == RESTRICTED_DOC
+
+    @pytest.mark.parametrize("door", ["entity.create", "entity.update"])
+    def test_a_key_that_can_read_it_is_still_refused_a_null(
+        self, client, registry, door
+    ):
+        _seed_node(registry, door, RESTRICTED_DOC)
+
+        accepted, message = _write(
+            client, _headers(registry, CAN_WRITE_RESTRICTED), door, None
+        )
+
+        assert not accepted
+        assert "may not change a node's evidence_ref once it is set" in message
+        assert _stored_pointer(registry) == RESTRICTED_DOC
+        assert _rejection_codes(registry) == [NODE_EVIDENCE_REF_CHANGED]
+
+
+class TestAStoredPointerToAWithheldPrecedent:
+    """A precedent's own row has no label, so only its source's label hides it.
+
+    The pointer is hidden from the same key on every graph read (#1232), so the
+    refusal must not say the node holds one: judging it with the plain read alone
+    called it readable and told the key the node "may not change" it.
+    """
+
+    SOURCE = "doc-precedent-source"
+
+    @pytest.fixture
+    def precedent(self, registry) -> str:
+        registry.knowledge.document_store.put(self.SOURCE, BODY, {"title": "Source"})
+        precedent_id = promote(registry, "cand:one", self.SOURCE)
+        relabel(registry, self.SOURCE, "confidential")
+        return str(precedent_id)
+
+    @pytest.mark.parametrize("door", ["entity.create", "entity.update"])
+    def test_a_key_below_the_source_gets_the_unreadable_words(
+        self, client, registry, precedent, door
+    ):
+        _seed_node(registry, door, precedent)
+
+        accepted, message = _write(client, _headers(registry), door, OTHER)
+
+        assert not accepted
+        assert "does not name a document this credential can read" in message
+        assert "may not change" not in message
+        assert precedent not in message
+        assert _rejection_codes(registry)[-1:] == [NODE_EVIDENCE_REF_UNREADABLE]
+
+    @pytest.mark.parametrize("door", ["entity.create", "entity.update"])
+    def test_a_key_cleared_for_the_source_gets_the_precise_refusal(
+        self, client, registry, precedent, door
+    ):
+        _seed_node(registry, door, precedent)
+
+        accepted, message = _write(
+            client, _headers(registry, CAN_WRITE_CONFIDENTIAL), door, OTHER
+        )
+
+        assert not accepted
+        assert "may not change a node's evidence_ref once it is set" in message
+        assert _rejection_codes(registry)[-1:] == [NODE_EVIDENCE_REF_CHANGED]

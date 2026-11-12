@@ -3476,8 +3476,14 @@ and `GET /graph/search/facets`: to keep a withheld precedent out of `total` and 
 time, and judge each one. A node under `precedent://learning/` stored as another
 type is left out of the page but not subtracted from a count; `entity.create` and
 `entity.update` no longer produce one, but one stored earlier is still there. Not covered: a
-precedent's chunks (judged on their own row only, as on `GET /search`), and a
-withheld precedent's id named in another node's `document_ids`.
+precedent's chunks (judged on their own row only, as on `GET /search`).
+
+A withheld precedent's id named in another node (`document_ids`, `evidence_ref`,
+`lifecycle.superseded_by`) is concealed on the graph reads by the same judgement
+(see "A graph node names a document id" below). That adds no read for a precedent
+the request already judged, and for one it did not, one graph-node read and one
+document read (the source's; the precedent's own row is replaced by the judgement,
+not added to it) per distinct precedent named, however many nodes name it.
 
 ```bash
 trellis retrieve precedents [--domain DOMAIN] [--limit N] [--format text|json]
@@ -6100,7 +6106,11 @@ entity id, the entities `build_file_context` returns, and the observation reads:
 other property stay, and a `document_ids` member that is not a string, a
 `document_ids` that is not a list and an `evidence_ref` that is not a string are
 left as stored. The store judges the ids as above, in one pass over the distinct
-ids the whole response names. Depth,
+ids the whole response names, except that an id in the promoted-precedent namespace
+is judged as the precedent read doors judge it (its source's label, not its own
+row, which carries none): a key that cannot read the precedent does not see its id
+named by another node on any of the routes above that serve one, and a cleared key
+does. Depth,
 neighbours and relationships do not change. A graph-axis pack item spreads its
 node's properties into its `metadata`, so `metadata.evidence_ref` on a pack item
 is a concealed carrier too, on the same footing as the supersession pointers: it
@@ -6374,8 +6384,20 @@ above its own clearance, and cannot touch a document it may not read.**
     refused. `null` is accepted where the node holds none: it points nowhere.
     Save the document first (MCP `save_knowledge(evidence_ref=...)` checks this).
   - `node_evidence_ref_not_a_string`: the value is not a non-empty string.
-  - `node_evidence_ref_changed`: the node already holds an `evidence_ref` and the
-    value differs (`null` and `""` included). Sending the stored value again is
+  - `node_evidence_ref_changed`: the node already holds an `evidence_ref` the
+    caller can read, and the value differs (`null` and `""` included). When the
+    caller cannot read the document the stored value names (above its clearance,
+    or gone; for a promoted precedent, above its source's label, the judgement
+    the graph reads make), a different value is refused as
+    `node_evidence_ref_unreadable` (or `node_evidence_ref_not_a_string`) instead,
+    in the words a node holding no pointer would get, so the refusal does not say
+    that a pointer exists. A `null` from that caller is accepted, as a pointerless
+    node accepts it, and writes nothing to the pointer: the stored value is left as
+    it was (`entity.update`, `entity.create`; `observation.record` reads a `null`
+    as leaving it out). A caller
+    that can write a document and send the stored id as a guess still has it
+    accepted unread; that needs the full id and is the same accepted posture as
+    the 409 on `POST /api/v1/documents`. Sending the stored value again is
     accepted whether or not its document still exists, so a read-modify-write
     that echoes the node back is not refused, and `entity.update` on a node that
     holds one leaves it in place when the key is absent. `entity.create` over an
