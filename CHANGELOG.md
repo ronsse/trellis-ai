@@ -4,6 +4,10 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A moved or renamed corpus file keeps its lifecycle state: archived and superseded documents stay withheld (#1132, item 2; serving change).** `ingest-corpus` re-keys a file whose bytes reappear under a new path, and the new row carried only this run's metadata, so a document retention had archived, or a reconcile verdict or `supersedes=` had stamped superseded, came back as current. A move now carries the stored `lifecycle` record whole onto the new parent row, under this run's metadata as an update merges it, and each chunk row takes the record of the old chunk with the same index (a move re-chunks the same bytes). Only that key is carried onto a chunk; its tags are rebuilt as before. `preserve_updated_at` stays `False` on the new row, because a new id is an insert and the flag is moot there. **Serving: a moved file that was archived or superseded stays withheld from a pack (reasons `archived`, `superseded`); before this it was served again as current.** A file that was current is served as before. The successor's `supersedes_doc_id` is not repointed (no seam writes it, and the vector row does not mirror it): it keeps naming the deleted id, and nothing that decides what is served reads it. A moved file that is itself a successor leaves its loser's `superseded_by` naming the old id; that case is unchanged and still open. A person-set label can still be lowered by a file's own frontmatter or an operator `--tag`, by design (item 1, unchanged). Holdout is untouched. See [`trellis ingest corpus`](docs/agent-guide/operations.md#trellis-ingest-corpus).
+
 ## [0.11.1] - 2026-11-10
 
 The first published release since 0.9.0. The v0.11.0 tag's publish run failed at
