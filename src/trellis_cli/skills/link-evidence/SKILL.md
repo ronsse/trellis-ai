@@ -1,7 +1,7 @@
 ---
 name: link-evidence
-description: Store a durable fact (API contract, config value, ownership, gotcha) in Trellis anchored to its knowledge-graph entity, so later work in that area retrieves it. Not for opinions or churning state.
-version: 1.2.0
+description: Store a durable fact (API contract, config value, gotcha) or a whole reference document in Trellis, anchored to its knowledge-graph entity so later work retrieves it. Not for opinions.
+version: 1.3.0
 ---
 
 # Link Evidence
@@ -78,6 +78,43 @@ save_knowledge(name="<short title>", evidence_ref="<doc_id>",
 Do **not** pass a document id as `relates_to`. Edge targets must be graph
 nodes and a document is not one: the entity is created, no edge is, and the
 only sign is a `target entity not found` warning in the reply.
+
+### When the thing to keep is a whole document
+
+A report, a paper or a long analysis is a source, not a fact. Store it once as
+a **reference document**, with a summary you write yourself:
+
+```
+save_memory(
+  content="<the full text>",
+  summary="<what it concludes, in a few short paragraphs>",
+  uri="<link to the original>",
+  metadata={"title": "<title>", "domain": "<area>"}
+)
+# Memory saved: <doc_id>
+```
+
+- Only the `summary` is embedded and shown in a pack, with the link under it.
+  The full text is held and comes back from
+  `get_items(item_ids=["<doc_id>"])`; pass a larger `max_tokens` for a long
+  body, or the reply says `over token budget`.
+- The summary is what a later search matches by meaning, so state the
+  conclusions, not the table of contents. One over 8,000 characters is
+  refused.
+- No field records who wrote what. When you know which model or person wrote
+  the document, and which wrote the summary, say so in `metadata`.
+- Saving the same text again with a new summary is a duplicate: the stored
+  row is kept and the new summary is dropped.
+
+Then anchor it, so work on that subject retrieves it:
+
+```
+save_knowledge(name="<title>", evidence_ref="<doc_id>",
+               relates_to="<entity id or name>")
+```
+
+Do not paste a long document into `save_knowledge(content=...)` or a
+`save_memory` without a summary: only its first 8,000 characters are embedded.
 
 ## Picking entity_type
 
