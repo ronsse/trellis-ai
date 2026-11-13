@@ -27,7 +27,7 @@ version field to bump. The `v*` tag push IS the release trigger.
 
 3. **Pick the version** — semver against the last tag:
    ```sh
-   git describe --tags --abbrev=0  # e.g. v0.11.1
+   git describe --tags --abbrev=0  # e.g. v0.12.0
    ```
    Scan `git log <last-tag>..HEAD --oneline` for breaking changes (major),
    features (minor), fixes only (patch). Confirm the number with the owner
