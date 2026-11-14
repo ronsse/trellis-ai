@@ -748,6 +748,91 @@ class TestSkippedRows:
         result = await extract(EVERYTHING, include_columns=False)
         assert result.skipped_rows == {"column_lineage_with_columns_off": 1}
 
+    async def test_a_volume_record_is_counted_not_minted_as_a_table(self) -> None:
+        volume = {
+            "catalog_name": "main",
+            "schema_name": "sales",
+            "name": "landing",
+            "full_name": "main.sales.landing",
+            "volume_type": "MANAGED",
+            "volume_id": "v-1",
+        }
+        result = await extract([volume])
+        assert not [
+            e for e in result.entities if e.entity_id.endswith("main.sales.landing")
+        ]
+        assert result.skipped_rows["volume_records"] == 1
+
+    async def test_a_function_record_is_counted_not_minted_as_a_table(self) -> None:
+        function = {
+            "catalog_name": "main",
+            "schema_name": "sales",
+            "name": "net_price",
+            "full_name": "main.sales.net_price",
+            "routine_body": "SQL",
+            "function_id": "f-1",
+        }
+        result = await extract([function])
+        assert not [
+            e for e in result.entities if e.entity_id.endswith("main.sales.net_price")
+        ]
+        assert result.skipped_rows == {"function_records": 1}
+
+    async def test_a_wrapped_volumes_response_is_counted_not_refused(self) -> None:
+        volumes = {
+            "volumes": [
+                {
+                    "catalog_name": "main",
+                    "schema_name": "sales",
+                    "name": "landing",
+                    "full_name": "main.sales.landing",
+                    "volume_type": "EXTERNAL",
+                    "volume_id": "v-1",
+                },
+                {
+                    "catalog_name": "main",
+                    "schema_name": "sales",
+                    "name": "archive",
+                    "full_name": "main.sales.archive",
+                    "volume_type": "MANAGED",
+                    "volume_id": "v-2",
+                },
+            ],
+            "next_page_token": None,
+        }
+        result = await extract([TABLES, volumes])
+        ids = {e.entity_id for e in result.entities}
+        assert tid("main.sales.landing") not in ids
+        assert tid("main.sales.archive") not in ids
+        assert result.skipped_rows == {"volume_records": 2}
+
+    async def test_a_table_without_a_columns_list_is_counted(self) -> None:
+        table = {
+            "catalog_name": "main",
+            "schema_name": "sales",
+            "name": "orders",
+            "full_name": "main.sales.orders",
+            "table_type": "MANAGED",
+        }
+        result = await extract({"tables": [table]})
+        node = by_id(result)[tid("main.sales.orders")]
+        assert "stub" not in node.properties
+        assert "column_count" not in node.properties
+        assert result.skipped_rows == {"tables_without_columns": 1}
+
+    async def test_a_table_with_an_empty_columns_list_is_not_counted(self) -> None:
+        table = {
+            "catalog_name": "main",
+            "schema_name": "sales",
+            "name": "orders",
+            "full_name": "main.sales.orders",
+            "table_type": "MANAGED",
+            "columns": [],
+        }
+        result = await extract({"tables": [table]})
+        assert by_id(result)[tid("main.sales.orders")].properties["column_count"] == 0
+        assert result.skipped_rows == {}
+
 
 # ---------------------------------------------------------------------------
 # System catalogs
