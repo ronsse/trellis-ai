@@ -246,6 +246,10 @@ def _keep_stricter_node_label(
     raise it; none may lower or erase it. The stored record is copied as it
     stands, a malformed one included (it reads ``restricted``). At equal rank
     the supplied record wins. A bag that never held the key gets none.
+
+    Only the sensitivity level is compared, and the winning record is written
+    whole: when the supplied record wins, the stored one's ``regulatory_tags``
+    and ``jurisdiction`` are not carried into it.
     """
     if stored_properties is None or DATA_CLASSIFICATION_KEY not in stored_properties:
         return
