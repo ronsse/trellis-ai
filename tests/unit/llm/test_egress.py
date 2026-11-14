@@ -626,6 +626,32 @@ class _FlakyStore:
         return getattr(self._inner, name)
 
 
+class _CountingStore:
+    """A real store that counts every method call naming ``watched`` in its args."""
+
+    def __init__(self, inner: SQLiteDocumentStore, watched: str):
+        self._inner = inner
+        self._watched = watched
+        self.reads = 0
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        def counted(*args: Any, **kwargs: Any) -> Any:
+            named = [*args, *kwargs.values()]
+            if any(
+                a == self._watched
+                or (isinstance(a, (list, tuple, set)) and self._watched in a)
+                for a in named
+            ):
+                self.reads += 1
+            return attr(*args, **kwargs)
+
+        return counted
+
+
 class TestStoredVerdict:
     """``stored_verdict``: a gate over a document named by id, failing closed.
 
@@ -971,8 +997,45 @@ class TestJudgeServed:
         assert judged.verdict is EgressVerdict.WITHHELD
         assert judged.unreadable is True
 
-    def test_a_gate_with_no_store_cannot_answer_for_a_stored_row(self) -> None:
-        judged = EgressGate(None, local=False).judge_served(["doc"])
+    @pytest.mark.parametrize("local", [True, False], ids=["local", "cloud"])
+    def test_a_gate_with_no_store_cannot_answer_for_a_stored_row(
+        self, local: bool
+    ) -> None:
+        judged = EgressGate(None, local=local).judge_served(["doc"])
 
         assert judged.verdict is EgressVerdict.UNREADABLE
+        assert judged.inherited == "restricted"
         assert judged.unreadable is True
+
+    def test_a_local_gate_reads_a_shared_parent_no_more_often_than_a_cloud_gate(
+        self, tmp_path: Path
+    ) -> None:
+        """A local gate keeps one twin, so its parent cache spans calls."""
+        reads: dict[bool, int] = {}
+        for local in (True, False):
+            inner = SQLiteDocumentStore(tmp_path / f"docs-{local}.db")
+            inner.put("par", "body", _label("confidential"))
+            counting = _CountingStore(inner, "par")
+            gate = EgressGate(counting, local=local)  # type: ignore[arg-type]
+
+            first = gate.judge_served([chunk_doc_id("par", 0)])
+            second = gate.judge_served([chunk_doc_id("par", 1)])
+
+            assert first.inherited == "confidential"
+            assert second.inherited == "confidential"
+            reads[local] = counting.reads
+            inner.close()
+
+        assert reads[True] == reads[False]
+
+    def test_a_local_gate_answers_the_same_on_a_second_call(
+        self, store: SQLiteDocumentStore
+    ) -> None:
+        orphan = chunk_doc_id("gone", 0)
+        gate = EgressGate(store, local=True)
+
+        first = gate.judge_served([orphan])
+        second = gate.judge_served([orphan])
+
+        assert first == second
+        assert first.inherited == "restricted"

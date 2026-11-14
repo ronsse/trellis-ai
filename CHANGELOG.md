@@ -4,6 +4,10 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A local `EgressGate` reads served labels through one non-local twin for its lifetime, and `judge_served` states what a store-less gate answers (#1237 F1, F4).** A local gate built a new twin, with a new parent cache, on every `judge_served` call, so a session capture re-read a chunk's parent once per pack it was served; the twin is now built on first use and kept, as a non-local gate keeps itself. The docstring now says that a gate built without a document store answers every non-empty id `UNREADABLE` with `inherited="restricted"`, which session capture holds rather than stamps, and a test pins it on both routes. The verdict, label and `unreadable` flag returned are unchanged for the same store state; only the number of store reads on a local route falls. No serving change.
+
 ## [0.12.0] - 2026-11-13
 
 Adds reference documents. Two entries change what a pack serves: a document stored with the

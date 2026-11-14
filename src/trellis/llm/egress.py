@@ -227,6 +227,7 @@ class EgressGate:
         self.local = local is True
         self._documents = document_store
         self._clearance: Any = None
+        self._served_twin: EgressGate | None = None
         if document_store is not None:
             # Deferred: ``trellis.retrieve`` is a heavy package and
             # ``trellis.ingest_corpus`` imports back into it, so a
@@ -512,12 +513,29 @@ class EgressGate:
         level are the true ones: ``WITHHELD`` there means "labelled above
         ``internal`` or unjudgeable", which a local route does not refuse, and
         the caller reads it with :attr:`SummaryJudgement.inherited`. Without
-        the twin a local gate would read an orphan chunk as unlabelled. Never
-        raises.
+        the twin a local gate would read an orphan chunk as unlabelled.
+
+        A gate built without a document store (``for_route_lazy`` on a local
+        route) cannot read a label. Every non-empty id then answers
+        ``UNREADABLE`` with ``inherited="restricted"`` and ``unreadable=True``.
+        The one caller, session capture, holds such a session rather than
+        stamping it, so a store-less gate there would hold every session that
+        was served anything. Build the gate with :meth:`for_route` and a store
+        wherever this is called. Never raises.
         """
-        gate = EgressGate(self._documents, local=False) if self.local else self
+        gate = self._served_gate()
         verdict, inherited, unreadable = gate._cited(doc_ids, with_level=True)
         return SummaryJudgement(verdict, inherited, unreadable=unreadable)
+
+    def _served_gate(self) -> EgressGate:
+        """The gate :meth:`judge_served` reads through: this one or its non-local
+        twin, kept for the gate's lifetime so the twin's parent cache is shared
+        across calls as a non-local gate's is."""
+        if not self.local:
+            return self
+        if self._served_twin is None:
+            self._served_twin = EgressGate(self._documents, local=False)
+        return self._served_twin
 
     def _judge_summary(
         self,
