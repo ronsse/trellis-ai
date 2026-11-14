@@ -336,6 +336,9 @@ def _pick(old: dict[str, Any] | None, new: dict[str, Any]) -> dict[str, Any]:
 _TableParts = tuple[str, str, str]
 #: A securable by its folded names, catalog first: one to four parts.
 _Path = tuple[str, ...]
+_CATALOG_DEPTH: Final = 1
+_SCHEMA_DEPTH: Final = 2
+_TABLE_DEPTH: Final = 3
 
 
 @dataclass
@@ -847,17 +850,15 @@ class _Builder:
 
     def entity_id_for(self, path: _Path) -> str:
         """The id the securable a tag row names would be minted under."""
-        match path:
-            case (catalog,):
-                return self._catalog_id(catalog)
-            case (catalog, schema):
-                return self._schema_id(catalog, schema)
-            case (catalog, schema, table):
-                return self._table_id((catalog, schema, table))
-            case (catalog, schema, table, column, *_):
-                return self._column_id((catalog, schema, table), column)
-        msg = "a securable path has one to four parts"
-        raise AssertionError(msg)
+        depth = len(path)
+        if depth == _CATALOG_DEPTH:
+            return self._catalog_id(path[0])
+        if depth == _SCHEMA_DEPTH:
+            return self._schema_id(path[0], path[1])
+        table: _TableParts = (path[0], path[1], path[2])
+        if depth == _TABLE_DEPTH:
+            return self._table_id(table)
+        return self._column_id(table, path[3])
 
     # -- labels ------------------------------------------------------------
 
