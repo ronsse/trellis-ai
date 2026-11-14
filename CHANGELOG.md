@@ -4,6 +4,10 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`trellis analyze health` reports the labels captured memories inherited, by level (#1237 F3).** The capture section sums `memories_label_inherited` and `memories_label_inherited_by_level` from the `CAPTURE_SWEEP_COMPLETED` events in its window into three new `capture.funnel` fields (`memories_label_inherited`, `memories_label_inherited_by_level`, `sweeps_reporting_label_inheritance`) and, when any memory inherited a label, prints a `labels:` line such as `3 of 7 written memories inherited a label (1 confidential, 2 restricted)`. It is a count of stamped writes in the window, not of rows now stored. Sweeps from a build before #1236 carry no counter and read 0; the line says `reported by k of n sweeps` when some sweeps did not report it. Dry runs stay excluded, and a malformed level map is skipped rather than raised. Read-side only: no new event, and the capture state, rate and notes are unchanged. No serving change.
+
 ## [0.12.0] - 2026-11-13
 
 Adds reference documents. Two entries change what a pack serves: a document stored with the
