@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
 from trellis.core.precedent_document import is_promoted_precedent_document
-from trellis.retrieve.sensitivity import readable_ids
-from trellis.schemas.classification import lifecycle_state_of
+from trellis.retrieve.sensitivity import permits, readable_ids
+from trellis.schemas.classification import (
+    DATA_CLASSIFICATION_KEY,
+    lifecycle_state_of,
+    sensitivity_of,
+)
 from trellis.stores.base.document import DocumentStore
 from trellis.stores.base.event_log import DEFAULT_SCAN_LIMIT, Event, EventLog, EventType
 from trellis.stores.base.graph import GraphStore
@@ -674,9 +679,28 @@ class PrecedentClearance:
         is ``None`` without a read; a node outside it keeps the pointer
         concealment of :func:`~trellis.retrieve.sensitivity.conceal_node_pointers`.
         ``restricted`` reads nothing.
+
+        Any node passed is judged by its own label first (#1029):
+        :data:`PRECEDENT_WITHHELD_LABELLED` when its
+        ``properties["data_classification"]`` is above the clearance, read as
+        :func:`~trellis.schemas.classification.sensitivity_of` reads a document
+        (a malformed record is ``restricted``), and
+        :data:`PRECEDENT_WITHHELD_UNREADABLE` when its ``properties`` is not a
+        mapping. That is the label a pack already honours at the collect seam,
+        so a direct read and a pack agree about a node. A node without the key
+        is not judged by this step at any clearance, and an id-only call (the
+        pack path) never reaches it. It runs before the memo, which is keyed by
+        id and may hold an id-only ``None``, and its answer is not memoised.
         """
         if self._clearance == "restricted":
             return None
+        if node is not None:
+            props = node.get("properties")
+            if isinstance(props, Mapping) and DATA_CLASSIFICATION_KEY in props:
+                if not permits(self._clearance, sensitivity_of(props)):
+                    return PRECEDENT_WITHHELD_LABELLED
+            elif props is not None and not isinstance(props, Mapping):
+                return PRECEDENT_WITHHELD_UNREADABLE
         if entity_id not in self._served:
             reason = self._verdict(entity_id, node)
             self._served[entity_id] = reason

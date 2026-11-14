@@ -175,8 +175,9 @@ def get_graph(
                 if e["source_id"] not in withheld and e["target_id"] not in withheld
             ],
         }
-    # A node carries no label, so the root and every neighbour are served; what
-    # is dropped is a pointer naming a document this caller may not read. One
+    # A node labelled above the caller was withheld above (``verdict_of`` reads
+    # its ``data_classification`` property, #1029); every other node is served,
+    # and what is dropped is a pointer naming a document this caller may not read. One
     # judgement for the whole response (root first, then the neighbourhood).
     root, *neighbours = conceal_node_pointers(
         [node, *subgraph.get("nodes", [])],

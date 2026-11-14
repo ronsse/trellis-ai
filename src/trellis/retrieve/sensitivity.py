@@ -62,7 +62,12 @@ Non-pack read surfaces (``get_items``, ``get_file_context``) use
 :class:`DocumentClearance`, the same predicate over a stored document. A by-id
 read of a withheld document answers exactly as not-found.
 
-Graph nodes, entities, precedents, advisories and observations carry no label
+A graph node carries no label of its own type, but a raw
+``data_classification`` key in its properties is honoured: a pack reads it from
+the item metadata :class:`GraphSearch` copies the properties into, and a direct
+graph read that asks
+:meth:`~trellis.retrieve.precedents.PrecedentClearance.verdict_of` about the node
+withholds it (#1029). Edges, traces, advisories and observations carry no label
 in this slice; ``tests/unit/test_sensitivity_surface_rule.py`` rosters every MCP
 tool as gated or free of document content so a new one cannot slip in unread.
 A ``public`` caller is refused those surfaces outright instead.
@@ -835,7 +840,10 @@ def conceal_node_pointers(
 ) -> list[dict[str, Any]]:
     """``nodes`` as a caller at ``clearance`` may be shown them by a graph read.
 
-    A node carries no label of its own (#1036), so it is served whole; what it
+    A node this reaches is served whole: one whose own ``data_classification``
+    property is above the caller was already left out by
+    :meth:`~trellis.retrieve.precedents.PrecedentClearance.verdict_of` (#1029),
+    and this function does not judge that label; what a served node
     can leak is the id of a document the caller may not read, in four places:
     its ``document_ids``, a string ``properties["evidence_ref"]``
     (``save_knowledge`` writes both, the same id, and the document may have
