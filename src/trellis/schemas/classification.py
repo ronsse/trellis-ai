@@ -381,8 +381,11 @@ class DataClassification(TrellisModel):
     (``classified_by=["caller"]``) under :data:`DATA_CLASSIFICATION_KEY`, and
     read back by :func:`sensitivity_of`. :mod:`trellis.retrieve.sensitivity`
     withholds a document above the caller's clearance on every surface that
-    returns document content. No classifier populates it, and graph nodes
-    carry no label yet. See ``docs/design/adr-tag-vocabulary-split.md`` and
+    returns document content. No classifier populates it. A graph node can
+    carry the same record as a raw ``data_classification`` property; packs and
+    the direct graph reads that ask
+    :meth:`~trellis.retrieve.precedents.PrecedentClearance.verdict_of` about a
+    node honour it (#1029). See ``docs/design/adr-tag-vocabulary-split.md`` and
     ``docs/design/adr-rest-api-security-model.md`` (Layer D).
     """
 

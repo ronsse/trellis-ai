@@ -4,6 +4,10 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Direct graph reads withhold a node labelled above the caller (#1029).** A graph node whose own `properties["data_classification"]` is above the caller's clearance was already withheld from that caller's pack, but every direct graph read served it whole. `PrecedentClearance.verdict_of` now judges a node it is handed by that label, so MCP `get_graph` (root and neighbours, with their edges), `get_items` and `get_file_context`, and REST `GET /graph/search`, `GET /entities/{id}` (root and neighbours) and `GET /graph/history` (any labelled version bars the history) answer for such a node as for a missing one. A node without the key is never judged by this step, so a store with no labelled node answers exactly as before. Known gap: `total` and facet counts on graph search still count a labelled node. **Serving change:** none to packs, whose path asks `verdict_of` with an id only, so pack selection, order and the `PACK_ASSEMBLED` payload are unchanged; direct graph reads and `get_file_context` change only for a node that carries the key, for a caller below `restricted`.
+
 ### Fixed
 
 - **A local `EgressGate` reads served labels through one non-local twin for its lifetime, and `judge_served` states what a store-less gate answers (#1237 F1, F4).** A local gate built a new twin, with a new parent cache, on every `judge_served` call, so a session capture re-read a chunk's parent once per pack it was served; the twin is now built on first use and kept, as a non-local gate keeps itself. The docstring now says that a gate built without a document store answers every non-empty id `UNREADABLE` with `inherited="restricted"`, which session capture holds rather than stamps, and a test pins it on both routes. The verdict, label and `unreadable` flag returned are unchanged for the same store state; only the number of store reads on a local route falls. No serving change.

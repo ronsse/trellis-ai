@@ -87,9 +87,9 @@ HANDS_REGISTRY = frozenset(
     }
 )
 
-#: Routes left out of the gate for now, like graph entity names; remove an
-#: entry when it is gated. None today: ``POST /vectors`` is gated and
-#: ``GET /classify/candidates`` is admin-only.
+#: Routes left out of the gate for now; remove an entry when it is gated. None
+#: today: ``POST /vectors`` is gated and ``GET /classify/candidates`` is
+#: admin-only.
 KNOWN_GAPS: frozenset[str] = frozenset()
 
 ROSTER: dict[str, str] = {

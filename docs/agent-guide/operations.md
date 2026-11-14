@@ -6213,10 +6213,16 @@ above its own clearance, and cannot touch a document it may not read.**
   unlabelled). A label stored anywhere else would be accepted and then do nothing.
   Honouring labels on nodes and traces is a different feature (every read of a node
   and a trace would need a label rule) and is not part of this policy.
-  **Labels already stored on a non-document id stay where they are and stay inert**;
-  there is no migration and nothing deletes them. A label can reach a graph node,
-  edge or trace only as a raw `data_classification` key inside its own properties or
-  metadata bag, which those writers accept as an ordinary property. To list such
+  **Labels already stored on a non-document id stay where they are**; there is no
+  migration and nothing deletes them. A label can reach a graph node, edge or trace
+  only as a raw `data_classification` key inside its own properties or metadata bag,
+  which those writers accept as an ordinary property. **A node's key is honoured**: a
+  pack withholds the node from a caller below it, and so do the direct graph reads
+  (MCP `get_graph` root and neighbours, `get_items`, `get_file_context`; REST
+  `GET /api/v1/graph/search`, `GET /api/v1/entities/{id}` root and neighbours,
+  `GET /api/v1/graph/history`), which answer as for a missing node. `total` and facet
+  counts on graph search still count a labelled node, so a caller below the label
+  can learn that some node matches. A key on an edge or a trace stays inert. To list such
   rows read-only there is no command that enumerates them across a store; for an id
   you suspect, `trellis retrieve entity <id> --format json` shows a node's properties
   and `trellis retrieve trace <id> --format json` a trace's metadata, so look for a
