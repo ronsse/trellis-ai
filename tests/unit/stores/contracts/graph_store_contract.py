@@ -2146,6 +2146,63 @@ class GraphStoreContractTests:
     # document_ids — Phase 4 of ADR planes-and-substrates
     # ------------------------------------------------------------------
 
+    def test_nested_mapping_property_round_trips_on_every_read(
+        self, store: GraphStore
+    ) -> None:
+        """A nested mapping property (a node label) survives every read method.
+
+        A node's ``data_classification`` is a nested record inside its
+        property bag; every backend must hand it back whole, from each read a
+        door or a writer uses, and keep each version in history.
+        """
+
+        def label(level: str) -> dict[str, Any]:
+            return {
+                "sensitivity": level,
+                "regulatory_tags": [],
+                "jurisdiction": [],
+                "classified_by": ["source-inherit"],
+                "classification_version": "1",
+            }
+
+        def nested(node: dict[str, Any]) -> Any:
+            return node["properties"]["data_classification"]
+
+        store.upsert_node(
+            "labelled",
+            "dataset",
+            {"name": "t", "data_classification": label("restricted")},
+        )
+        node = store.get_node("labelled")
+        assert node is not None
+        assert nested(node) == label("restricted")
+        (bulk,) = store.get_nodes_bulk(["labelled"])
+        assert nested(bulk) == label("restricted")
+        (root,) = store.get_subgraph(["labelled"], depth=0)["nodes"]
+        assert nested(root) == label("restricted")
+        rows, total = store.search_nodes(node_type="dataset")
+        assert total == 1
+        assert nested(rows[0]) == label("restricted")
+        (queried,) = store.query(node_type="dataset")
+        assert nested(queried) == label("restricted")
+        (version,) = store.get_node_history("labelled")
+        assert nested(version) == label("restricted")
+
+        _sleep_for_ordering()
+        store.upsert_node(
+            "labelled",
+            "dataset",
+            {"name": "t", "data_classification": label("confidential")},
+        )
+        node = store.get_node("labelled")
+        assert node is not None
+        assert nested(node) == label("confidential")
+        history = store.get_node_history("labelled")
+        assert [nested(v) for v in history] == [
+            label("confidential"),
+            label("restricted"),
+        ]
+
     def test_document_ids_round_trip(self, store: GraphStore) -> None:
         store.upsert_node("n", "service", {}, document_ids=["doc_1", "doc_2"])
         node = store.get_node("n")

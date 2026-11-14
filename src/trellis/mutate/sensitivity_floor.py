@@ -43,6 +43,7 @@ from trellis.retrieve.sensitivity import (
     OverwriteRefusedError,
     permits,
 )
+from trellis.schemas.classification import DATA_CLASSIFICATION_KEY, sensitivity_of
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -134,6 +135,30 @@ def refuse_written_label(
         raise OverwriteRefusedError(msg)
 
 
+def refuse_written_node_label(
+    node_id: str,
+    properties: Mapping[str, Any],
+    *,
+    clearance: Sensitivity,
+) -> None:
+    """Refuse a node's ``data_classification`` property above the writer's clearance.
+
+    The node twin of :func:`refuse_written_label`: a node label lives only as
+    the raw ``data_classification`` key in the node's property bag, and a
+    writer may not set one it could not read. A bag without the key is no
+    verdict. A present but malformed record reads ``restricted``, as every read
+    of it does. The message names the entity and neither label.
+    """
+    if DATA_CLASSIFICATION_KEY not in properties:
+        return
+    if not permits(clearance, sensitivity_of(properties)):
+        msg = (
+            "this credential's clearance does not cover the label requested "
+            f"for entity {node_id!r}; nothing was written"
+        )
+        raise OverwriteRefusedError(msg)
+
+
 def targeted_document_ids(command: Command) -> list[str]:
     """The document ids ``command`` names as its target, by operation.
 
@@ -209,6 +234,7 @@ __all__ = [
     "SensitivityFloor",
     "refuse_above_clearance",
     "refuse_written_label",
+    "refuse_written_node_label",
     "targeted_document_ids",
     "visible_document",
     "visible_row",
