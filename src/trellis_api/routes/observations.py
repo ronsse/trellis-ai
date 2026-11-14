@@ -137,8 +137,9 @@ def list_observations(
     """Query Observation nodes by subject and/or observer.
 
     Filters apply on the graph store's property-level WHERE clause —
-    matches against the same keys the Pydantic schema declares. A node carries
-    no label, so every match is served; one whose ``evidence_ref`` (normally a
+    matches against the same keys the Pydantic schema declares. This read does
+    not judge a node's own ``data_classification`` property (the doors of #1029
+    do), so every match is served; one whose ``evidence_ref`` (normally a
     document id) names a document the caller may not read is served without it.
     """
     registry = get_registry()

@@ -177,7 +177,8 @@ def query_observations(
         detail = _exception_detail(exc)
         return json.dumps({"status": "error", "message": f"Query failed: {detail}"})
 
-    # A node carries no label, so every match is served; what is dropped is an
+    # This read does not judge a node's own ``data_classification`` property
+    # (the doors of #1029 do), so every match is served; what is dropped is an
     # ``evidence_ref`` naming a document this caller may not read.
     clearance = current_clearance()
     rows = conceal_node_pointers(
