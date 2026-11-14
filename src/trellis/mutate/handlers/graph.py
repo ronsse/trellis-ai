@@ -14,7 +14,12 @@ from trellis.core.precedent_document import (
     SOURCE_EXCERPT_STATUS_KEY,
     is_promoted_precedent_document,
 )
-from trellis.errors import NotFoundError, StoreError, ValidationError
+from trellis.errors import (
+    NotFoundError,
+    PolicyViolationError,
+    StoreError,
+    ValidationError,
+)
 from trellis.extract.entity_resolution import NAME_ALIAS_SOURCE_SYSTEM
 from trellis.mutate.commands import HANDLER_OUTCOME_KEY, OUTCOME_LEFT_ALONE, Command
 from trellis.mutate.evidence_pointer_keys import node_evidence_ref_refusal
@@ -24,8 +29,18 @@ from trellis.mutate.handlers._common import (
     _write_node_replacing_read,
 )
 from trellis.mutate.retention import CURRENT_STATE
+from trellis.mutate.sensitivity_floor import (
+    SENSITIVITY_FLOOR_POLICY_ID,
+    refuse_written_node_label,
+)
 from trellis.retrieve.lifecycle import EVIDENCE_REF_KEY
-from trellis.schemas.classification import LIFECYCLE_KEY
+from trellis.retrieve.sensitivity import OverwriteRefusedError
+from trellis.schemas.classification import (
+    DATA_CLASSIFICATION_KEY,
+    LIFECYCLE_KEY,
+    sensitivity_of,
+    sensitivity_rank,
+)
 from trellis.schemas.measurement import Measurement
 from trellis.schemas.observation import Observation
 from trellis.schemas.well_known import (
@@ -200,6 +215,48 @@ def _carry_held_evidence_ref(
     held = stored_properties.get(EVIDENCE_REF_KEY)
     if held not in (None, ""):
         properties[EVIDENCE_REF_KEY] = held
+
+
+def _refuse_node_label_above_clearance(
+    node_id: str, properties: Mapping[str, Any], *, clearance: Sensitivity
+) -> None:
+    """Apply :func:`refuse_written_node_label` as a typed policy rejection.
+
+    The same translation ``classification.set`` and ``evidence.ingest`` make,
+    so a refused node label is answered as the sensitivity floor's rejection,
+    not as an unexpected handler failure. Runs before the write.
+    """
+    try:
+        refuse_written_node_label(node_id, properties, clearance=clearance)
+    except OverwriteRefusedError as exc:
+        raise PolicyViolationError(
+            exc.message, policy_id=SENSITIVITY_FLOOR_POLICY_ID
+        ) from exc
+
+
+def _keep_stricter_node_label(
+    properties: dict[str, Any], stored_properties: Mapping[str, Any] | None
+) -> None:
+    """Keep the stored ``data_classification`` when it is stricter than ``properties``'.
+
+    For the same writers as :func:`_carry_held_evidence_ref`. A node label
+    lives only as this raw key in the bag, and those writers replace or merge
+    the bag, so a write that leaves the key out (or supplies a weaker record)
+    would lower a label an earlier writer set. Any writer the label covers may
+    raise it; none may lower or erase it. The stored record is copied as it
+    stands, a malformed one included (it reads ``restricted``). At equal rank
+    the supplied record wins. A bag that never held the key gets none.
+
+    Only the sensitivity level is compared, and the winning record is written
+    whole: when the supplied record wins, the stored one's ``regulatory_tags``
+    and ``jurisdiction`` are not carried into it.
+    """
+    if stored_properties is None or DATA_CLASSIFICATION_KEY not in stored_properties:
+        return
+    if sensitivity_rank(sensitivity_of(stored_properties)) > sensitivity_rank(
+        sensitivity_of(properties)
+    ):
+        properties[DATA_CLASSIFICATION_KEY] = stored_properties[DATA_CLASSIFICATION_KEY]
 
 
 class EntityCreateHandler:
@@ -404,6 +461,11 @@ class EntityCreateHandler:
             stored_properties = (
                 existing_node.get("properties") if existing_node is not None else None
             )
+            # A caller may not set a node label above its own clearance. After
+            # the ``if_absent`` skip (a left-alone node writes nothing).
+            _refuse_node_label_above_clearance(
+                node_id, base_props, clearance=self._clearance
+            )
             # A caller-supplied ``evidence_ref`` names the document another item
             # is superseded by: it must exist, be readable at the caller's
             # clearance, and not replace one the node already holds. Judged
@@ -422,6 +484,7 @@ class EntityCreateHandler:
             # it alone", and a supplied value was judged above.
             props = dict(base_props)
             _carry_held_evidence_ref(props, stored_properties)
+            _keep_stricter_node_label(props, stored_properties)
             # ``document_ids`` is the first-class graph<->document link (Phase 4
             # of ADR planes-and-substrates). Threading it here gives the pointer
             # a governed write path: the pointer-not-prose invariant depends on a
@@ -678,6 +741,9 @@ class EntityUpdateHandler:
                 clearance=self._clearance,
                 writer="entity.update",
             )
+            _refuse_node_label_above_clearance(
+                entity_id, supplied_properties, clearance=self._clearance
+            )
             # Partial update: merge caller-supplied properties onto the
             # existing bag, then let an explicit ``name`` win.
             props: dict[str, Any] = dict(existing["properties"])
@@ -686,6 +752,7 @@ class EntityUpdateHandler:
             # read the pointer the node holds (a reader's is refused above); it
             # is a no-op for them, so the stored pointer survives the merge.
             _carry_held_evidence_ref(props, existing["properties"])
+            _keep_stricter_node_label(props, existing["properties"])
             if "name" in command.args:
                 props["name"] = command.args["name"]
             changes: dict[str, Any] = {"properties": props}
@@ -987,6 +1054,11 @@ class ObservationRecordHandler:
                 node_props["evidence_ref"] = obs.evidence_ref
             else:
                 _carry_held_evidence_ref(node_props, stored_properties)
+            # Outside the branch: the bag is replaced whether or not the record
+            # names an evidence_ref. The record's fields are fixed (its
+            # ``metadata`` nests under its own key), so no caller-supplied
+            # top-level label reaches this bag and none is judged here.
+            _keep_stricter_node_label(node_props, stored_properties)
             return {
                 "node_type": OBSERVATION,
                 "properties": node_props,
@@ -1095,12 +1167,15 @@ class MeasurementRecordHandler:
             # id that holds one would clear it; it is carried forward instead,
             # from the version the write replaces.
             node_props = dict(props)
-            _carry_held_evidence_ref(
-                node_props,
+            stored_properties = (
                 existing_measurement.get("properties")
                 if existing_measurement is not None
-                else None,
+                else None
             )
+            _carry_held_evidence_ref(node_props, stored_properties)
+            # The record's fields are fixed, so no caller-supplied top-level
+            # label reaches this bag; a stored one is only carried forward.
+            _keep_stricter_node_label(node_props, stored_properties)
             return {
                 "node_type": MEASUREMENT,
                 "properties": node_props,

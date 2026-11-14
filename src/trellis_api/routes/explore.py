@@ -778,7 +778,9 @@ def get_node_history(
     Query param rather than a path segment because
     ``GET /entities/{entity_id:path}`` greedily matches any suffix.
 
-    A node carries no label, so every version is served; a version whose
+    A history any version of which carries a ``data_classification`` property
+    above the caller's clearance answers 404 (#1029). Otherwise every version
+    is served; a version whose
     ``document_ids``, ``evidence_ref`` property or ``lifecycle.superseded_by``
     names a document the caller may not read is served without that id. A
     promoted precedent the caller may not read (its own row or its source above
