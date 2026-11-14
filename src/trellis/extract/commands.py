@@ -102,9 +102,13 @@ def result_to_batch(
     carrying only that property follows its create (and its alias commands).
     ``EntityUpdateHandler`` merges it, keeps a stricter stored label and
     refuses one above the writer's clearance, so the update can only raise
-    the node's label.  Known cost: on the run that first creates the
-    placeholder, the update writes a second SCD-2 version with the same
-    label.  Every other draft produces exactly the commands it did before.
+    the node's label.  The follow-up is an ordinary ``entity.update``, so when
+    its level ties or beats the stored one its record replaces the stored
+    label record whole (#1265).  Known cost: ``entity.update`` has no
+    same-value short-circuit, so every run that carries a labelled
+    placeholder writes one more SCD-2 version of that node, not only the run
+    that first creates it.  Every other draft produces exactly the commands it
+    did before.
     """
     entities = list(result.entities)
     edges = list(result.edges)

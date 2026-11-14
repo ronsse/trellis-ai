@@ -86,11 +86,17 @@ Tags and labels
 
 The input may also hold tag rows: rows of the ``information_schema`` tag views
 (``catalog_tags``, ``schema_tags``, ``table_tags``, ``column_tags``), bare or
-under a wrapper key ``"tags"``.  ``"tags"`` is a wrapper only on a node that is
-not itself a record: a non-empty list beside nothing but other wrapper keys and
-``namespace``.  A record that carries a ``tags`` key is read as it was before
-tag rows were read, its ``tags`` ignored; with a ``sensitivity_map`` given, a
-non-empty one refuses the run instead, since those tags are not read.
+under a wrapper key ``"tags"``.  A node's ``tags`` value is read as tag rows
+only when the key is exactly ``tags``, the value is a non-empty list whose every
+item is a tag row, and every other key on the node is a wrapper key or an
+ignored document key (``namespace``, ``next_page_token``, ``table_name``).  Any
+other ``tags`` key is not read, and its node is read as it was before tag rows
+were read.  With a ``sensitivity_map`` given, the run is refused if any dict at
+any depth (a wrapper, a record bare or under a wrapper key, a column record, a
+nested property map) has a key whose ``casefold()`` is ``tags`` holding a
+truthy value that is not read as tag rows, since a tag the map names would be
+silently ignored; the refusal gives the position only.  Without a map no such
+check runs.
 
 A row is told apart by its ``tag_name``; its keys are read case-insensitively
 (``TAG_NAME`` or ``tag_name``), its securable names fold the way a table
@@ -212,6 +218,9 @@ _WRAPPER_KEYS: Final = (
 
 #: Wrapper key of tag rows, read only by :func:`_is_tags_wrapper`'s rule.
 _TAGS_KEY: Final = "tags"
+
+#: Keys an unread-tags refusal may name in its position; any other is numbered.
+_POSITION_KEYS: Final = frozenset({*_WRAPPER_KEYS, "columns"})
 
 #: ``classified_by`` of a label inherited from mapped source tags.
 SOURCE_INHERIT_CLASSIFIER: Final = "source-inherit"
@@ -376,9 +385,6 @@ class _Collected:
     namespaces: set[str] = field(default_factory=set)
     #: ``(securable, tag key, tag value)``, one per readable tag row
     tags: list[tuple[_Path, str, str]] = field(default_factory=list)
-    #: Positions of a non-empty ``tags`` value on a node that is a record,
-    #: which is not read as tag rows (see :func:`_is_tags_wrapper`).
-    unread_tags: list[str] = field(default_factory=list)
     skipped: Counter[str] = field(default_factory=Counter)
 
     def add_table_edge(
@@ -573,22 +579,72 @@ def _is_bare_catalog(node: dict[str, Any]) -> bool:
 
 
 def _is_tags_wrapper(node: dict[str, Any]) -> bool:
-    """``tags`` holds tag rows only on a node that is not itself a record.
+    """Whether ``node["tags"]`` is read as tag rows.
 
-    That is a non-empty list under ``tags`` beside nothing but other wrapper
-    keys and ignored document keys (``namespace`` among them).  A record that
-    happens to carry a ``tags`` key is read exactly as it was before tag rows
-    were read at all.
+    Only when the key is exactly ``tags``, its value is a non-empty list of
+    dicts each of which is a tag row (:func:`_is_tag_row`), and every other key
+    is a wrapper key or an ignored document key (``namespace`` among them).
+    Any other ``tags`` key is not read, and its node is read exactly as it was
+    before tag rows were read at all.
     """
     rows = node.get(_TAGS_KEY)
     return (
         isinstance(rows, list)
         and bool(rows)
+        and all(isinstance(row, dict) and _is_tag_row(row) for row in rows)
         and all(
             key == _TAGS_KEY or key in _WRAPPER_KEYS or key in _IGNORED_DOCUMENT_KEYS
             for key in node
         )
     )
+
+
+def _first_unread_tags(node: Any, where: str) -> str | None:
+    """Position of the first ``tags`` key (any case) that is not read, or ``None``.
+
+    A key whose ``casefold()`` is ``tags`` holding a truthy value is unread
+    unless :func:`_is_tags_wrapper` reads it as tag rows; the scan does not
+    descend into rows read that way.  It covers every dict at any depth,
+    records under a wrapper key and nested property maps included.
+    """
+    if isinstance(node, list):
+        for idx, item in enumerate(node):
+            found = _first_unread_tags(item, f"{where}[{idx}]")
+            if found is not None:
+                return found
+        return None
+    if not isinstance(node, dict):
+        return None
+    consumed = _is_tags_wrapper(node)
+    for idx, (key, value) in enumerate(node.items()):
+        if consumed and key == _TAGS_KEY:
+            continue
+        if isinstance(key, str) and key.casefold() == _TAGS_KEY and value:
+            return where
+        # Only structural keys are named: a nested map's keys may be tag keys.
+        step = f".{key}" if key in _POSITION_KEYS else f".<key {idx}>"
+        found = _first_unread_tags(value, f"{where}{step}")
+        if found is not None:
+            return found
+    return None
+
+
+def _refuse_unread_tags(raw_input: Any) -> None:
+    """Refuse a run whose input holds a ``tags`` key it does not read.
+
+    Run only when a ``sensitivity_map`` is given: a tag the map names must not
+    be silently ignored.  The message gives the position only.
+    """
+    try:
+        where = _first_unread_tags(raw_input, "input")
+    except RecursionError:
+        _refuse("input: nested too deeply to read")
+    if where is not None:
+        _refuse(
+            f"{where}: a tags key here is not read as tag rows; pass rows of the "
+            "information_schema *_tags views instead, so no tag the sensitivity "
+            "map names is silently ignored"
+        )
 
 
 def _walk(node: Any, where: str, state: _Collected) -> None:  # noqa: PLR0912 - one dispatch over every accepted shape
@@ -605,9 +661,6 @@ def _walk(node: Any, where: str, state: _Collected) -> None:  # noqa: PLR0912 - 
         return
 
     tags_wrapper = _is_tags_wrapper(node)
-    if not tags_wrapper and node.get(_TAGS_KEY):
-        state.unread_tags.append(where)
-
     if (
         tags_wrapper
         or any(key in node for key in _WRAPPER_KEYS)
@@ -821,12 +874,8 @@ class UnityCatalogExtractor:
                 "(the sensitivity_map argument); nothing is minted below a label "
                 "it cannot read"
             )
-        if self._sensitivity_map is not None and state.unread_tags:
-            _refuse(
-                f"{state.unread_tags[0]}: tags nested in a record are not read; "
-                "pass rows of the information_schema *_tags views instead, so "
-                "no tag the sensitivity map names is silently ignored"
-            )
+        if self._sensitivity_map is not None:
+            _refuse_unread_tags(raw_input)
         labels = _own_labels(state, self._sensitivity_map or {})
 
         builder = _Builder(

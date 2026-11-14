@@ -2005,3 +2005,95 @@ class TestTagsKeyOnARecord:
         with pytest.raises(ValidationError, match="sensitivity_map") as caught:
             await extract([ORDERS, TABLE_TAG])
         assert "--sensitivity-map" not in str(caught.value)
+
+
+def _with_column_tags(value: Any) -> dict[str, Any]:
+    """``BARE_ORDERS`` with ``tags`` on its first column record."""
+    columns = [dict(col) for col in BARE_ORDERS["columns"]]
+    columns[0]["tags"] = value
+    return {**BARE_ORDERS, "columns": columns}
+
+
+#: ``(input with an unread tags key, the same input without it)``.  None holds
+#: tag rows by the wrapper rule, so each reads as on main without a map and
+#: refuses with one.
+UNREAD_TAGS = {
+    "record_under_wrapper": (
+        {"tables": [{**BARE_ORDERS, "tags": [TABLE_TAG]}]},
+        {"tables": [BARE_ORDERS]},
+    ),
+    "wrapper_with_strings": (
+        {"tables": [BARE_ORDERS], "tags": ["prod", "pii"]},
+        {"tables": [BARE_ORDERS]},
+    ),
+    "wrapper_with_non_rows": (
+        {"tables": [BARE_ORDERS], "tags": [{"owner": "x"}]},
+        {"tables": [BARE_ORDERS]},
+    ),
+    "wrapper_upper_case_key": (
+        {"tables": [BARE_ORDERS], "TAGS": [TABLE_TAG]},
+        {"tables": [BARE_ORDERS]},
+    ),
+    "column_record": (
+        {"tables": [_with_column_tags([TABLE_TAG])]},
+        {"tables": [BARE_ORDERS]},
+    ),
+    "wrapper_with_a_mixed_list": (
+        {"tables": [BARE_ORDERS], "tags": [TABLE_TAG, "junk"]},
+        {"tables": [BARE_ORDERS]},
+    ),
+    "nested_property_map": (
+        {"tables": [{**BARE_ORDERS, "properties": {"tags": "classification"}}]},
+        {"tables": [{**BARE_ORDERS, "properties": {}}]},
+    ),
+}
+
+
+class TestUnreadTags:
+    """``tags`` holds tag rows only by the wrapper rule; any other is unread."""
+
+    @pytest.mark.parametrize("case", sorted(UNREAD_TAGS))
+    async def test_an_unread_tags_key_with_a_map_refuses_the_run(
+        self, case: str
+    ) -> None:
+        raw, _ = UNREAD_TAGS[case]
+        with pytest.raises(ValidationError, match="_tags views") as caught:
+            await labelled(raw)
+        assert caught.value.code == INPUT_REFUSAL_CODE
+        message = str(caught.value)
+        for leaked in ("classification", "restricted", "orders", "owner", "prod"):
+            assert leaked not in message
+
+    @pytest.mark.parametrize("case", sorted(UNREAD_TAGS))
+    async def test_without_a_map_an_unread_tags_key_reads_as_without_it(
+        self, case: str
+    ) -> None:
+        raw, plain_raw = UNREAD_TAGS[case]
+        with_key = await extract(raw)
+        plain = await extract(plain_raw)
+        assert drafts(with_key) == drafts(plain)
+        assert with_key.skipped_rows == plain.skipped_rows
+
+    async def test_an_empty_bare_tags_node_is_refused_as_on_main(self) -> None:
+        # On main ``{"tags": []}`` is no wrapper and no record: refused.
+        for options in ({}, {"sensitivity_map": LABEL_MAP}):
+            with pytest.raises(ValidationError, match="not a catalog") as caught:
+                await extract([ORDERS, {"tags": []}], **options)
+            assert caught.value.code == INPUT_REFUSAL_CODE
+
+    async def test_tag_rows_under_a_wrapper_are_not_also_scanned(self) -> None:
+        # A consumed tag row carrying its own ``tags`` key is not unread.
+        row = {**TABLE_TAG, "tags": "x"}
+        wrapped = await labelled({"tables": [BARE_ORDERS], "tags": [row]})
+        assert label(by_id(wrapped)[ORDERS_ID]) == "restricted"
+
+    async def test_a_deep_input_with_a_map_gets_the_typed_refusal(self) -> None:
+        deep: Any = {"tables": [BARE_ORDERS], "namespace": NS}
+        inner: Any = deep
+        for _ in range(5000):
+            nxt: dict[str, Any] = {}
+            inner["properties"] = nxt
+            inner = nxt
+        with pytest.raises(ValidationError) as caught:
+            await labelled(deep)
+        assert caught.value.code == INPUT_REFUSAL_CODE
