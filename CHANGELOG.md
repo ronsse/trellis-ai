@@ -4,6 +4,10 @@ All notable changes to Trellis will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Unity Catalog volume or function record is counted, not minted as a table, and a table exported without columns is counted (#1198).** A `VolumeInfo` or `FunctionInfo` record carries `catalog_name` and `schema_name`, so the Unity Catalog extractor read it as a table and minted a `dataset` node for it. A record carrying `volume_id` or `volume_type` (or under a `volumes` wrapper) is now counted in `skipped_rows` as `volume_records`, and one carrying `function_id` or `routine_body` (or under a `functions` wrapper) as `function_records`; neither mints a node. A table record with no `columns` list (an export made with `omit_columns`) is still minted as before, without `column_count` / `column_names`, and is now counted as `tables_without_columns` so the operator sees the run dropped column facts. No serving change: only what one extractor mints from its input.
+
 ## [0.12.0] - 2026-11-13
 
 Adds reference documents. Two entries change what a pack serves: a document stored with the
