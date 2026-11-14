@@ -34,7 +34,9 @@ draft with ``if_absent=True`` and ``stub=True`` on the same id the real record
 would have, so every edge joins two nodes of the batch and the Bolt stores,
 which refuse a dangling edge, take it.  ``if_absent`` makes the write a
 create-if-absent: the node is created when missing and left alone when it
-exists, so a partial run never replaces what a fuller run wrote.  A record the
+exists, so a partial run never replaces what a fuller run wrote.  The one thing
+a placeholder does carry onto an existing node is its label (see "Tags and
+labels" below).  A record the
 export does hold is a full create, which replaces the node's properties and so
 drops ``stub``: the metadata that arrives after a lineage-only run lands whole.
 
@@ -79,6 +81,68 @@ no ``columns`` list (an export made with ``omit_columns``) is still a full
 create, so it carries no ``column_count`` or ``column_names``; it is counted in
 ``skipped_rows`` as ``tables_without_columns``.
 
+Tags and labels
+---------------
+
+The input may also hold tag rows: rows of the ``information_schema`` tag views
+(``catalog_tags``, ``schema_tags``, ``table_tags``, ``column_tags``), bare or
+under a wrapper key ``"tags"``.  A node's ``tags`` value is read as tag rows
+only when the key is exactly ``tags``, the value is a non-empty list whose every
+item is a tag row, and every other key on the node is a wrapper key or an
+ignored document key (``namespace``, ``next_page_token``, ``table_name``).  Any
+other ``tags`` key is not read, and its node is read as it was before tag rows
+were read.  With a ``sensitivity_map`` given, the run is refused if any dict at
+any depth (a wrapper, a record bare or under a wrapper key, a column record, a
+lineage item, a nested property map, a tag row's own values) is a tag row the
+walk did not read, or has a key whose ``casefold()`` is ``tags`` holding a
+truthy value that the walk did not read as tag rows, since a tag the map names
+would be silently ignored; the refusal gives the position only.  The walk alone
+decides what was read.  With a map, any value in the input that is not a
+``dict``, ``list``, ``str``, ``int``, ``float``, ``bool`` or ``None`` also
+refuses the run (a ``tuple``, a ``datetime``, ``bytes``), since JSON yields none
+of them and the check could not see into it; a caller holding such values
+passes the input through ``json`` first.  Without a map no such check runs.
+
+A row is told apart by its ``tag_name``; its keys are read case-insensitively
+(``TAG_NAME`` or ``tag_name``), its securable names fold the way a table
+record's do, and its tag key and value are compared exactly, since Databricks
+tag keys are case sensitive.  ``column_name`` makes it a column tag, else
+``table_name`` a table tag, else ``schema_name`` a schema tag, else a catalog
+tag.  A missing or null ``tag_value`` reads as ``""``.  See
+<https://docs.databricks.com/aws/en/sql/language-manual/information-schema/table_tags>
+and <https://docs.databricks.com/aws/en/database-objects/tags>.
+
+Tags become a label only through the operator's ``sensitivity_map``,
+``{tag_key: {tag_value | "*": level}}`` with ``level`` one of ``internal``,
+``confidential`` or ``restricted``.  The map fails closed where the operator named
+a key and stays open where they did not:
+
+* a tag key the map does not name is ignored and counted as ``tags_unmapped_key``;
+* a mapped key whose value the map lacks (and has no ``"*"``) reads
+  ``restricted`` and is counted as ``tags_unmapped_value``;
+* tag rows with no map, and a tag row that cannot be read, refuse the run; so
+  does a tag row whose keys are not all strings or collide when lowercased
+  (``tag_name`` beside ``TAG_NAME``), before anything is read from it.
+
+A node's label is the strictest of its own tags and its parents': a catalog's
+reaches its schemas, a schema's its tables, and a table's its columns, so a column
+is never more visible than its table.  A table does not rise to its strictest
+column.  Every draft, placeholders included, whose label ranks above
+``internal`` carries a ``data_classification`` property holding
+``DataClassification(sensitivity=<level>, classified_by=["source-inherit"])``.
+With no tag rows the output is the same with or without a map.  A tag row whose
+securable this run does not mint is counted as ``tags_for_absent_securables``,
+and a volume's tag row as ``tag_rows_on_volumes``.  That includes a tagged
+column beyond ``max_columns_per_table`` that no column lineage names: it is
+not minted, its tag row is counted under ``tags_for_absent_securables``, and
+its name stays in the table's ``column_names`` (within that list's own bound).
+
+A placeholder's label reaches a node that already exists: the create-if-absent
+leaves that node alone, so
+:func:`~trellis.extract.commands.result_to_batch` follows a labelled
+placeholder's create with an ``entity.update`` carrying only
+``data_classification``, which can raise the stored label and never lowers it.
+
 Rows the extractor reads and does not use (a lineage row without two tables,
 and the like) are counted by reason in :attr:`ExtractionResult.skipped_rows`.
 
@@ -91,15 +155,23 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, ClassVar, Final, NoReturn
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, ClassVar, Final, NoReturn, cast
 
 import structlog
 
 from trellis.errors import ValidationError
 from trellis.extract.base import ExtractorTier
 from trellis.schemas import well_known as wk
+from trellis.schemas.classification import (
+    DATA_CLASSIFICATION_KEY,
+    DataClassification,
+    Sensitivity,
+    sensitivity_rank,
+)
 from trellis.schemas.enums import NodeRole
 from trellis.schemas.extraction import (
     AliasDraft,
@@ -149,6 +221,28 @@ _WRAPPER_KEYS: Final = (
     "functions",
     "upstreams",
     "downstreams",
+)
+
+#: Wrapper key of tag rows, read only by :func:`_is_tags_wrapper`'s rule.
+_TAGS_KEY: Final = "tags"
+
+#: Keys an unread-tags refusal may name in its position; any other is numbered.
+_POSITION_KEYS: Final = frozenset({*_WRAPPER_KEYS, "columns"})
+
+#: ``classified_by`` of a label inherited from mapped source tags.
+SOURCE_INHERIT_CLASSIFIER: Final = "source-inherit"
+
+#: Levels a ``sensitivity_map`` may name.  ``public`` is refused: a ``public``
+#: node is served to ``read,external`` callers, and a team's "public" tag does
+#: not mean that.
+_MAP_LEVELS: Final[tuple[Sensitivity, ...]] = ("internal", "confidential", "restricted")
+_WILDCARD: Final = "*"
+
+#: Name fields a tag row of each level needs, after ``catalog_name``.
+_TAG_LEVEL_NAMES: Final = (
+    ("column_name", ("schema_name", "table_name", "column_name")),
+    ("table_name", ("schema_name", "table_name")),
+    ("schema_name", ("schema_name",)),
 )
 
 #: Fields only a ``VolumeInfo`` / ``FunctionInfo`` record carries.  Both also
@@ -275,6 +369,11 @@ def _pick(old: dict[str, Any] | None, new: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 _TableParts = tuple[str, str, str]
+#: A securable by its folded names, catalog first: one to four parts.
+_Path = tuple[str, ...]
+_CATALOG_DEPTH: Final = 1
+_SCHEMA_DEPTH: Final = 2
+_TABLE_DEPTH: Final = 3
 
 
 @dataclass
@@ -291,6 +390,14 @@ class _Collected:
         tuple[tuple[_TableParts, str], tuple[_TableParts, str]], str | None
     ] = field(default_factory=dict)
     namespaces: set[str] = field(default_factory=set)
+    #: ``(securable, tag key, tag value)``, one per readable tag row
+    tags: list[tuple[_Path, str, str]] = field(default_factory=list)
+    #: ``id()`` of every node whose ``tags`` list :func:`_walk` read as tag
+    #: rows, and of every dict :func:`_add_tag_row` read as a tag row.  An id
+    #: is valid only while the raw input that holds the node is alive, so these
+    #: are read only by :func:`_refuse_unread_tags` against that same input.
+    read_wrappers: set[int] = field(default_factory=set)
+    read_rows: set[int] = field(default_factory=set)
     skipped: Counter[str] = field(default_factory=Counter)
 
     def add_table_edge(
@@ -373,6 +480,48 @@ def _add_function(rec: Any, where: str, state: _Collected) -> None:
     state.skipped["function_records"] += 1
 
 
+def _is_tag_row(node: dict[str, Any]) -> bool:
+    return any(isinstance(key, str) and key.lower() == "tag_name" for key in node)
+
+
+def _add_tag_row(rec: Any, where: str, state: _Collected) -> None:
+    """One ``information_schema.*_tags`` row; an unreadable one refuses the run."""
+    if not isinstance(rec, dict):
+        _refuse(f"{where}: expected an object, got {type(rec).__name__}")
+    # Before anything is read: two spellings of one key would keep only the last.
+    keys = [key.lower() for key in rec if isinstance(key, str)]
+    if len(keys) != len(rec) or len(set(keys)) != len(keys):
+        _refuse(
+            f"{where}: tag row has keys that are not strings or that collide "
+            "when lowercased"
+        )
+    row = {key.lower(): value for key, value in rec.items()}
+    if "tag_name" not in row:
+        _refuse(f"{where}: a record under tags has no tag_name")
+    state.read_rows.add(id(rec))
+    if "volume_name" in row:
+        # A volume mints nothing, so its tag has nothing to label.
+        state.skipped["tag_rows_on_volumes"] += 1
+        return
+    key, value = row["tag_name"], row.get("tag_value")
+    if not isinstance(key, str) or not key:
+        _refuse(f"{where}: tag row has no tag_name")
+    if value is not None and not isinstance(value, str):
+        _refuse(f"{where}: tag row has a tag_value that is not a string")
+    needed: tuple[str, ...] = ()
+    for marker, names in _TAG_LEVEL_NAMES:
+        if marker in row:
+            needed = names
+            break
+    path: list[str] = []
+    for name in ("catalog_name", *needed):
+        part = row.get(name)
+        if not isinstance(part, str) or not part.strip():
+            _refuse(f"{where}: tag row has no {name}")
+        path.append(_fold(part))
+    state.tags.append((tuple(path), key, value or ""))
+
+
 def _row_table(row: dict[str, Any], side: str) -> _TableParts | None:
     full = row.get(f"{side}_table_full_name")
     if isinstance(full, str) and full.strip():
@@ -450,6 +599,86 @@ def _is_bare_catalog(node: dict[str, Any]) -> bool:
     return full_name is None or _fold(full_name) == _fold(node["name"])
 
 
+def _is_tags_wrapper(node: dict[str, Any]) -> bool:
+    """Whether ``node["tags"]`` is read as tag rows.
+
+    Only when the key is exactly ``tags``, its value is a non-empty list of
+    dicts each of which is a tag row (:func:`_is_tag_row`), and every other key
+    is a wrapper key or an ignored document key (``namespace`` among them).
+    Any other ``tags`` key is not read, and its node is read exactly as it was
+    before tag rows were read at all.
+    """
+    rows = node.get(_TAGS_KEY)
+    return (
+        isinstance(rows, list)
+        and bool(rows)
+        and all(isinstance(row, dict) and _is_tag_row(row) for row in rows)
+        and all(
+            key == _TAGS_KEY or key in _WRAPPER_KEYS or key in _IGNORED_DOCUMENT_KEYS
+            for key in node
+        )
+    )
+
+
+#: Every type ``json.loads`` yields besides ``None``; ``bool`` is an ``int``.
+_JSON_TYPES = (dict, list, str, int, float)
+
+
+def _first_unread_tags(node: Any, where: str, state: _Collected) -> str | None:
+    """Position of the first tag :func:`_walk` did not read, or ``None``.
+
+    Unread is a dict that :func:`_is_tag_row` accepts but the walk did not read
+    as a tag row, or a key whose ``casefold()`` is ``tags`` holding a truthy
+    value on a node whose ``tags`` the walk did not read as tag rows.  The walk
+    is the only judge of what was read: the scan covers every dict at any
+    depth, including the rows of a wrapper that was read and a read row's own
+    values.  The ids in ``state`` are those of ``node``'s own objects, valid
+    because the raw input is alive for the whole scan.
+    """
+    children: list[tuple[Any, str]] = []
+    if node is not None and not isinstance(node, _JSON_TYPES):
+        # What JSON yields is listed, not what could hide a row: a container
+        # nobody thought of is then refused instead of passed over unread.
+        _refuse(f"{where}: a value that is not a JSON value")
+    if isinstance(node, list):
+        children = [(item, f"{where}[{idx}]") for idx, item in enumerate(node)]
+    elif isinstance(node, dict):
+        if _is_tag_row(node) and id(node) not in state.read_rows:
+            return where
+        wrapper_read = id(node) in state.read_wrappers
+        for idx, (key, value) in enumerate(node.items()):
+            is_tags = isinstance(key, str) and key.casefold() == _TAGS_KEY
+            if is_tags and value and not (wrapper_read and key == _TAGS_KEY):
+                return where
+            # Only structural keys are named: a nested map's keys may be tag keys.
+            step = f".{key}" if key in _POSITION_KEYS else f".<key {idx}>"
+            children.append((value, f"{where}{step}"))
+    for child, position in children:
+        found = _first_unread_tags(child, position, state)
+        if found is not None:
+            return found
+    return None
+
+
+def _refuse_unread_tags(raw_input: Any, state: _Collected) -> None:
+    """Refuse a run whose input holds a tag the walk did not read.
+
+    Run only when a ``sensitivity_map`` is given, after :func:`_collect` over
+    the same ``raw_input``: a tag the map names must not be silently ignored.
+    The message gives the position only.
+    """
+    try:
+        where = _first_unread_tags(raw_input, "input", state)
+    except RecursionError:
+        _refuse("input: nested too deeply to read")
+    if where is not None:
+        _refuse(
+            f"{where}: a tag here is not read as tag rows; pass rows of the "
+            "information_schema *_tags views instead, so no tag the sensitivity "
+            "map names is silently ignored"
+        )
+
+
 def _walk(node: Any, where: str, state: _Collected) -> None:  # noqa: PLR0912 - one dispatch over every accepted shape
     if isinstance(node, list):
         for idx, item in enumerate(node):
@@ -458,8 +687,16 @@ def _walk(node: Any, where: str, state: _Collected) -> None:  # noqa: PLR0912 - 
     if not isinstance(node, dict):
         _refuse(f"{where}: expected an object or a list, got {type(node).__name__}")
 
-    if any(key in node for key in _WRAPPER_KEYS) or (
-        node.keys() <= _IGNORED_DOCUMENT_KEYS
+    # First: a tag row also carries the names a table record is told apart by.
+    if _is_tag_row(node):
+        _add_tag_row(node, where, state)
+        return
+
+    tags_wrapper = _is_tags_wrapper(node)
+    if (
+        tags_wrapper
+        or any(key in node for key in _WRAPPER_KEYS)
+        or (node.keys() <= _IGNORED_DOCUMENT_KEYS)
     ):
         namespace = normalize_scope(node.get("namespace"))
         if namespace:
@@ -473,6 +710,10 @@ def _walk(node: Any, where: str, state: _Collected) -> None:  # noqa: PLR0912 - 
         ):
             for idx, rec in enumerate(_record_list(node.get(key), f"{where}.{key}")):
                 add(rec, f"{where}.{key}[{idx}]", state)
+        if tags_wrapper:
+            state.read_wrappers.add(id(node))
+            for idx, rec in enumerate(node[_TAGS_KEY]):
+                _add_tag_row(rec, f"{where}.{_TAGS_KEY}[{idx}]", state)
         if "upstreams" in node or "downstreams" in node:
             _add_lineage_api(node, where, state)
         return
@@ -525,6 +766,54 @@ def _drop_none(props: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in props.items() if v is not None}
 
 
+def _checked_map(value: Any) -> dict[str, dict[str, Sensitivity]]:
+    """A plain-dict copy of an operator's ``sensitivity_map``, or ``ValueError``."""
+    shape = 'sensitivity_map must map a tag key to {tag value or "*": level}'
+    if not isinstance(value, Mapping):
+        raise ValueError(shape)  # noqa: TRY004 - the cap check's type
+    checked: dict[str, dict[str, Sensitivity]] = {}
+    for key, inner in value.items():
+        if not isinstance(key, str) or not key or not isinstance(inner, Mapping):
+            raise ValueError(shape)
+        levels: dict[str, Sensitivity] = {}
+        for tag_value, level in inner.items():
+            if not isinstance(tag_value, str):
+                raise ValueError(shape)  # noqa: TRY004 - the cap check's type
+            if not isinstance(level, str) or level not in _MAP_LEVELS:
+                msg = (
+                    "sensitivity_map levels must be internal, confidential or "
+                    "restricted (public is refused)"
+                )
+                raise ValueError(msg)
+            levels[tag_value] = cast("Sensitivity", level)
+        checked[key] = levels
+    return checked
+
+
+def _stricter(a: Sensitivity | None, b: Sensitivity) -> Sensitivity:
+    return b if a is None or sensitivity_rank(b) > sensitivity_rank(a) else a
+
+
+def _own_labels(
+    state: _Collected, sensitivity_map: Mapping[str, Mapping[str, Sensitivity]]
+) -> dict[_Path, Sensitivity]:
+    """Each tagged securable's strictest mapped label, before inheritance."""
+    own: dict[_Path, Sensitivity] = {}
+    for path, key, value in state.tags:
+        values = sensitivity_map.get(key)
+        if values is None:
+            # Open vocabulary (owners, cost centres): not a classification.
+            state.skipped["tags_unmapped_key"] += 1
+            continue
+        level = values.get(value) or values.get(_WILDCARD)
+        if level is None:
+            # The operator said this key classifies; an unforeseen value fails closed.
+            level = "restricted"
+            state.skipped["tags_unmapped_value"] += 1
+        own[path] = _stricter(own.get(path), level)
+    return own
+
+
 class UnityCatalogExtractor:
     """Deterministic extractor for a Unity Catalog metadata and lineage export.
 
@@ -548,6 +837,10 @@ class UnityCatalogExtractor:
             :data:`DEFAULT_MAX_COLUMNS_PER_TABLE`).  Columns past it are counted
             as ``columns_over_cap`` in the result; a column that column lineage
             references is minted regardless.
+        sensitivity_map: ``{tag_key: {tag_value | "*": level}}``, how the
+            export's tag rows become labels (see the module docstring).  A level
+            outside ``internal``, ``confidential`` and ``restricted`` raises
+            ``ValueError``.  Without a map, an input holding tag rows is refused.
 
     An object the export names but does not hold, whether through a lineage row
     or as the parent of a record, becomes a name-only ``if_absent`` placeholder
@@ -571,6 +864,7 @@ class UnityCatalogExtractor:
         include_system: bool = False,
         include_columns: bool = True,
         max_columns_per_table: int = DEFAULT_MAX_COLUMNS_PER_TABLE,
+        sensitivity_map: Mapping[str, Mapping[str, str]] | None = None,
     ) -> None:
         if max_columns_per_table < 1:
             msg = "max_columns_per_table must be at least 1"
@@ -579,6 +873,21 @@ class UnityCatalogExtractor:
         self._include_system = include_system
         self._include_columns = include_columns
         self._max_columns = max_columns_per_table
+        self._sensitivity_map = (
+            None if sensitivity_map is None else _checked_map(sensitivity_map)
+        )
+
+    @property
+    def sensitivity_map(self) -> Mapping[str, Mapping[str, Sensitivity]] | None:
+        """The operator's tag map as given, read-only, or ``None``."""
+        if self._sensitivity_map is None:
+            return None
+        return MappingProxyType(
+            {
+                key: MappingProxyType(values)
+                for key, values in self._sensitivity_map.items()
+            }
+        )
 
     async def extract(
         self,
@@ -591,6 +900,16 @@ class UnityCatalogExtractor:
 
         state = _collect(raw_input)
         namespace = self._namespace or next(iter(state.namespaces), None)
+        has_tags = bool(state.tags) or state.skipped["tag_rows_on_volumes"] > 0
+        if has_tags and self._sensitivity_map is None:
+            _refuse(
+                "input: the export holds tag rows but no sensitivity map was given "
+                "(the sensitivity_map argument); nothing is minted below a label "
+                "it cannot read"
+            )
+        if self._sensitivity_map is not None:
+            _refuse_unread_tags(raw_input, state)
+        labels = _own_labels(state, self._sensitivity_map or {})
 
         builder = _Builder(
             state,
@@ -598,8 +917,13 @@ class UnityCatalogExtractor:
             include_system=self._include_system,
             include_columns=self._include_columns,
             max_columns=self._max_columns,
+            labels=labels,
         )
         entities, edges = builder.build()
+        minted = {draft.entity_id for draft in entities}
+        for path, _, _ in state.tags:
+            if builder.entity_id_for(path) not in minted:
+                state.skipped["tags_for_absent_securables"] += 1
         # Unary + drops a reason whose count lineage brought back to zero.
         skipped = dict(sorted((+state.skipped).items()))
         if skipped:
@@ -635,8 +959,10 @@ class _Builder:
         include_system: bool,
         include_columns: bool,
         max_columns: int,
+        labels: Mapping[_Path, Sensitivity],
     ) -> None:
         self._state = state
+        self._labels = labels
         self._namespace = namespace
         self._scope = namespace or DEFAULT_SCOPE
         self._include_system = include_system
@@ -659,6 +985,44 @@ class _Builder:
 
     def _column_id(self, parts: _TableParts, column: str) -> str:
         return f"{UC_COLUMN_ENTITY_TYPE}:{self._scope}:{identity_key(*parts)}/{column}"
+
+    def entity_id_for(self, path: _Path) -> str:
+        """The id the securable a tag row names would be minted under."""
+        depth = len(path)
+        if depth == _CATALOG_DEPTH:
+            return self._catalog_id(path[0])
+        if depth == _SCHEMA_DEPTH:
+            return self._schema_id(path[0], path[1])
+        table: _TableParts = (path[0], path[1], path[2])
+        if depth == _TABLE_DEPTH:
+            return self._table_id(table)
+        return self._column_id(table, path[3])
+
+    # -- labels ------------------------------------------------------------
+
+    def label_for(
+        self,
+        catalog: str,
+        schema: str | None = None,
+        table: str | None = None,
+        column: str | None = None,
+    ) -> Sensitivity | None:
+        """The strictest own label along the path from the catalog down, or ``None``."""
+        path = tuple(p for p in (catalog, schema, table, column) if p is not None)
+        found: Sensitivity | None = None
+        for depth in range(1, len(path) + 1):
+            own = self._labels.get(path[:depth])
+            if own is not None:
+                found = _stricter(found, own)
+        return found
+
+    @staticmethod
+    def _stamp(props: dict[str, Any], label: Sensitivity | None) -> None:
+        """Label a draft's properties when the inherited label is above internal."""
+        if label is not None and sensitivity_rank(label) > sensitivity_rank("internal"):
+            props[DATA_CLASSIFICATION_KEY] = DataClassification(
+                sensitivity=label, classified_by=[SOURCE_INHERIT_CLASSIFIER]
+            ).model_dump(mode="json")
 
     # -- selection ---------------------------------------------------------
 
@@ -694,6 +1058,7 @@ class _Builder:
                     "source_updated_at": _iso(rec.get("updated_at")),
                 }
             )
+            self._stamp(props, self.label_for(catalog))
             self._entities[cid] = EntityDraft(
                 entity_id=cid,
                 entity_type=UC_CATALOG_ENTITY_TYPE,
@@ -732,6 +1097,7 @@ class _Builder:
                     "source_updated_at": _iso(rec.get("updated_at")),
                 }
             )
+            self._stamp(props, self.label_for(catalog, schema))
             self._entities[sid] = EntityDraft(
                 entity_id=sid,
                 entity_type=UC_SCHEMA_ENTITY_TYPE,
@@ -784,6 +1150,7 @@ class _Builder:
                 }
             )
         )
+        self._stamp(props, self.label_for(catalog, schema, table))
         aliases = [
             AliasDraft(
                 source_system=wk.UNITY_CATALOG_SOURCE_SYSTEM,
@@ -834,6 +1201,7 @@ class _Builder:
                 "description": _text(rec.get("comment"), _MAX_DESCRIPTION),
             }
         )
+        self._stamp(props, self.label_for(*parts, column))
         self._entities[cid] = EntityDraft(
             entity_id=cid,
             entity_type=UC_COLUMN_ENTITY_TYPE,

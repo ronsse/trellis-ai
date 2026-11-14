@@ -94,6 +94,21 @@ def result_to_batch(
             ``extractor_tier`` column.
             Callers read the knob with
             :func:`trellis.core.write_config.knowledge_link_or_mint_enabled`.
+
+    A placeholder draft (``if_absent``) is created only when its node is
+    missing, so a ``data_classification`` it carries would be lost on a node
+    that already exists.  When such a draft has an ``entity_id`` and a
+    non-``None`` ``data_classification`` property, an ``ENTITY_UPDATE``
+    carrying only that property follows its create (and its alias commands).
+    ``EntityUpdateHandler`` merges it, keeps a stricter stored label and
+    refuses one above the writer's clearance, so the update can only raise
+    the node's label.  The follow-up is an ordinary ``entity.update``, so when
+    its level ties or beats the stored one its record replaces the stored
+    label record whole (#1265).  Known cost: ``entity.update`` has no
+    same-value short-circuit, so every run that carries a labelled
+    placeholder writes one more SCD-2 version of that node, not only the run
+    that first creates it.  Every other draft produces exactly the commands it
+    did before.
     """
     entities = list(result.entities)
     edges = list(result.edges)
@@ -144,6 +159,9 @@ def result_to_batch(
                 _alias_command(entity, alias, requested_by=requested_by)
                 for alias in entity.aliases
             )
+        label_update = _placeholder_label_command(entity, requested_by=requested_by)
+        if label_update is not None:
+            commands.append(label_update)
 
     tier = _edge_tier(result) if bind_identity else None
     for edge in edges:
@@ -175,6 +193,35 @@ def result_to_batch(
     return CommandBatch(
         commands=commands,
         strategy=strategy,
+        requested_by=requested_by,
+    )
+
+
+#: Property a placeholder's follow-up ``ENTITY_UPDATE`` carries.
+_LABEL_PROPERTY = "data_classification"
+
+
+def _placeholder_label_command(
+    entity: EntityDraft, *, requested_by: str
+) -> Command | None:
+    """``ENTITY_UPDATE`` raising an existing node to a placeholder's label.
+
+    ``None`` unless the draft is ``if_absent``, has an ``entity_id`` and
+    carries a non-``None`` ``data_classification``: the create-if-absent
+    leaves an existing node alone, label included, and this carries the label
+    to it.  If the node does not exist (its create failed), the handler
+    refuses the update like any update of a missing node.
+    """
+    if not entity.if_absent or entity.entity_id is None:
+        return None
+    label = entity.properties.get(_LABEL_PROPERTY)
+    if label is None:
+        return None
+    return Command(
+        operation=Operation.ENTITY_UPDATE,
+        args={"entity_id": entity.entity_id, "properties": {_LABEL_PROPERTY: label}},
+        target_id=entity.entity_id,
+        target_type="entity",
         requested_by=requested_by,
     )
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 from trellis.extract.commands import (
@@ -13,6 +14,7 @@ from trellis.extract.commands import (
 from trellis.mutate.commands import BatchStrategy, CommandBatch, Operation
 from trellis.schemas.enums import NodeRole
 from trellis.schemas.extraction import (
+    AliasDraft,
     EdgeDraft,
     EntityDraft,
     ExtractionProvenance,
@@ -354,3 +356,87 @@ class TestReconcileNodeRoles:
         )
         assert reconcile_node_roles(batch, store) == []
         store.get_node.assert_not_called()
+
+
+class TestPlaceholderLabelFollowUp:
+    """A labelled ``if_absent`` draft gets an ``entity.update`` for its label."""
+
+    LABEL: ClassVar[dict[str, Any]] = {
+        "sensitivity": "restricted",
+        "classified_by": ["source-inherit"],
+    }
+
+    def _commands(self, *entities: EntityDraft, bind: bool = False) -> list[Any]:
+        return list(
+            result_to_batch(
+                _result(entities=list(entities)), requested_by="t", bind_identity=bind
+            ).commands
+        )
+
+    def test_a_labelled_if_absent_draft_yields_create_then_update(self) -> None:
+        ent = EntityDraft(
+            entity_id="ent-a",
+            entity_type="uc_catalog",
+            name="a",
+            properties={"stub": True, "data_classification": self.LABEL},
+            if_absent=True,
+        )
+        create, update = self._commands(ent)
+        assert create.operation is Operation.ENTITY_CREATE
+        assert create.args["if_absent"] is True
+        assert create.args["properties"]["data_classification"] == self.LABEL
+        assert update.operation is Operation.ENTITY_UPDATE
+        assert update.args == {
+            "entity_id": "ent-a",
+            "properties": {"data_classification": self.LABEL},
+        }
+        assert update.target_id == "ent-a"
+        assert update.target_type == "entity"
+        assert update.requested_by == "t"
+
+    def test_the_update_follows_the_alias_commands(self) -> None:
+        ent = EntityDraft(
+            entity_id="ent-a",
+            entity_type="uc_catalog",
+            name="a",
+            properties={"data_classification": self.LABEL},
+            aliases=[AliasDraft(source_system="uc", raw_id="a")],
+            if_absent=True,
+        )
+        ops = [c.operation for c in self._commands(ent, bind=True)]
+        assert ops == [
+            Operation.ENTITY_CREATE,
+            Operation.ALIAS_UPSERT,
+            Operation.ENTITY_UPDATE,
+        ]
+
+    def test_drafts_without_both_conditions_yield_todays_commands(self) -> None:
+        unlabelled = EntityDraft(
+            entity_id="ent-a", entity_type="uc_catalog", name="a", if_absent=True
+        )
+        null_label = unlabelled.model_copy(
+            update={"properties": {"data_classification": None}}
+        )
+        ordinary = EntityDraft(
+            entity_id="ent-b",
+            entity_type="uc_catalog",
+            name="b",
+            properties={"data_classification": self.LABEL},
+        )
+        no_id = EntityDraft(
+            entity_type="uc_catalog",
+            name="c",
+            properties={"data_classification": self.LABEL},
+            if_absent=True,
+        )
+        for ent in (unlabelled, null_label, ordinary, no_id):
+            (cmd,) = self._commands(ent)
+            assert cmd.operation is Operation.ENTITY_CREATE
+        (ordinary_cmd,) = self._commands(ordinary)
+        assert ordinary_cmd.args == {
+            "entity_id": "ent-b",
+            "entity_type": "uc_catalog",
+            "name": "b",
+            "properties": {"data_classification": self.LABEL, CONFIDENCE_PROPERTY: 1.0},
+            "node_role": "semantic",
+        }
