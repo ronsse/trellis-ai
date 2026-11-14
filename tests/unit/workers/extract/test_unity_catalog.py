@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import random
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -2146,3 +2147,72 @@ class TestUnreadTags:
         with pytest.raises(ValidationError) as caught:
             await labelled(deep)
         assert caught.value.code == INPUT_REFUSAL_CODE
+
+
+#: A table tag row whose keys collide after lowercasing: the upper-case pair is
+#: mapped and restricted, the lower-case pair is unmapped.
+COLLIDING_TAG_NAME = {
+    "catalog_name": "main",
+    "schema_name": "sales",
+    "table_name": "orders",
+    "TAG_NAME": "classification",
+    "TAG_VALUE": "restricted",
+    "tag_name": "owner",
+    "tag_value": "x",
+}
+COLLIDING_CATALOG = {**TABLE_TAG, "CATALOG_NAME": "main"}
+
+
+class TestTagRowKeys:
+    @pytest.mark.parametrize(
+        "row", [COLLIDING_TAG_NAME, COLLIDING_CATALOG], ids=["tag_name", "catalog"]
+    )
+    async def test_a_row_whose_keys_collide_when_lowercased_refuses(
+        self, row: dict[str, Any]
+    ) -> None:
+        with pytest.raises(ValidationError, match="collide") as caught:
+            await labelled([ORDERS, row])
+        assert caught.value.code == INPUT_REFUSAL_CODE
+        message = str(caught.value)
+        for leaked in ("classification", "restricted", "owner", "orders", "main"):
+            assert leaked not in message
+
+    async def test_a_row_with_a_non_string_key_refuses(self) -> None:
+        with pytest.raises(ValidationError, match="collide") as caught:
+            await labelled([ORDERS, {**TABLE_TAG, 1: "x"}])
+        assert caught.value.code == INPUT_REFUSAL_CODE
+
+    @pytest.mark.parametrize("case", [str.upper, str.lower], ids=["upper", "lower"])
+    async def test_a_row_in_one_case_still_labels(self, case: Any) -> None:
+        row = {case(key): value for key, value in TABLE_TAG.items()}
+        result = await labelled([ORDERS, row])
+        assert label(by_id(result)[ORDERS_ID]) == "restricted"
+
+
+#: Containers JSON cannot produce, hiding a tag row under an unwalked key.
+HIDDEN_ROWS = {
+    "tuple": (TABLE_TAG,),
+    "mapping_proxy": MappingProxyType({"tags": [TABLE_TAG]}),
+}
+
+
+class TestNonJsonContainers:
+    @pytest.mark.parametrize("case", sorted(HIDDEN_ROWS))
+    async def test_a_non_json_container_with_a_map_refuses(self, case: str) -> None:
+        raw = {"tables": [{**BARE_ORDERS, "properties": {"x": HIDDEN_ROWS[case]}}]}
+        with pytest.raises(ValidationError, match="not a JSON") as caught:
+            await labelled(raw)
+        assert caught.value.code == INPUT_REFUSAL_CODE
+        message = str(caught.value)
+        for leaked in ("classification", "restricted", "orders"):
+            assert leaked not in message
+
+    @pytest.mark.parametrize("case", sorted(HIDDEN_ROWS))
+    async def test_without_a_map_it_reads_as_with_an_empty_property_map(
+        self, case: str
+    ) -> None:
+        raw = {"tables": [{**BARE_ORDERS, "properties": {"x": HIDDEN_ROWS[case]}}]}
+        plain = await extract({"tables": [{**BARE_ORDERS, "properties": {}}]})
+        result = await extract(raw)
+        assert drafts(result) == drafts(plain)
+        assert result.skipped_rows == plain.skipped_rows

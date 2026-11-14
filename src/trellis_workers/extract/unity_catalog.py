@@ -97,7 +97,10 @@ lineage item, a nested property map, a tag row's own values) is a tag row the
 walk did not read, or has a key whose ``casefold()`` is ``tags`` holding a
 truthy value that the walk did not read as tag rows, since a tag the map names
 would be silently ignored; the refusal gives the position only.  The walk alone
-decides what was read.  Without a map no such check runs.
+decides what was read.  With a map, a ``tuple``, ``set``, ``frozenset`` or a
+mapping that is not a ``dict`` anywhere in the input also refuses the run, since
+JSON yields none of them and the check could not see into it.  Without a map no
+such check runs.
 
 A row is told apart by its ``tag_name``; its keys are read case-insensitively
 (``TAG_NAME`` or ``tag_name``), its securable names fold the way a table
@@ -116,7 +119,9 @@ a key and stays open where they did not:
 * a tag key the map does not name is ignored and counted as ``tags_unmapped_key``;
 * a mapped key whose value the map lacks (and has no ``"*"``) reads
   ``restricted`` and is counted as ``tags_unmapped_value``;
-* tag rows with no map, and a tag row that cannot be read, refuse the run.
+* tag rows with no map, and a tag row that cannot be read, refuse the run; so
+  does a tag row whose keys are not all strings or collide when lowercased
+  (``tag_name`` beside ``TAG_NAME``), before anything is read from it.
 
 A node's label is the strictest of its own tags and its parents': a catalog's
 reaches its schemas, a schema's its tables, and a table's its columns, so a column
@@ -482,7 +487,14 @@ def _add_tag_row(rec: Any, where: str, state: _Collected) -> None:
     """One ``information_schema.*_tags`` row; an unreadable one refuses the run."""
     if not isinstance(rec, dict):
         _refuse(f"{where}: expected an object, got {type(rec).__name__}")
-    row = {str(key).lower(): value for key, value in rec.items()}
+    # Before anything is read: two spellings of one key would keep only the last.
+    keys = [key.lower() for key in rec if isinstance(key, str)]
+    if len(keys) != len(rec) or len(set(keys)) != len(keys):
+        _refuse(
+            f"{where}: tag row has keys that are not strings or that collide "
+            "when lowercased"
+        )
+    row = {key.lower(): value for key, value in rec.items()}
     if "tag_name" not in row:
         _refuse(f"{where}: a record under tags has no tag_name")
     state.read_rows.add(id(rec))
@@ -619,6 +631,11 @@ def _first_unread_tags(node: Any, where: str, state: _Collected) -> str | None:
     because the raw input is alive for the whole scan.
     """
     children: list[tuple[Any, str]] = []
+    if isinstance(node, (tuple, set, frozenset)) or (
+        isinstance(node, Mapping) and not isinstance(node, dict)
+    ):
+        # JSON yields only dicts and lists; any other container could hide rows.
+        _refuse(f"{where}: a container that is not a JSON object or array")
     if isinstance(node, list):
         children = [(item, f"{where}[{idx}]") for idx, item in enumerate(node)]
     elif isinstance(node, dict):
