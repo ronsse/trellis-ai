@@ -14,6 +14,10 @@ Accepted input, parsed (a dict, or a list of any mix of these):
 * the list responses of ``GET /api/2.1/unity-catalog/{catalogs,schemas,tables}``,
   either as the wrapper object (``{"tables": [...], "next_page_token": ...}``)
   or as a bare list of records;
+* the list responses of ``GET /api/2.1/unity-catalog/{volumes,functions}``,
+  wrapped or bare: a volume or function record is not a table, so it mints
+  nothing and is counted in ``skipped_rows`` as ``volume_records`` or
+  ``function_records``;
 * rows of ``system.access.table_lineage`` / ``system.access.column_lineage``
   as a list of objects (a row with ``source_column_name`` and
   ``target_column_name`` is column lineage);
@@ -70,7 +74,10 @@ entities are minted from a table's own column records (default
 larger of that and :data:`MAX_COLUMN_NAMES` names.  ``column_count`` is always
 the full count, and every column left out is counted in the result's
 ``skipped_rows``, never dropped silently.  A column that column lineage
-references is always minted, because its edge needs it.
+references is always minted, because its edge needs it.  A table record with
+no ``columns`` list (an export made with ``omit_columns``) is still a full
+create, so it carries no ``column_count`` or ``column_names``; it is counted in
+``skipped_rows`` as ``tables_without_columns``.
 
 Rows the extractor reads and does not use (a lineage row without two tables,
 and the like) are counted by reason in :attr:`ExtractionResult.skipped_rows`.
@@ -134,7 +141,21 @@ INPUT_REFUSAL_CODE: Final = "unity_catalog_input"
 #: Catalogs left out unless ``include_system`` is set.
 SYSTEM_CATALOGS: Final[frozenset[str]] = frozenset({"system", "__databricks_internal"})
 
-_WRAPPER_KEYS: Final = ("catalogs", "schemas", "tables", "upstreams", "downstreams")
+_WRAPPER_KEYS: Final = (
+    "catalogs",
+    "schemas",
+    "tables",
+    "volumes",
+    "functions",
+    "upstreams",
+    "downstreams",
+)
+
+#: Fields only a ``VolumeInfo`` / ``FunctionInfo`` record carries.  Both also
+#: carry ``catalog_name`` and ``schema_name``, so without these a volume or a
+#: function would be read as a table.
+_VOLUME_KEYS: Final = frozenset({"volume_id", "volume_type"})
+_FUNCTION_KEYS: Final = frozenset({"function_id", "routine_body"})
 
 #: Fields a table or a column record carries and a catalog record does not.  A
 #: bare record holding one of them is not a catalog, whatever else it has.
@@ -340,6 +361,18 @@ def _add_table(rec: Any, where: str, state: _Collected) -> None:
     state.tables[parts] = _pick(state.tables.get(parts), rec)
 
 
+def _add_volume(rec: Any, where: str, state: _Collected) -> None:
+    if not isinstance(rec, dict):
+        _refuse(f"{where}: expected an object, got {type(rec).__name__}")
+    state.skipped["volume_records"] += 1
+
+
+def _add_function(rec: Any, where: str, state: _Collected) -> None:
+    if not isinstance(rec, dict):
+        _refuse(f"{where}: expected an object, got {type(rec).__name__}")
+    state.skipped["function_records"] += 1
+
+
 def _row_table(row: dict[str, Any], side: str) -> _TableParts | None:
     full = row.get(f"{side}_table_full_name")
     if isinstance(full, str) and full.strip():
@@ -435,6 +468,8 @@ def _walk(node: Any, where: str, state: _Collected) -> None:  # noqa: PLR0912 - 
             ("catalogs", _add_catalog),
             ("schemas", _add_schema),
             ("tables", _add_table),
+            ("volumes", _add_volume),
+            ("functions", _add_function),
         ):
             for idx, rec in enumerate(_record_list(node.get(key), f"{where}.{key}")):
                 add(rec, f"{where}.{key}[{idx}]", state)
@@ -445,6 +480,10 @@ def _walk(node: Any, where: str, state: _Collected) -> None:  # noqa: PLR0912 - 
     # A bare record, told apart by the fields only it carries.
     if "source_table_full_name" in node or "target_table_full_name" in node:
         _add_lineage_row(node, state)
+    elif not node.keys().isdisjoint(_VOLUME_KEYS):
+        _add_volume(node, where, state)
+    elif not node.keys().isdisjoint(_FUNCTION_KEYS):
+        _add_function(node, where, state)
     elif "catalog_name" in node and "schema_name" in node:
         _add_table(node, where, state)
     elif "catalog_name" in node:
@@ -720,6 +759,10 @@ class _Builder:
         key = identity_key(*parts)
         columns = rec.get("columns")
         names = self._column_names(parts) if isinstance(columns, list) else None
+        if found is not None and not isinstance(columns, list):
+            # An export made without columns: the full create replaces the
+            # node, so a stored column_count / column_names is dropped.
+            self._state.skipped["tables_without_columns"] += 1
         props = table_properties(
             parts,
             self._scope,
