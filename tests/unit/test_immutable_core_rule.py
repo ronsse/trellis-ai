@@ -538,12 +538,17 @@ _ALLOWED_UNREADABLE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         _PASSTHROUGH_REASON,
     ),
+    (
+        "src/trellis/extract/commands.py",
+        "_placeholder_label_command",
+        "requested_by",
+    ): (1, _PASSTHROUGH_REASON),
     ("src/trellis/extract/commands.py", "reconcile_node_roles", "batch.requested_by"): (
         1,
         _PASSTHROUGH_REASON,
     ),
     ("src/trellis/extract/commands.py", "result_to_batch", "requested_by"): (
-        5,
+        6,
         _PASSTHROUGH_REASON,
     ),
     (
