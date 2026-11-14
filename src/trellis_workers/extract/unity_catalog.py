@@ -93,10 +93,11 @@ ignored document key (``namespace``, ``next_page_token``, ``table_name``).  Any
 other ``tags`` key is not read, and its node is read as it was before tag rows
 were read.  With a ``sensitivity_map`` given, the run is refused if any dict at
 any depth (a wrapper, a record bare or under a wrapper key, a column record, a
-nested property map) has a key whose ``casefold()`` is ``tags`` holding a
-truthy value that is not read as tag rows, since a tag the map names would be
-silently ignored; the refusal gives the position only.  Without a map no such
-check runs.
+lineage item, a nested property map, a tag row's own values) is a tag row the
+walk did not read, or has a key whose ``casefold()`` is ``tags`` holding a
+truthy value that the walk did not read as tag rows, since a tag the map names
+would be silently ignored; the refusal gives the position only.  The walk alone
+decides what was read.  Without a map no such check runs.
 
 A row is told apart by its ``tag_name``; its keys are read case-insensitively
 (``TAG_NAME`` or ``tag_name``), its securable names fold the way a table
@@ -385,6 +386,12 @@ class _Collected:
     namespaces: set[str] = field(default_factory=set)
     #: ``(securable, tag key, tag value)``, one per readable tag row
     tags: list[tuple[_Path, str, str]] = field(default_factory=list)
+    #: ``id()`` of every node whose ``tags`` list :func:`_walk` read as tag
+    #: rows, and of every dict :func:`_add_tag_row` read as a tag row.  An id
+    #: is valid only while the raw input that holds the node is alive, so these
+    #: are read only by :func:`_refuse_unread_tags` against that same input.
+    read_wrappers: set[int] = field(default_factory=set)
+    read_rows: set[int] = field(default_factory=set)
     skipped: Counter[str] = field(default_factory=Counter)
 
     def add_table_edge(
@@ -478,6 +485,7 @@ def _add_tag_row(rec: Any, where: str, state: _Collected) -> None:
     row = {str(key).lower(): value for key, value in rec.items()}
     if "tag_name" not in row:
         _refuse(f"{where}: a record under tags has no tag_name")
+    state.read_rows.add(id(rec))
     if "volume_name" in row:
         # A volume mints nothing, so its tag has nothing to label.
         state.skipped["tag_rows_on_volumes"] += 1
@@ -599,49 +607,52 @@ def _is_tags_wrapper(node: dict[str, Any]) -> bool:
     )
 
 
-def _first_unread_tags(node: Any, where: str) -> str | None:
-    """Position of the first ``tags`` key (any case) that is not read, or ``None``.
+def _first_unread_tags(node: Any, where: str, state: _Collected) -> str | None:
+    """Position of the first tag :func:`_walk` did not read, or ``None``.
 
-    A key whose ``casefold()`` is ``tags`` holding a truthy value is unread
-    unless :func:`_is_tags_wrapper` reads it as tag rows; the scan does not
-    descend into rows read that way.  It covers every dict at any depth,
-    records under a wrapper key and nested property maps included.
+    Unread is a dict that :func:`_is_tag_row` accepts but the walk did not read
+    as a tag row, or a key whose ``casefold()`` is ``tags`` holding a truthy
+    value on a node whose ``tags`` the walk did not read as tag rows.  The walk
+    is the only judge of what was read: the scan covers every dict at any
+    depth, including the rows of a wrapper that was read and a read row's own
+    values.  The ids in ``state`` are those of ``node``'s own objects, valid
+    because the raw input is alive for the whole scan.
     """
+    children: list[tuple[Any, str]] = []
     if isinstance(node, list):
-        for idx, item in enumerate(node):
-            found = _first_unread_tags(item, f"{where}[{idx}]")
-            if found is not None:
-                return found
-        return None
-    if not isinstance(node, dict):
-        return None
-    consumed = _is_tags_wrapper(node)
-    for idx, (key, value) in enumerate(node.items()):
-        if consumed and key == _TAGS_KEY:
-            continue
-        if isinstance(key, str) and key.casefold() == _TAGS_KEY and value:
+        children = [(item, f"{where}[{idx}]") for idx, item in enumerate(node)]
+    elif isinstance(node, dict):
+        if _is_tag_row(node) and id(node) not in state.read_rows:
             return where
-        # Only structural keys are named: a nested map's keys may be tag keys.
-        step = f".{key}" if key in _POSITION_KEYS else f".<key {idx}>"
-        found = _first_unread_tags(value, f"{where}{step}")
+        wrapper_read = id(node) in state.read_wrappers
+        for idx, (key, value) in enumerate(node.items()):
+            is_tags = isinstance(key, str) and key.casefold() == _TAGS_KEY
+            if is_tags and value and not (wrapper_read and key == _TAGS_KEY):
+                return where
+            # Only structural keys are named: a nested map's keys may be tag keys.
+            step = f".{key}" if key in _POSITION_KEYS else f".<key {idx}>"
+            children.append((value, f"{where}{step}"))
+    for child, position in children:
+        found = _first_unread_tags(child, position, state)
         if found is not None:
             return found
     return None
 
 
-def _refuse_unread_tags(raw_input: Any) -> None:
-    """Refuse a run whose input holds a ``tags`` key it does not read.
+def _refuse_unread_tags(raw_input: Any, state: _Collected) -> None:
+    """Refuse a run whose input holds a tag the walk did not read.
 
-    Run only when a ``sensitivity_map`` is given: a tag the map names must not
-    be silently ignored.  The message gives the position only.
+    Run only when a ``sensitivity_map`` is given, after :func:`_collect` over
+    the same ``raw_input``: a tag the map names must not be silently ignored.
+    The message gives the position only.
     """
     try:
-        where = _first_unread_tags(raw_input, "input")
+        where = _first_unread_tags(raw_input, "input", state)
     except RecursionError:
         _refuse("input: nested too deeply to read")
     if where is not None:
         _refuse(
-            f"{where}: a tags key here is not read as tag rows; pass rows of the "
+            f"{where}: a tag here is not read as tag rows; pass rows of the "
             "information_schema *_tags views instead, so no tag the sensitivity "
             "map names is silently ignored"
         )
@@ -679,6 +690,7 @@ def _walk(node: Any, where: str, state: _Collected) -> None:  # noqa: PLR0912 - 
             for idx, rec in enumerate(_record_list(node.get(key), f"{where}.{key}")):
                 add(rec, f"{where}.{key}[{idx}]", state)
         if tags_wrapper:
+            state.read_wrappers.add(id(node))
             for idx, rec in enumerate(node[_TAGS_KEY]):
                 _add_tag_row(rec, f"{where}.{_TAGS_KEY}[{idx}]", state)
         if "upstreams" in node or "downstreams" in node:
@@ -875,7 +887,7 @@ class UnityCatalogExtractor:
                 "it cannot read"
             )
         if self._sensitivity_map is not None:
-            _refuse_unread_tags(raw_input)
+            _refuse_unread_tags(raw_input, state)
         labels = _own_labels(state, self._sensitivity_map or {})
 
         builder = _Builder(

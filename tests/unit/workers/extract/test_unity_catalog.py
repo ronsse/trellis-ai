@@ -2046,6 +2046,37 @@ UNREAD_TAGS = {
         {"tables": [{**BARE_ORDERS, "properties": {"tags": "classification"}}]},
         {"tables": [{**BARE_ORDERS, "properties": {}}]},
     ),
+    "tag_rows_in_a_page_token": (
+        {"tables": [BARE_ORDERS], "next_page_token": {"tags": [TABLE_TAG]}},
+        {"tables": [BARE_ORDERS], "next_page_token": {}},
+    ),
+    "tag_rows_in_a_property_map": (
+        {"tables": [{**BARE_ORDERS, "properties": {"tags": [TABLE_TAG]}}]},
+        {"tables": [{**BARE_ORDERS, "properties": {}}]},
+    ),
+    "tag_rows_in_a_columns_item": (
+        {
+            "tables": [
+                {
+                    **BARE_ORDERS,
+                    "columns": [*BARE_ORDERS["columns"], {"tags": [TABLE_TAG]}],
+                }
+            ]
+        },
+        {"tables": [{**BARE_ORDERS, "columns": [*BARE_ORDERS["columns"], {}]}]},
+    ),
+    "tag_rows_in_a_lineage_item": (
+        {
+            "table_name": "main.sales.orders",
+            "tables": [BARE_ORDERS],
+            "upstreams": [{"tags": [TABLE_TAG]}],
+        },
+        {"table_name": "main.sales.orders", "tables": [BARE_ORDERS], "upstreams": [{}]},
+    ),
+    "tag_rows_under_another_key": (
+        {"tables": [{**BARE_ORDERS, "table_tags": [TABLE_TAG]}]},
+        {"tables": [BARE_ORDERS]},
+    ),
 }
 
 
@@ -2081,11 +2112,29 @@ class TestUnreadTags:
                 await extract([ORDERS, {"tags": []}], **options)
             assert caught.value.code == INPUT_REFUSAL_CODE
 
-    async def test_tag_rows_under_a_wrapper_are_not_also_scanned(self) -> None:
-        # A consumed tag row carrying its own ``tags`` key is not unread.
-        row = {**TABLE_TAG, "tags": "x"}
-        wrapped = await labelled({"tables": [BARE_ORDERS], "tags": [row]})
-        assert label(by_id(wrapped)[ORDERS_ID]) == "restricted"
+    async def test_a_read_tag_row_nesting_tags_refuses_the_run(self) -> None:
+        # The walk reads the schema row only; its nested rows are unread.
+        row = {**SCHEMA_TAG, "x": {"tags": [TABLE_TAG]}}
+        with pytest.raises(ValidationError, match="_tags views") as caught:
+            await labelled([ORDERS, {"tags": [row]}])
+        assert caught.value.code == INPUT_REFUSAL_CODE
+        message = str(caught.value)
+        for leaked in ("classification", "restricted", "confidential", "orders"):
+            assert leaked not in message
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            {"tables": [BARE_ORDERS], "tags": [TABLE_TAG]},
+            [ORDERS, {"tags": [TABLE_TAG]}],
+            [ORDERS, TABLE_TAG],
+            [ORDERS, {"namespace": NS, "tags": [TABLE_TAG]}],
+        ],
+        ids=["beside_tables", "bare_wrapper", "bare_rows", "with_namespace"],
+    )
+    async def test_read_tag_rows_label_and_do_not_refuse(self, raw: Any) -> None:
+        result = await labelled(raw)
+        assert label(by_id(result)[ORDERS_ID]) == "restricted"
 
     async def test_a_deep_input_with_a_map_gets_the_typed_refusal(self) -> None:
         deep: Any = {"tables": [BARE_ORDERS], "namespace": NS}
