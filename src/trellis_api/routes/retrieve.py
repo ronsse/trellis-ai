@@ -457,10 +457,11 @@ def search_entities(
 ) -> dict[str, Any]:
     """Search graph nodes by name or type.
 
-    A node carries no label, so every match is served; a hit whose
+    A node whose own ``data_classification`` property is above the caller's
+    clearance is left out of the page (#1029) but still counted in ``total``, a
+    known gap. Every other match is served; a hit whose
     ``document_ids``, ``evidence_ref`` property or ``lifecycle.superseded_by``
     names a document the caller may not read is served without that id.
-    ``total`` and the page are unchanged.
 
     A promoted precedent the caller may not read (its own row or its source
     above the caller's clearance, or a lookup that failed) is left out of the
@@ -555,7 +556,9 @@ def get_entity(
 ) -> dict[str, Any]:
     """Get an entity and its neighborhood.
 
-    A node carries no label, so the entity and every node of the subgraph are
+    A node whose own ``data_classification`` property is above the caller's
+    clearance answers 404 as the entity and is left out, with its edges, as a
+    neighbour (#1029). Every other node of the subgraph is
     served; one whose ``document_ids``, ``evidence_ref`` property,
     ``lifecycle.superseded_by`` or ``source_item_id`` names a document the
     caller may not read is served without that id. An edge is served whole too:
