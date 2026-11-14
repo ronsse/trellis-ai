@@ -1331,6 +1331,24 @@ class TestDeterminism:
         edge = next(e for e in result.edges if e.edge_kind == "depends_on")
         assert edge.properties["last_event_time"] == "2024-02-01T00:00:00.000+00:00"
 
+    @pytest.mark.parametrize("seed", range(4))
+    async def test_tag_row_order_does_not_change_the_labels(self, seed: int) -> None:
+        tags = [
+            {"catalog_name": "main", "tag_name": "classification", "tag_value": "x"},
+            {
+                "catalog_name": "main",
+                "schema_name": "sales",
+                "table_name": "orders",
+                "tag_name": "classification",
+                "tag_value": "restricted",
+            },
+        ]
+        mapping = {"classification": {"*": "confidential", "restricted": "restricted"}}
+        extractor = UnityCatalogExtractor(namespace=NS, sensitivity_map=mapping)
+        baseline = drafts(await extractor.extract([*EVERYTHING, *tags]))
+        mixed = shuffled([*EVERYTHING, *tags], random.Random(seed))  # noqa: S311
+        assert drafts(await extractor.extract(mixed)) == baseline
+
 
 # ---------------------------------------------------------------------------
 # Meeting OpenLineage datasets
@@ -1636,3 +1654,237 @@ class TestOpenLineageAndCatalogInOneStore:
         ]
         edges = store.graph.get_edges(JOB, direction="outgoing", edge_type="reads_from")
         assert len(edges) == 1
+
+
+# ---------------------------------------------------------------------------
+# Labels inherited from mapped source tags
+# ---------------------------------------------------------------------------
+
+#: The operator's map: which tag key carries classification, and what each value means.
+LABEL_MAP = {
+    "classification": {"confidential": "confidential", "restricted": "restricted"}
+}
+ORDERS = {"tables": [TABLES["tables"][0]]}
+ORDERS_ID = tid("main.sales.orders")
+
+
+def _column(name: str, table: str = "main.sales.orders") -> str:
+    return f"uc_column:{NS}:{table}/{name}"
+
+
+def tag(value: str | None = "restricted", **names: str) -> dict[str, Any]:
+    """One ``information_schema.*_tags`` row naming ``names`` (catalog first)."""
+    row: dict[str, Any] = {"catalog_name": "main", **names}
+    row["tag_name"] = "classification"
+    if value is not None:
+        row["tag_value"] = value
+    return row
+
+
+SCHEMA_TAG = tag("confidential", schema_name="sales")
+TABLE_TAG = tag("restricted", schema_name="sales", table_name="orders")
+
+
+def label(draft: Any) -> str | None:
+    record = draft.properties.get("data_classification")
+    return None if record is None else record["sensitivity"]
+
+
+async def labelled(raw: Any, **options: Any) -> ExtractionResult:
+    options.setdefault("sensitivity_map", LABEL_MAP)
+    return await extract(raw, **options)
+
+
+class TestSourceLabels:
+    async def test_a_table_inherits_the_strictest_mapped_tag_of_itself_and_its_parents(
+        self,
+    ) -> None:
+        result = await labelled([ORDERS, SCHEMA_TAG, TABLE_TAG])
+        entities = by_id(result)
+        assert label(entities[_schema()]) == "confidential"
+        for nid in (ORDERS_ID, _column("order_id"), _column("customer_id")):
+            assert label(entities[nid]) == "restricted"
+            record = entities[nid].properties["data_classification"]
+            assert record["classified_by"] == ["source-inherit"]
+        assert "data_classification" not in entities[_catalog()].properties
+
+    async def test_a_catalog_tag_reaches_every_node_below_it(self) -> None:
+        entities = by_id(await labelled([ORDERS, tag("confidential")]))
+        assert {label(e) for e in entities.values()} == {"confidential"}
+
+    async def test_a_column_tag_raises_only_that_column(self) -> None:
+        plain = by_id(await extract(ORDERS))
+        column_tag = tag(
+            "restricted",
+            schema_name="sales",
+            table_name="orders",
+            column_name="customer_id",
+        )
+        entities = by_id(await labelled([ORDERS, column_tag]))
+        assert label(entities[_column("customer_id")]) == "restricted"
+        assert label(entities[_column("order_id")]) is None
+        assert entities[ORDERS_ID].properties == plain[ORDERS_ID].properties
+
+    async def test_a_column_never_reads_below_its_table(self) -> None:
+        column_tag = tag(
+            "confidential",
+            schema_name="sales",
+            table_name="orders",
+            column_name="customer_id",
+        )
+        entities = by_id(await labelled([ORDERS, TABLE_TAG, column_tag]))
+        assert label(entities[_column("customer_id")]) == "restricted"
+
+    async def test_upper_case_row_keys_read_the_same(self) -> None:
+        upper = [
+            {k.upper(): v for k, v in row.items()} for row in (SCHEMA_TAG, TABLE_TAG)
+        ]
+        lower = await labelled([ORDERS, SCHEMA_TAG, TABLE_TAG])
+        assert drafts(await labelled([ORDERS, *upper])) == drafts(lower)
+
+    async def test_securable_names_fold_like_a_table_record(self) -> None:
+        shouted = tag("restricted", schema_name="Sales", table_name=" ORDERS ")
+        entities = by_id(await labelled([ORDERS, shouted]))
+        assert label(entities[ORDERS_ID]) == "restricted"
+
+    async def test_tag_rows_under_the_tags_wrapper(self) -> None:
+        wrapped = await labelled([ORDERS, {"tags": [SCHEMA_TAG, TABLE_TAG]}])
+        bare = await labelled([ORDERS, SCHEMA_TAG, TABLE_TAG])
+        assert drafts(wrapped) == drafts(bare)
+
+    async def test_an_unmapped_key_is_ignored_and_counted(self) -> None:
+        other = {**TABLE_TAG, "tag_name": "cost_centre", "tag_value": "1234"}
+        result = await labelled([ORDERS, other])
+        assert drafts(result) == drafts(await extract(ORDERS))
+        assert result.skipped_rows["tags_unmapped_key"] == 1
+
+    async def test_a_tag_key_is_compared_exactly(self) -> None:
+        other = {**TABLE_TAG, "tag_name": "Classification"}
+        result = await labelled([ORDERS, other])
+        assert label(by_id(result)[ORDERS_ID]) is None
+        assert result.skipped_rows["tags_unmapped_key"] == 1
+
+    async def test_an_unmapped_value_of_a_mapped_key_reads_restricted(self) -> None:
+        odd = tag("top-secret-ish", schema_name="sales")
+        result = await labelled([ORDERS, odd])
+        assert label(by_id(result)[_schema()]) == "restricted"
+        assert result.skipped_rows["tags_unmapped_value"] == 1
+
+    @pytest.mark.parametrize("value", ["anything", "", None])
+    async def test_a_wildcard_matches_any_value(self, value: str | None) -> None:
+        mapping = {"pii": {"*": "confidential"}}
+        row = {**tag(value, schema_name="sales"), "tag_name": "pii"}
+        result = await labelled([ORDERS, row], sensitivity_map=mapping)
+        assert label(by_id(result)[_schema()]) == "confidential"
+        assert "tags_unmapped_value" not in result.skipped_rows
+
+    async def test_an_exact_value_beats_the_wildcard(self) -> None:
+        mapping = {
+            "classification": {"*": "restricted", "confidential": "confidential"}
+        }
+        result = await labelled([ORDERS, SCHEMA_TAG], sensitivity_map=mapping)
+        assert label(by_id(result)[_schema()]) == "confidential"
+
+    async def test_a_level_of_internal_writes_no_key(self) -> None:
+        mapping = {"classification": {"*": "internal"}}
+        result = await labelled([ORDERS, TABLE_TAG], sensitivity_map=mapping)
+        assert drafts(result) == drafts(await extract(ORDERS))
+
+    @pytest.mark.parametrize(
+        "mapping",
+        [
+            {"classification": {"open": "public"}},
+            {"classification": {"x": "secret"}},
+            {"classification": {"x": 3}},
+            {"classification": "restricted"},
+            {"": {"x": "restricted"}},
+            "classification",
+        ],
+    )
+    def test_a_bad_map_is_refused_at_construction(self, mapping: Any) -> None:
+        with pytest.raises(ValueError, match="sensitivity_map"):
+            UnityCatalogExtractor(sensitivity_map=mapping)
+
+    def test_the_map_is_copied_and_read_only(self) -> None:
+        mapping = {"classification": {"x": "restricted"}}
+        extractor = UnityCatalogExtractor(sensitivity_map=mapping)
+        mapping["classification"]["x"] = "internal"
+        assert extractor.sensitivity_map == {"classification": {"x": "restricted"}}
+        with pytest.raises(TypeError):
+            extractor.sensitivity_map["other"] = {}  # type: ignore[index]
+        with pytest.raises(TypeError):
+            extractor.sensitivity_map["classification"]["y"] = "restricted"  # type: ignore[index]
+
+    @pytest.mark.parametrize(
+        "rows",
+        [
+            [TABLE_TAG],
+            [{"tags": [SCHEMA_TAG]}],
+            [{**tag(schema_name="sales"), "volume_name": "landing"}],
+        ],
+    )
+    async def test_tag_rows_with_no_map_refuse_the_run(self, rows: list[Any]) -> None:
+        with pytest.raises(ValidationError, match="--sensitivity-map") as caught:
+            await extract([ORDERS, *rows])
+        assert caught.value.code == INPUT_REFUSAL_CODE
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            {**TABLE_TAG, "tag_name": ""},
+            {**TABLE_TAG, "tag_name": 7},
+            {**TABLE_TAG, "catalog_name": None},
+            {**TABLE_TAG, "catalog_name": "  "},
+            {**TABLE_TAG, "schema_name": None},
+            {**tag(schema_name="sales", column_name="customer_id")},
+            {**TABLE_TAG, "tag_value": 3},
+            {**TABLE_TAG, "tag_value": ["restricted"]},
+        ],
+    )
+    async def test_an_unreadable_tag_row_refuses_the_run(
+        self, row: dict[str, Any]
+    ) -> None:
+        with pytest.raises(ValidationError) as caught:
+            await labelled([ORDERS, row])
+        assert caught.value.code == INPUT_REFUSAL_CODE
+
+    async def test_a_tag_row_for_an_absent_table_is_counted(self) -> None:
+        absent = tag("restricted", schema_name="sales", table_name="refunds")
+        result = await labelled([ORDERS, absent])
+        assert result.skipped_rows["tags_for_absent_securables"] == 1
+        assert tid("main.sales.refunds") not in by_id(result)
+
+    async def test_a_lineage_stub_of_a_tagged_table_carries_the_label(self) -> None:
+        stub_tag = tag("restricted", schema_name="raw", table_name="events")
+        result = await labelled([TABLE_LINEAGE[1], stub_tag])
+        stub = by_id(result)[tid("main.raw.events")]
+        assert stub.if_absent
+        assert stub.properties["stub"] is True
+        assert label(stub) == "restricted"
+        assert "tags_for_absent_securables" not in result.skipped_rows
+
+    async def test_a_volume_tag_row_is_counted(self) -> None:
+        row = {**tag(schema_name="sales"), "volume_name": "landing"}
+        result = await labelled([ORDERS, row])
+        assert result.skipped_rows["tag_rows_on_volumes"] == 1
+        assert drafts(result) == drafts(await extract(ORDERS))
+
+    async def test_with_no_tag_rows_a_map_changes_nothing(self) -> None:
+        plain = await extract(EVERYTHING)
+        mapped = await labelled(EVERYTHING)
+        assert drafts(mapped) == drafts(plain)
+        assert mapped.skipped_rows == plain.skipped_rows
+
+    @BOTH_MODES
+    async def test_a_labelled_batch_writes_and_the_node_keeps_its_label(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lom: bool
+    ) -> None:
+        store = Store(tmp_path, monkeypatch, lom=lom)
+        store.write(await labelled([ORDERS, SCHEMA_TAG, TABLE_TAG]))
+        record = store.props(ORDERS_ID)["data_classification"]
+        assert record["sensitivity"] == "restricted"
+        assert record["classified_by"] == ["source-inherit"]
+        assert store.props(_schema())["data_classification"]["sensitivity"] == (
+            "confidential"
+        )
+        assert "data_classification" not in store.props(_catalog())
