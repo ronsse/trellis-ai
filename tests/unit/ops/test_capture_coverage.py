@@ -57,6 +57,8 @@ def _sweep_payload(**overrides: Any) -> dict[str, Any]:
         "candidates_blocked_scan": 1,
         "candidates_reconciled_noop": 0,
         "memories_written": 25,
+        "memories_label_inherited": 0,
+        "memories_label_inherited_by_level": {},
         "memories_skipped_unchanged": 0,
         "scan_hits_by_class": {},
         "warning_kinds": {},
@@ -641,3 +643,97 @@ class TestEgressWithholdingIsVisible:
 
         assert report.funnel.sessions_skipped_egress_withheld == 0
         assert report.funnel.sessions_skipped_egress_unreadable == 0
+
+
+class TestInheritedLabelsAreSummed:
+    """#1237 F3: the per-sweep inherited-label counter reaches the funnel."""
+
+    _SWEEPS: tuple[dict[str, Any], ...] = (
+        {
+            "memories_label_inherited": 2,
+            "memories_label_inherited_by_level": {"confidential": 2},
+        },
+        {
+            "memories_label_inherited": 3,
+            "memories_label_inherited_by_level": {
+                "confidential": 1,
+                "restricted": 2,
+            },
+        },
+        {
+            "dry_run": True,
+            "memories_label_inherited": 5,
+            "memories_label_inherited_by_level": {"restricted": 5},
+        },
+    )
+
+    def test_inherited_labels_are_summed_by_level_across_sweeps(
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        bare_log = SQLiteEventLog(tmp_path / "bare.db")
+        for sweep in self._SWEEPS:
+            _emit_sweep(event_log, **sweep)
+            bare = _sweep_payload(dry_run=sweep.get("dry_run", False))
+            del bare["memories_label_inherited"]
+            del bare["memories_label_inherited_by_level"]
+            bare_log.emit(
+                EventType.CAPTURE_SWEEP_COMPLETED,
+                "worker:session-capture",
+                entity_id="capture:claude-code",
+                entity_type="capture_sweep",
+                payload=bare,
+            )
+
+        report = summarize_capture_coverage(event_log, days=7)
+        bare_report = summarize_capture_coverage(bare_log, days=7)
+
+        assert report.funnel.memories_label_inherited == 5
+        assert report.funnel.memories_label_inherited_by_level == {
+            "confidential": 3,
+            "restricted": 2,
+        }
+        assert report.funnel.sweeps_reporting_label_inheritance == 2
+        assert report.dry_run_sweeps_excluded == 1
+        # The counter is reported, never judged: nothing else moves.
+        assert report.state == bare_report.state
+        assert report.capture_rate == bare_report.capture_rate
+        assert report.notes == bare_report.notes
+
+    def test_a_sweep_from_before_the_label_counter_reads_zero_and_is_not_counted_as_reporting(  # noqa: E501
+        self, tmp_path: Path
+    ) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        payload = _sweep_payload()
+        del payload["memories_label_inherited"]
+        del payload["memories_label_inherited_by_level"]
+        event_log.emit(
+            EventType.CAPTURE_SWEEP_COMPLETED,
+            "worker:session-capture",
+            entity_id="capture:claude-code",
+            entity_type="capture_sweep",
+            payload=payload,
+        )
+
+        report = summarize_capture_coverage(event_log, days=7)
+
+        assert report.funnel.memories_label_inherited == 0
+        assert report.funnel.memories_label_inherited_by_level == {}
+        assert report.funnel.sweeps_reporting_label_inheritance == 0
+        assert report.funnel.sweeps == 1
+
+    def test_a_malformed_level_map_is_skipped_not_raised(self, tmp_path: Path) -> None:
+        event_log = SQLiteEventLog(tmp_path / "events.db")
+        _emit_sweep(event_log, memories_label_inherited_by_level=3)
+        _emit_sweep(
+            event_log,
+            memories_label_inherited_by_level={
+                "restricted": "two",
+                "confidential": True,
+            },
+        )
+
+        report = summarize_capture_coverage(event_log, days=7)
+
+        assert report.funnel.memories_label_inherited_by_level == {}
+        assert report.funnel.sweeps == 2

@@ -684,6 +684,24 @@ def _print_capture_coverage(capture: CaptureCoverageReport) -> None:
                 f"{funnel.sessions_skipped_egress_unreadable} unreadable "
                 f"(parsed sessions kept off the distillation route)"
             )
+        if funnel.memories_label_inherited:
+            levels = ", ".join(
+                f"{count} {escape(level)}"
+                for level, count in sorted(
+                    funnel.memories_label_inherited_by_level.items()
+                )
+            )
+            line = (
+                f"    labels: {funnel.memories_label_inherited} of "
+                f"{funnel.memories_written} written memories inherited a label "
+                f"({levels})"
+            )
+            if funnel.sweeps_reporting_label_inheritance < funnel.sweeps:
+                line += (
+                    f"; reported by {funnel.sweeps_reporting_label_inheritance} "
+                    f"of {funnel.sweeps} sweeps"
+                )
+            console.print(line)
     for note in capture.notes:
         console.print(f"    [dim]{note}[/dim]")
 
