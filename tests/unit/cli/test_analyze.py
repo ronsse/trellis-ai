@@ -2458,6 +2458,69 @@ class TestAnalyzeHealthCaptureSection:
         assert data["capture"]["capture_rate"] is None
         assert data["capture"]["state"] == "unobserved"
 
+    def _emit_labelled_sweep(self, registry: StoreRegistry) -> None:
+        self._emit_sweep(
+            registry,
+            memories_written=7,
+            memories_label_inherited=3,
+            memories_label_inherited_by_level={"confidential": 1, "restricted": 2},
+        )
+
+    def test_json_carries_inherited_labels_by_level(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._emit_labelled_sweep(temp_stores)
+        result = runner.invoke(app, ["analyze", "health", "--format", "json"])
+        assert result.exit_code == 0
+        funnel = json.loads(result.stdout)["capture"]["funnel"]
+        assert funnel["memories_label_inherited"] == 3
+        assert funnel["memories_label_inherited_by_level"] == {
+            "confidential": 1,
+            "restricted": 2,
+        }
+        assert funnel["sweeps_reporting_label_inheritance"] == 1
+
+    def test_text_prints_inherited_labels_by_level(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._emit_labelled_sweep(temp_stores)
+        result = runner.invoke(app, ["analyze", "health"])
+        assert result.exit_code == 0
+        out = " ".join(plain(result.stdout).split())
+        # Rich wraps at the console width, so read the flattened text after
+        # the label marker rather than one physical line.
+        line = out[out.index("labels:") :]
+        assert "3 of 7" in line
+        assert "1 confidential" in line
+        assert "2 restricted" in line
+        assert "reported by" not in line
+
+    def test_text_prints_no_label_line_when_nothing_inherited(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._emit_sweep(
+            temp_stores,
+            memories_label_inherited=0,
+            memories_label_inherited_by_level={},
+        )
+        result = runner.invoke(app, ["analyze", "health"])
+        assert result.exit_code == 0
+        assert "funnel:" in plain(result.stdout)
+        assert "labels:" not in plain(result.stdout)
+
+    def test_text_says_how_many_sweeps_report_the_counter(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        self._emit_labelled_sweep(temp_stores)
+        self._emit_sweep(temp_stores)
+        result = runner.invoke(app, ["analyze", "health"])
+        assert result.exit_code == 0
+        out = " ".join(plain(result.stdout).split())
+        # Rich wraps at the console width, so read the flattened text after
+        # the label marker rather than one physical line.
+        line = out[out.index("labels:") :]
+        assert "reported by 1 of 2 sweeps" in line
+
 
 class TestTruncationReachesTheOperator:
     """A capped report must say so on the surface a human reads (#374).

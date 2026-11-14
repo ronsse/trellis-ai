@@ -71,6 +71,7 @@ reported, as counts, in :class:`CaptureFunnel`.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -157,6 +158,16 @@ class CaptureFunnel(TrellisModel):
     sessions_skipped_egress_unreadable: int = 0
     sessions_with_memory: int = 0
     memories_written: int = 0
+    #: Memories the sweeps reported writing under a label inherited from what
+    #: their session was served (#1236), in total and per level. These count
+    #: stamped writes in the window (a flow), not rows now in the store. They
+    #: read 0 and empty for sweeps written by a build before #1236, so
+    #: ``sweeps_reporting_label_inheritance`` counts the live sweeps whose
+    #: payload carries the counter: a zero from an older build can then be
+    #: told from a true zero.
+    memories_label_inherited: int = 0
+    memories_label_inherited_by_level: dict[str, int] = Field(default_factory=dict)
+    sweeps_reporting_label_inheritance: int = 0
     candidates_distilled: int = 0
     #: Total worthiness-gate rejections, and it stays the total so a window
     #: spanning the 2026-09-12 split still means one thing.
@@ -221,7 +232,13 @@ def _funnel_from_events(events: list[Any]) -> tuple[CaptureFunnel, int]:
     """Sum sweep payloads into a funnel; also count dry runs skipped."""
     funnel = CaptureFunnel()
     dry_runs = 0
-    fields = set(CaptureFunnel.model_fields) - {"sweeps"}
+    # The map and the reporting count are not payload integers; summing them
+    # here would add an int to a dict when a payload carries one.
+    fields = set(CaptureFunnel.model_fields) - {
+        "sweeps",
+        "sweeps_reporting_label_inheritance",
+        "memories_label_inherited_by_level",
+    }
     for event in events:
         payload = event.payload or {}
         if payload.get("dry_run"):
@@ -236,6 +253,18 @@ def _funnel_from_events(events: list[Any]) -> tuple[CaptureFunnel, int]:
             value = payload.get(name)
             if isinstance(value, int) and not isinstance(value, bool):
                 setattr(funnel, name, getattr(funnel, name) + value)
+        if "memories_label_inherited" in payload:
+            funnel.sweeps_reporting_label_inheritance += 1
+        by_level = payload.get("memories_label_inherited_by_level")
+        if isinstance(by_level, Mapping):
+            totals = funnel.memories_label_inherited_by_level
+            for level, count in by_level.items():
+                if (
+                    isinstance(level, str)
+                    and isinstance(count, int)
+                    and not isinstance(count, bool)
+                ):
+                    totals[level] = totals.get(level, 0) + count
     return funnel, dry_runs
 
 

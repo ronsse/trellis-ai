@@ -107,7 +107,8 @@ successful injection's damage to junk, not leakage.
   route, a memory distilled from a session served a document labelled above
   `internal` is written under the strictest such label
   (`classified_by: ["session-inherit"]`), so a caller below it is not served it.
-  Counted as `memories_label_inherited` in the report. See
+  Counted as `memories_label_inherited` in the report, and summed by level in
+  `trellis analyze health`. See
   [the same section](operations.md#keeping-labelled-content-off-a-hosted-model).
 
 ## Three ways to run it
