@@ -97,10 +97,11 @@ lineage item, a nested property map, a tag row's own values) is a tag row the
 walk did not read, or has a key whose ``casefold()`` is ``tags`` holding a
 truthy value that the walk did not read as tag rows, since a tag the map names
 would be silently ignored; the refusal gives the position only.  The walk alone
-decides what was read.  With a map, a ``tuple``, ``set``, ``frozenset`` or a
-mapping that is not a ``dict`` anywhere in the input also refuses the run, since
-JSON yields none of them and the check could not see into it.  Without a map no
-such check runs.
+decides what was read.  With a map, any value in the input that is not a
+``dict``, ``list``, ``str``, ``int``, ``float``, ``bool`` or ``None`` also
+refuses the run (a ``tuple``, a ``datetime``, ``bytes``), since JSON yields none
+of them and the check could not see into it; a caller holding such values
+passes the input through ``json`` first.  Without a map no such check runs.
 
 A row is told apart by its ``tag_name``; its keys are read case-insensitively
 (``TAG_NAME`` or ``tag_name``), its securable names fold the way a table
@@ -619,6 +620,10 @@ def _is_tags_wrapper(node: dict[str, Any]) -> bool:
     )
 
 
+#: Every type ``json.loads`` yields besides ``None``; ``bool`` is an ``int``.
+_JSON_TYPES = (dict, list, str, int, float)
+
+
 def _first_unread_tags(node: Any, where: str, state: _Collected) -> str | None:
     """Position of the first tag :func:`_walk` did not read, or ``None``.
 
@@ -631,11 +636,10 @@ def _first_unread_tags(node: Any, where: str, state: _Collected) -> str | None:
     because the raw input is alive for the whole scan.
     """
     children: list[tuple[Any, str]] = []
-    if isinstance(node, (tuple, set, frozenset)) or (
-        isinstance(node, Mapping) and not isinstance(node, dict)
-    ):
-        # JSON yields only dicts and lists; any other container could hide rows.
-        _refuse(f"{where}: a container that is not a JSON object or array")
+    if node is not None and not isinstance(node, _JSON_TYPES):
+        # What JSON yields is listed, not what could hide a row: a container
+        # nobody thought of is then refused instead of passed over unread.
+        _refuse(f"{where}: a value that is not a JSON value")
     if isinstance(node, list):
         children = [(item, f"{where}[{idx}]") for idx, item in enumerate(node)]
     elif isinstance(node, dict):

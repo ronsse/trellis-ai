@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import random
+from collections import UserList, deque
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -2193,6 +2194,8 @@ class TestTagRowKeys:
 HIDDEN_ROWS = {
     "tuple": (TABLE_TAG,),
     "mapping_proxy": MappingProxyType({"tags": [TABLE_TAG]}),
+    "deque": deque([TABLE_TAG]),
+    "user_list": UserList([TABLE_TAG]),
 }
 
 
@@ -2206,6 +2209,23 @@ class TestNonJsonContainers:
         message = str(caught.value)
         for leaked in ("classification", "restricted", "orders"):
             assert leaked not in message
+
+    @pytest.mark.parametrize("value", [b"x", object()], ids=["bytes", "object"])
+    async def test_a_value_json_cannot_hold_refuses_with_a_map(
+        self, value: object
+    ) -> None:
+        # The check lists what JSON yields, not what could hide a row, so a
+        # type nobody thought of is refused instead of passed over unread.
+        raw = {"tables": [{**BARE_ORDERS, "properties": {"x": value}}]}
+        with pytest.raises(ValidationError, match="not a JSON") as caught:
+            await labelled(raw)
+        assert caught.value.code == INPUT_REFUSAL_CODE
+
+    @pytest.mark.parametrize("value", ["s", 1, 1.5, True, None])
+    async def test_every_json_scalar_passes_with_a_map(self, value: object) -> None:
+        raw = {"tables": [{**BARE_ORDERS, "properties": {"x": value}}]}
+        plain = await labelled({"tables": [{**BARE_ORDERS, "properties": {}}]})
+        assert (await labelled(raw)).skipped_rows == plain.skipped_rows
 
     @pytest.mark.parametrize("case", sorted(HIDDEN_ROWS))
     async def test_without_a_map_it_reads_as_with_an_empty_property_map(
