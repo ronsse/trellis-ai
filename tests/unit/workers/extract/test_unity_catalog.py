@@ -1824,7 +1824,7 @@ class TestSourceLabels:
         ],
     )
     async def test_tag_rows_with_no_map_refuse_the_run(self, rows: list[Any]) -> None:
-        with pytest.raises(ValidationError, match="--sensitivity-map") as caught:
+        with pytest.raises(ValidationError, match="sensitivity_map") as caught:
             await extract([ORDERS, *rows])
         assert caught.value.code == INPUT_REFUSAL_CODE
 
@@ -1888,3 +1888,120 @@ class TestSourceLabels:
             "confidential"
         )
         assert "data_classification" not in store.props(_catalog())
+
+    async def test_a_column_placeholder_carries_the_label_of_its_path(self) -> None:
+        column_tag = tag(
+            "confidential",
+            schema_name="sales",
+            table_name="daily_revenue",
+            column_name="revenue",
+        )
+        result = await labelled([*COLUMN_LINEAGE, column_tag])
+        placeholder = by_id(result)[_column("revenue", "main.sales.daily_revenue")]
+        assert placeholder.if_absent
+        assert label(placeholder) == "confidential"
+        assert "tags_for_absent_securables" not in result.skipped_rows
+
+
+def _label_record(store: Store, node_id: str) -> dict[str, Any] | None:
+    record = store.props(node_id).get("data_classification")
+    return None if record is None else dict(record)
+
+
+class TestPlaceholderLabelsOverStoredNodes:
+    """A placeholder is create-if-absent, so its label goes in a follow-up update.
+
+    Without it a label that a later run maps onto a catalog, schema or table
+    the store already holds is dropped with the skipped create.
+    """
+
+    @BOTH_MODES
+    async def test_a_catalog_tag_labels_a_stored_catalog_and_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lom: bool
+    ) -> None:
+        store = Store(tmp_path, monkeypatch, lom=lom)
+        store.write(await extract(ORDERS))
+        assert _label_record(store, _catalog()) is None
+        store.write(await labelled([ORDERS, tag("restricted")]))
+        for nid in (_catalog(), _schema()):
+            record = _label_record(store, nid)
+            assert record is not None, nid
+            assert record["sensitivity"] == "restricted"
+            assert record["classified_by"] == ["source-inherit"]
+
+    @BOTH_MODES
+    async def test_a_lineage_only_run_labels_a_stored_table_and_keeps_its_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lom: bool
+    ) -> None:
+        store = Store(tmp_path, monkeypatch, lom=lom)
+        store.write(await extract(ORDERS))
+        before = store.props(ORDERS_ID)
+        store.write(await labelled([TABLE_LINEAGE[0], TABLE_TAG]))
+        after = store.props(ORDERS_ID)
+        record = after.pop("data_classification")
+        assert record["sensitivity"] == "restricted"
+        assert record["classified_by"] == ["source-inherit"]
+        assert "stub" not in after
+        assert after == before
+
+    @BOTH_MODES
+    async def test_a_weaker_later_tag_does_not_lower_a_placeholder_label(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lom: bool
+    ) -> None:
+        store = Store(tmp_path, monkeypatch, lom=lom)
+        store.write(await extract(ORDERS))
+        store.write(await labelled([ORDERS, tag("restricted")]))
+        store.write(await labelled([ORDERS, tag("confidential")]))
+        for nid in (_catalog(), _schema()):
+            record = _label_record(store, nid)
+            assert record is not None, nid
+            assert record["sensitivity"] == "restricted"
+
+
+#: A bare table record (no wrapper) to which a ``tags`` key is added.
+BARE_ORDERS = dict(TABLES["tables"][0])
+
+
+class TestTagsKeyOnARecord:
+    """``tags`` is a wrapper key only on a node that is not itself a record."""
+
+    @pytest.mark.parametrize("value", [[], None, {"owner": "x"}])
+    async def test_a_record_with_a_tags_key_reads_as_without_it(
+        self, value: Any
+    ) -> None:
+        plain = await extract([BARE_ORDERS])
+        with_key = await extract([{**BARE_ORDERS, "tags": value}])
+        assert drafts(with_key) == drafts(plain)
+        assert with_key.skipped_rows == plain.skipped_rows
+
+    @pytest.mark.parametrize("value", [[], None])
+    async def test_an_empty_tags_key_on_a_record_reads_the_same_with_a_map(
+        self, value: Any
+    ) -> None:
+        plain = await labelled([BARE_ORDERS])
+        with_key = await labelled([{**BARE_ORDERS, "tags": value}])
+        assert drafts(with_key) == drafts(plain)
+
+    @pytest.mark.parametrize("value", [[TABLE_TAG], {"owner": "x"}, ["classification"]])
+    async def test_non_empty_tags_on_a_record_with_a_map_refuse_the_run(
+        self, value: Any
+    ) -> None:
+        with pytest.raises(ValidationError, match="_tags views") as caught:
+            await labelled([{**BARE_ORDERS, "tags": value}])
+        assert caught.value.code == INPUT_REFUSAL_CODE
+        message = str(caught.value)
+        for leaked in ("classification", "owner", "orders", "restricted"):
+            assert leaked not in message
+
+    async def test_tags_beside_another_wrapper_key_are_read(self) -> None:
+        wrapped = await labelled({"tables": [BARE_ORDERS], "tags": [TABLE_TAG]})
+        assert label(by_id(wrapped)[ORDERS_ID]) == "restricted"
+
+    async def test_a_bare_tags_wrapper_is_read(self) -> None:
+        wrapped = await labelled([ORDERS, {"tags": [TABLE_TAG]}])
+        assert label(by_id(wrapped)[ORDERS_ID]) == "restricted"
+
+    async def test_the_no_map_refusal_names_the_argument(self) -> None:
+        with pytest.raises(ValidationError, match="sensitivity_map") as caught:
+            await extract([ORDERS, TABLE_TAG])
+        assert "--sensitivity-map" not in str(caught.value)

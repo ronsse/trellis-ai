@@ -34,7 +34,9 @@ draft with ``if_absent=True`` and ``stub=True`` on the same id the real record
 would have, so every edge joins two nodes of the batch and the Bolt stores,
 which refuse a dangling edge, take it.  ``if_absent`` makes the write a
 create-if-absent: the node is created when missing and left alone when it
-exists, so a partial run never replaces what a fuller run wrote.  A record the
+exists, so a partial run never replaces what a fuller run wrote.  The one thing
+a placeholder does carry onto an existing node is its label (see "Tags and
+labels" below).  A record the
 export does hold is a full create, which replaces the node's properties and so
 drops ``stub``: the metadata that arrives after a lineage-only run lands whole.
 
@@ -84,12 +86,18 @@ Tags and labels
 
 The input may also hold tag rows: rows of the ``information_schema`` tag views
 (``catalog_tags``, ``schema_tags``, ``table_tags``, ``column_tags``), bare or
-under a wrapper key ``"tags"``.  A row is told apart by its ``tag_name``; its
-keys are read case-insensitively (``TAG_NAME`` or ``tag_name``), its securable
-names fold the way a table record's do, and its tag key and value are compared
-exactly, since Databricks tag keys are case sensitive.  ``column_name`` makes it
-a column tag, else ``table_name`` a table tag, else ``schema_name`` a schema tag,
-else a catalog tag.  A missing or null ``tag_value`` reads as ``""``.  See
+under a wrapper key ``"tags"``.  ``"tags"`` is a wrapper only on a node that is
+not itself a record: a non-empty list beside nothing but other wrapper keys and
+``namespace``.  A record that carries a ``tags`` key is read as it was before
+tag rows were read, its ``tags`` ignored; with a ``sensitivity_map`` given, a
+non-empty one refuses the run instead, since those tags are not read.
+
+A row is told apart by its ``tag_name``; its keys are read case-insensitively
+(``TAG_NAME`` or ``tag_name``), its securable names fold the way a table
+record's do, and its tag key and value are compared exactly, since Databricks
+tag keys are case sensitive.  ``column_name`` makes it a column tag, else
+``table_name`` a table tag, else ``schema_name`` a schema tag, else a catalog
+tag.  A missing or null ``tag_value`` reads as ``""``.  See
 <https://docs.databricks.com/aws/en/sql/language-manual/information-schema/table_tags>
 and <https://docs.databricks.com/aws/en/database-objects/tags>.
 
@@ -111,7 +119,16 @@ column.  Every draft, placeholders included, whose label ranks above
 ``DataClassification(sensitivity=<level>, classified_by=["source-inherit"])``.
 With no tag rows the output is the same with or without a map.  A tag row whose
 securable this run does not mint is counted as ``tags_for_absent_securables``,
-and a volume's tag row as ``tag_rows_on_volumes``.
+and a volume's tag row as ``tag_rows_on_volumes``.  That includes a tagged
+column beyond ``max_columns_per_table`` that no column lineage names: it is
+not minted, its tag row is counted under ``tags_for_absent_securables``, and
+its name stays in the table's ``column_names`` (within that list's own bound).
+
+A placeholder's label reaches a node that already exists: the create-if-absent
+leaves that node alone, so
+:func:`~trellis.extract.commands.result_to_batch` follows a labelled
+placeholder's create with an ``entity.update`` carrying only
+``data_classification``, which can raise the stored label and never lowers it.
 
 Rows the extractor reads and does not use (a lineage row without two tables,
 and the like) are counted by reason in :attr:`ExtractionResult.skipped_rows`.
@@ -189,10 +206,12 @@ _WRAPPER_KEYS: Final = (
     "tables",
     "volumes",
     "functions",
-    "tags",
     "upstreams",
     "downstreams",
 )
+
+#: Wrapper key of tag rows, read only by :func:`_is_tags_wrapper`'s rule.
+_TAGS_KEY: Final = "tags"
 
 #: ``classified_by`` of a label inherited from mapped source tags.
 SOURCE_INHERIT_CLASSIFIER: Final = "source-inherit"
@@ -357,6 +376,9 @@ class _Collected:
     namespaces: set[str] = field(default_factory=set)
     #: ``(securable, tag key, tag value)``, one per readable tag row
     tags: list[tuple[_Path, str, str]] = field(default_factory=list)
+    #: Positions of a non-empty ``tags`` value on a node that is a record,
+    #: which is not read as tag rows (see :func:`_is_tags_wrapper`).
+    unread_tags: list[str] = field(default_factory=list)
     skipped: Counter[str] = field(default_factory=Counter)
 
     def add_table_edge(
@@ -550,6 +572,25 @@ def _is_bare_catalog(node: dict[str, Any]) -> bool:
     return full_name is None or _fold(full_name) == _fold(node["name"])
 
 
+def _is_tags_wrapper(node: dict[str, Any]) -> bool:
+    """``tags`` holds tag rows only on a node that is not itself a record.
+
+    That is a non-empty list under ``tags`` beside nothing but other wrapper
+    keys and ignored document keys (``namespace`` among them).  A record that
+    happens to carry a ``tags`` key is read exactly as it was before tag rows
+    were read at all.
+    """
+    rows = node.get(_TAGS_KEY)
+    return (
+        isinstance(rows, list)
+        and bool(rows)
+        and all(
+            key == _TAGS_KEY or key in _WRAPPER_KEYS or key in _IGNORED_DOCUMENT_KEYS
+            for key in node
+        )
+    )
+
+
 def _walk(node: Any, where: str, state: _Collected) -> None:  # noqa: PLR0912 - one dispatch over every accepted shape
     if isinstance(node, list):
         for idx, item in enumerate(node):
@@ -563,8 +604,14 @@ def _walk(node: Any, where: str, state: _Collected) -> None:  # noqa: PLR0912 - 
         _add_tag_row(node, where, state)
         return
 
-    if any(key in node for key in _WRAPPER_KEYS) or (
-        node.keys() <= _IGNORED_DOCUMENT_KEYS
+    tags_wrapper = _is_tags_wrapper(node)
+    if not tags_wrapper and node.get(_TAGS_KEY):
+        state.unread_tags.append(where)
+
+    if (
+        tags_wrapper
+        or any(key in node for key in _WRAPPER_KEYS)
+        or (node.keys() <= _IGNORED_DOCUMENT_KEYS)
     ):
         namespace = normalize_scope(node.get("namespace"))
         if namespace:
@@ -575,10 +622,12 @@ def _walk(node: Any, where: str, state: _Collected) -> None:  # noqa: PLR0912 - 
             ("tables", _add_table),
             ("volumes", _add_volume),
             ("functions", _add_function),
-            ("tags", _add_tag_row),
         ):
             for idx, rec in enumerate(_record_list(node.get(key), f"{where}.{key}")):
                 add(rec, f"{where}.{key}[{idx}]", state)
+        if tags_wrapper:
+            for idx, rec in enumerate(node[_TAGS_KEY]):
+                _add_tag_row(rec, f"{where}.{_TAGS_KEY}[{idx}]", state)
         if "upstreams" in node or "downstreams" in node:
             _add_lineage_api(node, where, state)
         return
@@ -769,7 +818,14 @@ class UnityCatalogExtractor:
         if has_tags and self._sensitivity_map is None:
             _refuse(
                 "input: the export holds tag rows but no sensitivity map was given "
-                "(--sensitivity-map); nothing is minted below a label it cannot read"
+                "(the sensitivity_map argument); nothing is minted below a label "
+                "it cannot read"
+            )
+        if self._sensitivity_map is not None and state.unread_tags:
+            _refuse(
+                f"{state.unread_tags[0]}: tags nested in a record are not read; "
+                "pass rows of the information_schema *_tags views instead, so "
+                "no tag the sensitivity map names is silently ignored"
             )
         labels = _own_labels(state, self._sensitivity_map or {})
 
