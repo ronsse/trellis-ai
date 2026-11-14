@@ -65,7 +65,7 @@ def seeded(temp_registry: StoreRegistry) -> StoreRegistry:
     temp_registry.knowledge.graph_store.upsert_node(
         "node-1",
         "entity",
-        {"name": "graph-sentinel", "data_classification": label("public")},
+        {"name": "graph-sentinel", **label("public")},
     )
     return temp_registry
 
