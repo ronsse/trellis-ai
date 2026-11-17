@@ -4316,6 +4316,54 @@ unhelpful counts in both and in `mixed`. `limits` also counts feedback with no
 item ids (so `served_ungraded` is not read as unhelpful), stray citations, and
 servings of items not created in the window, by item type.
 
+### `trellis analyze unanswered-intents`
+
+Read-only list of the **requests whose packs keep being graded as failures**:
+what agents ask for that the memory does not hold. It decides nothing and
+changes no serving.
+
+```bash
+trellis analyze unanswered-intents [--days N] [--limit N] [--top N] [--min-unanswered N] \
+    [--examples N] [--redact-intents] [--format text|json] [--no-meta-trace]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--days` | `30` | Window for the pack and feedback scans |
+| `--limit` | `5000` | Max events scanned per event type; truncation is reported in `scan` |
+| `--top` | `20` | Most groups listed; the rest are counted in `limits.groups_beyond_top` |
+| `--min-unanswered` | `2` | Hide groups with fewer unanswered packs; counted in `limits.groups_hidden_below_min` |
+| `--examples` | `3` | Most recent unanswered pack ids listed per group |
+| `--redact-intents` | off | Replace each group key and label with `intent:<12 hex>`, a SHA-256 digest of the key |
+| `--no-meta-trace` | off | Skip the meta-trace; the run then writes nothing |
+
+Each `PACK_ASSEMBLED` (held-out packs and their feedback dropped and counted)
+is joined to the `FEEDBACK_RECORDED` rows naming it, from both feedback
+families: by payload `pack_id`, or for a governed row without one by a
+`target_id` that is a scanned pack. A row's verdict is its `success`, else
+`rating >= SUCCESS_RATING_THRESHOLD`; the latest row with a verdict decides,
+and packs graded more than once, or inconsistently, are counted in `limits`.
+A pack is **unanswered** when that verdict fails; a pack no verdict names is
+**ungraded**, never unanswered.
+
+Packs group on their `intent` text case-folded, with punctuation and
+whitespace collapsed, so `Rotate the widget?` and `rotate  the WIDGET` are one
+line, while a paraphrase is a separate line (no embeddings, no model).
+`intent_family` is not keyed on: it is a coarse keyword bucket. Packs with no
+intent text group under `(no intent)`. Each group reports packs, graded,
+unanswered, answered, ungraded, unanswered packs split into
+`unanswered_empty` (served nothing), `unanswered_named_unhelpful` (a served
+item was named unhelpful) and `unanswered_not_named_unhelpful`, mean rating
+of the deciding rows, first and last seen, domains, intent families and
+example pack ids. Groups sort by unanswered count, then recency.
+
+The label is the latest raw intent, cut to 80 characters. It is the asker's
+own text, so share output only with `--redact-intents`; a digest of a short,
+guessable intent can still be confirmed by hashing a guess.
+
+JSON keys: `window_days`, `since`, `min_unanswered`, `top`, `redacted`,
+`groups`, `totals`, `limits`, `scan`.
+
 ### `trellis analyze pack-judge`
 
 Offline relevance judge for served pack items, and the report that measures it

@@ -2197,6 +2197,117 @@ def memory_yield(
         console.print(f"  [dim]note: {escape(statement)}[/dim]")
 
 
+@analyze_app.command("unanswered-intents")
+def unanswered_intents(
+    days: int = typer.Option(30, help="Days of history to analyze"),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+    limit: int = typer.Option(
+        DEFAULT_SCAN_LIMIT,
+        "--limit",
+        help="Max events to scan per event type; truncation is reported.",
+    ),
+    top: int = typer.Option(20, "--top", help="Most groups to list."),
+    min_unanswered: int = typer.Option(
+        2,
+        "--min-unanswered",
+        help="Hide groups with fewer unanswered packs; the count is reported.",
+    ),
+    examples: int = typer.Option(
+        3, "--examples", help="Unanswered pack ids listed per group."
+    ),
+    redact_intents: bool = typer.Option(
+        False,
+        "--redact-intents",
+        help="Replace each intent with a short stable digest.",
+    ),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
+) -> None:
+    """Requests whose packs keep being graded unhelpful.
+
+    Joins each PACK_ASSEMBLED to the FEEDBACK_RECORDED rows naming it (both
+    feedback families), takes the latest verdict, and groups packs by their
+    intent text normalised for case, whitespace and punctuation. A pack is
+    unanswered when graded below SUCCESS_RATING_THRESHOLD; ungraded packs are
+    not. Held-out packs are dropped and counted. Read-only.
+    """
+    from trellis.analyze.unanswered_intents import (  # noqa: PLC0415
+        summarize_unanswered_intents,
+    )
+
+    event_log = get_event_log()
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.unanswered_intents",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        report = summarize_unanswered_intents(
+            event_log,
+            days=days,
+            limit=limit,
+            min_unanswered=min_unanswered,
+            top=top,
+            examples=examples,
+            redact_intents=redact_intents,
+        )
+        if _meta_record.enabled and report.totals.unanswered > 0:
+            _meta_record.produced_finding(
+                f"unanswered-intents-report-d{days}",
+                finding_type="UnansweredIntentsReport",
+            )
+
+    if output_format == "json":
+        emit_json(report.model_dump())
+        return
+
+    totals = report.totals
+    console.print(f"[bold]Unanswered Intents[/bold] (last {days} days)")
+    if report.scan.truncated:
+        console.print(f"  [yellow]window[/yellow] {escape(report.scan.note or '')}")
+    console.print(
+        f"  {totals.packs} pack(s) in {totals.groups} group(s): graded "
+        f"{totals.graded}, unanswered {totals.unanswered}, answered "
+        f"{totals.answered}, ungraded {totals.ungraded}"
+    )
+    if not report.groups:
+        console.print("  [dim]No group meets the thresholds.[/dim]")
+    for group in report.groups:
+        mean = "n/a" if group.mean_rating is None else f"{group.mean_rating:.2f}"
+        # The label is user text: printed verbatim, never read as markup.
+        console.print(f"  {group.label}", markup=False, highlight=False)
+        console.print(
+            f"    unanswered {group.unanswered} of {group.graded} graded "
+            f"({group.packs} pack(s)): empty {group.unanswered_empty}, "
+            f"named unhelpful {group.unanswered_named_unhelpful}, "
+            f"none named unhelpful {group.unanswered_not_named_unhelpful}; "
+            f"mean rating {mean}; seen {escape(group.first_seen or '?')} to "
+            f"{escape(group.last_seen or '?')}"
+        )
+        console.print(
+            f"    domains {escape(', '.join(group.domains) or '(none)')}; "
+            f"examples {escape(', '.join(group.example_pack_ids))}"
+        )
+    lim = report.limits
+    console.print()
+    console.print(
+        f"  [dim]{lim.groups_hidden_below_min} group(s) below --min-unanswered "
+        f"{min_unanswered} hidden; {lim.groups_beyond_top} beyond --top; "
+        f"{lim.holdout_packs_dropped} held-out pack(s) and "
+        f"{lim.holdout_feedback_dropped} feedback event(s) on them dropped; "
+        f"{lim.ungraded_packs} ungraded pack(s); {lim.packs_without_intent} "
+        f"pack(s) with no intent; {lim.feedback_outside_scan} feedback event(s) "
+        f"naming a pack outside the scan; {lim.feedback_without_pack} naming no "
+        f"pack; {lim.packs_with_conflicting_verdicts} of "
+        f"{lim.packs_with_multiple_verdicts} multiply graded pack(s) "
+        "conflict.[/dim]"
+    )
+    for statement in lim.statements:
+        console.print(f"  [dim]note: {escape(statement)}[/dim]")
+
+
 def _parse_window_end(value: str | None) -> datetime | None:
     """``--until`` as an aware UTC datetime; a naive value is read as UTC."""
     from trellis.analyze.holdout import HoldoutAnalysisError  # noqa: PLC0415
