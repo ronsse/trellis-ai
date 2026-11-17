@@ -285,23 +285,15 @@ class TestCount:
 class TestQuery:
     """``query`` issues Cypher 25 ``SEARCH ... IN ( VECTOR INDEX ... )``.
 
-    That clause is AuraDB-grade: ``neo4j:2025.12`` — the image live-infra CI
-    provisions — rejects it at parse time with ``Invalid input 'SEARCH'``, and
-    a server that gets far enough to resolve it raises ``51N26``. So every
-    test below that reaches Cypher takes ``require_neo4j_vector_search``,
-    which probes the connected instance once per session and skips when the
-    clause is unavailable. Without the gate these four are the reason the
-    whole file could not be named in ``.github/workflows/live-infra.yml``,
-    which is what kept the other 23 tests here from ever running in CI.
-
-    ``test_query_dimension_mismatch_raises`` is deliberately **not** gated:
-    ``Neo4jVectorStore.query`` validates the vector length in Python and
-    raises before it builds any Cypher, so that test needs a store, not a
-    capability. ``tests/unit/test_neo4j_vector_live_infra_rule.py`` holds
-    that exemption by name, and fails if it ever stops being true.
+    ``neo4j:2025.12``, the image live-infra CI provisions, refuses that clause:
+    ``Invalid input 'SEARCH'`` (GQL ``42I67``) under its default
+    ``CYPHER 5``, and ``51N26`` (SEARCH not available) even with a
+    ``CYPHER 25`` prefix. The store then falls back to
+    ``db.index.vector.queryNodes``, so on that image these tests run, ungated,
+    through the procedure.
     """
 
-    def test_cosine_ordering(self, require_neo4j_vector_search, stores):
+    def test_cosine_ordering(self, stores):
         graph, vector = stores
         for nid, v in [
             ("right", _vec(1, 0, 0)),
@@ -316,7 +308,7 @@ class TestQuery:
         assert ids[0] == "right"
         assert all(0 <= r["score"] <= 1.0001 for r in results)
 
-    def test_top_k_limits_results(self, require_neo4j_vector_search, stores):
+    def test_top_k_limits_results(self, stores):
         graph, vector = stores
         for i in range(5):
             nid = f"v{i}"
@@ -325,7 +317,7 @@ class TestQuery:
         results = vector.query(_vec(1, 0, 0), top_k=2)
         assert len(results) == 2
 
-    def test_filter_by_metadata(self, require_neo4j_vector_search, stores):
+    def test_filter_by_metadata(self, stores):
         graph, vector = stores
         _make_node(graph, "a")
         _make_node(graph, "b")
@@ -340,14 +332,14 @@ class TestQuery:
         with pytest.raises(ValueError, match="dimensions"):
             vector.query([1.0, 0.0], top_k=1)
 
-    def test_excludes_historical_versions(self, require_neo4j_vector_search, stores):
+    def test_excludes_historical_versions(self, stores):
         """A node updated after embedding leaves the embedding on the
         closed version, but the index call filters them out.
 
         The store-side half of this — that the current row ends up
         unembedded at all — is asserted by
         ``TestCount::test_reversioning_drops_the_node_from_the_count``,
-        which needs no ``SEARCH`` and so keeps running where this one skips.
+        which needs no ``SEARCH``.
         """
         graph, vector = stores
         _make_node(graph, "n1", v=1)
@@ -371,9 +363,7 @@ class TestGraphReadsLeaveEmbeddingOut:
         graph, vector = stores
         assert_read_leaves_embedding_out(graph, vector, monkeypatch, read)
 
-    def test_similarity_search_after_graph_reads(
-        self, require_neo4j_vector_search, stores
-    ):
+    def test_similarity_search_after_graph_reads(self, stores):
         graph, vector = stores
         seed_embedded_nodes(graph, vector)
         run_every_whole_node_read(graph)

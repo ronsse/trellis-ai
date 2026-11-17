@@ -7,20 +7,16 @@ version. :meth:`provision_storage` declares that prerequisite by creating
 the backing node through the paired graph store and writing no vector;
 every assertion is the one every other backend runs.
 
-Two things differ from ``test_arcadedb_vector_contract.py``, and both are
-about the container CI provisions rather than about vector semantics.
+Every case runs, including the ones that reach
+:meth:`Neo4jVectorStore.query`. ``neo4j:2025.12``, the image
+``live-infra.yml`` provisions, refuses its Cypher 25 ``SEARCH`` clause, so
+on that image those cases run through the store's
+``db.index.vector.queryNodes`` fallback (they skipped behind a capability
+gate before the fallback existed). The ``SEARCH`` form itself runs on no CI
+server.
 
-**The ``SEARCH`` cases are gated per test, not per class.**
-:meth:`Neo4jVectorStore.query` issues the Cypher 25
-``SEARCH ... IN (VECTOR INDEX ...)`` clause, which ``neo4j:2025.12``
-rejects at parse time. The cases in :data:`SEARCH_ISSUING_TESTS` take the
-shared ``require_neo4j_vector_search`` capability gate from
-``tests/conftest.py`` and skip there; every other case runs. The roster is
-hand-read and pinned both directions against an AST scan of the contract
-by ``tests/unit/test_neo4j_vector_live_infra_rule.py``, so a contract case
-added later that calls ``query`` fails that rule instead of turning
-live-infra red — or, worse, being gated by a stale name that no longer
-exists.
+One thing differs from ``test_arcadedb_vector_contract.py``, and it is
+about sharing the CI container rather than about vector semantics.
 
 **It takes the production index name, at the contract's 3 dims.** Neo4j
 holds one vector index per ``(label, property)``, and a second
@@ -63,55 +59,11 @@ pytestmark = [
     pytest.mark.skipif(not URI, reason="TRELLIS_TEST_NEO4J_URI not set"),
 ]
 
-#: Contract cases whose body reaches ``Neo4jVectorStore.query``'s Cypher on
-#: this backend, and therefore need the ``SEARCH`` capability. Hand-read.
-#: One contract case calls ``query`` and is deliberately absent:
-#: ``test_reset_storage_matches_supports_reset`` only queries after a
-#: successful ``reset_storage``, which this store does not implement, so on
-#: this backend it takes the ``NotImplementedError`` branch and returns
-#: first. It runs, and passes, on ``neo4j:2025.12``. The reason is recorded
-#: in ``CONTRACT_UNGATED_QUERY_TESTS`` in
-#: ``tests/unit/test_neo4j_vector_live_infra_rule.py``, which also pins its
-#: premise.
-SEARCH_ISSUING_TESTS = frozenset(
-    {
-        "test_empty_query_returns_empty_list",
-        "test_get_then_reupsert_keeps_row_queryable",
-        "test_provisioning_alone_stores_no_vector",
-        "test_query_filter_by_int_metadata",
-        "test_query_filter_by_str_metadata",
-        "test_query_filter_key_is_one_flat_key_as_written",
-        "test_query_filter_no_match_returns_empty",
-        "test_query_filter_on_unknown_key_returns_empty",
-        "test_query_filter_returns_matches_ranked_below_non_matches",
-        "test_query_filter_with_multiple_keys_is_and",
-        "test_query_orders_by_similarity_descending",
-        "test_query_result_shape",
-        "test_query_returns_metadata",
-        "test_query_self_match_is_top",
-        "test_query_top_k_caps_results",
-        "test_upsert_bulk_results_visible_to_query",
-    }
-)
-
 
 class TestNeo4jVectorContract(VectorStoreContractTests):
     """The shared contract, with shape #2's storage prerequisite declared."""
 
     _graph: Any
-
-    @pytest.fixture(autouse=True)
-    def _search_capability_gate(self, request: pytest.FixtureRequest) -> None:
-        """Route :data:`SEARCH_ISSUING_TESTS` through the shared gate.
-
-        The contract's bodies are inherited, so the gate cannot be a
-        parameter in their signatures the way it is in
-        ``test_neo4j_vector.py``; requesting it by name here is the same
-        mechanism, one frame up. It runs before ``store`` is built, so a
-        skipped case never provisions the index.
-        """
-        if request.node.originalname in SEARCH_ISSUING_TESTS:
-            request.getfixturevalue("require_neo4j_vector_search")
 
     def provision_storage(self, store: VectorStore, *item_ids: str) -> None:
         """Create the ``(:Node)`` rows the vector store attaches to.
