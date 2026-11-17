@@ -34,41 +34,30 @@ from pathlib import PurePosixPath
 #: edits that row in the same diff. A floor is a minimum: adding a case never
 #: turns the job red.
 FLOORS: dict[str, tuple[int, int]] = {
-    # Live run against a fresh ``neo4j:2025.12`` container (2026-11-17, the
-    # job's own image and env names, local rather than a CI run): 44 passed,
-    # 0 skipped. The 19 cases that once skipped behind a SEARCH capability
-    # gate now run through the store's ``db.index.vector.queryNodes``
-    # fallback, since that image refuses ``SEARCH``. Before the fallback:
-    # 25 passed, 19 skipped (run 37484813426 at d873f570, 2026-10-06).
+    # Every row below was read off live-infra run 44027876125 at 2eb74266
+    # (2026-11-17), from the job's own per-test lines.
+    #
+    # Neo4j vector: 44 passed, 0 skipped. ``neo4j:2025.12`` refuses the
+    # ``SEARCH`` clause, and the store falls back to the
+    # ``db.index.vector.queryNodes`` procedure, so the 19 cases that once
+    # skipped behind a capability gate now run. Before the fallback: 25
+    # passed, 19 skipped (run 37484813426 at d873f570, 2026-10-06).
     "tests/unit/stores/contracts/test_neo4j_vector_contract.py": (44, 0),
-    # Run 39334674588 at e16e24a7 (2026-10-19): every row below passed all of
-    # its cases and skipped none. The three graph rows rose 151 -> 155 with the
-    # four subgraph-order cases of #958, then 155 -> 158 with the three
-    # code-point-order cases of #966 (one subgraph, two search_nodes), then
-    # 158 -> 164 with the six ``create_node_if_absent`` cases (run 42313480748
-    # at 7dee3258, 2026-11-06: Postgres 164 passed, 0 skipped), then
-    # 164 -> 168 (and 163 -> 167 on the Bolt rows) with the four
-    # property-filter cases (three buried-match reads, one ``limit=0``),
-    # none of them skipped on any engine. These numbers are
-    # arithmetic, not read off a live run; re-read them against the first
-    # green live-infra run that carries them.
-    "tests/unit/stores/contracts/test_postgres_graph_contract.py": (168, 0),
-    # The two Bolt engines skip exactly one of those six,
+    # Postgres graph: 169 passed, 0 skipped.
+    "tests/unit/stores/contracts/test_postgres_graph_contract.py": (169, 0),
+    # The two Bolt engines: 168 passed, 1 skipped on each. The skip is
     # ``test_create_node_if_absent_is_atomic_for_concurrent_writers``
     # (``ATOMIC_CREATE_IF_ABSENT = False``): a node's versions share one
     # ``node_id`` under SCD2, so no uniqueness constraint can arbitrate two
-    # first creates that start together. Same run: 163 passed, 1 skipped on
-    # each.
-    "tests/unit/stores/contracts/test_arcadedb_graph_contract.py": (167, 1),
-    "tests/unit/stores/contracts/test_neo4j_graph_contract.py": (167, 1),
+    # first creates that start together.
+    "tests/unit/stores/contracts/test_arcadedb_graph_contract.py": (168, 1),
+    "tests/unit/stores/contracts/test_neo4j_graph_contract.py": (168, 1),
     "tests/unit/stores/contracts/test_pgvector_contract.py": (44, 0),
     "tests/unit/stores/contracts/test_arcadedb_vector_contract.py": (44, 0),
-    # The event log contract under a Los Angeles session: 53 contract cases plus
-    # the case that reads the session's zone. Read off a run against a
-    # ``pgvector/pgvector:pg16`` container, this job's own image; re-read it
-    # against the first green live-infra run that carries the file.
+    # The event log contract under a Los Angeles session: 59 passed, 0
+    # skipped.
     "tests/unit/stores/contracts/test_postgres_event_log_session_zone_contract.py": (
-        54,
+        59,
         0,
     ),
 }
