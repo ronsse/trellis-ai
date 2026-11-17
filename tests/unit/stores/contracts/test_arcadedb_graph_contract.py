@@ -41,6 +41,23 @@ pytestmark = [
 ]
 
 
+# A property-filtered read takes a first window of max(limit * 10, the
+# minimum) rows. The contract's buried-match cases ask for limit=2 behind
+# 40 newer non-matching rows, so with the minimum patched to 7 the first
+# window is max(20, 7) = 20 rows, all non-matching and full, and the read
+# needs a second statement (window 20 * 4 = 80, which returns all 43 rows)
+# through real Cypher. With the shipped minimum of 200 one statement would
+# answer and no window boundary would be crossed.
+_SMALL_MIN_WINDOW = 7
+
+
+@pytest.fixture(autouse=True)
+def _small_property_filter_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    from trellis.stores.bolt_opencypher import graph as bolt_graph
+
+    monkeypatch.setattr(bolt_graph, "_PROPERTY_FILTER_MIN_WINDOW", _SMALL_MIN_WINDOW)
+
+
 class TestArcadeDBGraphContract(GraphStoreContractTests):
     # One Cypher statement checks and creates, with no uniqueness constraint on
     # a current version behind it, so two simultaneous calls can both write.

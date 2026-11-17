@@ -2378,6 +2378,19 @@ class GraphStoreContractTests:
         assert len(results) == 2
         assert all(r["properties"]["tier"] == "gold" for r in results)
 
+    def test_execute_node_query_property_filter_limit_zero_returns_nothing(
+        self, store: GraphStore
+    ) -> None:
+        from trellis.stores.base.graph_query import FilterClause, NodeQuery
+
+        store.upsert_node("match0", "service", {"tier": "gold"})
+
+        results = store.execute_node_query(
+            NodeQuery(filters=(FilterClause("properties.tier", "eq", "gold"),), limit=0)
+        )
+
+        assert results == []
+
     def test_execute_subgraph_query_round_trip(self, store: GraphStore) -> None:
         from trellis.stores.base.graph_query import SubgraphQuery
 
