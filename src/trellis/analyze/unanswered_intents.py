@@ -74,7 +74,7 @@ from trellis.stores.base.event_log import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Container, Iterable
 
     from trellis.stores.base.event_log import Event, EventLog
 
@@ -212,6 +212,30 @@ def row_verdict(row: FeedbackRow) -> bool | None:
     return None
 
 
+def feedback_pack_id(row: FeedbackRow, known_pack_ids: Container[str]) -> str | None:
+    """The pack one feedback row grades, or ``None`` when it names none.
+
+    The payload ``pack_id`` when there is one; else, for a governed row
+    (``trellis curate feedback``, ``POST /feedback``), its ``target_id`` when
+    that is one of ``known_pack_ids``, since that family's ``target_id`` may
+    equally be a trace.
+    """
+    if row.pack_id is not None:
+        return row.pack_id
+    if row.family is FeedbackFamily.GOVERNED and row.target_id in known_pack_ids:
+        return row.target_id
+    return None
+
+
+#: One graded row on a pack: ``(event time, scan index, answered, rating)``.
+Verdict = tuple[datetime, int, bool, float | None]
+
+
+def latest_verdict(verdicts: Iterable[Verdict]) -> Verdict | None:
+    """The row that decides a pack: the latest by event time, then scan order."""
+    return max(verdicts, key=lambda v: (v[0], v[1]), default=None)
+
+
 @dataclass
 class _Pack:
     pack_id: str
@@ -221,9 +245,7 @@ class _Pack:
     domain: str | None
     family: str | None
     served: frozenset[str]
-    verdicts: list[tuple[datetime, int, bool, float | None]] = field(
-        default_factory=list
-    )
+    verdicts: list[Verdict] = field(default_factory=list)
     unhelpful: set[str] = field(default_factory=set)
 
 
@@ -359,9 +381,7 @@ def _attach_feedback(
     for index, (event, row) in enumerate(
         zip(events, iter_feedback_rows(events), strict=True)
     ):
-        pack_id = row.pack_id
-        if pack_id is None and row.family is FeedbackFamily.GOVERNED:
-            pack_id = row.target_id if row.target_id in packs else None
+        pack_id = feedback_pack_id(row, packs)
         if pack_id is None:
             limits.feedback_without_pack += 1
             continue
@@ -414,7 +434,8 @@ def _count_verdict(
     rating_sums: dict[str, float],
     limits: UnansweredLimits,
 ) -> None:
-    if not pack.verdicts:
+    decided = latest_verdict(pack.verdicts)
+    if decided is None:
         group.ungraded += 1
         limits.ungraded_packs += 1
         return
@@ -422,7 +443,7 @@ def _count_verdict(
         limits.packs_with_multiple_verdicts += 1
         if len({verdict for _, _, verdict, _ in pack.verdicts}) > 1:
             limits.packs_with_conflicting_verdicts += 1
-    _, _, answered, rating = max(pack.verdicts, key=lambda v: (v[0], v[1]))
+    _, _, answered, rating = decided
     group.graded += 1
     if rating is not None:
         group.rated_packs += 1
@@ -461,7 +482,10 @@ __all__ = [
     "UnansweredIntentsReport",
     "UnansweredLimits",
     "UnansweredTotals",
+    "Verdict",
+    "feedback_pack_id",
     "intent_key",
+    "latest_verdict",
     "redact_key",
     "row_verdict",
     "summarize_unanswered_intents",

@@ -4316,6 +4316,21 @@ unhelpful counts in both and in `mixed`. `limits` also counts feedback with no
 item ids (so `served_ungraded` is not read as unhelpful), stray citations, and
 servings of items not created in the window, by item type.
 
+### `trellis analyze pack-scenario`
+
+Read-only export of served, graded packs as `EvaluationScenario` YAML for
+`trellis analyze pack-quality --scenarios`; see
+[pack-quality-evaluation.md § Scenarios from served packs](pack-quality-evaluation.md#scenarios-from-served-packs).
+
+```bash
+trellis analyze pack-scenario --pack-id <id> [--pack-id <id> ...] [--out FILE] [--force] \
+    [--limit N] [--format text|json] [--no-meta-trace]
+```
+
+Unknown, held-out, intent-less and sectioned packs are refused, and an
+existing `--out` is kept unless `--force`; either way nothing is written and
+the exit is `2` in both formats.
+
 ### `trellis analyze unanswered-intents`
 
 Read-only list of the **requests whose packs keep being graded as failures**:

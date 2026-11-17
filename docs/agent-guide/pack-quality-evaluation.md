@@ -153,6 +153,45 @@ trellis analyze pack-quality --scenarios ./scenarios.yaml --format json
 
 The colour coding on `weighted_score` uses the same thresholds as other `analyze` commands: green ≥ 0.7, yellow ≥ 0.4, red below.
 
+## Scenarios from served packs
+
+`trellis analyze pack-scenario` turns a pack that was really served, and
+graded, into a scenario, so a bad or good request becomes a repeatable case:
+
+```bash
+trellis analyze pack-scenario --pack-id <id> [--pack-id <id> ...] \
+    [--out scenarios.yaml] [--force] [--format json] [--no-meta-trace]
+trellis analyze pack-quality --scenarios scenarios.yaml
+```
+
+It reads the pack's `PACK_ASSEMBLED` event and the `FEEDBACK_RECORDED` rows
+naming it (both feedback families; the latest row with a verdict decides, as
+in `unanswered-intents`) and writes only the `--out` file, or stdout. It never
+overwrites an existing `--out` without `--force`.
+
+| Field | Source |
+|-------|--------|
+| `name` | `pack-` plus the pack id, non-`[A-Za-z0-9._-]` runs replaced by `-`; a digest suffix when two ids collide |
+| `intent`, `domain` | the pack payload, verbatim |
+| `expected_shapes` | per `item_type` of the served items a grader named helpful: `min_count` = their count, no `max_count` |
+| `expected_categories` | the distinct `category` (`content_tags.content_type`, what `breadth` reads first) on those items |
+| `required_coverage` | always empty: the event records no excerpt text, and a keyword not read from served text would be invented |
+| `metadata` | `source_pack_id`, `assembled_at`, `verdict` (`answered` / `unanswered` / `ungraded`), `rating`, `helpful_item_ids`, `unhelpful_item_ids`, `served_items` (`item_id`, `item_type`) |
+
+An item also named unhelpful, or a helpful id the pack did not serve, adds no
+expectation and is counted in `limits`. An ungraded pack, or one graded only by
+the CLI / `POST /feedback` family (which names no items), exports with empty
+expectations. A helpful item with no category adds none: the scorer's
+fallbacks (flat `content_type`, `document_form`) are not on the event row.
+
+Refused, with a message and a count, and then nothing is written and the exit
+is `2` on both formats: an unknown pack id, a held-out pack (it served nothing
+by design and its outcome is sealed), a pack with no intent, and a sectioned
+pack (budgeted per section, while a scenario scores one flat pack).
+
+The intent is the request's own text and the file carries it; treat the file
+like the event log it came from.
+
 ## Python API
 
 ```python
