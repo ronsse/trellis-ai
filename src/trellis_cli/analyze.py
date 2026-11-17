@@ -2121,6 +2121,82 @@ def judged_outcomes(
         console.print(f"  [dim]note: {escape(note)}[/dim]")
 
 
+@analyze_app.command("memory-yield")
+def memory_yield(
+    days: int = typer.Option(30, help="Days of history to analyze"),
+    output_format: str = typer.Option("text", "--format", help="Output format"),
+    limit: int = typer.Option(
+        DEFAULT_SCAN_LIMIT,
+        "--limit",
+        help="Max events to scan per event type; truncation is reported.",
+    ),
+    no_meta_trace: bool = typer.Option(
+        False,
+        "--no-meta-trace",
+        help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
+    ),
+) -> None:
+    """Per creation path: documents created, served, graded, never served.
+
+    Joins document-store rows created in the window to their earliest
+    creation event (MEMORY_STORED or a successful creating MUTATION_EXECUTED,
+    read for requested_by), to the packs that served them or their chunks
+    (PACK_ASSEMBLED.injected_items[], per (pack_id, item_id)), and to the
+    per-item verdicts graders gave those packs (FEEDBACK_RECORDED).
+    Held-out packs are dropped and counted. Read-only.
+    """
+    from trellis.analyze.memory_yield import summarize_memory_yield  # noqa: PLC0415
+
+    document_store = get_document_store()
+    event_log = get_event_log()
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.memory_yield",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        report = summarize_memory_yield(
+            document_store, event_log, days=days, limit=limit
+        )
+        if _meta_record.enabled and report.totals.created > 0:
+            _meta_record.produced_finding(
+                f"memory-yield-report-d{days}",
+                finding_type="MemoryYieldReport",
+            )
+
+    if output_format == "json":
+        emit_json(report.model_dump())
+        return
+
+    console.print(f"[bold]Memory Yield by Creation Path[/bold] (last {days} days)")
+    if report.scan.truncated:
+        console.print(f"  [yellow]window[/yellow] {escape(report.scan.note or '')}")
+    if not report.totals.created:
+        console.print("  [dim]No documents created in the window.[/dim]")
+    for row in [*report.paths, report.totals]:
+        console.print(
+            f"  {escape(row.path)} [dim]({escape(row.basis)})[/dim]: "
+            f"created {row.created}, served {row.served} "
+            f"({row.servings} servings), helpful {row.graded_helpful}, "
+            f"unhelpful {row.graded_unhelpful}, mixed {row.mixed}, "
+            f"served ungraded {row.served_ungraded}, "
+            f"never served {row.never_served}; tokens served "
+            f"{row.tokens_served:g}, helpful {row.tokens_helpful:g}"
+        )
+    lim = report.limits
+    console.print()
+    console.print(
+        f"  [dim]{lim.holdout_packs_dropped} held-out pack(s) and "
+        f"{lim.holdout_feedback_dropped} feedback event(s) on them dropped; "
+        f"{escape(str(lim.feedback_without_item_ids))} of "
+        f"{lim.feedback_events} feedback "
+        f"event(s) named no item; {lim.unattributed_servings} serving(s) of "
+        f"items not created in the window; {lim.stray_citations} stray "
+        "citation(s).[/dim]"
+    )
+    for statement in lim.statements:
+        console.print(f"  [dim]note: {escape(statement)}[/dim]")
+
+
 def _parse_window_end(value: str | None) -> datetime | None:
     """``--until`` as an aware UTC datetime; a naive value is read as UTC."""
     from trellis.analyze.holdout import HoldoutAnalysisError  # noqa: PLC0415
