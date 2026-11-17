@@ -1,12 +1,16 @@
 """Neo4jVectorStore — Neo4j 2025.06+ HNSW vectors as optional properties on :Node.
 
-Minimum version is **Neo4j 2025.06** (Cypher 25), driven by the SEARCH
-clause used in :meth:`Neo4jVectorStore.query`. The deprecated
-``db.index.vector.queryNodes`` procedure that older versions used emits
-a ``DEPRECATION`` notification on every call against AuraDB and will
-eventually be removed. AuraDB always runs the latest engine; self-
-hosted Docker users on the ``neo4j:5`` tag should upgrade to a
-``neo4j:2025`` (or newer) image.
+:meth:`Neo4jVectorStore.query` sends the Cypher 25 ``SEARCH`` clause
+first. The ``db.index.vector.queryNodes`` procedure it replaced emits a
+``DEPRECATION`` notification on every call against AuraDB, which runs
+``SEARCH`` and so never sees the procedure.
+
+Not every ``neo4j:2025`` image runs ``SEARCH``. ``neo4j:2025.12``
+(community, databases defaulting to ``CYPHER 5``) refuses it at parse
+time (GQL ``42I67`` beneath ``42I06 Invalid input 'SEARCH'``), and with a
+``CYPHER 25`` prefix answers ``51N26`` (the keyword is not available in
+that implementation). On either refusal the store falls back to the
+procedure for the rest of its life; see :meth:`Neo4jVectorStore.query`.
 
 Shape #2 of the design discussion: vectors live as an ``embedding``
 property directly on the ``(:Node)`` rows that the
@@ -59,6 +63,35 @@ logger = structlog.get_logger(__name__)
 
 _VALID_SIMILARITY = frozenset({"cosine", "euclidean"})
 _OVER_FETCH_MULT = 10
+
+# GQL statuses with which a server refuses the ``SEARCH`` clause itself.
+# ``42I67``: "a valid CYPHER 25 query, but it is run in CYPHER 5" — the
+# parse-time refusal, chained beneath ``42001``/``42I06 Invalid input
+# 'SEARCH'``. ``51N26``: "The SEARCH keyword is not available" — the
+# refusal a Cypher 25 parser gives when the implementation lacks vector
+# search. The store only ever sends one fixed statement, so either code
+# on it means SEARCH, not some other clause, was refused.
+_SEARCH_REFUSED_GQL_STATUSES = frozenset({"42I67", "51N26"})
+
+
+def search_refusal_status(exc: BaseException) -> str | None:
+    """Return the GQL status that marks ``exc`` as a refusal of ``SEARCH``.
+
+    Walks the driver's GQL cause chain (``__cause__``), because the
+    parse-time refusal arrives as ``42001`` with the telling ``42I67``
+    two links down. Returns ``None`` for any other error, which the caller
+    re-raises unchanged. Classifies on status codes only — never on a
+    server version string or message text.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        status = getattr(current, "gql_status", None)
+        if isinstance(status, str) and status in _SEARCH_REFUSED_GQL_STATUSES:
+            return status
+        current = current.__cause__
+    return None
 
 
 class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
@@ -145,6 +178,11 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
         self._m = m
         self._ef_construction = ef_construction
         self._quantization = quantization
+        # Set the first time the server refuses SEARCH; from then on
+        # ``query`` sends the procedure directly. Per instance, never
+        # persisted: a store pointed at an upgraded server tries SEARCH
+        # again on its next construction.
+        self._search_refused: str | None = None
         # The index DDL is the store's first round trip.
         with open_errors_as_store_error("vector"):
             self._init_schema()
@@ -345,7 +383,7 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
             f"RETURN n.node_id AS item_id, score, "
             f"       n.vector_metadata_json AS metadata_json"
         )
-        records = self._run_read_list(cypher, k=fetch_k, vector=vector)
+        records = self._run_vector_index_query(cypher, k=fetch_k, vector=vector)
 
         results: list[dict[str, Any]] = []
         for r in records:
@@ -362,6 +400,50 @@ class Neo4jVectorStore(Neo4jSessionRunner, VectorStore):
             if len(results) >= top_k:
                 break
         return results
+
+    def _run_vector_index_query(
+        self, search_cypher: str, *, k: int, vector: list[float]
+    ) -> Any:
+        """Run ``search_cypher``, or the procedure on a server that refuses it.
+
+        The fallback sends ``db.index.vector.queryNodes`` with the same
+        ``k`` and the same ``valid_to IS NULL`` filter after ``YIELD``, and
+        returns the same three columns, so :meth:`query` parses, filters
+        and trims its rows exactly as it does SEARCH rows. Parity is exact
+        on everything this store controls: both forms ask the index for
+        ``k`` neighbours and filter afterwards (the SEARCH form never
+        pushes a filter into the index; metadata filters are applied
+        client-side for both), so ``top_k``, metadata filters and
+        current-version-only behaviour are unchanged. Both return rows in
+        descending score order. Scores come from the same index and can
+        differ in the last decimal places between the two forms.
+
+        The first refusal on an instance costs one refused statement and
+        one ``warning``; later calls send the procedure directly. Any
+        error that is not a SEARCH refusal propagates unchanged and does
+        not switch the instance.
+        """
+        if self._search_refused is None:
+            try:
+                return self._run_read_list(search_cypher, k=k, vector=vector)
+            except Exception as exc:
+                status = search_refusal_status(exc)
+                if status is None:
+                    raise
+                self._search_refused = status
+                logger.warning(
+                    "neo4j_vector_search_refused_using_procedure",
+                    reason_code=status,
+                    index_name=self._index,
+                )
+        procedure = (
+            "CALL db.index.vector.queryNodes($index, $k, $vector) "
+            "YIELD node, score "
+            "WHERE node.valid_to IS NULL "
+            "RETURN node.node_id AS item_id, score, "
+            "       node.vector_metadata_json AS metadata_json"
+        )
+        return self._run_read_list(procedure, index=self._index, k=k, vector=vector)
 
     def get(self, item_id: str) -> dict[str, Any] | None:
         cypher = (

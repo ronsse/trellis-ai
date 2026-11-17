@@ -211,9 +211,12 @@ RETURN n.node_id AS item_id, score, n.vector_metadata_json AS metadata_json
 
 Live runs after the migration emit zero `DEPRECATION` notifications
 (was: one per query). Bumps the minimum Neo4j version to **2025.06**
-(Cypher 25 introduction). AuraDB always runs the latest engine; self-
-hosted Docker users on the `neo4j:5` tag should upgrade to `neo4j:2025`
-or newer.
+(Cypher 25 introduction). AuraDB always runs the latest engine. Not
+every `neo4j:2025` image runs the query as is: `neo4j:2025.12`
+(community, `CYPHER 5` by default) refuses `SEARCH` at parse time, and
+answers `51N26` (SEARCH not available) even under a `CYPHER 25` prefix.
+On either refusal the store falls back to `db.index.vector.queryNodes`
+for the life of the store instance (added 2026-11-17).
 
 ### 5.1.1 Closed-loop signal — re-run on 2026-04-27 (post-fixes)
 

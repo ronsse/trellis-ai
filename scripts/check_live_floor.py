@@ -34,10 +34,13 @@ from pathlib import PurePosixPath
 #: edits that row in the same diff. A floor is a minimum: adding a case never
 #: turns the job red.
 FLOORS: dict[str, tuple[int, int]] = {
-    # Run 37484813426 at d873f570 (2026-10-06): 25 passed, 19 skipped. The 19
-    # are ``SEARCH_ISSUING_TESTS``, which ``neo4j:2025.12`` cannot run. Still
-    # 25 and 19 on run 39334674588.
-    "tests/unit/stores/contracts/test_neo4j_vector_contract.py": (25, 19),
+    # Live run against a fresh ``neo4j:2025.12`` container (2026-11-17, the
+    # job's own image and env names, local rather than a CI run): 44 passed,
+    # 0 skipped. The 19 cases that once skipped behind a SEARCH capability
+    # gate now run through the store's ``db.index.vector.queryNodes``
+    # fallback, since that image refuses ``SEARCH``. Before the fallback:
+    # 25 passed, 19 skipped (run 37484813426 at d873f570, 2026-10-06).
+    "tests/unit/stores/contracts/test_neo4j_vector_contract.py": (44, 0),
     # Run 39334674588 at e16e24a7 (2026-10-19): every row below passed all of
     # its cases and skipped none. The three graph rows rose 151 -> 155 with the
     # four subgraph-order cases of #958, then 155 -> 158 with the three
