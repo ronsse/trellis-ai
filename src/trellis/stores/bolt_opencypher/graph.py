@@ -732,26 +732,46 @@ _DEFAULT_SCHEMA_STATEMENTS: tuple[str, ...] = (
 )
 
 
+# A round that removes rows means a writer this purge waited on had committed
+# a version; no real interleaving produces anywhere near this many in one
+# transaction, so reaching it means the server's answer is wrong (#1272).
+_DETACH_DELETE_MAX_ROUNDS = 100
+
+
 def _detach_delete_until_none(tx: ManagedTransaction, cypher: str, nid: str) -> int:
-    """Repeat a ``... DETACH DELETE x RETURN count(x) AS deleted`` statement
-    until it matches no row; return the total of the counts it reported.
+    """Repeat a ``... DETACH DELETE x`` statement until it removes no node;
+    return the total it removed.
 
     Neo4j reads at READ COMMITTED and takes write locks: a DETACH DELETE
     that waited on a writer's lock matched its rows before the wait, so a
     version that writer created is invisible to that statement and visible
-    to the next one. A statement's count also includes a row that a
-    concurrent purge removed while it waited, so ``delete_node`` locks the
-    node's rows before its first count. ArcadeDB never waits (the
-    conflicting commit fails and the driver re-runs the whole transaction
-    function), so there the repeat finds nothing.
+    to the next one. A statement can also count a row that a concurrent
+    purge removed while it waited, so ``delete_node`` locks the node's rows
+    before its first count. ArcadeDB never waits (the conflicting commit
+    fails and the driver re-runs the whole transaction function), so there
+    the repeat finds nothing.
+
+    The count is the result summary's ``nodes_deleted``, not a returned
+    ``count(x)``. On ``neo4j:2026.10.2``, after ``delete_node``'s lock
+    statement, a ``MATCH`` on the indexed ``node_id`` keeps returning rows
+    this transaction already deleted, so ``count(x)`` never reaches zero
+    while ``nodes_deleted`` does (#1272). Neo4j 2025.12 and ArcadeDB report
+    the same counter. Whatever a server answers, the repeat stops after
+    ``_DETACH_DELETE_MAX_ROUNDS`` rounds with a :class:`StoreError` naming
+    the node; it is not a driver error, so the driver does not retry it.
     """
     removed = 0
-    while True:
-        record = tx.run(cypher, nid=nid).single()
-        count = int(record["deleted"]) if record else 0
+    for _ in range(_DETACH_DELETE_MAX_ROUNDS):
+        summary = tx.run(cypher, nid=nid).consume()
+        count = int(summary.counters.nodes_deleted)
         if count == 0:
             return removed
         removed += count
+    msg = (
+        f"delete_node({nid!r}): a DETACH DELETE still removed rows after "
+        f"{_DETACH_DELETE_MAX_ROUNDS} rounds in one transaction"
+    )
+    raise StoreError(msg, store="graph")
 
 
 def _missing_endpoint_message(row_index: int, end: str, node_id: str) -> str:
@@ -2757,20 +2777,17 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # DELETE cleans up all :EDGE relationships automatically.
             removed = _detach_delete_until_none(
                 tx,
-                "MATCH (n:Node {node_id: $nid}) DETACH DELETE n "
-                "RETURN count(n) AS deleted",
+                "MATCH (n:Node {node_id: $nid}) DETACH DELETE n",
                 node_id,
             )
             _detach_delete_until_none(
                 tx,
-                "MATCH (a:Alias {entity_id: $nid}) DETACH DELETE a "
-                "RETURN count(a) AS deleted",
+                "MATCH (a:Alias {entity_id: $nid}) DETACH DELETE a",
                 node_id,
             )
             _detach_delete_until_none(
                 tx,
-                "MATCH (c:AliasClaim {entity_id: $nid}) DETACH DELETE c "
-                "RETURN count(c) AS deleted",
+                "MATCH (c:AliasClaim {entity_id: $nid}) DETACH DELETE c",
                 node_id,
             )
             # EdgeClaim rows carry the triplet's source_id/target_id (see
@@ -2779,14 +2796,12 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # already gets, closing the gap the AliasClaim-only purge left.
             _detach_delete_until_none(
                 tx,
-                "MATCH (c:EdgeClaim {source_id: $nid}) DETACH DELETE c "
-                "RETURN count(c) AS deleted",
+                "MATCH (c:EdgeClaim {source_id: $nid}) DETACH DELETE c",
                 node_id,
             )
             _detach_delete_until_none(
                 tx,
-                "MATCH (c:EdgeClaim {target_id: $nid}) DETACH DELETE c "
-                "RETURN count(c) AS deleted",
+                "MATCH (c:EdgeClaim {target_id: $nid}) DETACH DELETE c",
                 node_id,
             )
             removed_any = removed > 0

@@ -32,6 +32,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 from neo4j.exceptions import DriverError, Neo4jError
@@ -147,7 +148,8 @@ class FakeTransaction:
 
 
 class FakeResult:
-    """A statement's result: ``single()`` is its one row."""
+    """A statement's result: ``single()`` is its one row, and ``consume()``
+    its summary, whose ``counters.nodes_deleted`` is the row's ``deleted``."""
 
     def __init__(self, row: dict[str, int]) -> None:
         self._row = row
@@ -155,5 +157,6 @@ class FakeResult:
     def single(self, strict: bool = False) -> dict[str, int]:
         return self._row
 
-    def consume(self) -> None:
-        return None
+    def consume(self) -> Any:
+        deleted = self._row.get("deleted", 0)
+        return SimpleNamespace(counters=SimpleNamespace(nodes_deleted=deleted))
