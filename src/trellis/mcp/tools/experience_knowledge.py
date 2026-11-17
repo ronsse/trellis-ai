@@ -6,7 +6,9 @@ Trace ingest and evidence-anchored knowledge, with the supersede planning
 
 from __future__ import annotations
 
-from typing import Any, NoReturn
+import difflib
+from collections.abc import Callable
+from typing import Any, NoReturn, TypeVar
 
 from trellis.auth import SCOPE_INGEST
 from trellis.core.error_sanitize import (
@@ -49,6 +51,11 @@ from trellis.mutate import (
 )
 from trellis.ops.write_health import record_trace_coercion
 from trellis.schemas.trace_repair import describe_repairs, validate_trace_json
+from trellis.schemas.well_known import (
+    ENTITY_TYPE_ALIASES,
+    ENTITY_TYPE_DESCRIPTIONS,
+    is_known_entity_type,
+)
 from trellis.stores.registry import StoreRegistry
 
 # ---------------------------------------------------------------------------
@@ -460,7 +467,58 @@ def _raise_create_failed(
     _raise_mutation_failed(message, data=data)
 
 
+#: Stands in the ``save_knowledge`` docstring for the well-known entity type
+#: list, which is rendered from ``ENTITY_TYPE_DESCRIPTIONS`` so the text an
+#: agent reads is never a hand-typed second copy of the table.
+_ENTITY_TYPE_TABLE_SLOT = "{well_known_entity_types}"
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _with_entity_type_table(func: _F) -> _F:
+    """Fill the docstring's entity-type slot from the well-known table.
+
+    Applied beneath ``@mcp.tool`` so FastMCP reads the filled docstring when
+    it builds the tool description and the ``entity_type`` parameter schema.
+    Each row takes the slot line's indentation, so it stays inside the
+    ``entity_type`` entry of the ``Args`` section. Under ``python -OO`` there
+    is no docstring to fill, and the function is returned unchanged.
+    """
+    doc = func.__doc__
+    if doc is None:
+        return func
+    if doc.count(_ENTITY_TYPE_TABLE_SLOT) != 1:
+        msg = f"{func.__name__} docstring must hold the entity-type slot once"
+        raise ValueError(msg)
+    line = next(ln for ln in doc.splitlines() if _ENTITY_TYPE_TABLE_SLOT in ln)
+    indent = line[: len(line) - len(line.lstrip())]
+    rows = (f"- {name}: {text}" for name, text in ENTITY_TYPE_DESCRIPTIONS.items())
+    func.__doc__ = doc.replace(_ENTITY_TYPE_TABLE_SLOT, ("\n" + indent).join(rows))
+    return func
+
+
+def _unknown_entity_type_note(entity_type: str) -> str | None:
+    """The reply line for a type that is neither canonical nor an alias.
+
+    Advisory only: the type is stored exactly as given, because entity
+    types are open strings. Names the nearest well-known type when one is
+    an obvious match (a case or spelling variant), else lists them all.
+    """
+    if is_known_entity_type(entity_type):
+        return None
+    head = f"Note: entity_type '{entity_type}' is not a well-known type; kept as given."
+    targets = {name.casefold(): name for name in ENTITY_TYPE_DESCRIPTIONS}
+    targets.update(ENTITY_TYPE_ALIASES)
+    key = entity_type.strip().casefold().replace("_", "").replace(" ", "")
+    squashed = {k.replace("_", ""): v for k, v in targets.items()}
+    nearest = difflib.get_close_matches(key, squashed, n=1, cutoff=0.8)
+    if nearest:
+        return f"{head} Nearest well-known type: {squashed[nearest[0]]}."
+    return f"{head} Well-known types: {', '.join(ENTITY_TYPE_DESCRIPTIONS)}."
+
+
 @mcp.tool(auth=trellis_scope(SCOPE_INGEST))
+@_with_entity_type_table
 def save_knowledge(
     name: str,
     entity_type: str = "concept",
@@ -485,8 +543,10 @@ def save_knowledge(
 
     Args:
         name: Entity name.
-        entity_type: Type (e.g., "concept", "person", "system").
-            Default: "concept".
+        entity_type: Type of the entity. Any string is accepted; prefer a
+            well-known type below (lowercase aliases such as "person" or
+            "service" also count). Default: "concept".
+            {well_known_entity_types}
         properties: Optional additional properties. A ``domain`` string (or
             list of strings) also links the entity ``appliesTo`` each
             existing ``domain:`` node it names; a domain with no node is
@@ -534,6 +594,8 @@ def save_knowledge(
             data={"field": "sensitivity"},
         )
     evidence_label = _stamp_sensitivity(None, sensitivity, tool="save_knowledge")
+    type_note = _unknown_entity_type_note(entity_type)
+    type_lines = [type_note] if type_note is not None else []
 
     registry = _get_registry()
 
@@ -599,7 +661,9 @@ def save_knowledge(
             edge_kind=edge_kind,
             link_or_mint=True,
         )
-        return "\n".join([result, *supersede_lines, *attach_lines, *link_lines])
+        return "\n".join(
+            [result, *type_lines, *supersede_lines, *attach_lines, *link_lines]
+        )
     create_result = executor.execute(
         Command(
             operation=Operation.ENTITY_CREATE,
@@ -626,7 +690,7 @@ def save_knowledge(
         result += "\nWarning: content ignored — evidence_ref takes precedence"
 
     if node_id is None:
-        return "\n".join([result, *supersede_lines])
+        return "\n".join([result, *type_lines, *supersede_lines])
     # Entity already created — link failures come back as response lines,
     # never as a raise. See trellis.mcp.knowledge_links.
     link_lines = link_knowledge_node(
@@ -638,4 +702,4 @@ def save_knowledge(
         edge_kind=edge_kind,
         link_or_mint=link_or_mint,
     )
-    return "\n".join([result, *supersede_lines, *link_lines])
+    return "\n".join([result, *type_lines, *supersede_lines, *link_lines])
