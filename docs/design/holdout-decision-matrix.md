@@ -150,3 +150,11 @@ read, each version's SHA-256 is recorded here:
 | Text | Committed | SHA-256 |
 |---|---|---|
 | Pre-registration with Amendment 1 | 2026-10-30 | `a67dbce44e1e65a9e6c0134833144f9412393444c11cd9b7e7fe6a79918fa5c9` |
+| The same, with Amendment 2 | 2026-11-17 | `e887c525b225691742cf0bd364a463684c3eb2dca8ecd39e2a1bad81ed7c0a77` |
+
+Amendment 2 changes no rule of the primary. It states the scope of the claim as
+this page does, restates that guardrails do not decide, names the good side,
+and declares one more descriptive check: how far a single parent session
+carries the result. That check cannot overturn or rescue the primary. The
+owner delegated the decision on these rules to the agent that drafted them,
+which adopted them on 2026-11-17. The text is not owner-signed.
