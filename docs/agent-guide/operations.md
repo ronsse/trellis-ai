@@ -4287,6 +4287,35 @@ judgment; `gate_readings` lists every looser reading, so `fails_strict_reading`
 means a looser count would have passed. When a scan truncates, rows older than
 the evidence start are dropped and rates use the covered window.
 
+### `trellis analyze memory-yield`
+
+Read-only yield per **creation path**: of the documents created in the window,
+how many were served, graded helpful or unhelpful, served but never graded, and
+never served. It decides nothing; a path with many writes and few helpful
+servings is where trimming would pay.
+
+```bash
+trellis analyze memory-yield [--days N] [--limit N] [--format text|json] [--no-meta-trace]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--days` | `30` | Window for document creation and for every event scan |
+| `--limit` | `5000` | Max events scanned per event type; truncation is reported in `scan` |
+| `--no-meta-trace` | off | Skip the meta-trace; the run then writes nothing |
+
+The universe is document-store parent rows whose `created_at` is in the window;
+a `<parent>#chunk-N` serving is credited to its parent. The path is the
+`requested_by` of the earliest `MEMORY_STORED` or successful creating
+`MUTATION_EXECUTED` (`evidence.ingest`, `precedent.promote`, ...) for the
+document id, else `source_system:<metadata.source_system>`, else `unknown`;
+each row's `basis` says which. Servings are `PACK_ASSEMBLED.injected_items[]`
+rows per `(pack_id, item_id)`, flat and sectioned; held-out packs and their
+feedback are dropped and counted in `limits`. An item named both helpful and
+unhelpful counts in both and in `mixed`. `limits` also counts feedback with no
+item ids (so `served_ungraded` is not read as unhelpful), stray citations, and
+servings of items not created in the window, by item type.
+
 ### `trellis analyze pack-judge`
 
 Offline relevance judge for served pack items, and the report that measures it
