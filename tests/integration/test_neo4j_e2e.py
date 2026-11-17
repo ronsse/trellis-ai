@@ -332,9 +332,7 @@ def _fake_embedder(text: str) -> list[float]:
     return [v / norm for v in vec]
 
 
-def test_vector_upsert_and_semantic_pack(
-    require_neo4j_vector_search: None, registry: Any, executor: Any
-) -> None:
+def test_vector_upsert_and_semantic_pack(registry: Any, executor: Any) -> None:
     """Embeddings attached to graph nodes are reachable through PackBuilder.
 
     Validates the shape #2 contract end-to-end: ENTITY_CREATE lands the
@@ -342,14 +340,10 @@ def test_vector_upsert_and_semantic_pack(
     same row, and SemanticSearch (via PackBuilder) returns the node
     against a similarity query.
 
-    Skips on a backend without the Cypher ``SEARCH`` vector clause (a
-    self-hosted Docker Neo4j); runs against AuraDB. The gate is the
-    ``require_neo4j_vector_search`` fixture in ``tests/conftest.py``, the
-    same one the four ``TestQuery`` cases in
-    ``tests/unit/stores/test_neo4j_vector.py`` take. It is listed first so a
-    skipped run does not pay for ``registry``, which waits on index
-    provisioning. Until #356 this test hand-wrote its own copy of that skip
-    reason, which is the drift the shared fixture exists to prevent.
+    Runs on any Neo4j the store supports: where the server refuses the
+    Cypher 25 ``SEARCH`` clause, as ``neo4j:2025.12`` in ``live-infra.yml``
+    does, the store's ``db.index.vector.queryNodes`` fallback serves the
+    query. This test skipped on that image until the fallback existed.
     """
     create = executor.execute(
         Command(

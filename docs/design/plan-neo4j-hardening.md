@@ -2,7 +2,7 @@
 
 **Status:** historical since 2026-11-17. Phase 1 and Phase 2 have landed; Phase 3 stays deferred on its own triggers.
 
-> **Read this before the rest.** The premise in §1 no longer holds: ArcadeDB, not Neo4j, is the blessed graph and vector substrate ([`adr-arcadedb-blessed-substrate.md`](./adr-arcadedb-blessed-substrate.md)). Neo4j remains a supported backend, and its graph store shares [`BoltOpenCypherGraphStore`](../../src/trellis/stores/bolt_opencypher/graph.py) with ArcadeDB. Every "blessed" below describes the 2026-04 decision. Two things this page calls landed have changed since: the AuraDB instance the cloud path used is gone, and the Neo4j image the live suite runs rejects the `SEARCH` clause that §5 migrated the vector query to, so the tests that issue a vector query are skipped there (`require_neo4j_vector_search` in `tests/conftest.py`).
+> **Read this before the rest.** The premise in §1 no longer holds: ArcadeDB, not Neo4j, is the blessed graph and vector substrate ([`adr-arcadedb-blessed-substrate.md`](./adr-arcadedb-blessed-substrate.md)). Neo4j remains a supported backend, and its graph store shares [`BoltOpenCypherGraphStore`](../../src/trellis/stores/bolt_opencypher/graph.py) with ArcadeDB. Every "blessed" below describes the 2026-04 decision. Two things this page calls landed have changed since: the AuraDB instance the cloud path used is gone, and the Neo4j image the live suite runs rejects the `SEARCH` clause that §5 migrated the vector query to, so the store falls back to the `db.index.vector.queryNodes` procedure when a server refuses `SEARCH`, and the live suite runs the vector query through that fallback.
 **Owner:** rotating
 **Scope:** What it takes to make Neo4j a credible "blessed default" graph backend for both local and cloud, given that Postgres remains a supported alternative. This is POC-stage scope discipline: prioritize what eliminates surprise on the recommended path, defer everything that requires a workload signal we don't have yet.
 
@@ -217,9 +217,12 @@ RETURN n.node_id AS item_id, score, n.vector_metadata_json AS metadata_json
 
 Live runs after the migration emit zero `DEPRECATION` notifications
 (was: one per query). Bumps the minimum Neo4j version to **2025.06**
-(Cypher 25 introduction). AuraDB always runs the latest engine; self-
-hosted Docker users on the `neo4j:5` tag should upgrade to `neo4j:2025`
-or newer.
+(Cypher 25 introduction). AuraDB always runs the latest engine. Not
+every `neo4j:2025` image runs the query as is: `neo4j:2025.12`
+(community, `CYPHER 5` by default) refuses `SEARCH` at parse time, and
+answers `51N26` (SEARCH not available) even under a `CYPHER 25` prefix.
+On either refusal the store falls back to `db.index.vector.queryNodes`
+for the life of the store instance (added 2026-11-17).
 
 ### 5.1.1 Closed-loop signal — re-run on 2026-04-27 (post-fixes)
 
