@@ -113,6 +113,12 @@ the read. The withholding rate is an owner setting and is not part of it.
   check early that the experiment is running, use `trellis analyze holdout --operational`, which
   reads no outcome. A later run of the same command reads the same window, so it must give the
   same pack rows while `scan.truncated` is `false`; raise `--limit` if it is not.
+- The first sensitivity run, once, after the read: the same command with `--itt`, which keeps the
+  tasks cut off by a usage limit. The pre-registration names it. It is recorded beside the read
+  and cannot rescue or overturn it. A refused run carried no figure, so repeating it (after the
+  sweep it names, or with a larger `--limit` and the same `--until`, `--days` and `--rate`) is
+  not a second look. How the result is read, what it covers and what each outcome commits the
+  project to are in the [decision matrix](design/holdout-decision-matrix.md).
 - Acceptance: that command reports `inference.status == "ok"` with `settled_window.settled: true`,
   and `power.mde_at_target_power` non-null and at or below `power.planned_mde`, or the readout
   records why not. The non-null clause is part of the check: at a very small N the power figure is

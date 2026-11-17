@@ -695,11 +695,11 @@ def _query_unconfirmed_mints(
     holds exactly the cap reads as complete and only a longer list reads as
     truncated. The extra row is not walked. Each row read is added to
     ``visited``, which the walk of the same pass shares, so a mint is counted
-    and classified once. On the Bolt backends ``query`` reads ``limit * 4``
-    newest nodes before it applies the property filter, so there the read
-    reaches mints only among the newest ``4 * (cap + 1)`` nodes, and a shorter
-    answer, with ``scan_truncated`` false, does not prove it found them all;
-    that store-side cap is not this module's to lift.
+    and classified once. On the Bolt backends ``query`` applies the property
+    filter in Python, re-reading a growing newest-first window until ``limit``
+    rows match or it has read every node, so there too a shorter answer, with
+    ``scan_truncated`` false, means every mint was read; when fewer mints
+    exist than the read asks for, that costs reading the whole graph.
     """
     rows = graph.query(
         properties={EXTRACTION_STATUS_PROPERTY: EXTRACTION_STATUS_UNCONFIRMED},
