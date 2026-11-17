@@ -43,16 +43,19 @@ FLOORS: dict[str, tuple[int, int]] = {
     # four subgraph-order cases of #958, then 155 -> 158 with the three
     # code-point-order cases of #966 (one subgraph, two search_nodes), then
     # 158 -> 164 with the six ``create_node_if_absent`` cases (run 42313480748
-    # at 7dee3258, 2026-11-06: Postgres 164 passed, 0 skipped).
-    "tests/unit/stores/contracts/test_postgres_graph_contract.py": (164, 0),
+    # at 7dee3258, 2026-11-06: Postgres 164 passed, 0 skipped), then
+    # 164 -> 167 (and 163 -> 166 on the Bolt rows) with the three
+    # property-filter paging cases; re-read these against the first green
+    # live-infra run that carries them.
+    "tests/unit/stores/contracts/test_postgres_graph_contract.py": (167, 0),
     # The two Bolt engines skip exactly one of those six,
     # ``test_create_node_if_absent_is_atomic_for_concurrent_writers``
     # (``ATOMIC_CREATE_IF_ABSENT = False``): a node's versions share one
     # ``node_id`` under SCD2, so no uniqueness constraint can arbitrate two
     # first creates that start together. Same run: 163 passed, 1 skipped on
     # each.
-    "tests/unit/stores/contracts/test_arcadedb_graph_contract.py": (163, 1),
-    "tests/unit/stores/contracts/test_neo4j_graph_contract.py": (163, 1),
+    "tests/unit/stores/contracts/test_arcadedb_graph_contract.py": (166, 1),
+    "tests/unit/stores/contracts/test_neo4j_graph_contract.py": (166, 1),
     "tests/unit/stores/contracts/test_pgvector_contract.py": (44, 0),
     "tests/unit/stores/contracts/test_arcadedb_vector_contract.py": (44, 0),
     # The event log contract under a Los Angeles session: 53 contract cases plus

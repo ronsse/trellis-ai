@@ -2321,6 +2321,63 @@ class GraphStoreContractTests:
         results = store.execute_node_query(NodeQuery(limit=2))
         assert len(results) == 2
 
+    # A property filter must reach its matches however many newer rows
+    # fail it. The matches are written first, so newest-first they sit
+    # behind every decoy; the decoy count is well above any fixed
+    # over-fetch multiple of the limit.
+    _BURIED_MATCHES = 3
+    _NEWER_DECOYS = 40
+
+    def test_execute_node_query_property_filter_reaches_oldest_matches(
+        self, store: GraphStore
+    ) -> None:
+        from trellis.stores.base.graph_query import FilterClause, NodeQuery
+
+        for i in range(self._BURIED_MATCHES):
+            store.upsert_node(f"match{i}", "service", {"tier": "gold"})
+        for i in range(self._NEWER_DECOYS):
+            store.upsert_node(f"decoy{i}", "service", {"tier": "tin"})
+
+        results = store.execute_node_query(
+            NodeQuery(filters=(FilterClause("properties.tier", "eq", "gold"),), limit=2)
+        )
+
+        assert len(results) == 2
+        assert all(r["properties"]["tier"] == "gold" for r in results)
+
+    def test_query_property_filter_reaches_oldest_matches(
+        self, store: GraphStore
+    ) -> None:
+        for i in range(self._BURIED_MATCHES):
+            store.upsert_node(f"match{i}", "service", {"tier": "gold"})
+        for i in range(self._NEWER_DECOYS):
+            store.upsert_node(f"decoy{i}", "service", {"tier": "tin"})
+
+        results = store.query(properties={"tier": "gold"}, limit=2)
+
+        assert len(results) == 2
+        assert all(r["properties"]["tier"] == "gold" for r in results)
+
+    def test_execute_edge_query_property_filter_reaches_oldest_matches(
+        self, store: GraphStore
+    ) -> None:
+        from trellis.stores.base.graph_query import EdgeQuery, FilterClause
+
+        store.upsert_node("a", "service", {})
+        store.upsert_node("b", "service", {})
+        # Distinct edge types so SCD-2 keeps every edge as its own row.
+        for i in range(self._BURIED_MATCHES):
+            store.upsert_edge("a", "b", f"match_kind_{i}", {"tier": "gold"})
+        for i in range(self._NEWER_DECOYS):
+            store.upsert_edge("a", "b", f"decoy_kind_{i}", {"tier": "tin"})
+
+        results = store.execute_edge_query(
+            EdgeQuery(filters=(FilterClause("properties.tier", "eq", "gold"),), limit=2)
+        )
+
+        assert len(results) == 2
+        assert all(r["properties"]["tier"] == "gold" for r in results)
+
     def test_execute_subgraph_query_round_trip(self, store: GraphStore) -> None:
         from trellis.stores.base.graph_query import SubgraphQuery
 

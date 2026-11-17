@@ -339,6 +339,17 @@ _NODE_WITHOUT_EMBEDDING = "n {.*, embedding: null} AS n"
 #: in 45 ms.
 _NEWEST_FIRST = "WITH n, n.created_at AS created_at ORDER BY created_at DESC "
 
+#: :data:`_NEWEST_FIRST` made total by ``node_id``, which a node's shown
+#: row holds alone, so ``SKIP`` pages neither skip nor repeat a row.
+_NEWEST_FIRST_TOTAL = (
+    "WITH n, n.created_at AS created_at, n.node_id AS node_id "
+    "ORDER BY created_at DESC, node_id DESC "
+)
+
+#: Rows read per round trip when a ``properties.<key>`` filter is matched
+#: in Python (:meth:`BoltOpenCypherGraphStore._page_until_matched`).
+_PROPERTY_FILTER_PAGE_SIZE = 200
+
 
 def _node_props_to_dict(props: dict[str, Any]) -> dict[str, Any]:
     """Convert a Bolt :Node's raw properties into the GraphStore dict shape.
@@ -470,6 +481,14 @@ def _shown_rows_passing(where: str, filters: list[str]) -> str:
         f"MATCH (n:Node {{node_id: candidate}}) WHERE {where}"
     )
     return _one_version_per_node(candidates) + f"WHERE {passing} "
+
+
+def _node_record_to_dict(record: Any) -> dict[str, Any]:
+    return _node_props_to_dict(dict(record["n"]))
+
+
+def _edge_record_to_dict(record: Any) -> dict[str, Any]:
+    return _edge_props_to_dict(dict(record["r"]))
 
 
 def _edge_props_to_dict(props: dict[str, Any]) -> dict[str, Any]:
@@ -2612,31 +2631,79 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             filters.append("n.node_type = $node_type")
             params["node_type"] = node_type
 
-        # Scalar property filters are handled by decoding properties_json
-        # in Cypher would require APOC; keep the backend community-safe
-        # by filtering client-side, matching how query handles nested
-        # filters in the Postgres backend.
+        # Decoding properties_json in Cypher would require APOC; keep the
+        # backend community-safe by filtering client-side, paging until
+        # ``limit`` nodes match (:meth:`_page_until_matched`).
+        if properties:
+            wanted = dict(properties)
+            return self._page_until_matched(
+                _shown_rows_passing(where, filters) + _NEWEST_FIRST_TOTAL,
+                f"RETURN {_NODE_WITHOUT_EMBEDDING}",
+                params,
+                _node_record_to_dict,
+                [
+                    lambda node: all(
+                        node["properties"].get(k) == v for k, v in wanted.items()
+                    )
+                ],
+                limit,
+            )
+
         cypher = (
             _shown_rows_passing(where, filters)
             + _NEWEST_FIRST
             + "LIMIT $limit"
             + f" RETURN {_NODE_WITHOUT_EMBEDDING}"
         )
-        params["limit"] = limit * 4 if properties else limit
-
+        params["limit"] = limit
         records = self._run_read_list(cypher, **params)
+        return [_node_props_to_dict(dict(r["n"])) for r in records]
 
+    def _page_until_matched(
+        self,
+        ordered: str,
+        returning: str,
+        params: dict[str, Any],
+        to_row: Callable[[Any], dict[str, Any]],
+        predicates: list[Callable[[dict[str, Any]], bool]],
+        limit: int,
+        id_key: str = "node_id",
+    ) -> list[dict[str, Any]]:
+        """The first *limit* rows passing *predicates*, read a page at a time.
+
+        A ``properties.<key>`` filter cannot run in Cypher because the
+        properties are one JSON string, so the rows are matched here after
+        decoding. *ordered* is the Cypher up to and including a total
+        ``ORDER BY``; each round trip appends ``SKIP``/``LIMIT`` and
+        *returning*, reads :data:`_PROPERTY_FILTER_PAGE_SIZE` rows, and
+        keeps the ones that pass. Reading stops once *limit* rows pass or a
+        page comes back short, so every match is reachable however many
+        newer rows fail the filter, and no cap on rows scanned truncates
+        the answer. A write landing between two pages can shift a row
+        across the page boundary; a row already read (by *id_key*) is not
+        counted twice.
+        """
         results: list[dict[str, Any]] = []
-        for r in records:
-            node = _node_props_to_dict(dict(r["n"]))
-            if properties:
-                props = node["properties"]
-                if not all(props.get(k) == v for k, v in properties.items()):
+        seen: set[str] = set()
+        skip = 0
+        while True:
+            cypher = (
+                f"{ordered}SKIP {skip} LIMIT {_PROPERTY_FILTER_PAGE_SIZE} {returning}"
+            )
+            records = self._run_read_list(cypher, **params)
+            for record in records:
+                row = to_row(record)
+                row_key = str(row[id_key])
+                if row_key in seen:
                     continue
-            results.append(node)
-            if len(results) >= limit:
-                break
-        return results
+                seen.add(row_key)
+                if all(pred(row) for pred in predicates):
+                    results.append(row)
+                    if len(results) >= limit:
+                        return results
+            if len(records) < _PROPERTY_FILTER_PAGE_SIZE:
+                return results
+            skip += _PROPERTY_FILTER_PAGE_SIZE
 
     # ------------------------------------------------------------------
     # Delete
@@ -2881,33 +2948,33 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         ``IN`` / ``IS NOT NULL``. Property filters (``properties.<key>``)
         cannot use native Cypher comparisons because the graph store
         encodes ``properties`` as a JSON string (``properties_json``),
-        so they over-fetch with the structural filters applied in
-        Cypher and apply the property predicates client-side after
-        decoding the JSON. Same approach the legacy ``query()`` method
-        uses; semantics match.
+        so the structural filters run in Cypher and the property
+        predicates run client-side after decoding the JSON, reading page
+        after page until ``query.limit`` nodes match
+        (:meth:`_page_until_matched`). Same approach the legacy
+        ``query()`` method uses; semantics match.
         """
         node_parts, field_parts, cypher_params, py_predicates = (
             self._compile_node_query(query)
         )
-        # Over-fetch when py_predicates are present to compensate for
-        # client-side trimming.
-        fetch_limit = query.limit * 10 if py_predicates else query.limit
+        shown = _shown_rows_passing(" AND ".join(node_parts), field_parts)
+        if py_predicates:
+            return self._page_until_matched(
+                shown + _NEWEST_FIRST_TOTAL,
+                f"RETURN {_NODE_WITHOUT_EMBEDDING}",
+                cypher_params,
+                _node_record_to_dict,
+                py_predicates,
+                query.limit,
+            )
         cypher = (
-            _shown_rows_passing(" AND ".join(node_parts), field_parts)
+            shown
             + _NEWEST_FIRST
-            + f"LIMIT {int(fetch_limit)}"
+            + f"LIMIT {int(query.limit)}"
             + f" RETURN {_NODE_WITHOUT_EMBEDDING}"
         )
-
         records = self._run_read_list(cypher, **cypher_params)
-        results: list[dict[str, Any]] = []
-        for r in records:
-            row = _node_props_to_dict(dict(r["n"]))
-            if all(pred(row) for pred in py_predicates):
-                results.append(row)
-                if len(results) >= query.limit:
-                    break
-        return results
+        return [_node_record_to_dict(r) for r in records]
 
     def _compile_node_query(
         self, query: Any
@@ -3040,29 +3107,29 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         ``target_id`` / ``edge_id`` and the five provenance keys)
         compile to native Cypher predicates (``r.<key> <op> $param``).
         ``properties.<key>`` predicates land on the JSON-stringified
-        ``properties_json`` property; the backend over-fetches with
-        the structural filters applied in Cypher and applies the
-        property predicates client-side after decoding — same approach
-        the node compiler uses.  Same semantics on Neo4j and ArcadeDB.
+        ``properties_json`` property; the structural filters run in
+        Cypher and the property predicates client-side after decoding,
+        page after page until ``query.limit`` edges match — same
+        approach the node compiler uses.  Same semantics on Neo4j and
+        ArcadeDB.
         """
         cypher_parts, cypher_params, py_predicates = self._compile_edge_query(query)
-        cypher = (
-            "MATCH ()-[r:EDGE]->() WHERE "
-            + " AND ".join(cypher_parts)
-            + " RETURN r ORDER BY r.created_at DESC"
-        )
-        fetch_limit = query.limit * 10 if py_predicates else query.limit
-        cypher += f" LIMIT {int(fetch_limit)}"
-
+        matched = "MATCH ()-[r:EDGE]->() WHERE " + " AND ".join(cypher_parts)
+        if py_predicates:
+            # edge_id breaks created_at ties, so SKIP pages are stable.
+            return self._page_until_matched(
+                matched + " RETURN r ORDER BY r.created_at DESC, r.edge_id DESC ",
+                "",
+                cypher_params,
+                _edge_record_to_dict,
+                py_predicates,
+                query.limit,
+                id_key="edge_id",
+            )
+        cypher = matched + " RETURN r ORDER BY r.created_at DESC"
+        cypher += f" LIMIT {int(query.limit)}"
         records = self._run_read_list(cypher, **cypher_params)
-        results: list[dict[str, Any]] = []
-        for record in records:
-            row = _edge_props_to_dict(dict(record["r"]))
-            if all(pred(row) for pred in py_predicates):
-                results.append(row)
-                if len(results) >= query.limit:
-                    break
-        return results
+        return [_edge_record_to_dict(r) for r in records]
 
     def _compile_edge_query(
         self, query: Any
