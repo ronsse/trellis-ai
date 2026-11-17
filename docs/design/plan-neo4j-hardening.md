@@ -1,6 +1,8 @@
 # Plan: Neo4j Hardening (POC-stage)
 
-**Status:** active 2026-04-25
+**Status:** historical since 2026-11-17. Phase 1 and Phase 2 have landed; Phase 3 stays deferred on its own triggers.
+
+> **Read this before the rest.** The premise in §1 no longer holds: ArcadeDB, not Neo4j, is the blessed graph and vector substrate ([`adr-arcadedb-blessed-substrate.md`](./adr-arcadedb-blessed-substrate.md)). Neo4j remains a supported backend, and its graph store shares [`BoltOpenCypherGraphStore`](../../src/trellis/stores/bolt_opencypher/graph.py) with ArcadeDB. Every "blessed" below describes the 2026-04 decision. Two things this page calls landed have changed since: the AuraDB instance the cloud path used is gone, and the Neo4j image the live suite runs rejects the `SEARCH` clause that §5 migrated the vector query to, so the tests that issue a vector query are skipped there (`require_neo4j_vector_search` in `tests/conftest.py`).
 **Owner:** rotating
 **Scope:** What it takes to make Neo4j a credible "blessed default" graph backend for both local and cloud, given that Postgres remains a supported alternative. This is POC-stage scope discipline: prioritize what eliminates surprise on the recommended path, defer everything that requires a workload signal we don't have yet.
 
@@ -48,7 +50,9 @@ Each item is something that, if missing the first time a stranger runs against N
 * **Estimate:** ~150 lines.
 * **Risk of leaving it:** orphaned pools, file-descriptor pressure on AuraDB Pro, opaque "connection refused" errors on transient network blips.
 
-### 1.2 Close on shutdown
+### 1.2 Close on shutdown ✅ in the code (marked 2026-11-17)
+
+* **Landed:** `StoreRegistry.close()` in `src/trellis/stores/registry.py`, called from the API lifespan in `src/trellis_api/app.py`. The text below is the original plan.
 
 * **State today:** `close()` exists on both Neo4j stores (graph.py:930, vector.py:254). Nothing calls them — `StoreRegistry` has no shutdown path and `trellis_api/app.py` lifespan doesn't fan out a close.
 * **Done when:**
@@ -69,7 +73,9 @@ Each item is something that, if missing the first time a stranger runs against N
 * **Estimate:** ~80 lines.
 * **Risk of leaving it:** "Neo4j down" surfaces as an opaque Bolt error on the first request rather than at startup. For a blessed default, that's amateur.
 
-### 1.4 Vector index "wait for online"
+### 1.4 Vector index "wait for online" ✅ in the code (marked 2026-11-17)
+
+* **Landed:** `wait_for_vector_index_online` in `src/trellis/stores/neo4j/base.py`, called when `Neo4jVectorStore` creates its index. The text below is the original plan.
 
 * **State today:** A.1's e2e suite surfaced that AuraDB provisions vector indexes asynchronously — a fresh `CREATE VECTOR INDEX` followed by an immediate `db.index.vector.queryNodes` call races and fails with "no such vector schema index". Currently mitigated by reusing a persistent test index.
 * **Done when:**

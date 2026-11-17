@@ -65,8 +65,11 @@ if TYPE_CHECKING:
 #   1.2.0 — add ``hasMeasurement`` edge kind so Measurement edges no
 #           longer overload ``hasObservation`` (adr-observation-entity-
 #           type.md §2.2).
+#   1.3.0 — add a one-sentence description per canonical entity type and
+#           edge kind (``ENTITY_TYPE_DESCRIPTIONS`` /
+#           ``EDGE_KIND_DESCRIPTIONS``). No name added or removed.
 
-WELL_KNOWN_VERSION: Final = "1.2.0"
+WELL_KNOWN_VERSION: Final = "1.3.0"
 
 # ---------------------------------------------------------------------------
 # Canonical entity types — schema.org + PROV-O
@@ -133,6 +136,74 @@ ENTITY_TYPE_ALIASES: Final[dict[str, str]] = {
     # well-known defaults (per ADR) because it collides with the
     # ContentTags.domain classification facet. Existing data using
     # ``entity_type="domain"`` continues to work as an open string.
+}
+
+# ---------------------------------------------------------------------------
+# One-sentence descriptions — what each canonical name is for
+# ---------------------------------------------------------------------------
+#
+# Shown to agents where they pick a type (the ``save_knowledge`` MCP tool
+# description), so every sentence is loaded into every agent session: keep
+# each one short (``DESCRIPTION_MAX_CHARS``) and say what the type is *not*
+# where a neighbour is easy to confuse with it. Keyed by canonical name, in
+# the order the names are declared above; read through
+# :func:`describe_entity_type` / :func:`describe_edge_kind`, which resolve
+# aliases first. Describing a type does not close the type system.
+
+DESCRIPTION_MAX_CHARS: Final = 110
+
+ENTITY_TYPE_DESCRIPTIONS: Final[dict[str, str]] = {
+    PERSON: "One human being. A group of people is a Team or an Organization.",
+    ORGANIZATION: (
+        "A company, vendor, regulator or other whole body. A group inside one "
+        "is a Team."
+    ),
+    TEAM: (
+        "A team or group of people inside an organization. The company itself "
+        "is an Organization."
+    ),
+    SOFTWARE_APPLICATION: (
+        "A service, system, application or tool that runs. The data it holds "
+        "is a Dataset."
+    ),
+    DATASET: (
+        "Queryable data: a table, view, data file, embedding set or model "
+        "artifact. Prose is CreativeWork."
+    ),
+    CREATIVE_WORK: (
+        "Something written to be read: a document, article, ADR, runbook or "
+        "report. Not a data table."
+    ),
+    PRODUCT: (
+        "A product offered or sold, as in a catalog. The software behind it is "
+        "a SoftwareApplication."
+    ),
+    EVENT: (
+        "Something that happened at a time: an incident, deployment, meeting "
+        "or release."
+    ),
+    PLACE: "A physical or virtual location: a site, region, office or data center.",
+    FILE: (
+        "A file that is neither data (Dataset) nor prose (CreativeWork), such "
+        "as a binary or a config file."
+    ),
+    PROJECT: "A project or initiative with a goal, such as a migration or a launch.",
+    CONCEPT: (
+        "An abstract idea, technique or term, such as idempotency or rate limiting."
+    ),
+    AGENT: (
+        "Anything that acts, such as an AI agent, bot or system actor (PROV-O). "
+        "Who a human is: Person."
+    ),
+    ACTIVITY: "A unit of work as a graph node: a trace, task or workflow run.",
+    OBSERVATION: (
+        "A narrative claim about a subject entity, from a trace, log or "
+        "analysis. One value is a Measurement."
+    ),
+    MEASUREMENT: (
+        "A scalar, numeric or boolean value measured on a subject entity, such "
+        "as null_rate=0.03."
+    ),
 }
 
 # ---------------------------------------------------------------------------
@@ -236,6 +307,42 @@ CANONICAL_EDGE_KINDS: Final[frozenset[str]] = frozenset(
         HAS_MEASUREMENT,
     }
 )
+
+EDGE_KIND_DESCRIPTIONS: Final[dict[str, str]] = {
+    USED: "An activity, such as a trace, consumed an entity or evidence as input.",
+    WAS_GENERATED_BY: (
+        "An entity was produced by an activity, such as an artifact a trace produced."
+    ),
+    WAS_INFORMED_BY: (
+        "An activity was influenced by another entity or trace, such as one a "
+        "trace touched."
+    ),
+    WAS_DERIVED_FROM: (
+        "An entity is derived from another, such as a precedent from its traces "
+        "or a summary."
+    ),
+    WAS_ATTRIBUTED_TO: (
+        "An entity is attributable to a responsible agent, such as its author or owner."
+    ),
+    WAS_ASSOCIATED_WITH: (
+        "An activity was carried out by an agent, such as the agent that ran a trace."
+    ),
+    PART_OF: "Compositional containment: one thing is a part or member of another.",
+    DEPENDS_ON: "Functional dependency: one thing needs another in order to work.",
+    RELATED_TO: "A generic relationship, for when no more specific kind fits.",
+    ATTACHED_TO: (
+        "An evidence row is bound to an entity. For an observation use hasObservation."
+    ),
+    SUPPORTS: "Evidence backs a claim: an epistemic link, not a structural one.",
+    APPLIES_TO: (
+        "A precedent or lesson applies to a class of situations, such as a "
+        "domain or an entity."
+    ),
+    HAS_OBSERVATION: (
+        "A subject entity has an attached Observation (a narrative claim)."
+    ),
+    HAS_MEASUREMENT: ("A subject entity has an attached Measurement (a scalar value)."),
+}
 
 # Legacy snake_case → canonical camelCase. Multiple legacy values can
 # map to the same canonical (e.g., both ``trace_promoted_to_precedent``
@@ -391,6 +498,25 @@ def schema_alignment_for_edge_kind(value: str) -> str | None:
     Same contract as :func:`schema_alignment_for_entity_type`.
     """
     return _EDGE_SCHEMA_ALIGNMENT.get(canonicalize_edge_kind(value))
+
+
+def describe_entity_type(value: str) -> str | None:
+    """Return the one-sentence description for *value*, or ``None``.
+
+    Canonicalises *value* first, so ``"person"`` and ``"Person"`` both
+    yield the ``Person`` sentence. Returns ``None`` for unknown /
+    open-string types, which stay valid: a missing description says only
+    that the type is not one of the well-known defaults.
+    """
+    return ENTITY_TYPE_DESCRIPTIONS.get(canonicalize_entity_type(value))
+
+
+def describe_edge_kind(value: str) -> str | None:
+    """Return the one-sentence description for *value*, or ``None``.
+
+    Same contract as :func:`describe_entity_type`.
+    """
+    return EDGE_KIND_DESCRIPTIONS.get(canonicalize_edge_kind(value))
 
 
 def expand_entity_type_query(value: str) -> tuple[str, ...]:

@@ -477,8 +477,9 @@ class TestObservationRegistration:
         # per plan-self-improvement-program.md §5.6 and
         # adr-observation-entity-type.md §5. The 1.1.0 entry registered
         # Observation/Measurement entities + hasObservation edge;
-        # 1.2.0 adds the dedicated Measurement edge kind.
-        assert wk.WELL_KNOWN_VERSION == "1.2.0"
+        # 1.2.0 adds the dedicated Measurement edge kind; 1.3.0 adds a
+        # description per canonical name and no name.
+        assert wk.WELL_KNOWN_VERSION == "1.3.0"
 
 
 class TestNormalizeAliasRawId:
@@ -578,3 +579,55 @@ class TestNormalizeAliasRawId:
     def test_every_other_system_is_verbatim(self, system: str) -> None:
         raw = " `Model`.Shop.Orders "
         assert wk.normalize_alias_raw_id(system, raw) == raw
+
+
+class TestTypeDescriptions:
+    """Every canonical name carries one short sentence, and nothing else does."""
+
+    @pytest.mark.parametrize(
+        ("table", "canonical"),
+        [
+            (wk.ENTITY_TYPE_DESCRIPTIONS, wk.CANONICAL_ENTITY_TYPES),
+            (wk.EDGE_KIND_DESCRIPTIONS, wk.CANONICAL_EDGE_KINDS),
+        ],
+        ids=["entity_types", "edge_kinds"],
+    )
+    def test_table_covers_exactly_the_canonical_names(
+        self, table: dict[str, str], canonical: frozenset[str]
+    ) -> None:
+        assert sorted(table) == sorted(canonical)
+
+    @pytest.mark.parametrize(
+        ("name", "text"),
+        [
+            *wk.ENTITY_TYPE_DESCRIPTIONS.items(),
+            *wk.EDGE_KIND_DESCRIPTIONS.items(),
+        ],
+    )
+    def test_each_description_is_one_short_sentence(self, name: str, text: str) -> None:
+        assert text.strip() == text
+        assert text, name
+        assert len(text) <= wk.DESCRIPTION_MAX_CHARS, (name, len(text))
+        assert text.endswith("."), name
+        assert "\n" not in text, name
+
+    def test_hand_read_floor(self) -> None:
+        # A table and a canonical set shrunk together would pass the
+        # coverage test; the counts are read from the declarations by hand.
+        assert len(wk.ENTITY_TYPE_DESCRIPTIONS) == 16
+        assert len(wk.EDGE_KIND_DESCRIPTIONS) == 14
+
+    def test_aliases_resolve_to_the_canonical_description(self) -> None:
+        assert wk.describe_entity_type("person") == wk.describe_entity_type("Person")
+        assert (
+            wk.describe_entity_type("system")
+            == wk.ENTITY_TYPE_DESCRIPTIONS[wk.SOFTWARE_APPLICATION]
+        )
+        assert (
+            wk.describe_edge_kind("entity_related_to")
+            == (wk.EDGE_KIND_DESCRIPTIONS[wk.RELATED_TO])
+        )
+
+    def test_unknown_names_have_no_description(self) -> None:
+        assert wk.describe_entity_type("dbt_model") is None
+        assert wk.describe_edge_kind("reads_from") is None
