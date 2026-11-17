@@ -993,6 +993,8 @@ The graph store accepts **any string** for entity types. The values below are we
 
 Use `canonicalize_entity_type("person") -> "Person"` to normalize legacy values when bucketing across the alias boundary.
 
+Each canonical type also carries a one-sentence description in `ENTITY_TYPE_DESCRIPTIONS` (read it with `describe_entity_type()`, which resolves aliases first). The MCP `save_knowledge` tool renders its `entity_type` parameter description from that table, and its reply adds a `Note:` line naming the well-known types (or the nearest one) when given a type that is neither canonical nor an alias. The type is still stored exactly as given.
+
 Examples of domain-specific types (not exhaustive): `uc_table`, `uc_schema`, `uc_column`, `dbt_model`, `dbt_source`, `pipeline`, `job`, `notebook`. These pass through `canonicalize_entity_type` unchanged.
 
 ### NodeRole
@@ -1056,6 +1058,8 @@ The graph store accepts **any string** for edge types. The values below are well
 | `supports` | `evidence_supports` | (Trellis-specific) | Evidence backs a claim epistemically |
 | `appliesTo` | `precedent_applies_to` | (Trellis-specific) | Precedent applies to a class of situations |
 | `hasObservation` | — | (Trellis-specific) | Subject entity has an attached [Observation](#observation) or [Measurement](#measurement) |
+
+Each canonical edge kind carries a one-sentence description in `EDGE_KIND_DESCRIPTIONS` (`describe_edge_kind()`).
 
 Examples of domain-specific edge types: `reads_from`, `writes_to`, `materializes_to`, `defined_in`, `owned_by`. These pass through `canonicalize_edge_kind` unchanged.
 
