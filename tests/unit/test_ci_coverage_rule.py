@@ -329,13 +329,13 @@ def _file_is_covered(
     That is the weaker claim on purpose: this rule asks whether a file is
     dark, and `tests/unit/stores/test_neo4j_vector.py` is the standing
     reminder that "the file runs" and "the file is verified" are
-    different questions. It is now wired, and 24 of its 28 nodes pass
-    against this workflow's own Neo4j image while four self-skip: the
-    capability probe from
-    [#356](https://github.com/ronsse/trellis-ai/issues/356) answers the
-    second question, and this rule still only answers the first. A file
-    can satisfy it on one runnable node while most of it skips, which is
-    why a green result here is not a coverage claim.
+    different questions. It sat wired while every node that issued a
+    vector query skipped on this workflow's own Neo4j image, until the
+    store gained a fallback for servers that refuse ``SEARCH``.
+    ``scripts/check_live_floor.py`` answers the second question, and
+    this rule still only answers the first. A file can satisfy it on one
+    runnable node while most of it skips, which is why a green result
+    here is not a coverage claim.
     """
     for leg in legs:
         if not leg.selects(path):
