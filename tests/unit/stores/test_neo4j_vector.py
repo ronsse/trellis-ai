@@ -30,6 +30,9 @@ URI = os.environ.get("TRELLIS_TEST_NEO4J_URI", "")
 USER = os.environ.get("TRELLIS_TEST_NEO4J_USER", "neo4j")
 PASSWORD = os.environ.get("TRELLIS_TEST_NEO4J_PASSWORD", "")
 DATABASE = os.environ.get("TRELLIS_TEST_NEO4J_DATABASE", "neo4j")
+# ``search`` or ``procedure``: the path ``query`` must take on this server.
+# live-infra sets it beside the image it pins; unset, that one case skips.
+EXPECTED_VECTOR_PATH = os.environ.get("TRELLIS_TEST_NEO4J_VECTOR_PATH", "")
 
 pytestmark = [
     pytest.mark.neo4j,
@@ -285,13 +288,33 @@ class TestCount:
 class TestQuery:
     """``query`` issues Cypher 25 ``SEARCH ... IN ( VECTOR INDEX ... )``.
 
-    ``neo4j:2025.12``, the image live-infra CI provisions, refuses that clause:
-    ``Invalid input 'SEARCH'`` (GQL ``42I67``) under its default
-    ``CYPHER 5``, and ``51N26`` (SEARCH not available) even with a
-    ``CYPHER 25`` prefix. The store then falls back to
+    ``neo4j:2025.12`` refuses that clause: ``Invalid input 'SEARCH'`` (GQL
+    ``42I67``) under its default ``CYPHER 5``, and ``51N26`` (SEARCH not
+    available) even with a ``CYPHER 25`` prefix. The store then falls back to
     ``db.index.vector.queryNodes``, so on that image these tests run, ungated,
-    through the procedure.
+    through the procedure. ``neo4j:2026.10.2``, the image live-infra CI
+    provisions, defaults its databases to ``CYPHER 25`` and runs ``SEARCH``.
+    ``TRELLIS_TEST_NEO4J_VECTOR_PATH`` names the path the server under test
+    is expected to take, and
+    :meth:`test_query_takes_the_path_recorded_for_the_server` asserts it.
     """
+
+    def test_query_takes_the_path_recorded_for_the_server(self, stores):
+        if not EXPECTED_VECTOR_PATH:
+            pytest.skip("TRELLIS_TEST_NEO4J_VECTOR_PATH not set")
+        assert EXPECTED_VECTOR_PATH in {"search", "procedure"}
+        graph, vector = stores
+        _make_node(graph, "a")
+        vector.upsert("a", _vec(1, 0, 0))
+
+        results = vector.query(_vec(1, 0, 0), top_k=1)
+
+        assert [r["item_id"] for r in results] == ["a"]
+        # ``_search_refused`` holds the GQL status of the refusal that
+        # switched this instance to the procedure, and stays ``None`` while
+        # SEARCH is answered.
+        taken = "search" if vector._search_refused is None else "procedure"
+        assert taken == EXPECTED_VECTOR_PATH, vector._search_refused
 
     def test_cosine_ordering(self, stores):
         graph, vector = stores

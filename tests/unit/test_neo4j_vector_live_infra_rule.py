@@ -21,9 +21,10 @@ to the same name.
 This module once also pinned a capability gate that skipped the cases
 reaching the store's ``SEARCH`` clause, because ``neo4j:2025.12`` refuses it.
 The store now falls back to ``db.index.vector.queryNodes`` on that refusal,
-so those cases run on the job's image through the procedure, the gate is
+so those cases ran on that image through the procedure, the gate is
 gone, and ``scripts/check_live_floor.py`` fails the job if the contract's
-cases start skipping again. The ``SEARCH`` form itself runs on no CI server;
+cases start skipping again. The job's image is now ``neo4j:2026.10.2``,
+which runs ``SEARCH``; before it, the ``SEARCH`` form ran on no CI server;
 ``tests/unit/stores/test_neo4j_vector_search_fallback.py`` covers the switch
 between the two without one.
 """
