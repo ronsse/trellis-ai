@@ -1253,8 +1253,13 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         raised: the write has committed.
         """
         rows = self._current_node_rows(node_id)
-        if len(rows) <= 1:
+        if not rows:
+            # Created, then deleted by another writer before this read.
             return True
+        if len(rows) == 1:
+            # One row that is not this writer's: another creator's re-read
+            # already settled the duplicate and removed this writer's row.
+            return rows[0][2] == own_row
         survivor = min(rows, key=lambda row: (row[0], row[2]))[2]
         extras = [row[2] for row in rows if row[2] != survivor]
         try:

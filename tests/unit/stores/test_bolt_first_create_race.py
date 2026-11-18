@@ -204,6 +204,25 @@ def test_the_survivor_writer_answers_true_and_removes_the_same_row() -> None:
     assert store.removed == [["#1:1"]]
 
 
+def test_a_writer_whose_row_was_already_removed_answers_false() -> None:
+    # The survivor's writer settled first: this writer's re-read finds one
+    # row, and it is not its own.
+    store = _VerifyingStore(
+        FakeBoltDriver(creates=["#1:1"]),
+        [("2026-01-01T00:00:00.000001+00:00", "first-x-0", "#1:2")],
+    )
+
+    assert store.create_node_if_absent("n1", "service", {}) is False
+    assert store.removed == []
+
+
+def test_a_create_deleted_before_the_re_read_still_answers_true() -> None:
+    store = _VerifyingStore(FakeBoltDriver(creates=["#1:1"]), [])
+
+    assert store.create_node_if_absent("n1", "service", {}) is True
+    assert store.removed == []
+
+
 def test_an_equal_stamp_tie_breaks_on_the_row_id() -> None:
     tied = [("t", "first-x-0", "#1:9"), ("t", "first-x-0", "#1:10")]
     answers = [
