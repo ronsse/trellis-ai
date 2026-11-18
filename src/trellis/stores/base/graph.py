@@ -595,13 +595,15 @@ class GraphStore(ABC):
         decides again. It never replaces a version, so a write that read an
         absent id cannot overwrite a record that committed in between.
 
-        The check and the write are one step. On SQLite and Postgres it is
-        atomic: of concurrent calls for one absent id exactly one returns
-        ``True``. On the Bolt backends (Neo4j, ArcadeDB) it is one Cypher
-        statement, so the window is the statement rather than the caller's
-        read-then-write, but those engines enforce no uniqueness on a
-        current version (see :class:`BoltOpenCypherGraphStore`), so two
-        concurrent calls that both observe no current row can both write.
+        The check and the write are one step: of concurrent calls for one
+        absent id exactly one returns ``True``, and the others return
+        ``False`` as a serial second call would. SQLite and Postgres are
+        atomic. The Bolt backends (Neo4j, ArcadeDB) enforce no uniqueness on
+        a current version, so their first create derives its ``version_id``
+        from the id and the count of its rows, and the unique constraint on
+        ``version_id`` admits one of the concurrent writers (see
+        :meth:`BoltOpenCypherGraphStore.create_node_if_absent`). There a
+        concurrent :meth:`upsert_node` of the absent id is not arbitrated.
 
         Raises:
             ValueError / TypeError: under the same conditions as

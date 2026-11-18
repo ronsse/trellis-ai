@@ -25,6 +25,13 @@ read finds, or an exception it raises. The parameters of every such read are
 kept on :attr:`FakeBoltDriver.reads`, and a read the test did not script
 fails it. The keyword arguments of every ``session()`` are kept on
 :attr:`FakeBoltDriver.sessions`.
+
+``creates`` scripts the transactions ``create_node_if_absent`` runs instead:
+each takes the next entry, played at its ``CREATE (n:Node)`` statement.
+``True`` is a created row, ``False`` a statement whose ``WHERE`` found a
+current row and returned none, and an exception is raised by the statement.
+The parameters of every such statement are kept on
+:attr:`FakeBoltDriver.create_params`.
 """
 
 from __future__ import annotations
@@ -57,11 +64,14 @@ class FakeBoltDriver:
         *outcomes: Outcome,
         attempts: int = 3,
         rows_left: int | Exception | None = None,
+        creates: list[bool | str | Exception] | None = None,
     ) -> None:
-        if not outcomes:
+        if not outcomes and creates is None:
             msg = "script at least one purge outcome"
             raise ValueError(msg)
-        self._outcomes = list(outcomes)
+        self._outcomes = list(outcomes) or [0]
+        self.creates = list(creates or [])
+        self.create_params: list[dict[str, Any]] = []
         self.attempts = attempts
         self.rows_left = rows_left
         self.transactions: list[FakeTransaction] = []
@@ -90,7 +100,7 @@ class FakeSession:
     ) -> Any:
         errors: list[DriverError | Neo4jError] = []
         for _ in range(self._driver.attempts):
-            tx = FakeTransaction(self._driver.next_outcome())
+            tx = FakeTransaction(self._driver.next_outcome(), driver=self._driver)
             self._driver.transactions.append(tx)
             try:
                 try:
@@ -122,8 +132,9 @@ class FakeSession:
 class FakeTransaction:
     """One transaction, and how it ended."""
 
-    def __init__(self, outcome: Outcome) -> None:
+    def __init__(self, outcome: Outcome, driver: FakeBoltDriver | None = None) -> None:
         self._outcome = outcome
+        self._driver = driver
         if isinstance(outcome, AtCommit):
             self._node_rows = outcome.rows
         elif isinstance(outcome, int):
@@ -132,7 +143,21 @@ class FakeTransaction:
             self._node_rows = 1
         self.ended: str | None = None
 
-    def run(self, cypher: str, **_params: Any) -> FakeResult:
+    def run(self, cypher: str, **params: Any) -> FakeResult | None:
+        if (
+            self._driver is not None
+            and self._driver.creates
+            and ("CREATE (n:Node)" in cypher)
+        ):
+            self._driver.create_params.append(params)
+            created = self._driver.creates.pop(0)
+            if isinstance(created, Exception):
+                raise created
+            if not created:
+                return FakeResult(None)
+            # A str names the created row's ``elementId``.
+            row_id = created if isinstance(created, str) else "fake-row"
+            return FakeResult({"node_id": 1, "row_id": row_id})  # type: ignore[dict-item]
         if not cypher.startswith("MATCH (n:Node") or "DETACH DELETE" not in cypher:
             return FakeResult({"deleted": 0})
         if isinstance(self._outcome, Exception):
@@ -158,17 +183,17 @@ class FakeResult:
     """
 
     def __init__(
-        self, row: dict[str, int], *, nodes_deleted: int | None = None
+        self, row: dict[str, int] | None, *, nodes_deleted: int | None = None
     ) -> None:
         self._row = row
         self._nodes_deleted = nodes_deleted
 
-    def single(self, strict: bool = False) -> dict[str, int]:
+    def single(self, strict: bool = False) -> dict[str, int] | None:
         return self._row
 
     def consume(self) -> Any:
         deleted = (
-            self._row.get("deleted", 0)
+            (self._row or {}).get("deleted", 0)
             if self._nodes_deleted is None
             else self._nodes_deleted
         )

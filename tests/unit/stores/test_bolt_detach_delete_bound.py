@@ -126,8 +126,8 @@ def test_the_count_is_the_summary_counter_not_the_returned_row() -> None:
 
 
 class _AlwaysOneFakeTransaction(FakeTransaction):
-    def __init__(self, outcome: Any) -> None:
-        super().__init__(outcome)
+    def __init__(self, outcome: Any, driver: Any = None) -> None:
+        super().__init__(outcome, driver=driver)
         self._deletes = _AlwaysOneTx()
 
     def run(self, cypher: str, **params: Any) -> Any:

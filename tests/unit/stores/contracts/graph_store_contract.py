@@ -1695,10 +1695,6 @@ class GraphStoreContractTests:
     # create_node_if_absent — create only when no version is current
     # ------------------------------------------------------------------
 
-    #: Whether two concurrent calls for one absent id can both write. False on
-    #: the Bolt engines, which enforce no uniqueness on a current version.
-    ATOMIC_CREATE_IF_ABSENT = True
-
     def test_create_node_if_absent_creates_an_absent_node(
         self, store: GraphStore
     ) -> None:
@@ -1772,8 +1768,8 @@ class GraphStoreContractTests:
     def test_create_node_if_absent_is_atomic_for_concurrent_writers(
         self, store: GraphStore
     ) -> None:
-        if not self.ATOMIC_CREATE_IF_ABSENT:
-            pytest.skip("this engine enforces no uniqueness on a current version")
+        # Every backend: on the Bolt engines the first ``version_id`` is
+        # derived from the id, so ``node_version_unique`` arbitrates (#1232).
         for round_number in range(20):
             node_id = f"n{round_number}"
             barrier = Barrier(2)
