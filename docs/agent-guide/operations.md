@@ -3505,20 +3505,23 @@ it did before the judgement. The reads it adds are bounded: per distinct
 promoted precedent a request meets, at most one graph-node read and two document
 reads (the precedent's own row and its source), each id judged once per request;
 a request that meets no precedent adds none, and a `restricted` caller adds none.
-The exception is `GET /graph/search` and `GET /graph/search/facets`: to keep a
-withheld precedent, and a node labelled above the caller (#1264), out of `total`
-and the per-type counts they page through every node matching `q` (and
-`node_type`), 500 at a time, for any caller below `restricted`. A node's label
-is read from the row in hand; only a `precedent` node costs the reads above.
-Nothing reports the subtraction. `offset` counts stored matches, withheld ones
-included, so a page holding a withheld match is shorter than `limit`, and
-stepping `offset` by `limit` serves every readable match once. Two limits
-follow from that. A caller can still infer that a withheld match exists: a page
-shorter than `limit` followed by a non-empty one, or a row at an `offset` at or
-past `total`, shows it. And a client that stops paging once `offset + limit`
-reaches `total` misses as many trailing readable rows as there were withheld
-matches before them; page until a page comes back empty instead. A node under `precedent://learning/` stored as another
-type is left out of the page but not subtracted from a count; `entity.create` and
+The exception is `GET /graph/search` and `GET /graph/search/facets`. For any
+caller below `restricted` they walk every node matching `q` (and `node_type`),
+500 at a time in the requested sort order, and serve and count only the rows the
+caller may read: a withheld precedent and a node labelled above the caller
+(#1264) are left out of the page, `total` and the per-type counts alike. A
+node's label is read from the row in hand; only a node under
+`precedent://learning/` costs the reads above. Nothing reports what was left
+out. `offset` counts readable matches too, so a withheld match shortens no page
+and cannot be located by paging, and stepping `offset` by `limit` until
+`offset` reaches `total` serves every readable match once while the graph does
+not change (a write between requests can repeat or skip a row, as on any offset
+paging). The cost is one walk
+of every match of `q` per request (`ceil(matches/500)` store calls), whatever
+`limit` is; a `restricted` caller and auth off read the stored page with one
+call. A node under `precedent://learning/` stored as another type is judged the
+same way and, when withheld, is now left out of the counts as well as the page;
+`entity.create` and
 `entity.update` no longer produce one, but one stored earlier is still there. Not covered: a
 precedent's chunks (judged on their own row only, as on `GET /search`).
 
@@ -6347,9 +6350,9 @@ above its own clearance, and cannot touch a document it may not read.**
   (#1264). `total` on graph search and the `/graph/search/facets` counts leave a
   labelled node out as they leave out a withheld precedent, and with a depth above 1
   `get_graph` and `GET /api/v1/entities/{id}` leave out a node whose every path
-  from the root within `depth` runs through a withheld node (#1264). Paging still
-  lets a caller below the label infer that some node matches, because `offset`
-  counts withheld matches and `total` does not. A key on an edge or a trace stays inert. To list such
+  from the root within `depth` runs through a withheld node (#1264). Graph search
+  `offset` counts readable matches as `total` does, so paging no longer shows that
+  a labelled node matches. A key on an edge or a trace stays inert. To list such
   rows read-only there is no command that enumerates them across a store; for an id
   you suspect, `trellis retrieve entity <id> --format json` shows a node's properties
   and `trellis retrieve trace <id> --format json` a trace's metadata, so look for a

@@ -299,6 +299,28 @@ class TestEntityListing:
         assert "entity://shared" in ids
         assert precedent not in ids
 
+    def test_a_withheld_precedent_stored_as_another_type_leaves_the_counts(
+        self, client, registry, precedent
+    ):
+        # #1080 left such a node out of the page but counted it; the page,
+        # ``total`` and the facets now share one predicate (#1264).
+        graph = registry.knowledge.graph_store
+        node = graph.get_node(precedent)
+        assert node is not None
+        graph.upsert_node(precedent, "table", node["properties"])
+        headers = _headers(registry, BELOW)
+
+        page = client.get("/api/v1/graph/search", headers=headers).json()
+        facets = client.get("/api/v1/graph/search/facets", headers=headers).json()
+
+        ids = [r["entity_id"] for r in page["results"]]
+        assert precedent not in ids
+        assert page["total"] == len(ids)
+        assert facets["total"] == page["total"]
+        cleared = _headers(registry, ["read", "restricted"])
+        whole = client.get("/api/v1/graph/search", headers=cleared).json()
+        assert whole["total"] == page["total"] + 1
+
     def test_a_restricted_key_reads_every_node(self, client, registry, precedent):
         resp = client.get(
             "/api/v1/graph/search",

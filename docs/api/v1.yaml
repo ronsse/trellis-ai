@@ -5500,24 +5500,32 @@ paths:
 
         A node whose own ``data_classification`` property is above the caller''s
 
-        clearance is left out of the page (#1029) and of ``total`` (#1264). Every
+        clearance is left out (#1029, #1264), and so is a node in the promoted
 
-        other match is served; a hit whose ``document_ids``, ``evidence_ref``
+        precedent namespace the caller may not read: its own row or its source
 
-        property or ``lifecycle.superseded_by`` names a document the caller may not
+        above the caller''s clearance, or a lookup that failed (#1080). Every other
 
-        read is served without that id.
+        match is served; a hit whose ``document_ids``, ``evidence_ref`` property or
+
+        ``lifecycle.superseded_by`` names a document the caller may not read is
+
+        served without that id.
 
 
-        A promoted precedent the caller may not read (its own row or its source
+        For a caller below ``restricted``, ``offset`` and ``total`` both count the
 
-        above the caller''s clearance, or a lookup that failed) is left out of the
+        matches that caller may read, so a withheld match shortens no page and
 
-        page and of ``total`` (#1080). ``offset`` counts stored matches, withheld
+        stepping ``offset`` by ``limit`` serves every readable match once while
 
-        ones included, so a page holding a withheld match is shorter than ``limit``
+        the graph does not change (a write between requests can repeat or skip a
 
-        and stepping ``offset`` by ``limit`` serves every readable match once.'
+        row, as on any offset paging). The cost is one walk of every match of
+
+        ``q`` per request. A ``restricted`` caller reads the stored page with one
+
+        store call.'
       operationId: search_entities_api_v1_graph_search_get
       parameters:
       - description: A case-insensitive substring of the name, node_id or node_type
@@ -5610,11 +5618,13 @@ paths:
 
         ``/graph/search``''s ``total`` for the same ``q``. ``node_type`` is not a
 
-        parameter because it is the dimension being counted. A promoted
+        parameter because it is the dimension being counted. A match
 
-        precedent the caller may not read is not counted (#1080), nor is a node
+        ``/graph/search`` withholds from the caller is not counted (#1080, #1264),
 
-        labelled above the caller (#1264); a type with nothing left is not listed.'
+        by the same predicate, and a type with nothing left is not listed. For a
+
+        caller below ``restricted`` that is one walk of every match of ``q``.'
       operationId: search_entity_facets_api_v1_graph_search_facets_get
       parameters:
       - description: 'The /graph/search q filter: a case-insensitive substring of the name, node_id or node_type'
