@@ -34,7 +34,11 @@ pytest.importorskip("neo4j")
 
 from neo4j import ManagedTransaction
 
-from tests.unit.stores import bolt_duplicate_current, bolt_edge_create_race
+from tests.unit.stores import (
+    bolt_duplicate_current,
+    bolt_edge_create_race,
+    bolt_first_create_race,
+)
 
 URI = os.environ.get("TRELLIS_TEST_NEO4J_URI", "")
 USER = os.environ.get("TRELLIS_TEST_NEO4J_USER", "neo4j")
@@ -163,6 +167,19 @@ def _second_neo4j_store():
     from trellis.stores.neo4j.graph import Neo4jGraphStore
 
     return Neo4jGraphStore(URI, user=USER, password=PASSWORD, database=DATABASE)
+
+
+def test_concurrent_first_creates_write_one_row(graph_store):
+    # #1232: the fixture wiped the database; each writer has its own driver.
+    bolt_first_create_race.check_concurrent_first_creates_write_one_row(
+        _second_neo4j_store
+    )
+
+
+def test_concurrent_re_creates_after_a_purge_write_one_row(graph_store):
+    bolt_first_create_race.check_concurrent_re_creates_after_a_purge_write_one_row(
+        _second_neo4j_store
+    )
 
 
 def test_concurrent_edge_create_leaves_one_current_row(graph_store):

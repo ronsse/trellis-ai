@@ -33,7 +33,11 @@ pytest.importorskip("neo4j")
 
 from neo4j import ManagedTransaction
 
-from tests.unit.stores import bolt_duplicate_current, bolt_edge_create_race
+from tests.unit.stores import (
+    bolt_duplicate_current,
+    bolt_edge_create_race,
+    bolt_first_create_race,
+)
 
 URI = os.environ.get("TRELLIS_TEST_ARCADEDB_URI", "")
 USER = os.environ.get("TRELLIS_TEST_ARCADEDB_USER", "root")
@@ -300,6 +304,19 @@ def _second_arcadedb_store():
         database=DATABASE,
         http_url=HTTP_URL,
         ensure_database_exists=True,
+    )
+
+
+def test_concurrent_first_creates_write_one_row(graph_store):
+    # #1232: the fixture wiped the database; each writer has its own driver.
+    bolt_first_create_race.check_concurrent_first_creates_write_one_row(
+        _second_arcadedb_store
+    )
+
+
+def test_concurrent_re_creates_after_a_purge_write_one_row(graph_store):
+    bolt_first_create_race.check_concurrent_re_creates_after_a_purge_write_one_row(
+        _second_arcadedb_store
     )
 
 
