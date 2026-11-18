@@ -3512,7 +3512,12 @@ and the per-type counts they page through every node matching `q` (and
 is read from the row in hand; only a `precedent` node costs the reads above.
 Nothing reports the subtraction. `offset` counts stored matches, withheld ones
 included, so a page holding a withheld match is shorter than `limit`, and
-stepping `offset` by `limit` serves every readable match once. A node under `precedent://learning/` stored as another
+stepping `offset` by `limit` serves every readable match once. Two limits
+follow from that. A caller can still infer that a withheld match exists: a page
+shorter than `limit` followed by a non-empty one, or a row at an `offset` at or
+past `total`, shows it. And a client that stops paging once `offset + limit`
+reaches `total` misses as many trailing readable rows as there were withheld
+matches before them; page until a page comes back empty instead. A node under `precedent://learning/` stored as another
 type is left out of the page but not subtracted from a count; `entity.create` and
 `entity.update` no longer produce one, but one stored earlier is still there. Not covered: a
 precedent's chunks (judged on their own row only, as on `GET /search`).
@@ -6325,7 +6330,9 @@ above its own clearance, and cannot touch a document it may not read.**
   (#1264). `total` on graph search and the `/graph/search/facets` counts leave a
   labelled node out as they leave out a withheld precedent, and with a depth above 1
   `get_graph` and `GET /api/v1/entities/{id}` leave out a node whose every path
-  from the root within `depth` runs through a withheld node (#1264). A key on an edge or a trace stays inert. To list such
+  from the root within `depth` runs through a withheld node (#1264). Paging still
+  lets a caller below the label infer that some node matches, because `offset`
+  counts withheld matches and `total` does not. A key on an edge or a trace stays inert. To list such
   rows read-only there is no command that enumerates them across a store; for an id
   you suspect, `trellis retrieve entity <id> --format json` shows a node's properties
   and `trellis retrieve trace <id> --format json` a trace's metadata, so look for a
