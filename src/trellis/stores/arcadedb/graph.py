@@ -226,11 +226,14 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
 
         The re-run is safe for the reason the alias path's is: the failed
         transaction rolled back whole, so the next attempt reads committed
-        state and answers as a serialized call would. The match is narrowed
-        to this statement by its own text, which the message echoes, so a
-        generic fault from any other statement is not retried here; the
-        base class's attempt bound keeps a genuinely fatal fault in this
-        fixed Cypher from spinning.
+        state and answers as a serialized call would. Only this statement's
+        errors reach the predicate, so the marker does not screen out other
+        statements; what it excludes is a generic-code error whose message
+        does not echo the Cypher, such as a commit-time or connection-level
+        fault. Any fault ArcadeDB raises while executing this statement, and
+        echoes, is therefore re-run, race or not. The base class's attempt
+        bound keeps a permanent one from spinning: it is raised unchanged
+        after the last attempt.
         """
         if super()._is_first_create_write_contention(exc):
             return True

@@ -304,3 +304,43 @@ def test_the_marker_names_the_first_create_statement() -> None:
     source = inspect.getsource(BoltOpenCypherGraphStore.create_node_if_absent)
     assert _FIRST_CREATE_STATEMENT_MARKER in source
     assert _FIRST_CREATE_STATEMENT_MARKER in _FIRST_CREATE_CYPHER_ECHO
+
+
+def _arcadedb_store(driver: FakeBoltDriver) -> BoltOpenCypherGraphStore:
+    """An ArcadeDB store on the fake driver, so the retry loop itself runs.
+
+    ``ArcadeDBGraphStore.__init__`` needs a URI, so the base initializer is
+    called on a bare instance. The settle re-read is stubbed to one row.
+    """
+    from trellis.stores.arcadedb.graph import ArcadeDBGraphStore
+
+    class _Store(ArcadeDBGraphStore):
+        def _current_node_rows(self, node_id: str) -> list[tuple[str, str, str]]:
+            return [("t", "first-x-0", "#1:1")]
+
+    store = object.__new__(_Store)
+    BoltOpenCypherGraphStore.__init__(
+        store, driver=driver, database="neo4j", owns_driver=False, init_schema=False
+    )
+    return store
+
+
+def test_arcadedb_create_re_runs_a_stale_re_read_and_answers_present() -> None:
+    # The predicate test above does not reach the call site: this one fails
+    # when ``create_node_if_absent`` asks the portable predicate instead.
+    driver = FakeBoltDriver(creates=[ARCADEDB_STALE_RE_READ, False])
+    assert _arcadedb_store(driver).create_node_if_absent("n1", "service", {}) is False
+    assert [t.ended for t in driver.transactions] == ["rollback", "commit"]
+
+
+def test_arcadedb_create_re_runs_a_stale_re_read_and_answers_created() -> None:
+    driver = FakeBoltDriver(creates=[ARCADEDB_STALE_RE_READ, "#1:1"])
+    assert _arcadedb_store(driver).create_node_if_absent("n1", "service", {}) is True
+
+
+def test_arcadedb_persistent_stale_re_read_is_raised_after_the_bound() -> None:
+    driver = FakeBoltDriver(creates=[ARCADEDB_STALE_RE_READ] * 5)
+    with pytest.raises(Neo4jError) as caught:
+        _arcadedb_store(driver).create_node_if_absent("n1", "service", {})
+    assert caught.value is ARCADEDB_STALE_RE_READ
+    assert len(driver.transactions) == 3
