@@ -3,9 +3,9 @@
 ``GET /graph/search``, ``GET /entities/{id}`` and ``GET /graph/history`` ask
 :meth:`~trellis.retrieve.precedents.PrecedentClearance.verdict_of` about every
 node they serve, and it now reads the node's own ``data_classification``
-property, the label a pack already honours. ``total`` on ``/graph/search`` still
-counts a labelled node: that is a known gap, pinned here so closing it is a
-deliberate change.
+property, the label a pack already honours. ``total`` on ``/graph/search``
+leaves a labelled node out as well (#1264; more in
+``test_node_label_counts.py``).
 """
 
 from __future__ import annotations
@@ -102,11 +102,12 @@ def test_graph_search_leaves_out_a_labelled_node(client, labelled) -> None:
     assert _ids(_search(client, labelled, CLEARED)) == {PLAIN, LABELLED}
 
 
-def test_search_total_still_counts_a_labelled_node_known_gap(client, labelled) -> None:
-    """Known gap: a key below the label can learn that some node matches."""
+def test_search_total_leaves_out_a_labelled_node(client, labelled) -> None:
+    """A key below the label does not learn that some node matches (#1264)."""
     below = _search(client, labelled, BELOW)
     assert _ids(below) == {PLAIN}
-    assert below["total"] == 2
+    assert below["total"] == 1
+    assert _search(client, labelled, CLEARED)["total"] == 2
 
 
 def test_entity_read_of_a_labelled_node_is_not_found(client, labelled) -> None:
