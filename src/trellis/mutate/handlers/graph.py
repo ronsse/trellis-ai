@@ -38,6 +38,7 @@ from trellis.retrieve.sensitivity import OverwriteRefusedError
 from trellis.schemas.classification import (
     DATA_CLASSIFICATION_KEY,
     LIFECYCLE_KEY,
+    SENSITIVITY_ORDER,
     sensitivity_of,
     sensitivity_rank,
 )
@@ -234,8 +235,66 @@ def _refuse_node_label_above_clearance(
         ) from exc
 
 
+#: The fields of a node label that describe the content rather than who may
+#: read it. A winning record carries the other record's, as
+#: ``classification.set``'s ``_relabelled_record`` carries a document's (#1265).
+_CARRIED_LABEL_FIELDS = ("regulatory_tags", "jurisdiction")
+
+
+def _readable_label(record: object) -> bool:
+    """Whether ``record`` is a label record that names a sensitivity level."""
+    return isinstance(record, dict) and record.get("sensitivity") in SENSITIVITY_ORDER
+
+
+def _string_list(record: Mapping[str, Any], name: str) -> list[str] | None:
+    """``record[name]`` if a list of strings (absent reads empty), else ``None``."""
+    value = record.get(name, [])
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return value
+    return None
+
+
+def _label_carrying_the_other(
+    stored: dict[str, Any], supplied: dict[str, Any], *, stored_wins: bool
+) -> dict[str, Any]:
+    """The winning record with the other's regulatory tags and jurisdiction in it.
+
+    The winner is ``stored`` when ``stored_wins``, else ``supplied``. Its
+    ``regulatory_tags`` become the union of both records' tags: the stored
+    record's first, in their stored order, then the supplied record's new ones,
+    each once. It keeps its own ``jurisdiction`` when it names one; when it
+    names none, it takes the other's. Every other field (``sensitivity``,
+    ``classified_by``) is the winner's. A field that is not a list of strings on
+    either side is left as the winner holds it. When nothing is added the
+    winner is returned as it stands, so a write that changes nothing writes the
+    same record.
+    """
+    winner, other = (stored, supplied) if stored_wins else (supplied, stored)
+    record = dict(winner)
+    stored_tags = _string_list(stored, "regulatory_tags")
+    supplied_tags = _string_list(supplied, "regulatory_tags")
+    if stored_tags is not None and supplied_tags is not None:
+        union = list(dict.fromkeys([*stored_tags, *supplied_tags]))
+        own = winner.get("regulatory_tags", [])
+        if set(union) != set(own):
+            record["regulatory_tags"] = union
+    own_place = _string_list(winner, "jurisdiction")
+    other_place = _string_list(other, "jurisdiction")
+    if own_place == [] and other_place:
+        record["jurisdiction"] = list(other_place)
+    return record if record != winner else winner
+
+
+def _held_label_fields(record: Mapping[str, Any]) -> list[str]:
+    """The names of :data:`_CARRIED_LABEL_FIELDS` that ``record`` holds non-empty."""
+    return [name for name in _CARRIED_LABEL_FIELDS if record.get(name)]
+
+
 def _keep_stricter_node_label(
-    properties: dict[str, Any], stored_properties: Mapping[str, Any] | None
+    properties: dict[str, Any],
+    stored_properties: Mapping[str, Any] | None,
+    *,
+    node_id: str,
 ) -> None:
     """Keep the stored ``data_classification`` when it is stricter than ``properties``'.
 
@@ -247,16 +306,47 @@ def _keep_stricter_node_label(
     stands, a malformed one included (it reads ``restricted``). At equal rank
     the supplied record wins. A bag that never held the key gets none.
 
-    Only the sensitivity level is compared, and the winning record is written
-    whole: when the supplied record wins, the stored one's ``regulatory_tags``
-    and ``jurisdiction`` are not carried into it.
+    **The winner keeps what the other record says about the content (#1265).**
+    When both records name a level, the winning one (by sensitivity alone)
+    carries the union of both records' ``regulatory_tags`` and, when it names
+    no ``jurisdiction``, the other's (:func:`_label_carrying_the_other`), as
+    ``classification.set`` carries a document's across a relabel. A supplied
+    record that names no level (``null``, a string, an unknown level) reads
+    ``restricted`` and so always wins, but it cannot hold tags: over a stored
+    record that names a level and holds tags or a jurisdiction it is refused
+    (``node_label_discards``) with nothing written, as ``classification.set``
+    refuses a relabel that would discard them. A write that supplies no
+    ``data_classification`` key is judged as before #1265: the stored record
+    is kept whole when stricter than ``internal``, and nothing is merged.
     """
     if stored_properties is None or DATA_CLASSIFICATION_KEY not in stored_properties:
         return
-    if sensitivity_rank(sensitivity_of(stored_properties)) > sensitivity_rank(
-        sensitivity_of(properties)
-    ):
-        properties[DATA_CLASSIFICATION_KEY] = stored_properties[DATA_CLASSIFICATION_KEY]
+    stored = stored_properties[DATA_CLASSIFICATION_KEY]
+    stored_wins = sensitivity_rank(sensitivity_of(stored_properties)) > (
+        sensitivity_rank(sensitivity_of(properties))
+    )
+    if DATA_CLASSIFICATION_KEY not in properties:
+        if stored_wins:
+            properties[DATA_CLASSIFICATION_KEY] = stored
+        return
+    supplied = properties[DATA_CLASSIFICATION_KEY]
+    if _readable_label(stored) and _readable_label(supplied):
+        properties[DATA_CLASSIFICATION_KEY] = _label_carrying_the_other(
+            stored, supplied, stored_wins=stored_wins
+        )
+        return
+    if stored_wins:
+        properties[DATA_CLASSIFICATION_KEY] = stored
+        return
+    discarded = _held_label_fields(stored) if _readable_label(stored) else []
+    if discarded:
+        msg = (
+            f"entity {node_id!r} carries {', '.join(discarded)} in its "
+            "classification record, and the supplied data_classification names "
+            "no sensitivity level, so it cannot hold them; writing it would "
+            "discard them. Nothing was written."
+        )
+        raise ValidationError(msg, errors=[msg], code="node_label_discards")
 
 
 class EntityCreateHandler:
@@ -484,7 +574,7 @@ class EntityCreateHandler:
             # it alone", and a supplied value was judged above.
             props = dict(base_props)
             _carry_held_evidence_ref(props, stored_properties)
-            _keep_stricter_node_label(props, stored_properties)
+            _keep_stricter_node_label(props, stored_properties, node_id=node_id)
             # ``document_ids`` is the first-class graph<->document link (Phase 4
             # of ADR planes-and-substrates). Threading it here gives the pointer
             # a governed write path: the pointer-not-prose invariant depends on a
@@ -752,7 +842,7 @@ class EntityUpdateHandler:
             # read the pointer the node holds (a reader's is refused above); it
             # is a no-op for them, so the stored pointer survives the merge.
             _carry_held_evidence_ref(props, existing["properties"])
-            _keep_stricter_node_label(props, existing["properties"])
+            _keep_stricter_node_label(props, existing["properties"], node_id=entity_id)
             if "name" in command.args:
                 props["name"] = command.args["name"]
             changes: dict[str, Any] = {"properties": props}
@@ -1058,7 +1148,9 @@ class ObservationRecordHandler:
             # names an evidence_ref. The record's fields are fixed (its
             # ``metadata`` nests under its own key), so no caller-supplied
             # top-level label reaches this bag and none is judged here.
-            _keep_stricter_node_label(node_props, stored_properties)
+            _keep_stricter_node_label(
+                node_props, stored_properties, node_id=obs.observation_id
+            )
             return {
                 "node_type": OBSERVATION,
                 "properties": node_props,
@@ -1175,7 +1267,9 @@ class MeasurementRecordHandler:
             _carry_held_evidence_ref(node_props, stored_properties)
             # The record's fields are fixed, so no caller-supplied top-level
             # label reaches this bag; a stored one is only carried forward.
-            _keep_stricter_node_label(node_props, stored_properties)
+            _keep_stricter_node_label(
+                node_props, stored_properties, node_id=meas.measurement_id
+            )
             return {
                 "node_type": MEASUREMENT,
                 "properties": node_props,

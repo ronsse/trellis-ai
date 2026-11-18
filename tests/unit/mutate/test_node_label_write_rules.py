@@ -23,6 +23,7 @@ import pytest
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.schemas.classification import DataClassification
+from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 
 if TYPE_CHECKING:
@@ -328,3 +329,262 @@ class TestRecordVerbs:
         _ok(_run(registry, command, "restricted"))
         props = _stored(registry, "meas-1")
         assert props["data_classification"]["sensitivity"] == "restricted"
+
+
+# --- #1265: the winning record keeps the other record's tags and jurisdiction ---
+#
+# The document path (``_relabelled_record``) carries a prior record's
+# ``regulatory_tags`` and ``jurisdiction`` across a relabel, and refuses a write
+# that would discard them. A node label now does the same: whichever readable
+# record wins on sensitivity carries the union of both records' tags (stored
+# first) and, when it names no jurisdiction, the other record's.
+
+
+def _labelled(level: str, **fields: Any) -> dict[str, Any]:
+    return {"sensitivity": level, **fields}
+
+
+def _seed(registry: StoreRegistry, record: object) -> None:
+    _ok(_run(registry, _create({"data_classification": record}), "restricted"))
+
+
+def _route(route: str, record: object) -> Command:
+    props = {"data_classification": record}
+    return _create(props) if route == "create" else _update(props)
+
+
+ROUTES = ["create", "update"]
+
+
+def _events(registry: StoreRegistry, event_type: Any) -> list[Any]:
+    return registry.operational.event_log.get_events(
+        event_type=event_type, entity_id=None, limit=1000
+    )
+
+
+@pytest.mark.parametrize("route", ROUTES)
+class TestWinnerCarriesTags:
+    def test_equal_rank_keeps_the_stored_tags(
+        self, registry: StoreRegistry, route: str
+    ) -> None:
+        _seed(registry, _labelled("confidential", regulatory_tags=["phi"]))
+        supplied = _labelled("confidential", classified_by=["source-inherit"])
+        _ok(_run(registry, _route(route, supplied), "restricted"))
+        assert _stored(registry)["data_classification"] == {
+            "sensitivity": "confidential",
+            "classified_by": ["source-inherit"],
+            "regulatory_tags": ["phi"],
+        }
+
+    def test_a_stricter_supplied_record_keeps_the_stored_tags(
+        self, registry: StoreRegistry, route: str
+    ) -> None:
+        _seed(registry, _labelled("internal", regulatory_tags=["phi", "pii"]))
+        supplied = _labelled("restricted", regulatory_tags=["pii", "gdpr"])
+        _ok(_run(registry, _route(route, supplied), "restricted"))
+        record = _stored(registry)["data_classification"]
+        assert record["sensitivity"] == "restricted"
+        assert record["regulatory_tags"] == ["phi", "pii", "gdpr"]
+
+    def test_a_kept_stricter_stored_record_gains_the_supplied_tags(
+        self, registry: StoreRegistry, route: str
+    ) -> None:
+        stored = _labelled("restricted", regulatory_tags=["phi"], classified_by=["a"])
+        _seed(registry, stored)
+        supplied = _labelled("internal", regulatory_tags=["pii"], classified_by=["b"])
+        _ok(_run(registry, _route(route, supplied), "restricted"))
+        assert _stored(registry)["data_classification"] == {
+            "sensitivity": "restricted",
+            "regulatory_tags": ["phi", "pii"],
+            "classified_by": ["a"],
+        }
+
+    def test_the_winner_keeps_its_own_classified_by(
+        self, registry: StoreRegistry, route: str
+    ) -> None:
+        _seed(registry, _labelled("internal", classified_by=["caller"]))
+        supplied = _labelled("internal", classified_by=["source-inherit"])
+        _ok(_run(registry, _route(route, supplied), "restricted"))
+        assert _stored(registry)["data_classification"] == supplied
+
+    def test_a_winner_without_a_jurisdiction_takes_the_stored_one(
+        self, registry: StoreRegistry, route: str
+    ) -> None:
+        _seed(registry, _labelled("confidential", jurisdiction=["eu"]))
+        _ok(_run(registry, _route(route, _labelled("confidential")), "restricted"))
+        assert _stored(registry)["data_classification"]["jurisdiction"] == ["eu"]
+
+    def test_a_kept_stored_record_takes_the_supplied_jurisdiction(
+        self, registry: StoreRegistry, route: str
+    ) -> None:
+        _seed(registry, _labelled("restricted"))
+        supplied = _labelled("internal", jurisdiction=["us"])
+        _ok(_run(registry, _route(route, supplied), "restricted"))
+        assert _stored(registry)["data_classification"]["jurisdiction"] == ["us"]
+
+    def test_a_winner_with_its_own_jurisdiction_keeps_it(
+        self, registry: StoreRegistry, route: str
+    ) -> None:
+        # The document path never meets two differing jurisdictions, so the
+        # winner's own stands, as before #1265.
+        _seed(registry, _labelled("confidential", jurisdiction=["eu"]))
+        supplied = _labelled("confidential", jurisdiction=["us"])
+        _ok(_run(registry, _route(route, supplied), "restricted"))
+        assert _stored(registry)["data_classification"]["jurisdiction"] == ["us"]
+
+    def test_the_success_event_is_unchanged_and_names_no_label(
+        self, registry: StoreRegistry, route: str
+    ) -> None:
+        _seed(registry, _labelled("confidential", regulatory_tags=["phi"]))
+        _ok(_run(registry, _route(route, _labelled("confidential")), "restricted"))
+        kind = (
+            EventType.ENTITY_CREATED if route == "create" else EventType.ENTITY_UPDATED
+        )
+        last = _events(registry, kind)[-1]
+        assert set(last.payload) == {"name", "node_role", "document_ids"}
+        executed = _events(registry, EventType.MUTATION_EXECUTED)[-1]
+        assert "data_classification" not in str(executed.payload)
+
+
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("unreadable", [None, {"sensitivity": "top-secret"}, "x"])
+class TestUnreadableSuppliedRecord:
+    def test_over_a_stored_record_with_tags_it_is_refused(
+        self, registry: StoreRegistry, route: str, unreadable: object
+    ) -> None:
+        stored = _labelled("confidential", regulatory_tags=["phi"], jurisdiction=["eu"])
+        _seed(registry, stored)
+        before = _version_count(registry)
+        result = _run(registry, _route(route, unreadable), "restricted")
+        assert result.status == CommandStatus.REJECTED
+        assert "regulatory_tags, jurisdiction" in result.message
+        assert NODE_ID in result.message
+        assert _version_count(registry) == before
+        assert _stored(registry)["data_classification"] == stored
+        rejected = _events(registry, EventType.MUTATION_REJECTED)[-1]
+        assert rejected.payload["error_code"] == "node_label_discards"
+        # Only the seed's create was announced; the refused write announced nothing.
+        assert len(_events(registry, EventType.ENTITY_CREATED)) == 1
+        assert _events(registry, EventType.ENTITY_UPDATED) == []
+
+    def test_over_a_stored_record_without_tags_it_is_written_as_before(
+        self, registry: StoreRegistry, route: str, unreadable: object
+    ) -> None:
+        _seed(registry, _labelled("confidential", regulatory_tags=[]))
+        _ok(_run(registry, _route(route, unreadable), "restricted"))
+        assert _stored(registry)["data_classification"] == unreadable
+
+    def test_a_readable_record_over_an_unreadable_stored_one_is_as_before(
+        self, registry: StoreRegistry, route: str, unreadable: object
+    ) -> None:
+        _seed(registry, unreadable)
+        supplied = _labelled("restricted", regulatory_tags=["pii"])
+        _ok(_run(registry, _route(route, supplied), "restricted"))
+        assert _stored(registry)["data_classification"] == supplied
+
+
+def _keep_stricter_node_label_before_1265(
+    properties: dict[str, Any], stored_properties: Any, **_: Any
+) -> None:
+    """The #1263 rule as it stood before #1265, for the invariance test."""
+    from trellis.schemas.classification import (
+        DATA_CLASSIFICATION_KEY,
+        sensitivity_of,
+        sensitivity_rank,
+    )
+
+    if stored_properties is None or DATA_CLASSIFICATION_KEY not in stored_properties:
+        return
+    if sensitivity_rank(sensitivity_of(stored_properties)) > sensitivity_rank(
+        sensitivity_of(properties)
+    ):
+        properties[DATA_CLASSIFICATION_KEY] = stored_properties[DATA_CLASSIFICATION_KEY]
+
+
+def _replay_keyless_writes(registry: StoreRegistry) -> list[list[dict[str, Any]]]:
+    """Writes that supply no label, on an unlabelled node and on labelled ones."""
+    # An unlabelled node through every writer.
+    _ok(_run(registry, _create({"owner": "sales"}), "restricted"))
+    _ok(_run(registry, _update({"owner": "finance"}), "restricted"))
+    _ok(_run(registry, _create({"owner": "ops"}), "restricted"))
+    obs = Command(
+        operation=Operation.OBSERVATION_RECORD,
+        args={
+            "observation": {
+                **_observation("obs-1", NODE_ID),
+                "observed_at": "2026-01-01T00:00:00+00:00",
+            }
+        },
+        requested_by="tester",
+    )
+    meas = Command(
+        operation=Operation.MEASUREMENT_RECORD,
+        args={
+            "measurement": {
+                **_measurement("meas-1", NODE_ID),
+                "measured_at": "2026-01-01T00:00:00+00:00",
+            }
+        },
+        requested_by="tester",
+    )
+    for command in (obs, meas, obs, meas):
+        _ok(_run(registry, command, "restricted"))
+    # Labelled nodes (stored record with tags) written without the key.
+    graph = registry.knowledge.graph_store
+    for level in ("public", "internal", "restricted"):
+        node_id = f"dataset:test:{level}"
+        record = {"sensitivity": level, "regulatory_tags": ["phi"]}
+        graph.upsert_node(node_id, "dataset", {"data_classification": record})
+        for command in (
+            Command(
+                operation=Operation.ENTITY_CREATE,
+                args={
+                    "entity_id": node_id,
+                    "entity_type": "dataset",
+                    "name": level,
+                    "properties": {"owner": "x"},
+                },
+                requested_by="tester",
+            ),
+            Command(
+                operation=Operation.ENTITY_UPDATE,
+                args={"entity_id": node_id, "properties": {"owner": "y"}},
+                requested_by="tester",
+            ),
+        ):
+            _ok(_run(registry, command, "restricted"))
+    node_ids = [NODE_ID, "obs-1", "meas-1"] + [
+        f"dataset:test:{level}" for level in ("public", "internal", "restricted")
+    ]
+    return [
+        [
+            {"node_type": v["node_type"], "properties": v["properties"]}
+            for v in graph.get_node_history(node_id)
+        ]
+        for node_id in node_ids
+    ]
+
+
+def test_writes_that_supply_no_label_are_unchanged_by_1265(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trellis.mutate.handlers import graph as graph_handlers
+
+    after_reg = StoreRegistry(stores_dir=tmp_path / "after")
+    try:
+        after = _replay_keyless_writes(after_reg)
+    finally:
+        after_reg.close()
+    monkeypatch.setattr(
+        graph_handlers,
+        "_keep_stricter_node_label",
+        _keep_stricter_node_label_before_1265,
+    )
+    before_reg = StoreRegistry(stores_dir=tmp_path / "before")
+    try:
+        before = _replay_keyless_writes(before_reg)
+    finally:
+        before_reg.close()
+    assert after == before
+    assert all(len(history) >= 2 for history in after)
+    assert "data_classification" not in after[0][-1]["properties"]
