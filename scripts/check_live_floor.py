@@ -42,6 +42,11 @@ FLOORS: dict[str, tuple[int, int]] = {
     # ``db.index.vector.queryNodes`` procedure, so the 19 cases that once
     # skipped behind a capability gate now run. Before the fallback: 25
     # passed, 19 skipped (run 37484813426 at d873f570, 2026-10-06).
+    # live-infra now runs ``neo4j:2026.10.2``, which answers ``SEARCH``, so
+    # the cases take that path instead; the counts did not move (44 passed,
+    # 0 skipped, measured on a local ``neo4j:2026.10.2`` container on
+    # 2026-11-18, not yet read off a live-infra run). The Neo4j graph row
+    # below measured the same 168 / 1 there.
     "tests/unit/stores/contracts/test_neo4j_vector_contract.py": (44, 0),
     # Postgres graph: 169 passed, 0 skipped.
     "tests/unit/stores/contracts/test_postgres_graph_contract.py": (169, 0),

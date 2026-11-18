@@ -80,7 +80,7 @@ already dispatched an agent at one.
 
 ### Test suite shape
 
-`pytest tests/unit/ -q` collects a different number with every merge, so none is written here. Measure it with `pytest tests/unit/ -q --co` rather than trusting this line, and treat CI's Tests job as the source of truth. CI runs five required checks (Tests, Lint, Type Check, OpenAPI, CodeQL) plus **Live infrastructure tests** — which since `586aee6` runs against **ephemeral service containers** (`neo4j:2025.12`, `pgvector/pgvector:pg16`), needs **no external instance and no repo secrets**, and includes the storage contract suites.
+`pytest tests/unit/ -q` collects a different number with every merge, so none is written here. Measure it with `pytest tests/unit/ -q --co` rather than trusting this line, and treat CI's Tests job as the source of truth. CI runs five required checks (Tests, Lint, Type Check, OpenAPI, CodeQL) plus **Live infrastructure tests** — which since `586aee6` runs against **ephemeral service containers** (`neo4j:2026.10.2` since 2026-11, `pgvector/pgvector:pg16`), needs **no external instance and no repo secrets**, and includes the storage contract suites.
 
 ### Live test credentials — current reality
 
