@@ -4316,6 +4316,23 @@ unhelpful counts in both and in `mixed`. `limits` also counts feedback with no
 item ids (so `served_ungraded` is not read as unhelpful), stray citations, and
 servings of items not created in the window, by item type.
 
+A trace's `trace-summary:<id>` document is a document row, counted under the
+embed worker's path (`worker:embed-traces`, or `source_system:trellis-trace`
+when its creation event fell outside the scan).
+
+The `traces` block is a second view: traces whose `created_at` is in the window
+(the newest `--limit` of them; `traces.truncated` says when more exist), how
+many were served, graded helpful, unhelpful, mixed, served ungraded and never
+served, overall and by `outcome.status` (`success`, `failure`, `other`). A
+trace is credited only through the two forms whose id names it: its
+`trace-summary:<id>` document or vector row (`servings_by_form.trace_summary`)
+and its `trace:<id>` Activity node (`graph_activity`). Precedents and extracted
+entity nodes are not credited to traces. The block is not added to `totals`:
+`servings_counted_as_documents` counts the summary servings a document row
+already owns, and only the rest leave `limits.unattributed_servings`. A trace
+recorded before the window is out of scope even when its summary was written
+inside it.
+
 ### `trellis analyze pack-scenario`
 
 Read-only export of served, graded packs as `EvaluationScenario` YAML for
