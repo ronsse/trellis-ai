@@ -32,6 +32,8 @@ from trellis.feedback.recording import record_feedback
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.mutate.evidence_ingest import build_evidence_ingest_command
+from trellis.schemas.enums import OutcomeStatus, TraceSource
+from trellis.schemas.trace import Outcome, Trace, TraceContext
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.main import app
@@ -253,10 +255,12 @@ class TestCli:
         )
         assert result.exit_code == 0, result.output
         data = json.loads(result.stdout.strip())
-        keys = {"window_days", "since", "paths", "totals", "limits", "scan"}
+        keys = {"window_days", "since", "paths", "totals", "limits", "scan", "traces"}
         assert set(data) == keys
         assert data["totals"]["created"] == 8
         assert data["limits"]["holdout_packs_dropped"] == 1
+        # The CLI reads the trace store; this fixture records no trace.
+        assert data["traces"]["totals"]["recorded"] == 0
 
     def test_text_names_each_path(
         self, registry: StoreRegistry, tmp_path: Path
@@ -298,3 +302,61 @@ class TestCli:
             )
             assert result.exit_code == 0, result.output
         assert _footprint() == before
+
+
+def _seed_traces(registry: StoreRegistry, tmp_path: Path) -> None:
+    """Two invented traces: one served as its Activity node and graded, one not."""
+    for trace_id, status in (("t-cli-served", "failure"), ("t-cli-never", "success")):
+        registry.operational.trace_store.append(
+            Trace(
+                trace_id=trace_id,
+                source=TraceSource.AGENT,
+                intent=f"invented secret intent {trace_id}",
+                outcome=Outcome(status=OutcomeStatus(status)),
+                context=TraceContext(agent_id="test-agent"),
+            )
+        )
+    _pack(registry, "p-trace", ["trace:t-cli-served"])
+    _grade(registry, tmp_path, "p-trace", helpful=("trace:t-cli-served",))
+
+
+class TestCliTraces:
+    def test_json_carries_the_trace_block(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        _seed_traces(registry, tmp_path)
+        result = runner.invoke(
+            app, ["analyze", "memory-yield", "--format", "json", "--no-meta-trace"]
+        )
+        assert result.exit_code == 0, result.output
+        traces = json.loads(result.stdout.strip())["traces"]
+        assert traces["totals"]["recorded"] == 2
+        assert traces["totals"]["served"] == 1
+        assert traces["totals"]["graded_helpful"] == 1
+        by_outcome = {row["outcome"]: row for row in traces["by_outcome"]}
+        assert by_outcome["failure"]["served"] == 1
+        assert by_outcome["success"]["never_served"] == 1
+        assert traces["servings_by_form"] == {"graph_activity": 1}
+
+    def test_text_prints_counts_not_ids_or_intents(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        _seed_traces(registry, tmp_path)
+        result = runner.invoke(app, ["analyze", "memory-yield", "--no-meta-trace"])
+        assert result.exit_code == 0, result.output
+        rendered = plain(result.stdout)
+        assert "Traces recorded in the window" in rendered
+        assert "(all): recorded 2, served 1 (1 servings), helpful 1" in rendered
+        assert "graph_activity 1" in rendered
+        assert "t-cli-" not in rendered
+        assert "invented secret intent" not in rendered
+
+    def test_exit_code_does_not_depend_on_format(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        _seed_traces(registry, tmp_path)
+        text = runner.invoke(app, ["analyze", "memory-yield", "--no-meta-trace"])
+        machine = runner.invoke(
+            app, ["analyze", "memory-yield", "--format", "json", "--no-meta-trace"]
+        )
+        assert text.exit_code == machine.exit_code == 0
