@@ -50,13 +50,15 @@ FLOORS: dict[str, tuple[int, int]] = {
     "tests/unit/stores/contracts/test_neo4j_vector_contract.py": (44, 0),
     # Postgres graph: 169 passed, 0 skipped.
     "tests/unit/stores/contracts/test_postgres_graph_contract.py": (169, 0),
-    # The two Bolt engines: 168 passed, 1 skipped on each. The skip is
-    # ``test_create_node_if_absent_is_atomic_for_concurrent_writers``
-    # (``ATOMIC_CREATE_IF_ABSENT = False``): a node's versions share one
-    # ``node_id`` under SCD2, so no uniqueness constraint can arbitrate two
-    # first creates that start together.
-    "tests/unit/stores/contracts/test_arcadedb_graph_contract.py": (168, 1),
-    "tests/unit/stores/contracts/test_neo4j_graph_contract.py": (168, 1),
+    # The two Bolt engines: 169 passed, 0 skipped on each. Until #1232 each
+    # skipped ``test_create_node_if_absent_is_atomic_for_concurrent_writers``
+    # (168 / 1 at run 44027876125); a first create now derives its
+    # ``version_id`` from the id, so ``node_version_unique`` arbitrates. The
+    # 169 / 0 was measured on local ``neo4j:2026.10.2`` and
+    # ``arcadedata/arcadedb:26.8.1`` containers on 2026-11-18, not yet read
+    # off a live-infra run.
+    "tests/unit/stores/contracts/test_arcadedb_graph_contract.py": (169, 0),
+    "tests/unit/stores/contracts/test_neo4j_graph_contract.py": (169, 0),
     "tests/unit/stores/contracts/test_pgvector_contract.py": (44, 0),
     "tests/unit/stores/contracts/test_arcadedb_vector_contract.py": (44, 0),
     # The event log contract under a Los Angeles session: 59 passed, 0

@@ -197,6 +197,7 @@ Per-backend subclasses override the **seams**:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import operator
 import re
@@ -417,7 +418,11 @@ def _shown_row(rows: str) -> str:
     writes attach their new version to it. Neo4j
     compares the stamps as text, which is time order for the one spelling
     every write uses (``_iso(utc_now())``, aware UTC); ArcadeDB reads them
-    as datetimes. Neither comparison can raise.
+    as datetimes. Neither comparison can raise. The tie-break compares the
+    ids as text and assumes no shape: a ``create_node_if_absent`` row's
+    ``first-...`` id (:func:`_first_version_prefix`) sorts above every ULID,
+    so on an exact stamp tie with a ULID row it is the one shown, where two
+    ULIDs minted in one millisecond tie-break by their random part.
     """
     return (
         f"reduce(shown = head({rows}), r IN tail({rows}) | "
@@ -687,6 +692,62 @@ def _is_edge_claim_contention(exc: Exception) -> bool:
     return _is_claim_contention(exc, _EDGE_CLAIM_LABEL, _EDGE_CLAIM_KEY_PROPERTY)
 
 
+#: Label and key property of the ``node_version_unique`` constraint below,
+#: which arbitrates two first creates of one absent ``node_id``: both derive
+#: the same first ``version_id`` (:func:`_first_version_prefix`), so the
+#: constraint rejects all but one. Built into the DDL so the constraint and
+#: :func:`_is_first_create_contention` cannot drift apart.
+_NODE_LABEL = "Node"
+_NODE_VERSION_KEY_PROPERTY = "version_id"
+
+#: How many times ``create_node_if_absent`` runs its statement when it
+#: loses the first-create race. One re-run reads the winner's current row
+#: and answers "already exists"; the bound makes a violation that is not
+#: that race surface as an error instead of spinning.
+_FIRST_CREATE_ATTEMPTS = 3
+
+
+def _first_version_prefix(node_id: str) -> str:
+    """The prefix of the ``version_id`` ``create_node_if_absent`` writes.
+
+    The statement appends the number of rows *node_id* already has (zero for
+    an id never seen or purged). Concurrent first creators of one absent id
+    read the same count and write the same ``version_id``, so the unique
+    constraint on it admits one of them. The id is hashed so the key stays
+    short whatever the ``node_id``'s length; the lowercase ``first-`` can
+    never equal a ULID, which is uppercase. Every other write keeps a ULID.
+    """
+    digest = hashlib.sha256(node_id.encode("utf-8")).hexdigest()
+    return f"first-{digest}-"
+
+
+def _is_first_create_contention(exc: Exception) -> bool:
+    """Return True when ``create_node_if_absent`` lost the first-create race.
+
+    The duplicate is on ``Node.version_id``, matched on the constraint's
+    identity as each engine prints it, not on a bare ``Node`` token: Neo4j
+    opens the message with ``Node(<id>)`` whatever the label, so a token
+    match would accept a ``version_id`` violation on another label.
+    Measured against ``neo4j:2026.10.2``: the loser blocks on the winner's
+    index entry, then fails at the statement with
+    ``Neo.ClientError.Schema.ConstraintValidationFailed`` (``Node(9) already
+    exists with label `Node` and property `version_id` = ...``). Against
+    ``arcadedata/arcadedb:26.8.1`` it fails at commit with
+    ``Neo.ClientError.Transaction.TransactionNotFound`` (``Duplicated key
+    [...] found on index 'Node[version_id]'``). Neither is retryable, so
+    the driver's managed retry does not re-run the function on it.
+    """
+    message = str(getattr(exc, "message", "") or exc)
+    if not any(marker in message.lower() for marker in _UNIQUE_VIOLATION_MARKERS):
+        return False
+    neo4j = (
+        f"label `{_NODE_LABEL}`" in message
+        and f"property `{_NODE_VERSION_KEY_PROPERTY}`" in message
+    )
+    arcadedb = f"'{_NODE_LABEL}[{_NODE_VERSION_KEY_PROPERTY}]'" in message
+    return neo4j or arcadedb
+
+
 _DEFAULT_SCHEMA_STATEMENTS: tuple[str, ...] = (
     # Uniqueness on version_id (Neo4j Community + Enterprise + AuraDB).
     # Backends without DDL-level constraints (e.g. Neptune) override
@@ -694,7 +755,7 @@ _DEFAULT_SCHEMA_STATEMENTS: tuple[str, ...] = (
     # only invariant.
     (
         "CREATE CONSTRAINT node_version_unique IF NOT EXISTS "
-        "FOR (n:Node) REQUIRE n.version_id IS UNIQUE"
+        f"FOR (n:{_NODE_LABEL}) REQUIRE n.{_NODE_VERSION_KEY_PROPERTY} IS UNIQUE"
     ),
     (
         "CREATE CONSTRAINT alias_version_unique IF NOT EXISTS "
@@ -844,6 +905,14 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
     # duplicate. A backend whose commit check can miss two writes to the same
     # claim row opts in (ArcadeDB, see its subclass).
     VERIFY_EDGE_WRITE_UNIQUENESS: bool = False
+
+    # Whether ``create_node_if_absent`` re-reads the id once a create it won
+    # has committed, and settles a second current row the engine's commit
+    # check let in (:meth:`_settle_first_create`). The same reasoning as
+    # ``VERIFY_EDGE_WRITE_UNIQUENESS``, for ``node_version_unique``: off where
+    # the constraint locks (Neo4j), on where its commit check can miss
+    # (ArcadeDB, see its subclass).
+    VERIFY_FIRST_CREATE_UNIQUENESS: bool = False
 
     def __init__(
         self,
@@ -1073,7 +1142,6 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         now = _iso(utc_now())
         new_props = {
             "node_id": node_id,
-            "version_id": generate_ulid(),
             "node_type": node_type,
             "node_role": node_role,
             "generation_spec_json": json.dumps(generation_spec, allow_nan=False)
@@ -1090,18 +1158,130 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         }
         # One statement: the CREATE runs only when the node has no current
         # row. Neither engine enforces one current version per ``node_id``
-        # (module docstring), so two calls that both observe no row can both
-        # create; the window this closes is the caller's read-then-write.
+        # (module docstring), so the statement alone cannot stop two calls
+        # that both observe no row. The ``version_id`` does: it is derived
+        # from the id and the count of its rows, read in this statement, so
+        # concurrent first creators write the same one and
+        # ``node_version_unique`` admits one (:func:`_first_version_prefix`).
+        # Only this method writes a derived id, so a violation of it is
+        # always another first create. The loser runs the statement again,
+        # sees the winner's current row and returns ``False``, as a serial
+        # second call does. A concurrent ``upsert_node`` of the absent id
+        # writes a ULID and is not arbitrated.
+        # The count and the current-row test come from one match: an
+        # aggregate after the ``WHERE`` would yield a row even when the
+        # ``WHERE`` kept none, and create over a current node.
         cypher = """
-        OPTIONAL MATCH (cur:Node {node_id: $node_id}) WHERE cur.valid_to IS NULL
-        WITH collect(cur) AS current_rows
+        OPTIONAL MATCH (row:Node {node_id: $node_id})
+        WITH collect(row) AS rows
+        WITH rows, [r IN rows WHERE r.valid_to IS NULL] AS current_rows
         WHERE size(current_rows) = 0
         CREATE (n:Node)
         SET n = $new_props
-        RETURN n.node_id AS node_id
+        SET n.version_id = $first_version_prefix + toString(size(rows))
+        RETURN n.node_id AS node_id, elementId(n) AS row_id
         """
-        record = self._run_write_single(cypher, node_id=node_id, new_props=new_props)
-        return record is not None
+        params = {
+            "node_id": node_id,
+            "new_props": new_props,
+            "first_version_prefix": _first_version_prefix(node_id),
+        }
+        for attempt in range(1, _FIRST_CREATE_ATTEMPTS + 1):
+            try:
+                record = self._run_write_single(cypher, **params)
+            except Exception as exc:
+                if attempt == _FIRST_CREATE_ATTEMPTS or not (
+                    _is_first_create_contention(exc)
+                ):
+                    raise
+                logger.debug(
+                    "bolt_first_create_lost_race", node_id=node_id, attempt=attempt
+                )
+                continue
+            if record is None:
+                return False
+            if self.VERIFY_FIRST_CREATE_UNIQUENESS:
+                return self._settle_first_create(node_id, str(record["row_id"]))
+            return True
+        # Unreachable: the last attempt returns or raises.
+        msg = f"create_node_if_absent({node_id!r}): no attempt ran"
+        raise StoreError(msg, store="graph")
+
+    def _current_node_rows(self, node_id: str) -> list[tuple[str, str, str]]:
+        """``(valid_from, version_id, row id)`` of each current row of ``node_id``."""
+        records = self._run_read_list(
+            "MATCH (n:Node {node_id: $node_id}) WHERE n.valid_to IS NULL "
+            "RETURN n.valid_from AS valid_from, n.version_id AS version_id, "
+            "elementId(n) AS row_id",
+            node_id=node_id,
+        )
+        return [
+            (str(r["valid_from"]), str(r["version_id"]), str(r["row_id"]))
+            for r in records
+        ]
+
+    def _remove_node_rows(self, node_id: str, row_ids: list[str]) -> None:
+        """Delete the rows of ``node_id`` named by ``row_ids``.
+
+        A plain ``DELETE``: a row an edge already hangs from raises rather
+        than taking the edge with it.
+        """
+        self._run_write(
+            "MATCH (n:Node {node_id: $node_id}) WHERE elementId(n) IN $row_ids "
+            "DELETE n",
+            node_id=node_id,
+            row_ids=row_ids,
+        )
+
+    def _settle_first_create(self, node_id: str, own_row: str) -> bool:
+        """Re-read a committed first create; keep one row if the engine let two in.
+
+        The edge path's post-commit re-read (``VERIFY_EDGE_WRITE_UNIQUENESS``,
+        #1078) applied to ``node_version_unique``: when the commit check misses,
+        two first creators both commit, with the same ``version_id``. Every
+        writer that sees more than one current row picks the same survivor,
+        the earliest ``valid_from`` with the row id breaking a tie (the
+        ``version_id`` is equal by construction, :func:`_earliest_row` picks
+        the earliest the same way), deletes every other current row, and
+        returns ``True`` only if the survivor is its own row. One row with no
+        extra write is the common case and costs this one read.
+
+        As on the edge path, a writer whose re-read ran before a racing commit
+        became visible has already answered ``True``; the later writer still
+        leaves one row, but if its own row is the survivor two callers have
+        been told they created the node. A failed delete is logged, not
+        raised: the write has committed.
+        """
+        rows = self._current_node_rows(node_id)
+        if not rows:
+            # Created, then deleted by another writer before this read.
+            return True
+        if len(rows) == 1:
+            # One row that is not this writer's: another creator's re-read
+            # already settled the duplicate and removed this writer's row.
+            return rows[0][2] == own_row
+        survivor = min(rows, key=lambda row: (row[0], row[2]))[2]
+        extras = [row[2] for row in rows if row[2] != survivor]
+        try:
+            self._remove_node_rows(node_id, extras)
+            removed = True
+        except Exception as exc:
+            removed = False
+            logger.warning(
+                "node_first_create_duplicate_remove_failed",
+                node_id=node_id,
+                error_type=type(exc).__name__,
+            )
+        # A warning, not debug: this is the only record that the engine let a
+        # duplicate first version in.
+        logger.warning(
+            "node_first_create_duplicate_settled",
+            node_id=node_id,
+            current_rows=len(rows),
+            removed=removed,
+            kept_own_row=survivor == own_row,
+        )
+        return survivor == own_row
 
     def upsert_nodes_bulk(
         self,

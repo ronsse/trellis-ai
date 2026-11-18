@@ -45,10 +45,6 @@ def _small_property_filter_window(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestNeo4jGraphContract(GraphStoreContractTests):
-    # One Cypher statement checks and creates, with no uniqueness constraint on
-    # a current version behind it, so two simultaneous calls can both write.
-    ATOMIC_CREATE_IF_ABSENT = False
-
     @pytest.fixture
     def store(self):
         from trellis.stores.neo4j.graph import Neo4jGraphStore

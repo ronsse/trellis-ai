@@ -122,6 +122,11 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
     # two rows are current.
     VERIFY_EDGE_WRITE_UNIQUENESS = True
 
+    # The same commit check guards ``node_version_unique``, which arbitrates
+    # concurrent ``create_node_if_absent`` calls for one absent id (#1232), so
+    # a won create re-reads the id and settles a second current row.
+    VERIFY_FIRST_CREATE_UNIQUENESS = True
+
     def _is_alias_write_contention(self, exc: Exception) -> bool:
         """Widen the base predicate over ArcadeDB's generic error channel.
 
