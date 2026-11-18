@@ -783,9 +783,9 @@ def list_precedent_domains(
     the precedent miner wrote
     (:func:`trellis.retrieve.precedents.is_miner_candidate_event`) is a
     candidate, not a promotion, and is skipped for the same reason. A precedent
-    the caller may not read (its own row or its source above the caller's
-    clearance, or a lookup that failed) is skipped too, so the options match what
-    ``GET /precedents`` serves that caller.
+    the caller may not read (its own row, its graph node or its source above the
+    caller's clearance, or a lookup that failed) is skipped too, so the options
+    match what ``GET /precedents`` serves that caller.
     """
     registry = get_registry()
     event_log = registry.operational.event_log
