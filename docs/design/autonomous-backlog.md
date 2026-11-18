@@ -47,10 +47,10 @@
    `TRELLIS_ALLOW_ENV_DRIFT=1` downgrades it to a warning for deliberate work in a
    known-drifted environment — but a gate green under that flag does not predict CI,
    and only `1`/`true`/`yes`/`on` turn it on: `=0` leaves the gate enforcing (#498).
-4. Open a PR. **Merge only when all six workflows are green** — `lint`, `typecheck`,
-   `tests` (3.11/3.12/3.13), `codeql`, `openapi`. `main` has no required status
-   checks configured, so GitHub will *not* enforce this for you; the gate is the
-   agent's responsibility. See [Repo-level gap](#repo-level-gap) below.
+4. Open a PR. **Merge only when every check is green** against current `main`
+   ([swarm-handoff §4](./swarm-handoff.md#4-the-merge-gate)). `main` now has required
+   status checks, but no required review, so the review gate is still the agent's
+   responsibility. See [Repo-level gap](#repo-level-gap) below.
 5. `save_experience` on the way out, including failed steps with their `error` set.
 
 ## Autonomy classes
@@ -97,7 +97,7 @@ explicitly authorized **this plan's Wave D #256 staged seam** for swarm executio
 **reversible in-repo PR1**; excludes publishing, external package release, and credentials.
 Owner review and the adversarial merge gate ([swarm-handoff §4.1](./swarm-handoff.md#41-the-review-gate--every-pr-before-merge)) still apply.
 
-**Status (2026-09-24): the override above is spent.** It authorized one PR and #537 was that PR (`RegistryContext` + `prepare_registry_params`, Bolt setup moved onto the store classes, a synthetic entry-point plugin test, and `tests/unit/test_registry_plugin_boundary_rule.py`); the contract is now in [`adr-plugin-contract.md` § Registry preparation hook](./adr-plugin-contract.md#registry-preparation-hook-store-plugins). The paragraph stays as the authorization record. What remains of #256 — extracting a separate distribution and publishing it — is **owner-only** per the owner's 2026-09-09 comment on the issue (publishing is never an agent's call — [swarm-handoff §2](./swarm-handoff.md#2-the-autonomy-contract)), so do not dispatch it.
+**Status (2026-09-24): the override above is spent.** It authorized one PR and #537 was that PR (`RegistryContext` + `prepare_registry_params`, Bolt setup moved onto the store classes, a synthetic entry-point plugin test, and `tests/unit/test_registry_plugin_boundary_rule.py`); the contract is now in [`adr-plugin-contract.md` § Registry preparation hook](./adr-plugin-contract.md#registry-preparation-hook-store-plugins). The paragraph stays as the authorization record. What remains of #256 — extracting a separate distribution and publishing it — is **owner-only** per the owner's 2026-09-09 comment on the issue (publishing is never an agent's call — [swarm-handoff §2](./swarm-handoff.md#2-the-autonomy-contract)), so do not dispatch it. #256 itself was closed as not planned on 2026-10-29, with its reopen condition stated on the issue.
 
 ---
 
@@ -285,7 +285,7 @@ at that snapshot (superseded by the 40-issue corpus).
 | H1 | Merge [#328](https://github.com/ronsse/trellis-ai/issues/328) — dependabot ruff 0.15.22→0.16.4, mypy bump | `panel` | **done** — merged as `2f8db2c` | CI-green and mergeable today. Expect new ruff findings on the bump; fixing them is in scope for this item. |
 | H2 | Land the 2026-08-26 doc reconciliation (`TODO.md` + roadmap) | `panel` | **done** — [#340](https://github.com/ronsse/trellis-ai/pull/340), `31058fc` | Seven stale checkboxes ticked, one rescoped, two false claims corrected. That pass is itself now stale; this file is its successor. |
 | H3 | Dispose of [#304](https://github.com/ronsse/trellis-ai/issues/304) — honest DoD-3 loop metric + reframe | `panel` | **done** — merged | Open 8 days, CI-green. A metric *reframe* is reversible, so the panel may decide it. |
-| H4 | Dispose of [#208](https://github.com/ronsse/trellis-ai/issues/208) — re-home to consumer-kg or close | `human` | **open** — the only Wave 0 item left (verified 2026-08-31) | Closing an issue can hide an open gate (the #312 failure). Operator call. |
+| H4 | Dispose of [#208](https://github.com/ronsse/trellis-ai/issues/208) — re-home to consumer-kg or close | `human` | **done** — closed in the tracker 2026-10-29 (see the issue) | Closing an issue can hide an open gate (the #312 failure). Operator call. |
 
 ## Wave 1 — make measurement trustworthy
 
@@ -448,7 +448,7 @@ State of the instrumentation, measured 2026-08-26 — most of it already exists:
 scope: *"what this deliberately does not claim: the agent's total spend ... or a ratio
 against it."* This wave closes exactly that.
 
-**F1 — Give `TOKEN_TRACKED` a `pack_id`, then compute value-per-token.** `class: panel`
+**F1 — Give `TOKEN_TRACKED` a `pack_id`, then compute value-per-token.** ~~`class: panel`~~ — ✅ **LANDED** via [#353](https://github.com/ronsse/trellis-ai/pull/353) (`61533ef`; `trellis analyze value`), coverage bounded by [#389](https://github.com/ronsse/trellis-ai/pull/389). [#362](https://github.com/ronsse/trellis-ai/issues/362), [#363](https://github.com/ronsse/trellis-ai/issues/363) and [#364](https://github.com/ronsse/trellis-ai/issues/364) are closed.
 The item-level join is arithmetically available today and nothing performs it. The
 call-level join is blocked by **one missing field**: `track_token_usage`
 ([`retrieve/token_tracker.py:39`](../../src/trellis/retrieve/token_tracker.py)) emits
@@ -480,7 +480,7 @@ citations, so the join is far better fed than the headline suggested. F1's real 
 **sample size**: 15 pack-targeted feedback events across 31 packs in 30 days. State `n`
 alongside every ratio and refuse to report one below a stated minimum.
 
-**F2 — Act on the measurement: trimming and disclosure policy.** `class: panel`
+**F2 — Act on the measurement: trimming and disclosure policy.** ~~`class: panel`~~ — ✅ **graduated disclosure LANDED** via #359 ([`retrieve/disclosure.py`](../../src/trellis/retrieve/disclosure.py)); excerpt width and index mode by default were **measured and refused**. **Do not re-propose either:** the reasoning is in `docs/design/claude-md-rationale.md` § "Graduated disclosure".
 Once F1 produces a number, the levers become tunable instead of guessed:
 - **Excerpt width** — `truncate_excerpt` and the embed-time cut in `build_vector_row`.
 - **Progressive disclosure** — #305 shipped index-mode packs and `get_items` batch
@@ -493,7 +493,7 @@ Once F1 produces a number, the levers become tunable instead of guessed:
 Acceptance: each lever change is justified by a before/after useful-token fraction on
 the same window, not by a plausibility argument.
 
-**F3 — Counterfactual benefit (deferred, named so it is not forgotten).** `class: human`
+**F3 — Counterfactual benefit (deferred, named so it is not forgotten).** `class: human` — the withhold arm exists as a randomised pack holdout, **off by default**, via [#701](https://github.com/ronsse/trellis-ai/pull/701) ([`core/pack_holdout.py`](../../src/trellis/core/pack_holdout.py)). Turning it on remains the operator's call.
 F1 measures *precision of what was served* — the honest name for it is a value-density
 proxy, not benefit. True benefit is counterfactual: does an agent with memory
 outperform the same agent without it? That needs a withhold arm — deliberately serving
@@ -503,7 +503,7 @@ panel one. Do not let F1's number get described as "benefit" in prose; it is not
 
 ## Wave 2 — retrieval quality
 
-**B1 — [#298](https://github.com/ronsse/trellis-ai/issues/298) same-day trace/artifact stubs outrank topical content.** `class: panel`
+**B1 — [#298](https://github.com/ronsse/trellis-ai/issues/298) same-day trace/artifact stubs outrank topical content.** ~~`class: panel`~~ — **CLOSED** 2026-09-03 in favour of [#371](https://github.com/ronsse/trellis-ai/issues/371) (itself closed 2026-09-21): the re-measurement on the issue refuted "outranks". See the issue.
 Open 18 days; the oldest untouched retrieval defect. Partially mitigated by the content
 floor and by #311's skip-discipline prompts — **re-measure before implementing**, the
 remaining gap may be smaller than the issue describes.
@@ -562,7 +562,10 @@ Three findings from the verification, none of which the original item anticipate
   so it rescans forever. Partly addressed: the extractor now resolves each *distinct*
   token once per document, which removed 40% of resolver calls on this corpus.
 - **B3′ — the real residual gap: past `DEFAULT_NAME_SCAN_LIMIT` the resolver stops
-  learning and starts being wrong.** `class: panel` — this is the item worth queueing.
+  learning and starts being wrong.** ~~`class: panel`~~ — ✅ **LANDED** via
+  [#530](https://github.com/ronsse/trellis-ai/pull/530) (`1ef5c9c`, closes
+  [#369](https://github.com/ronsse/trellis-ai/issues/369)): name aliases bind on entity
+  writes, plus a bounded, resumable backfill. The original framing follows.
   `query` is `ORDER BY created_at DESC LIMIT n`, so above 2000 current nodes an older
   entity reports a clean "no match" (the duplicate-`hermes` failure #289 ended, returning
   by another door) and `mintable` is permanently `False`. 964 current nodes growing
@@ -597,15 +600,15 @@ actually strict.
 reachable, and [#360](https://github.com/ronsse/trellis-ai/issues/360) — which "gains most
 of its point after C1" — is unblocked.
 
-**C2 — [#256](https://github.com/ronsse/trellis-ai/issues/256) extract Bolt backends to a `trellis-stores-bolt` plugin.** `class: panel`
+**C2 — [#256](https://github.com/ronsse/trellis-ai/issues/256) extract Bolt backends to a `trellis-stores-bolt` plugin.** ~~`class: panel`~~ — **CLOSED as not planned** 2026-10-29 (see the issue). The registry seam shipped as [#537](https://github.com/ronsse/trellis-ai/pull/537); extracting a separate distribution did not, and C3 did not wait on it.
 Keystone, labelled `ready`. Halves #194's enforcement surface, so it precedes C3.
 
-**C3 — [#194](https://github.com/ronsse/trellis-ai/issues/194) classification enforcement, minimal slice.** `class: blocked` → `panel` once C1+C2 land
+**C3 — [#194](https://github.com/ronsse/trellis-ai/issues/194) classification enforcement, minimal slice.** ~~`class: blocked` → `panel` once C1+C2 land~~ — ✅ **CLOSED** 2026-10-29: labels at write time (#1021, #1026, #1037), the read floor (#1021, #1026) and the mutation floor (#1027). The remaining gaps are tracked in [#1029](https://github.com/ronsse/trellis-ai/issues/1029) (open).
 Populate `DataClassification` on write paths; PackBuilder/search filter and the policy
 gate deny by caller scope. Carries an owner-approved exception to pull one slice of
 tag-vocab Phase 4 forward. Acceptance is already written in roadmap §3.H.1.
 
-**C4 — [#264](https://github.com/ronsse/trellis-ai/issues/264) log every judged memory operation as a training example.** `class: panel`
+**C4 — [#264](https://github.com/ronsse/trellis-ai/issues/264) log every judged memory operation as a training example.** ~~`class: panel`~~ — **CLOSED** 2026-09-21; shipped via #266, #540 and #566. The issue's last comment names a remaining roster step; see the issue.
 Labelled `ready` / `mechanical`. The classify-layer instance already exists
 (`JudgedOpType.CLASSIFICATION` from #321); this generalizes it.
 
@@ -613,6 +616,8 @@ Labelled `ready` / `mechanical`. The classify-layer instance already exists
 
 Fixture-testable now; the consumer-kg pilot restart is the *validation* gate, not the
 implementation gate. Spec: [`adr-query-history-promotion.md`](./adr-query-history-promotion.md) §2–§5.
+
+**All four issues were closed as not planned on 2026-10-29**, each with its reopen condition on the issue. Do not dispatch from this table.
 
 | id | item | class |
 |---|---|---|
@@ -623,7 +628,7 @@ implementation gate. Spec: [`adr-query-history-promotion.md`](./adr-query-histor
 
 ## Wave 5 — capture density
 
-**E1 — [#306](https://github.com/ronsse/trellis-ai/issues/306) observer-agent capture via local model.** ~~`class: panel`~~ — **the observer was measured and refused; the density it was for shipped deterministically.** `feat/306-tool-use-density`
+**E1 — [#306](https://github.com/ronsse/trellis-ai/issues/306) observer-agent capture via local model.** ~~`class: panel`~~ — **the observer was measured and refused; the density it was for shipped deterministically.** ✅ merged as [#582](https://github.com/ronsse/trellis-ai/pull/582) (`fe30b6f`); #306 closed 2026-09-21.
 
 The item proposed a second local model (hermes3:8b) watching every tool use, to lift
 #255 capture from session-level to tool-level density. Its own precondition — verify the
@@ -732,7 +737,7 @@ worth carrying into E1:
 Also split `sessions_skipped_empty` out of `sessions_sampled_out`: under the old
 counter, #332's 61% presented as a sampling decision.
 
-**#365 — retrieval availability.** Option three shipped in the same PR: `analyze health`
+**#365 — retrieval availability.** **CLOSED** 2026-09-12 on option three (see the issue). Option three shipped in the same PR: `analyze health`
 states that `untargeted_feedback` assumes non-retrieval and that retrieval availability
 is unmeasured. The other two shapes remain open and are follow-ups; the issue's own
 ordering holds, since recording an attempt *on arrival* cannot see a call that never
@@ -742,16 +747,18 @@ arrives.
 
 ## Repo-level gap
 
-`main` has **no required status checks** and `required_approving_review_count: 0`;
-`allow_auto_merge` is `false`. Any push or merge can land on `main` without CI having
-passed. Every workflow exists and runs on PRs — nothing enforces the result. Agents
-working this backlog gate on CI themselves, but that is a convention, not a control.
+`main` now has **required status checks** (read the live list with
+`gh api repos/ronsse/trellis-ai/branches/main/protection`), so CI is enforced. Two parts of
+the gap remain: `required_approving_review_count: 0`, and `allow_auto_merge` is `false`.
+No review is required, so the adversarial review gate
+([swarm-handoff §4.1](./swarm-handoff.md#41-the-review-gate--every-pr-before-merge)) is
+a convention, not a control.
 
-`class: human` — this is a repo-settings change and stays with the operator.
+`class: human` — repo-settings changes stay with the operator.
 
 ## Deliberately not in this backlog
 
-- **[#250](https://github.com/ronsse/trellis-ai/issues/250) Aura credential purge** — 3 of 4 tasks verified done 2026-08-26; the remaining one needs a browser session at the Neo4j console. Irreducibly operator-only.
-- **[#257](https://github.com/ronsse/trellis-ai/issues/257) ingest-normalization ADR** — labelled `owner-only`.
-- **[#261](https://github.com/ronsse/trellis-ai/issues/261) promote-to-standing advisory** — `blocked:signal`; needs loop throughput this deployment does not yet produce at single-user scale.
+- **[#250](https://github.com/ronsse/trellis-ai/issues/250) Aura credential purge** — closed 2026-09-30, every task checked (see the issue).
+- **[#257](https://github.com/ronsse/trellis-ai/issues/257) ingest-normalization ADR** — done: recorded as [`adr-corpus-ingestion.md`](./adr-corpus-ingestion.md) §8 via [#626](https://github.com/ronsse/trellis-ai/pull/626).
+- **[#261](https://github.com/ronsse/trellis-ai/issues/261) promote-to-standing advisory** — closed as not planned 2026-10-29; the reopen condition is on the issue.
 - **Tag-vocabulary phases, B.4 RDF export, E.4 AWS dry-run** — gated on a design partner asking or on infra access, per roadmap §4.
