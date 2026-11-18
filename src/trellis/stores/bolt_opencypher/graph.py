@@ -745,9 +745,15 @@ def _detach_delete_until_none(tx: ManagedTransaction, cypher: str, nid: str) -> 
     Neo4j reads at READ COMMITTED and takes write locks: a DETACH DELETE
     that waited on a writer's lock matched its rows before the wait, so a
     version that writer created is invisible to that statement and visible
-    to the next one. A statement can also count a row that a concurrent
-    purge removed while it waited, so ``delete_node`` locks the node's rows
-    before its first count. ArcadeDB never waits (the conflicting commit
+    to the next one. When the count was a returned ``count(x)``, a statement
+    that waited on a concurrent purge also counted a row that purge removed
+    while it waited (#699); ``delete_node`` therefore takes the node's row
+    locks before its first delete, so the lock statement, not the delete,
+    is the one that waits, and the delete matches only what the other purge
+    left. Whether
+    ``nodes_deleted`` would count such a row has not been measured; the
+    lock statement does not depend on the answer. ArcadeDB never waits (the
+    conflicting commit
     fails and the driver re-runs the whole transaction function), so there
     the repeat finds nothing.
 

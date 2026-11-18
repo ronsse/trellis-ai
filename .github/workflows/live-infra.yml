@@ -107,21 +107,24 @@ jobs:
           --health-retries 30
           --health-start-period 30s
 
-      # Neo4j 2025.12 (community) — the version the shape #2 vector store
-      # documents for self-hosted use. Community runs the full graph + SCD-2
-      # suite. It refuses the Cypher 25 SEARCH clause the vector store sends
-      # first: its databases default to Cypher 5 and reject the keyword at
-      # parse time (`Invalid input 'SEARCH'`, GQL 42I67), and under a
-      # `CYPHER 25` prefix it answers 51N26 "not available". The store
-      # classifies on both and falls back to db.index.vector.queryNodes, so
-      # the vector tests run here through that fallback and none skips. The
-      # SEARCH form itself therefore runs on no CI server.
+      # Neo4j 2026.10.2 (community). Community runs the full graph + SCD-2
+      # suite. Its databases default to Cypher 25, and it runs the Cypher 25
+      # SEARCH clause the vector store sends first, so the vector tests here
+      # take the SEARCH path, not the db.index.vector.queryNodes fallback.
+      # TRELLIS_TEST_NEO4J_VECTOR_PATH below records that, and
+      # test_neo4j_vector.py fails when a query takes the other path. Until
+      # 2026-11 this was neo4j:2025.12, which refuses SEARCH (GQL 42I67 under
+      # its default Cypher 5, 51N26 under a CYPHER 25 prefix), so the
+      # fallback was the only path CI ran; the switch between the two stays
+      # unit-tested in tests/unit/stores/test_neo4j_vector_search_fallback.py.
+      # 2026.10 is also the image on which #1272 (delete_node repeating
+      # forever) reproduced, so the Bolt purge's fix runs here.
       # NEO4J_AUTH sets the initial password so
       # there's no forced first-login change. The credentials are a literal
       # throwaway pair: the container is reachable only on the runner's
       # loopback, so there is nothing to keep secret.
       neo4j:
-        image: neo4j:2025.12
+        image: neo4j:2026.10.2
         env:
           NEO4J_AUTH: neo4j/trellistestpw
         ports:
@@ -205,6 +208,10 @@ jobs:
           TRELLIS_TEST_NEO4J_USER: neo4j
           TRELLIS_TEST_NEO4J_PASSWORD: trellistestpw
           TRELLIS_TEST_NEO4J_DATABASE: neo4j
+          # Which path Neo4jVectorStore.query takes on the neo4j service
+          # image: `search` (the Cypher 25 clause) or `procedure` (the
+          # db.index.vector.queryNodes fallback). Change it with the image.
+          TRELLIS_TEST_NEO4J_VECTOR_PATH: search
           TRELLIS_TEST_PG_DSN: postgresql://trellis:trellis@localhost:5432/trellis
           TRELLIS_TEST_ARCADEDB: "1"
           TRELLIS_TEST_ARCADEDB_URI: bolt://localhost:17687
@@ -246,7 +253,7 @@ jobs:
         #
         # They were added on measurement, not on the assumption that they
         # would pass. Run 2026-09-12 against containers started from this
-        # file's own images — arcadedata/arcadedb:26.8.1 and neo4j:2025.12:
+        # file's images at the time — arcadedata/arcadedb:26.8.1 and neo4j:2025.12:
         # test_arcadedb_graph 8 passed, test_arcadedb_vector 17 passed,
         # test_neo4j_graph 39 passed, test_neo4j_connectivity_live 4 passed.
         #
@@ -270,14 +277,15 @@ jobs:
         #
         # First, four of its five TestQuery cases reach the store's Cypher 25
         # `SEARCH ... IN (VECTOR INDEX ...)` clause, which the neo4j:2025.12
-        # container above refuses (`Invalid input 'SEARCH'`, GQL 42I67, under
-        # its default CYPHER 5; 51N26 under a CYPHER 25 prefix). They once
-        # skipped behind a capability gate. The store now falls back to the
-        # db.index.vector.queryNodes procedure when the server refuses SEARCH,
-        # so on this image the vector query runs through that fallback and
-        # every case runs, ungated. The SEARCH form itself therefore runs on
-        # no CI server; the switch between the two is unit-tested in
-        # tests/unit/stores/test_neo4j_vector_search_fallback.py.
+        # container this job used then refuses (`Invalid input 'SEARCH'`,
+        # GQL 42I67, under its default CYPHER 5; 51N26 under a CYPHER 25
+        # prefix). They once skipped behind a capability gate. The store now
+        # falls back to the db.index.vector.queryNodes procedure when the
+        # server refuses SEARCH, so every case runs, ungated. The
+        # neo4j:2026.10.2 container above runs SEARCH, so here the query
+        # takes the SEARCH path; TRELLIS_TEST_NEO4J_VECTOR_PATH records that
+        # and a TestQuery case asserts it. The switch between the two is
+        # unit-tested in tests/unit/stores/test_neo4j_vector_search_fallback.py.
         #
         # Second, the index name. Neo4j allows one vector index per (label,
         # property): a second CREATE under a different name returns success
