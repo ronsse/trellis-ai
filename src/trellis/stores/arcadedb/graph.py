@@ -57,6 +57,11 @@ _REGISTRY_MIGRATIONS_KEY = f"{__name__}:provenance_migrations"
 #: shares this code and why that is affordable here.
 _GENERIC_ENGINE_ERROR_CODE = "Neo.DatabaseError.General.UnknownError"
 
+#: A fragment only ``create_node_if_absent``'s statement contains. ArcadeDB
+#: echoes the failed statement in a generic-bucket message, so this names the
+#: statement a :data:`_GENERIC_ENGINE_ERROR_CODE` fault came from.
+_FIRST_CREATE_STATEMENT_MARKER = "$first_version_prefix"
+
 #: The code ArcadeDB gives a server that was asked to run in a transaction it
 #: never began. It is a ``ClientError``, so the driver's managed retry does
 #: not re-run it, and the same code also carries every duplicate-key
@@ -202,6 +207,40 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
         if super()._is_alias_write_contention(exc):
             return True
         return getattr(exc, "code", None) == _GENERIC_ENGINE_ERROR_CODE
+
+    def _is_first_create_write_contention(self, exc: Exception) -> bool:
+        """Widen the base first-create predicate over the generic error channel.
+
+        A first creator that loses the ``node_version_unique`` race fails at
+        commit with the duplicate key, which the base predicate reads. Its
+        re-run then re-reads the id while the winner's commit is landing, and
+        ArcadeDB can resolve the ``node_id`` index entry to a record it cannot
+        yet load: the server log shows ``RecordNotFoundException: Record #1:0
+        not found`` under the statement's ``OPTIONAL MATCH``, and the client
+        sees only :data:`_GENERIC_ENGINE_ERROR_CODE` with ``Error executing
+        Cypher command: <the cypher>`` (the cause does not cross Bolt, as
+        :meth:`_is_alias_write_contention` records). Measured against
+        ``arcadedata/arcadedb:26.8.1``: 1 of 3 runs of the 8-writer race
+        check raised it before this override, and live-infra failed on it
+        4 of 8 runs.
+
+        The re-run is safe for the reason the alias path's is: the failed
+        transaction rolled back whole, so the next attempt reads committed
+        state and answers as a serialized call would. Only this statement's
+        errors reach the predicate, so the marker does not screen out other
+        statements; what it excludes is a generic-code error whose message
+        does not echo the Cypher, such as a commit-time or connection-level
+        fault. Any fault ArcadeDB raises while executing this statement, and
+        echoes, is therefore re-run, race or not. The base class's attempt
+        bound keeps a permanent one from spinning: it is raised unchanged
+        after the last attempt.
+        """
+        if super()._is_first_create_write_contention(exc):
+            return True
+        if getattr(exc, "code", None) != _GENERIC_ENGINE_ERROR_CODE:
+            return False
+        message = str(getattr(exc, "message", "") or exc)
+        return _FIRST_CREATE_STATEMENT_MARKER in message
 
     @staticmethod
     def _is_transaction_not_begun(exc: Exception) -> bool:

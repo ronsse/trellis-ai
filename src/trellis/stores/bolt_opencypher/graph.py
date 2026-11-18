@@ -1191,7 +1191,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                 record = self._run_write_single(cypher, **params)
             except Exception as exc:
                 if attempt == _FIRST_CREATE_ATTEMPTS or not (
-                    _is_first_create_contention(exc)
+                    self._is_first_create_write_contention(exc)
                 ):
                     raise
                 logger.debug(
@@ -1206,6 +1206,17 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         # Unreachable: the last attempt returns or raises.
         msg = f"create_node_if_absent({node_id!r}): no attempt ran"
         raise StoreError(msg, store="graph")
+
+    def _is_first_create_write_contention(self, exc: Exception) -> bool:
+        """Return True when ``exc`` means ``create_node_if_absent`` lost the race.
+
+        The portable answer is a ``node_version_unique`` violation
+        (:func:`_is_first_create_contention`). A per-backend seam, as
+        :meth:`_is_alias_write_contention` is: ArcadeDB widens it over the
+        other channel its lost race arrives on — see
+        :meth:`~trellis.stores.arcadedb.graph.ArcadeDBGraphStore._is_first_create_write_contention`.
+        """
+        return _is_first_create_contention(exc)
 
     def _current_node_rows(self, node_id: str) -> list[tuple[str, str, str]]:
         """``(valid_from, version_id, row id)`` of each current row of ``node_id``."""

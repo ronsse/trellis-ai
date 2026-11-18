@@ -16,6 +16,8 @@ reads message text.
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 pytest.importorskip("neo4j")
@@ -241,3 +243,104 @@ def test_neo4j_does_not_re_read_and_arcadedb_does() -> None:
 
     assert Neo4jGraphStore.VERIFY_FIRST_CREATE_UNIQUENESS is False
     assert ArcadeDBGraphStore.VERIFY_FIRST_CREATE_UNIQUENESS is True
+
+
+# The shape the loser's re-run raised on ``arcadedata/arcadedb:26.8.1`` once the
+# winner's commit was landing (captured 2026-11-18): the server log names
+# ``RecordNotFoundException: Record #1:0 not found``, but only the outer text,
+# echoing the statement, crosses Bolt.
+_FIRST_CREATE_CYPHER_ECHO = (
+    "Error executing Cypher command: \n"
+    "        OPTIONAL MATCH (row:Node {node_id: $node_id})\n"
+    "        WITH collect(row) AS rows\n"
+    "        WITH rows, [r IN rows WHERE r.valid_to IS NULL] AS current_rows\n"
+    "        WHERE size(current_rows) = 0\n"
+    "        CREATE (n:Node)\n"
+    "        SET n = $new_props\n"
+    "        SET n.version_id = $first_version_prefix + toString(size(rows))\n"
+    "        RETURN n.node_id AS node_id, elementId(n) AS row_id\n"
+)
+ARCADEDB_STALE_RE_READ = Neo4jError._hydrate_neo4j(
+    code="Neo.DatabaseError.General.UnknownError",
+    message=_FIRST_CREATE_CYPHER_ECHO,
+)
+
+
+def test_arcadedb_re_runs_its_stale_re_read_and_neo4j_does_not() -> None:
+    from trellis.stores.arcadedb.graph import ArcadeDBGraphStore
+
+    # The predicate reads no state, so a bare instance is enough.
+    arcadedb = object.__new__(ArcadeDBGraphStore)
+    assert arcadedb._is_first_create_write_contention(ARCADEDB_STALE_RE_READ)
+    assert arcadedb._is_first_create_write_contention(ARCADEDB_LOSER)
+    # The generic code from any other statement is not this race.
+    assert not arcadedb._is_first_create_write_contention(
+        Neo4jError._hydrate_neo4j(
+            code="Neo.DatabaseError.General.UnknownError",
+            message="Error executing Cypher command: MATCH (n:Node) RETURN n",
+        )
+    )
+    # Nor is this statement's text under another code.
+    assert not arcadedb._is_first_create_write_contention(
+        Neo4jError._hydrate_neo4j(
+            code="Neo.ClientError.Statement.SyntaxError",
+            message=_FIRST_CREATE_CYPHER_ECHO,
+        )
+    )
+    assert not arcadedb._is_first_create_write_contention(ALIAS_CLAIM_VIOLATION)
+
+    # The portable store (and Neo4j, which inherits it) raises it at once.
+    driver = FakeBoltDriver(creates=[ARCADEDB_STALE_RE_READ, False])
+    with pytest.raises(Neo4jError) as caught:
+        _store(driver).create_node_if_absent("n1", "service", {})
+    assert caught.value is ARCADEDB_STALE_RE_READ
+    assert len(driver.transactions) == 1
+
+
+def test_the_marker_names_the_first_create_statement() -> None:
+    from trellis.stores.arcadedb.graph import _FIRST_CREATE_STATEMENT_MARKER
+
+    # The statement that echoes it is the one ``create_node_if_absent`` runs.
+    source = inspect.getsource(BoltOpenCypherGraphStore.create_node_if_absent)
+    assert _FIRST_CREATE_STATEMENT_MARKER in source
+    assert _FIRST_CREATE_STATEMENT_MARKER in _FIRST_CREATE_CYPHER_ECHO
+
+
+def _arcadedb_store(driver: FakeBoltDriver) -> BoltOpenCypherGraphStore:
+    """An ArcadeDB store on the fake driver, so the retry loop itself runs.
+
+    ``ArcadeDBGraphStore.__init__`` needs a URI, so the base initializer is
+    called on a bare instance. The settle re-read is stubbed to one row.
+    """
+    from trellis.stores.arcadedb.graph import ArcadeDBGraphStore
+
+    class _Store(ArcadeDBGraphStore):
+        def _current_node_rows(self, node_id: str) -> list[tuple[str, str, str]]:
+            return [("t", "first-x-0", "#1:1")]
+
+    store = object.__new__(_Store)
+    BoltOpenCypherGraphStore.__init__(
+        store, driver=driver, database="neo4j", owns_driver=False, init_schema=False
+    )
+    return store
+
+
+def test_arcadedb_create_re_runs_a_stale_re_read_and_answers_present() -> None:
+    # The predicate test above does not reach the call site: this one fails
+    # when ``create_node_if_absent`` asks the portable predicate instead.
+    driver = FakeBoltDriver(creates=[ARCADEDB_STALE_RE_READ, False])
+    assert _arcadedb_store(driver).create_node_if_absent("n1", "service", {}) is False
+    assert [t.ended for t in driver.transactions] == ["rollback", "commit"]
+
+
+def test_arcadedb_create_re_runs_a_stale_re_read_and_answers_created() -> None:
+    driver = FakeBoltDriver(creates=[ARCADEDB_STALE_RE_READ, "#1:1"])
+    assert _arcadedb_store(driver).create_node_if_absent("n1", "service", {}) is True
+
+
+def test_arcadedb_persistent_stale_re_read_is_raised_after_the_bound() -> None:
+    driver = FakeBoltDriver(creates=[ARCADEDB_STALE_RE_READ] * 5)
+    with pytest.raises(Neo4jError) as caught:
+        _arcadedb_store(driver).create_node_if_absent("n1", "service", {})
+    assert caught.value is ARCADEDB_STALE_RE_READ
+    assert len(driver.transactions) == 3

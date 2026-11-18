@@ -60,7 +60,13 @@ def _race(stores: list[Any], node_id: str) -> list[Any]:
 
 def _check_round(stores: list[Any], node_id: str) -> None:
     results = _race(stores, node_id)
-    errors = [r for r in results if isinstance(r, Exception)]
+    # A driver error's repr is bare (``DatabaseError()``), so report its
+    # class, server code and message: a failure must say which error it was.
+    errors = [
+        (type(r).__name__, getattr(r, "code", None), str(r))
+        for r in results
+        if isinstance(r, Exception)
+    ]
     assert not errors, (node_id, errors)
     assert sorted(results) == [False] * (len(stores) - 1) + [True], (node_id, results)
     winner = results.index(True)
