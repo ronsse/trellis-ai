@@ -6313,12 +6313,12 @@ above its own clearance, and cannot touch a document it may not read.**
   below it, and so do MCP `get_graph` (root and neighbours), `get_items` and
   `get_file_context`, and REST `GET /api/v1/graph/search`,
   `GET /api/v1/entities/{id}` (root and neighbours) and `GET /api/v1/graph/history`,
-  which answer as for a missing node. **Three reads do not judge a node's key and
-  serve a labelled node whole**: the observation and measurement reads (REST
+  which answer as for a missing node. The observation and measurement reads (REST
   `GET /api/v1/observations` and `GET /api/v1/measurements`, MCP
-  `query_observations`) and the precedent listing (REST `GET /api/v1/precedents`,
-  MCP `get_lessons`), which lists a labelled precedent's title and description.
-  `total` and facet counts on graph search still count a labelled node, so a caller
+  `query_observations`) leave such a node out of their rows, and the precedent
+  listing (REST `GET /api/v1/precedents` and `GET /api/v1/precedents/domains`, MCP
+  `get_lessons`) leaves out a promotion whose current node carries such a key
+  (#1264). `total` and facet counts on graph search still count a labelled node, so a caller
   below the label can learn that some node matches; the one exception is a promoted
   precedent node, which `total` leaves out when it is withheld. With a depth above 1,
   a node reached only through a withheld neighbour is still returned, without an

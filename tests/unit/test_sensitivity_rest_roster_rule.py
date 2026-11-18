@@ -152,7 +152,7 @@ ROSTER: dict[str, str] = {
     "observations:record_observation": MUTATION,  # POST /observations
     "observations:list_observations": GATED,  # GET /observations
     "observations:record_measurement": MUTATION,  # POST /measurements
-    "observations:list_measurements": FREE,  # GET /measurements
+    "observations:list_measurements": GATED,  # GET /measurements
     "policies:list_policies": FREE,  # GET /policies
     "policies:get_policy": FREE,  # GET /policies/{policy_id}
     "policies:create_policy": ADMIN,  # POST /policies

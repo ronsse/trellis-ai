@@ -738,9 +738,11 @@ def list_precedents(
 ) -> dict[str, Any]:
     """List promoted precedents.
 
-    Below ``restricted`` a precedent is withheld when its own document row or
-    its source document is above the caller's clearance, unless the promotion
-    was made under the source-label rule. A learning promotion's
+    Below ``restricted`` a precedent is withheld when its current node carries a
+    ``data_classification`` property above the caller's clearance (#1264), or
+    when its own document row or its source document is above the caller's
+    clearance, unless the promotion was made under the source-label rule.
+    ``count`` is the number of rows served. A learning promotion's
     ``payload.source_item_id`` is left out when it names a document above the
     caller's clearance.
     """
@@ -781,9 +783,9 @@ def list_precedent_domains(
     the precedent miner wrote
     (:func:`trellis.retrieve.precedents.is_miner_candidate_event`) is a
     candidate, not a promotion, and is skipped for the same reason. A precedent
-    the caller may not read (its own row or its source above the caller's
-    clearance, or a lookup that failed) is skipped too, so the options match what
-    ``GET /precedents`` serves that caller.
+    the caller may not read (its own row, its graph node or its source above the
+    caller's clearance, or a lookup that failed) is skipped too, so the options
+    match what ``GET /precedents`` serves that caller.
     """
     registry = get_registry()
     event_log = registry.operational.event_log

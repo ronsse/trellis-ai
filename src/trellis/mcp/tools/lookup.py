@@ -63,8 +63,8 @@ def get_lessons(
 ) -> str:
     """Get lessons learned (promoted precedents) from past experiences.
 
-    A lesson whose own document row or source the caller's clearance cannot read
-    is left out.
+    A lesson whose own document row, graph node or source the caller's clearance
+    cannot read is left out.
 
     Args:
         domain: Optional domain filter.
