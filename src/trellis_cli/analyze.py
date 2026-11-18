@@ -122,6 +122,7 @@ if TYPE_CHECKING:
         HoldoutSecondaryInference,
         HoldoutSettledWindow,
     )
+    from trellis.analyze.memory_yield import TraceYield
     from trellis.analyze.trend import TrendReport
     from trellis.ops.write_health import RecoveryReport, ToolWriteStats
 
@@ -2143,19 +2144,27 @@ def memory_yield(
     read for requested_by), to the packs that served them or their chunks
     (PACK_ASSEMBLED.injected_items[], per (pack_id, item_id)), and to the
     per-item verdicts graders gave those packs (FEEDBACK_RECORDED).
+    A separate trace block counts traces recorded in the window, credited
+    through the two forms whose id names the trace (its trace-summary:
+    document and its trace: Activity node), broken down by outcome.status.
     Held-out packs are dropped and counted. Read-only.
     """
     from trellis.analyze.memory_yield import summarize_memory_yield  # noqa: PLC0415
 
     document_store = get_document_store()
     event_log = get_event_log()
+    trace_store = get_trace_store()
     with wrap_cli_meta_analysis(
         agent_suffix="analyze",
         analyzer_name="cli.analyze.memory_yield",
         disabled=no_meta_trace,
     ) as _meta_record:
         report = summarize_memory_yield(
-            document_store, event_log, days=days, limit=limit
+            document_store,
+            event_log,
+            trace_store=trace_store,
+            days=days,
+            limit=limit,
         )
         if _meta_record.enabled and report.totals.created > 0:
             _meta_record.produced_finding(
@@ -2195,6 +2204,35 @@ def memory_yield(
     )
     for statement in lim.statements:
         console.print(f"  [dim]note: {escape(statement)}[/dim]")
+    if report.traces is not None:
+        _print_trace_yield(report.traces)
+
+
+def _print_trace_yield(traces: TraceYield) -> None:
+    """The memory-yield trace block: counts and fixed labels only."""
+    console.print()
+    console.print("[bold]Traces recorded in the window[/bold] (a second view)")
+    if traces.truncated:
+        console.print(
+            f"  [yellow]truncated[/yellow] newest {traces.scan_limit} trace(s) "
+            "counted; raise --limit to see the rest"
+        )
+    for row in [*traces.by_outcome, traces.totals]:
+        console.print(
+            f"  {escape(row.outcome)}: recorded {row.recorded}, served "
+            f"{row.served} ({row.servings} servings), helpful "
+            f"{row.graded_helpful}, unhelpful {row.graded_unhelpful}, mixed "
+            f"{row.mixed}, served ungraded {row.served_ungraded}, never served "
+            f"{row.never_served}"
+        )
+    forms = ", ".join(
+        f"{escape(form)} {count}" for form, count in traces.servings_by_form.items()
+    )
+    console.print(
+        f"  [dim]servings by form: {forms or 'none'}; "
+        f"{traces.servings_counted_as_documents} of them are summary documents "
+        "already counted in the rows above, so do not add the two.[/dim]"
+    )
 
 
 @analyze_app.command("unanswered-intents")

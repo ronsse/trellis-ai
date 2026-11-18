@@ -11,9 +11,39 @@ window, parents only. A chunk (``<parent>#chunk-N``, read by
 :func:`~trellis.ingest_corpus.models.chunk_parent_id`) is credited to its
 parent, so a long document served chunk by chunk counts once as a created item
 and once per ``(pack_id, item_id)`` serving. Documents created before the
-window are out of scope; graph nodes, raw traces and advisories are not
-document rows and are not in the universe (their servings are counted under
-``limits.unattributed_servings``).
+window are out of scope; graph nodes and advisories are not document rows
+and are not in the universe (their servings are counted under
+``limits.unattributed_servings``). A trace's ``trace-summary:<id>`` document is
+a document row like any other: the trace-embed worker writes it, so it is
+counted under that worker's ``requested_by`` (``worker:embed-traces``), or under
+``source_system:trellis-trace`` when its creation event fell outside the scan.
+
+**Traces.** Given a trace store, the report adds a separate block,
+:class:`TraceYield`: traces whose ``created_at`` falls in the window, how many
+were ever served in a form whose id names the trace, and how they were graded.
+Two forms carry the link in the id itself, so crediting them is a fact in the
+data, not an inference:
+
+* ``trace-summary:<id>`` (:data:`TRACE_FORM_SUMMARY`), the document and vector
+  row the trace-embed worker renders from one trace, served by the keyword
+  (``item_type`` ``document``) and semantic (``vector``) axes;
+* ``trace:<id>`` (:data:`TRACE_FORM_ACTIVITY`), the Activity node trace
+  extraction mints for one trace, served by the graph axis as ``entity``.
+
+No retrieval strategy reads the trace store, so a raw trace id is never
+served. Precedents and the entity nodes extraction draws out of a trace are not
+credited: a precedent distils several traces, and an entity node is mentioned
+by many, so spreading their servings over traces would invent a link. They stay
+where they were (document rows or ``unattributed_servings``).
+
+The block is a second view, not a second universe: it is not added to
+``totals``. A summary document written in the window is still owned by its
+document row, and the block counts those servings again under
+``servings_counted_as_documents`` so the two are never summed. Only servings no
+document row owned leave ``limits.unattributed_servings``, which therefore
+falls by exactly ``totals.servings - servings_counted_as_documents`` of the
+block. A trace recorded before the window is out of scope, even when its
+summary, written later by a backlog pass, is a document created inside it.
 
 **Creation path.** Read by :func:`classify_creation_path` from the earliest
 creation evidence the event log holds for the document id, in this order:
@@ -54,6 +84,7 @@ from pydantic import Field
 
 from trellis.core.base import TrellisModel
 from trellis.core.pack_holdout import drop_holdout, is_holdout
+from trellis.core.reserved_doc_ids import TRACE_SUMMARY_DOC_ID_PREFIX
 from trellis.feedback.attribution import is_sectioned_payload
 from trellis.feedback.pack_rows import (
     has_served_rows,
@@ -73,6 +104,7 @@ from trellis.stores.base.event_log import (
 if TYPE_CHECKING:
     from trellis.stores.base.document import DocumentStore
     from trellis.stores.base.event_log import Event, EventLog
+    from trellis.stores.base.trace import TraceStore
 
 logger = structlog.get_logger(__name__)
 
@@ -96,6 +128,20 @@ CREATION_OPERATIONS: frozenset[str] = frozenset(
 BASIS_EVENT = "event:requested_by"
 BASIS_SOURCE_SYSTEM = "document:metadata.source_system"
 BASIS_NONE = "none"
+
+#: The two forms a served item id names its trace in (see the module
+#: docstring), as reported in :attr:`TraceYield.servings_by_form`.
+TRACE_FORM_SUMMARY = "trace_summary"
+TRACE_FORM_ACTIVITY = "graph_activity"
+
+#: Id prefix of the Activity node trace extraction mints for one trace
+#: (``trellis.extract.trace``).
+TRACE_ACTIVITY_ID_PREFIX = "trace:"
+
+#: ``outcome.status`` values the trace block breaks out; every other status,
+#: and a trace with no outcome, is :data:`OTHER_OUTCOME`.
+TRACE_OUTCOMES: tuple[str, ...] = ("success", "failure")
+OTHER_OUTCOME = "other"
 
 _PAGE = 500
 _SUCCESS = "success"
@@ -167,6 +213,40 @@ class YieldLimits(TrellisModel):
     statements: list[str] = Field(default_factory=lambda: list(_LIMIT_STATEMENTS))
 
 
+class TraceYieldRow(TrellisModel):
+    """Recorded, served and graded counts for a set of traces."""
+
+    outcome: str
+    recorded: int = 0
+    served: int = 0
+    servings: int = 0
+    graded_helpful: int = 0
+    helpful_servings: int = 0
+    graded_unhelpful: int = 0
+    unhelpful_servings: int = 0
+    mixed: int = 0
+    served_ungraded: int = 0
+    never_served: int = 0
+
+
+class TraceYield(TrellisModel):
+    """Traces recorded in the window, credited through the forms naming them."""
+
+    totals: TraceYieldRow = Field(
+        default_factory=lambda: TraceYieldRow(outcome="(all)")
+    )
+    by_outcome: list[TraceYieldRow] = Field(default_factory=list)
+    servings_by_form: dict[str, int] = Field(default_factory=dict)
+    #: Servings in ``totals`` a document row also owns (an in-window summary
+    #: document); never add the block to the document totals.
+    servings_counted_as_documents: int = 0
+    scan_limit: int = 0
+    traces_scanned: int = 0
+    #: True when the trace store held more than ``scan_limit`` traces in the
+    #: window; the newest ``scan_limit`` were counted.
+    truncated: bool = False
+
+
 class MemoryYieldReport(TrellisModel):
     """Per-creation-path yield over a window."""
 
@@ -178,6 +258,7 @@ class MemoryYieldReport(TrellisModel):
     )
     limits: YieldLimits = Field(default_factory=YieldLimits)
     scan: ScanCoverage = Field(default_factory=ScanCoverage)
+    traces: TraceYield | None = None
 
 
 def classify_creation_path(
@@ -217,6 +298,14 @@ class _Doc:
 
 
 @dataclass
+class _TraceTally:
+    outcome: str
+    servings: int = 0
+    helpful: int = 0
+    unhelpful: int = 0
+
+
+@dataclass
 class _Verdicts:
     helpful: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
     unhelpful: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
@@ -227,6 +316,7 @@ def summarize_memory_yield(
     document_store: DocumentStore,
     event_log: EventLog,
     *,
+    trace_store: TraceStore | None = None,
     days: int = 30,
     limit: int = DEFAULT_SCAN_LIMIT,
     now: datetime | None = None,
@@ -236,8 +326,10 @@ def summarize_memory_yield(
     Args:
         document_store: Source of the universe (rows created in the window).
         event_log: Holds the creation, pack and feedback events.
+        trace_store: Source of the trace block; ``None`` omits the block.
         days: Look-back window for creation and for the scans.
         limit: Per-event-type scan cap; truncation is reported in ``scan``.
+            Also caps the trace read, reported in ``traces.truncated``.
         now: Window end, for tests. Default: the current time.
 
     Returns:
@@ -262,6 +354,11 @@ def summarize_memory_yield(
     limits = YieldLimits()
     surfaces = _creation_surfaces(stored.events, executed.events)
     docs = _created_documents(document_store, since, surfaces, limits)
+    traces = (
+        _recorded_traces(trace_store, since, until, limit)
+        if trace_store is not None
+        else None
+    )
 
     held = sum(1 for event in pack_scan.events if is_holdout(event.payload))
     packs, feedback = drop_holdout(pack_scan.events, feedback_scan.events)
@@ -287,11 +384,18 @@ def summarize_memory_yield(
             if doc is None:
                 parent = chunk_parent_id(item_id)
                 doc = docs.get(parent) if parent is not None else None
-            if doc is None:
-                unattributed[item_type or "(none)"] += 1
-                continue
             is_helpful = item_id in verdicts.helpful.get(pack_id, ())
             is_unhelpful = item_id in verdicts.unhelpful.get(pack_id, ())
+            credited = traces is not None and traces.credit(
+                item_id,
+                helpful=is_helpful,
+                unhelpful=is_unhelpful,
+                owned_by_document=doc is not None,
+            )
+            if doc is None:
+                if not credited:
+                    unattributed[item_type or "(none)"] += 1
+                continue
             _add_serving(doc, tokens, helpful=is_helpful, unhelpful=is_unhelpful)
     limits.unattributed_servings = sum(unattributed.values())
     limits.unattributed_servings_by_item_type = dict(sorted(unattributed.items()))
@@ -304,6 +408,7 @@ def summarize_memory_yield(
         totals=totals,
         limits=limits,
         scan=scan,
+        traces=traces.rollup() if traces is not None else None,
     )
     logger.debug(
         "memory_yield_summarized",
@@ -381,6 +486,104 @@ def _created_documents(
         if len(page) < _PAGE:
             return docs
         offset += _PAGE
+
+
+def trace_form(item_id: str) -> tuple[str, str] | None:
+    """``(form, trace_id)`` when *item_id* names one trace, else ``None``.
+
+    A chunk of a summary document is credited to the summary's trace.
+    """
+    parent = chunk_parent_id(item_id) or item_id
+    for prefix, form in (
+        (TRACE_SUMMARY_DOC_ID_PREFIX, TRACE_FORM_SUMMARY),
+        (TRACE_ACTIVITY_ID_PREFIX, TRACE_FORM_ACTIVITY),
+    ):
+        if parent.startswith(prefix) and len(parent) > len(prefix):
+            return form, parent[len(prefix) :]
+    return None
+
+
+@dataclass
+class _TraceLedger:
+    """The trace block's working state: in-window traces and their servings."""
+
+    tallies: dict[str, _TraceTally]
+    scan_limit: int
+    scanned: int
+    truncated: bool
+    by_form: Counter[str] = field(default_factory=Counter)
+    owned_by_documents: int = 0
+
+    def credit(
+        self, item_id: str, *, helpful: bool, unhelpful: bool, owned_by_document: bool
+    ) -> bool:
+        """Credit one ``(pack_id, item_id)`` serving; whether a trace took it."""
+        named = trace_form(item_id)
+        if named is None:
+            return False
+        form, trace_id = named
+        tally = self.tallies.get(trace_id)
+        if tally is None:
+            return False
+        tally.servings += 1
+        tally.helpful += int(helpful)
+        tally.unhelpful += int(unhelpful)
+        self.by_form[form] += 1
+        self.owned_by_documents += int(owned_by_document)
+        return True
+
+    def rollup(self) -> TraceYield:
+        totals = TraceYieldRow(outcome="(all)")
+        rows = {name: TraceYieldRow(outcome=name) for name in TRACE_OUTCOMES}
+        rows[OTHER_OUTCOME] = TraceYieldRow(outcome=OTHER_OUTCOME)
+        for tally in self.tallies.values():
+            for target in (rows[tally.outcome], totals):
+                _accumulate_trace(target, tally)
+        return TraceYield(
+            totals=totals,
+            by_outcome=list(rows.values()),
+            servings_by_form=dict(sorted(self.by_form.items())),
+            servings_counted_as_documents=self.owned_by_documents,
+            scan_limit=self.scan_limit,
+            traces_scanned=self.scanned,
+            truncated=self.truncated,
+        )
+
+
+def _recorded_traces(
+    trace_store: TraceStore, since: datetime, until: datetime | None, limit: int
+) -> _TraceLedger:
+    """Traces created in the window, newest ``limit`` of them, by outcome.
+
+    Reads one more than ``limit`` so a full window is reported as truncated
+    rather than silently cut.
+    """
+    found = trace_store.query(since=since, until=until, limit=limit + 1)
+    truncated = len(found) > limit
+    kept = found[:limit]
+    tallies: dict[str, _TraceTally] = {}
+    for trace in kept:
+        status = trace.outcome.status.value if trace.outcome is not None else None
+        outcome = status if status in TRACE_OUTCOMES else OTHER_OUTCOME
+        tallies[trace.trace_id] = _TraceTally(outcome=outcome)
+    return _TraceLedger(
+        tallies=tallies, scan_limit=limit, scanned=len(kept), truncated=truncated
+    )
+
+
+def _accumulate_trace(target: TraceYieldRow, tally: _TraceTally) -> None:
+    target.recorded += 1
+    target.servings += tally.servings
+    target.helpful_servings += tally.helpful
+    target.unhelpful_servings += tally.unhelpful
+    if not tally.servings:
+        target.never_served += 1
+        return
+    target.served += 1
+    target.graded_helpful += int(tally.helpful > 0)
+    target.graded_unhelpful += int(tally.unhelpful > 0)
+    target.mixed += int(tally.helpful > 0 and tally.unhelpful > 0)
+    target.served_ungraded += int(not tally.helpful and not tally.unhelpful)
 
 
 def _served_ids(
@@ -497,10 +700,18 @@ __all__ = [
     "BASIS_NONE",
     "BASIS_SOURCE_SYSTEM",
     "CREATION_OPERATIONS",
+    "OTHER_OUTCOME",
+    "TRACE_ACTIVITY_ID_PREFIX",
+    "TRACE_FORM_ACTIVITY",
+    "TRACE_FORM_SUMMARY",
+    "TRACE_OUTCOMES",
     "UNKNOWN_PATH",
     "MemoryYieldReport",
     "PathYield",
+    "TraceYield",
+    "TraceYieldRow",
     "YieldLimits",
     "classify_creation_path",
     "summarize_memory_yield",
+    "trace_form",
 ]
