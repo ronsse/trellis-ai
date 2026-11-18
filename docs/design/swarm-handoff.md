@@ -219,13 +219,18 @@ gh pr view <n> --json statusCheckRollup,mergeStateStatus \
   --jq '(.statusCheckRollup|map(.name+"="+((.conclusion//.status)//"?"))|join("  ")),("mergeState: "+.mergeStateStatus)'
 ```
 
-All eight must be `SUCCESS` and `mergeState: CLEAN`: `lint`, `typecheck`,
-`test (3.11/3.12/3.13)`, `openapi-check`, `CodeQL`, `Analyze (python)`.
+Every check must be `SUCCESS` and `mergeState: CLEAN`. The required ones are `lint`,
+`typecheck`, `test (3.11, dev)`, `test (3.12, dev)`, `test (3.13, dev)`,
+`test (3.13, dev,all)`, `openapi-check`, `CodeQL`, `Analyze (python)`,
+`cold-install (3.11)` and `cold-install (3.13)`; read the live list with
+`gh api repos/ronsse/trellis-ai/branches/main/protection`. A check that has not
+registered yet reads as absent, not as failed, so count them before trusting `CLEAN`.
 
 **If `main` moved since the run, `gh pr update-branch` and wait for a fresh run.** This is
 not pedantry — a dependabot bump of ruff/mypy landed mid-session and could legitimately
-have failed the next PR's lint. `main` has **no required status checks**, so nothing but
-this discipline stands between an agent and an unverified merge (ledger D-3).
+have failed the next PR's lint. `main` now has required status checks and requires the
+branch to be up to date, so GitHub enforces this; no review is required, so the review
+gate below is still the agent's own (ledger D-3).
 
 ### 4.1 The review gate — every PR, before merge
 

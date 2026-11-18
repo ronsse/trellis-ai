@@ -64,7 +64,9 @@ def main() -> None:
     # Seed the entity our result will be linked to. In a real pipeline this
     # already exists in the graph; we create it so the demo is self-contained.
     target_entity_id = client.create_entity(
-        "orders-api", entity_type="service", properties={"name": "orders-api"}
+        "orders-api",
+        entity_type="SoftwareApplication",
+        properties={"name": "orders-api"},
     )
     print(f"target entity: {target_entity_id}\n")
 

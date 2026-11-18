@@ -41,7 +41,7 @@ Trellis exposes 16 macro tools. The eleven below return markdown (not raw JSON):
 |------|-------------|---------|
 | `get_context` | Search docs + graph + traces for task context | `get_context(intent="implement retry logic", domain="backend")` |
 | `save_experience` | Record a trace of completed work | `save_experience(trace_json="{...}")` |
-| `save_knowledge` | Create an entity in the knowledge graph | `save_knowledge(name="auth-service", entity_type="service")` |
+| `save_knowledge` | Create an entity in the knowledge graph | `save_knowledge(name="auth-service", entity_type="SoftwareApplication")` |
 | `save_memory` | Store a document for later retrieval | `save_memory(content="Rate limiting uses token bucket algorithm")` |
 | `get_lessons` | List precedents (proven patterns) | `get_lessons(domain="backend", max_tokens=1500)` |
 | `get_graph` | Explore entity neighborhood | `get_graph(entity_id="01JRK5N7QF", depth=2)` |
@@ -90,7 +90,7 @@ When you discover useful documentation or patterns, store them and connect to en
 
 ```
 save_memory(content="API rate limits: 1000 req/min per client", metadata={"source": "api-docs", "domain": "platform"})
-save_knowledge(name="rate-limiter", entity_type="concept", relates_to="api-gateway-id", edge_kind="entity_part_of")
+save_knowledge(name="rate-limiter", entity_type="Concept", relates_to="api-gateway-id", edge_kind="partOf")
 ```
 
 ## Context Window Tips
