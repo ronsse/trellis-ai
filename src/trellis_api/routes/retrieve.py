@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -402,58 +403,46 @@ def assemble_sectioned_pack(
 
 
 # The node type the learning promoter stores a precedent under.
-PRECEDENT_NODE_TYPE = "precedent"
 _PRECEDENT_SCAN_PAGE = 500
 
 
-def _withheld_match(row: dict[str, Any], precedents: PrecedentClearance) -> bool:
-    """Whether a ``/graph/search`` match is left out of the page *and* the counts.
-
-    A node labelled above the caller (#1264), judged from the row in hand with
-    no further read, and a promoted precedent stored under
-    ``PRECEDENT_NODE_TYPE`` that the caller may not read (#1080). A node in the
-    precedent namespace stored under another type is left out of the page but
-    still counted, as before.
-    """
-    if precedents.node_label_reason(row) is not None:
-        return True
-    return (
-        row["node_type"] == PRECEDENT_NODE_TYPE
-        and is_promoted_precedent_document(row["node_id"])
-        and precedents.verdict_of(row["node_id"], row) is not None
-    )
-
-
-def _count_withheld_by_type(
+def _readable_matches(
     store: GraphStore,
     precedents: PrecedentClearance,
     q: str | None,
     node_type: str | None = None,
-) -> dict[str, int]:
-    """How many matches of ``q`` (and ``node_type``) the caller may not read, per type.
+    *,
+    sort: str = "created_at",
+    descending: bool = True,
+) -> Iterator[dict[str, Any]]:
+    """Every match of ``q`` (and ``node_type``) the caller may read, in sort order.
 
-    A count depends only on rows the key can read (#1026), so a withheld match
-    leaves ``/graph/search``'s ``total`` and its facets as well as the page:
-    a promoted precedent (#1080) and a node labelled above the caller (#1264).
-    Nothing reports the subtraction. Walks every match once, in pages of
-    ``_PRECEDENT_SCAN_PAGE``; a label is read from the row, and only a promoted
-    precedent costs a document read.
+    The one predicate ``/graph/search``'s page, its ``total`` and its facets
+    share, so they cannot disagree: ``precedents.verdict_of`` is ``None``. That
+    withholds a node labelled above the caller (#1029, #1264) and any node in
+    the promoted-precedent namespace the caller may not read (#1080), whatever
+    type it is stored under. Walks every match once, in store pages of
+    ``_PRECEDENT_SCAN_PAGE``; ``search_nodes`` ends each sort key with
+    ``node_id``, so the pages neither repeat nor skip a row while the graph
+    does not change. A label is read from the row in hand, and only a node in
+    the precedent namespace costs a document read.
     """
-    withheld: dict[str, int] = {}
     offset = 0
     while True:
         rows, total = store.search_nodes(
             search=q,
             node_type=node_type,
+            sort=sort,
+            descending=descending,
             limit=_PRECEDENT_SCAN_PAGE,
             offset=offset,
         )
         for r in rows:
-            if _withheld_match(r, precedents):
-                withheld[r["node_type"]] = withheld.get(r["node_type"], 0) + 1
+            if precedents.verdict_of(r["node_id"], r) is None:
+                yield r
         offset += len(rows)
         if not rows or offset >= total:
-            return withheld
+            return
 
 
 @router.get(
@@ -478,34 +467,44 @@ def search_entities(
     """Search graph nodes by name or type.
 
     A node whose own ``data_classification`` property is above the caller's
-    clearance is left out of the page (#1029) and of ``total`` (#1264). Every
-    other match is served; a hit whose ``document_ids``, ``evidence_ref``
-    property or ``lifecycle.superseded_by`` names a document the caller may not
-    read is served without that id.
+    clearance is left out (#1029, #1264), and so is a node in the promoted
+    precedent namespace the caller may not read: its own row or its source
+    above the caller's clearance, or a lookup that failed (#1080). Every other
+    match is served; a hit whose ``document_ids``, ``evidence_ref`` property or
+    ``lifecycle.superseded_by`` names a document the caller may not read is
+    served without that id.
 
-    A promoted precedent the caller may not read (its own row or its source
-    above the caller's clearance, or a lookup that failed) is left out of the
-    page and of ``total`` (#1080). ``offset`` counts stored matches, withheld
-    ones included, so a page holding a withheld match is shorter than ``limit``
-    and stepping ``offset`` by ``limit`` serves every readable match once.
+    For a caller below ``restricted``, ``offset`` and ``total`` both count the
+    matches that caller may read, so a withheld match shortens no page and
+    stepping ``offset`` by ``limit`` serves every readable match once. The
+    cost is one walk of every match of ``q`` per request. A ``restricted``
+    caller reads the stored page with one store call.
     """
     registry = get_registry()
     store = registry.knowledge.graph_store
     # Lenient: an unknown sort is created_at, and any order but asc (in any
     # case) descends.
-    rows, total = store.search_nodes(
-        search=q,
-        node_type=node_type,
-        sort=sort if sort in NODE_SEARCH_SORTS else "created_at",
-        descending=order.lower() != "asc",
-        limit=limit,
-        offset=offset,
-    )
+    sort_key = sort if sort in NODE_SEARCH_SORTS else "created_at"
+    descending = order.lower() != "asc"
     clearance = request_clearance(ctx)
     precedents = PrecedentClearance(registry.knowledge.document_store, clearance, store)
-    if clearance != "restricted":
-        rows = [r for r in rows if precedents.verdict_of(r["node_id"], r) is None]
-        total -= sum(_count_withheld_by_type(store, precedents, q, node_type).values())
+    if clearance == "restricted":
+        rows, total = store.search_nodes(
+            search=q,
+            node_type=node_type,
+            sort=sort_key,
+            descending=descending,
+            limit=limit,
+            offset=offset,
+        )
+    else:
+        rows, total = [], 0
+        for row in _readable_matches(
+            store, precedents, q, node_type, sort=sort_key, descending=descending
+        ):
+            if offset <= total < offset + limit:
+                rows.append(row)
+            total += 1
     rows = conceal_node_pointers(
         rows, registry.knowledge.document_store, clearance, precedents=precedents
     )
@@ -548,24 +547,23 @@ def search_entity_facets(
     The graph page's type chips. Every type is counted server-side, in its
     stored case, by count descending then type, and the counts sum to
     ``/graph/search``'s ``total`` for the same ``q``. ``node_type`` is not a
-    parameter because it is the dimension being counted. A promoted
-    precedent the caller may not read is not counted (#1080), nor is a node
-    labelled above the caller (#1264); a type with nothing left is not listed.
+    parameter because it is the dimension being counted. A match
+    ``/graph/search`` withholds from the caller is not counted (#1080, #1264),
+    by the same predicate, and a type with nothing left is not listed. For a
+    caller below ``restricted`` that is one walk of every match of ``q``.
     """
     registry = get_registry()
     store = registry.knowledge.graph_store
-    counts = store.count_nodes_by_type(search=q or None)
     clearance = request_clearance(ctx)
-    if clearance != "restricted" and counts:
+    if clearance == "restricted":
+        counts = store.count_nodes_by_type(search=q or None)
+    else:
         precedents = PrecedentClearance(
             registry.knowledge.document_store, clearance, store
         )
-        withheld = _count_withheld_by_type(store, precedents, q or None)
-        for withheld_type, n in withheld.items():
-            if withheld_type in counts:
-                counts[withheld_type] -= n
-                if counts[withheld_type] <= 0:
-                    del counts[withheld_type]
+        counts = {}
+        for row in _readable_matches(store, precedents, q or None):
+            counts[row["node_type"]] = counts.get(row["node_type"], 0) + 1
     node_types = [
         {"node_type": node_type, "count": count}
         for node_type, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))

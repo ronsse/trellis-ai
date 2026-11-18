@@ -1,11 +1,11 @@
 """Counts and shape on the REST graph doors agree with what they withhold (#1264).
 
 A node labelled above the key is left out of ``GET /graph/search``'s page
-(#1029). It is now left out of ``total`` and of every
-``/graph/search/facets`` bucket as well, exactly as a withheld promoted
-precedent already was (#1080): nothing reports the subtraction. Paging stays
-in store order, so a page holding a withheld row is short and walking the
-offsets serves each readable match once.
+(#1029), of ``total`` and of every ``/graph/search/facets`` bucket, exactly
+as a withheld promoted precedent is (#1080): nothing reports it. ``offset``
+counts readable matches, so a withheld row shortens no page and stepping
+``offset`` by ``limit`` serves each readable match once, in the requested
+order, however many store pages the walk spans.
 
 ``GET /entities/{id}`` with ``depth`` above 1 no longer returns a node whose
 every path from the root runs through a withheld node; a node also reached by
@@ -24,6 +24,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
+import trellis_api.routes.retrieve as retrieve_routes
 from trellis.auth import generate_api_key
 from trellis.schemas.classification import DATA_CLASSIFICATION_KEY
 from trellis.stores.registry import StoreRegistry
@@ -161,7 +162,7 @@ def test_a_type_whose_only_match_is_labelled_has_no_bucket(client, registry) -> 
 
 
 def test_paging_across_a_withheld_row(client, registry) -> None:
-    """Offsets stay in store order: the page holding the withheld row is short."""
+    """Offsets count readable matches: the withheld row shortens no page."""
     _seed_search(registry, label=True)
     seen: list[str] = []
     pages: list[dict[str, Any]] = []
@@ -170,11 +171,110 @@ def test_paging_across_a_withheld_row(client, registry) -> None:
         pages.append(page)
         seen.extend(r["entity_id"] for r in page["results"])
 
-    # Sorted by name ascending: m0 m1 | m2 m3 | m4 -- m2 is withheld.
-    assert [p["count"] for p in pages] == [2, 1, 1]
+    # Sorted by name ascending, readable rows only: m0 m1 | m3 m4 | (empty).
+    assert [p["count"] for p in pages] == [2, 2, 0]
     assert [p["offset"] for p in pages] == [0, 2, 4]
     assert seen == ["entity://m0", "entity://m1", "entity://m3", "entity://m4"]
     assert all(p["total"] == len(seen) for p in pages)
+
+
+#: Twelve matches; every third one is labelled above ``BELOW``.
+_WIDE = 12
+
+
+def _seed_wide(registry: StoreRegistry) -> list[str]:
+    """Seed ``_WIDE`` matches and return the readable ids in name order."""
+    graph = registry.knowledge.graph_store
+    readable: list[str] = []
+    for i in range(_WIDE):
+        node_id = f"entity://w{i:02d}"
+        labelled = i % 3 == 1
+        graph.upsert_node(
+            node_id,
+            "table" if i % 2 else "service",
+            _props(f"Orchard {i:02d}", label=labelled),
+        )
+        if not labelled:
+            readable.append(node_id)
+    return readable
+
+
+def _walk(client, registry, scopes, limit, **params) -> tuple[list[str], set[int]]:
+    """Every id served stepping ``offset`` by ``limit``, and each page's total."""
+    served: list[str] = []
+    totals: set[int] = set()
+    offset = 0
+    while True:
+        page = _search(client, registry, scopes, limit=limit, offset=offset, **params)
+        totals.add(page["total"])
+        if not page["results"]:
+            return served, totals
+        assert page["offset"] == offset
+        served.extend(r["entity_id"] for r in page["results"])
+        offset += limit
+
+
+@pytest.mark.parametrize("order", ["asc", "desc"])
+@pytest.mark.parametrize("limit", [1, 3, 5])
+def test_stepping_offset_serves_each_readable_row_once_in_order(
+    client, registry, monkeypatch, order, limit
+) -> None:
+    """The walk spans several store pages and keeps the requested sort."""
+    monkeypatch.setattr(retrieve_routes, "_PRECEDENT_SCAN_PAGE", 2)
+    readable = _seed_wide(registry)
+    expected = readable if order == "asc" else list(reversed(readable))
+
+    served, totals = _walk(client, registry, BELOW, limit, order=order)
+
+    assert served == expected
+    assert totals == {len(served)}
+
+
+def test_a_full_page_is_never_short_while_rows_remain(
+    client, registry, monkeypatch
+) -> None:
+    monkeypatch.setattr(retrieve_routes, "_PRECEDENT_SCAN_PAGE", 2)
+    readable = _seed_wide(registry)
+
+    for offset in range(0, len(readable), 4):
+        page = _search(client, registry, BELOW, limit=4, offset=offset)
+        assert page["count"] == min(4, len(readable) - offset)
+
+
+def test_wide_facets_sum_to_total(client, registry, monkeypatch) -> None:
+    monkeypatch.setattr(retrieve_routes, "_PRECEDENT_SCAN_PAGE", 2)
+    readable = _seed_wide(registry)
+
+    facets = _facets(client, registry, BELOW)
+
+    assert facets["total"] == len(readable)
+    assert sum(f["count"] for f in facets["node_types"]) == facets["total"]
+    assert facets["total"] == _search(client, registry, BELOW)["total"]
+
+
+def test_a_restricted_caller_makes_one_store_call(
+    client, registry, monkeypatch
+) -> None:
+    """A cleared key reads the stored page as it did before the walk."""
+    monkeypatch.setattr(retrieve_routes, "_PRECEDENT_SCAN_PAGE", 2)
+    _seed_wide(registry)
+    graph = registry.knowledge.graph_store
+    stored, stored_total = graph.search_nodes(
+        search=QUERY, sort="name", descending=False, limit=3, offset=4
+    )
+    calls: list[dict[str, Any]] = []
+    real = graph.search_nodes
+
+    def spy(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(graph, "search_nodes", spy)
+    body = _search(client, registry, CLEARED, limit=3, offset=4)
+
+    assert len(calls) == 1
+    assert body["total"] == stored_total == _WIDE
+    assert [r["entity_id"] for r in body["results"]] == [r["node_id"] for r in stored]
 
 
 # ---------------------------------------------------------------------------
