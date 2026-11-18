@@ -160,21 +160,9 @@ def get_graph(
     subgraph = registry.knowledge.graph_store.get_subgraph(
         seed_ids=[entity_id], depth=depth
     )
-    withheld = {
-        n["node_id"]
-        for n in subgraph.get("nodes", [])
-        if precedents.verdict_of(n["node_id"], n) is not None
-    }
-    if withheld:
-        subgraph = {
-            **subgraph,
-            "nodes": [n for n in subgraph["nodes"] if n["node_id"] not in withheld],
-            "edges": [
-                e
-                for e in subgraph.get("edges", [])
-                if e["source_id"] not in withheld and e["target_id"] not in withheld
-            ],
-        }
+    # A withheld neighbour goes with its edges, and so does a node it alone
+    # joined to the root within ``depth`` (#1264).
+    subgraph = precedents.withhold_from_subgraph(subgraph, entity_id, depth)
     # A node labelled above the caller was withheld above (``verdict_of`` reads
     # its ``data_classification`` property, #1029); every other node is served,
     # and what is dropped is a pointer naming a document this caller may not read. One

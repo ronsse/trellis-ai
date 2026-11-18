@@ -3483,14 +3483,14 @@ hold the excerpt and carry no label (#1080):
 
 | Route | A precedent the caller may not read |
 |-------|-------------------------------------|
-| `GET /entities/{id}` | 404 for the entity; absent from `subgraph.nodes`, with the edges that touch it |
+| `GET /entities/{id}` | 404 for the entity; absent from `subgraph.nodes`, with the edges that touch it, and so is a node it alone joined to the entity within `depth` (#1264) |
 | `GET /documents/{id}` | 404, as a missing document |
 | `GET /search` | left out of `results` |
 | `GET /documents` (list, and the `q` search) | left out of `documents`, and not counted in `count` or `total` |
 | `GET /graph/search` (the entity listing) | left out of `results` and not counted in `total`; not counted in `GET /graph/search/facets` either |
 | `GET /graph/history` (a node's versions) | 404, as a missing entity; every version is judged, and one barred version bars the history |
 | MCP `get_items` | reported `not found`, as a missing id |
-| MCP `get_graph` | `entity not found` for the root; a withheld neighbour is left out with the edges that touch it |
+| MCP `get_graph` | `entity not found` for the root; a withheld neighbour is left out with the edges that touch it, and so is a node it alone joined to the root within `depth` (#1264) |
 | MCP `get_file_context` | left out of the path's documents and entities |
 | MCP `search` | left out; counted on the pack's `Withheld` line |
 | `POST /packs`, `POST /packs/sectioned` | withheld at the collect seam, so every strategy is covered, and recorded in `rejected_items` and the pack's withheld line under reason `sensitivity`; a builder wired with no document store withholds it as `sensitivity_unreadable` |
@@ -3505,10 +3505,19 @@ it did before the judgement. The reads it adds are bounded: per distinct
 promoted precedent a request meets, at most one graph-node read and two document
 reads (the precedent's own row and its source), each id judged once per request;
 a request that meets no precedent adds none, and a `restricted` caller adds none.
-The exception is `GET /graph/search` (with no `node_type`, or `node_type=precedent`)
-and `GET /graph/search/facets`: to keep a withheld precedent out of `total` and the
-`precedent` count they page through every `precedent` node matching `q`, 500 at a
-time, and judge each one. A node under `precedent://learning/` stored as another
+The exception is `GET /graph/search` and `GET /graph/search/facets`: to keep a
+withheld precedent, and a node labelled above the caller (#1264), out of `total`
+and the per-type counts they page through every node matching `q` (and
+`node_type`), 500 at a time, for any caller below `restricted`. A node's label
+is read from the row in hand; only a `precedent` node costs the reads above.
+Nothing reports the subtraction. `offset` counts stored matches, withheld ones
+included, so a page holding a withheld match is shorter than `limit`, and
+stepping `offset` by `limit` serves every readable match once. Two limits
+follow from that. A caller can still infer that a withheld match exists: a page
+shorter than `limit` followed by a non-empty one, or a row at an `offset` at or
+past `total`, shows it. And a client that stops paging once `offset + limit`
+reaches `total` misses as many trailing readable rows as there were withheld
+matches before them; page until a page comes back empty instead. A node under `precedent://learning/` stored as another
 type is left out of the page but not subtracted from a count; `entity.create` and
 `entity.update` no longer produce one, but one stored earlier is still there. Not covered: a
 precedent's chunks (judged on their own row only, as on `GET /search`).
@@ -6335,11 +6344,12 @@ above its own clearance, and cannot touch a document it may not read.**
   `query_observations`) leave such a node out of their rows, and the precedent
   listing (REST `GET /api/v1/precedents` and `GET /api/v1/precedents/domains`, MCP
   `get_lessons`) leaves out a promotion whose current node carries such a key
-  (#1264). `total` and facet counts on graph search still count a labelled node, so a caller
-  below the label can learn that some node matches; the one exception is a promoted
-  precedent node, which `total` leaves out when it is withheld. With a depth above 1,
-  a node reached only through a withheld neighbour is still returned, without an
-  edge to the root. A key on an edge or a trace stays inert. To list such
+  (#1264). `total` on graph search and the `/graph/search/facets` counts leave a
+  labelled node out as they leave out a withheld precedent, and with a depth above 1
+  `get_graph` and `GET /api/v1/entities/{id}` leave out a node whose every path
+  from the root within `depth` runs through a withheld node (#1264). Paging still
+  lets a caller below the label infer that some node matches, because `offset`
+  counts withheld matches and `total` does not. A key on an edge or a trace stays inert. To list such
   rows read-only there is no command that enumerates them across a store; for an id
   you suspect, `trellis retrieve entity <id> --format json` shows a node's properties
   and `trellis retrieve trace <id> --format json` a trace's metadata, so look for a

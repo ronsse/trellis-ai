@@ -759,6 +759,57 @@ class PrecedentClearance:
         self.judge([entity_id, *([source] if source else [])])
         return self._bar_reason(entity_id, source, exempt=exempt)
 
+    def withhold_from_subgraph(
+        self, subgraph: dict[str, Any], root_id: str, depth: int
+    ) -> dict[str, Any]:
+        """``subgraph`` without what this caller may not be shown (#1029, #1264).
+
+        For a by-id graph read that has already cleared ``root_id``. A node with
+        a :meth:`verdict_of` is left out with every edge that touches it, and so
+        is a node that is no longer within ``depth`` hops of the root once those
+        are gone: one whose every path from the root ran through a withheld node,
+        which would otherwise be served with nothing joining it to the root. A
+        node also reached by a path of readable nodes keeps its place. Hops
+        follow edges in either direction, as
+        :meth:`~trellis.stores.base.graph.GraphStore.get_subgraph` traverses.
+
+        With nothing withheld the subgraph is returned unchanged (the same
+        object), so a caller cleared for every node, and a graph with no
+        withheld node, read exactly what the store returned. ``restricted``
+        withholds nothing.
+        """
+        nodes = subgraph.get("nodes", [])
+        withheld = {
+            n["node_id"] for n in nodes if self.verdict_of(n["node_id"], n) is not None
+        }
+        if not withheld:
+            return subgraph
+        edges = [
+            e
+            for e in subgraph.get("edges", [])
+            if e["source_id"] not in withheld and e["target_id"] not in withheld
+        ]
+        adjacent: dict[str, set[str]] = {}
+        for e in edges:
+            adjacent.setdefault(e["source_id"], set()).add(e["target_id"])
+            adjacent.setdefault(e["target_id"], set()).add(e["source_id"])
+        reached = {root_id}
+        frontier = {root_id}
+        for _ in range(depth):
+            frontier = {n for f in frontier for n in adjacent.get(f, ())} - reached
+            if not frontier:
+                break
+            reached |= frontier
+        return {
+            **subgraph,
+            "nodes": [n for n in nodes if n["node_id"] in reached],
+            "edges": [
+                e
+                for e in edges
+                if e["source_id"] in reached and e["target_id"] in reached
+            ],
+        }
+
 
 def _conceal_source_pointers(
     rows: list[dict[str, Any]], gate: PrecedentClearance | None
