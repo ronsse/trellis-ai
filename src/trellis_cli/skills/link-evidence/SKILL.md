@@ -1,7 +1,7 @@
 ---
 name: link-evidence
 description: Store a durable fact (API contract, config value, gotcha) or a whole reference document in Trellis, anchored to its knowledge-graph entity so later work retrieves it. Not for opinions.
-version: 1.3.0
+version: 1.3.1
 ---
 
 # Link Evidence
@@ -55,8 +55,8 @@ Create it first, once, then store the fact with `relates_to` set to the id it
 returns:
 
 ```
-save_knowledge(name="<e.g. 'orders-api'>", entity_type="<service|system|concept|...>")
-# Entity created: <id> (service: orders-api)
+save_knowledge(name="<e.g. 'orders-api'>", entity_type="<SoftwareApplication|Team|Concept|...>")
+# Entity created: <id> (SoftwareApplication: orders-api)
 ```
 
 `save_knowledge` **always creates a new node**. It does not update an existing
@@ -118,9 +118,11 @@ Do not paste a long document into `save_knowledge(content=...)` or a
 
 ## Picking entity_type
 
-Open strings; consistency beats precision. Conventions: `service` (deployable
-units) · `system` (Stripe, PostgreSQL) · `concept` (idempotency, rate-limiting)
-· `team` · `runbook`. A fact stored without an `entity_type` is a `concept`.
+Open strings; consistency beats precision. Prefer the canonical types that the
+`save_knowledge` tool description lists, each with a one-line description:
+`SoftwareApplication` (a deployable service, or a system such as Stripe or
+PostgreSQL) · `Concept` (idempotency, rate-limiting) · `Team` · `CreativeWork`
+(a runbook). A fact stored without an `entity_type` is a `concept`.
 
 ## Example
 
@@ -135,7 +137,7 @@ save_knowledge(
 )
 # Entity created: 01JRK5P2XA... (concept: orders-api read replica kills queries over 5s)
 # Evidence document: 01JRK5N7QF...
-# Resolved relates_to 'orders-api' -> 01JRK4Z9TM... (service, via name-alias)
+# Resolved relates_to 'orders-api' -> 01JRK4Z9TM... (SoftwareApplication, via name-alias)
 # Edge created: 01JRK5Q8WD... --[entity_related_to]--> 01JRK4Z9TM...
 ```
 

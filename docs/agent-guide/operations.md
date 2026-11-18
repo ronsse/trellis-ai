@@ -1860,7 +1860,7 @@ trellis curate link <source_id> <target_id> [--kind <edge_kind>] [--format text|
 **Example:**
 
 ```bash
-trellis curate link 01JRK5N7QF auth_service --kind entity_depends_on --format json
+trellis curate link 01JRK5N7QF auth_service --kind dependsOn --format json
 ```
 
 **JSON output (success):**
@@ -1871,7 +1871,7 @@ trellis curate link 01JRK5N7QF auth_service --kind entity_depends_on --format js
   "edge_id": "01JRK8B3QF8GHTM2XVZP3CWD9E",
   "source_id": "01JRK5N7QF",
   "target_id": "auth_service",
-  "edge_kind": "entity_depends_on",
+  "edge_kind": "dependsOn",
   "warnings": []
 }
 ```
@@ -2843,7 +2843,7 @@ trellis curate entity <entity_type> <name> [--properties <json>] [--format text|
 
 | Argument/Option | Required | Default | Description |
 |-----------------|----------|---------|-------------|
-| `entity_type` | **Yes** | -- | Entity type (any string, e.g. `concept`, `person`, `system`) |
+| `entity_type` | **Yes** | -- | Entity type (any string; prefer a canonical type, e.g. `Concept`, `Person`, `SoftwareApplication`) |
 | `name` | **Yes** | -- | Entity name |
 | `--properties`, `-p` | No | `null` | JSON object of properties |
 | `--format` | No | `text` | Output format |
@@ -3426,7 +3426,7 @@ trellis retrieve entity <entity_id> [--format text|json]
 ```json
 {
   "node_id": "01JRK5N7QF",
-  "node_type": "service",
+  "node_type": "SoftwareApplication",
   "properties": {"name": "auth-service", "domain": "platform"}
 }
 ```
@@ -3934,7 +3934,7 @@ result = executor.execute(cmd)
 cmd = Command(
     operation=Operation.ENTITY_CREATE,
     args={
-        "entity_type": "service",
+        "entity_type": "SoftwareApplication",
         "name": "auth-service",
         "properties": {"language": "python", "team": "platform"},
     },
@@ -4024,7 +4024,7 @@ Set `idempotency_key` on a `Command` to prevent duplicate execution:
 ```python
 cmd = Command(
     operation=Operation.ENTITY_CREATE,
-    args={"entity_type": "service", "name": "auth-service"},
+    args={"entity_type": "SoftwareApplication", "name": "auth-service"},
     idempotency_key="create_auth_service_20260310",
     requested_by="code-orchestrator",
 )

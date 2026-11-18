@@ -121,7 +121,7 @@ def create_trellis_tools(
     @tool
     def trellis_save_knowledge(
         name: str,
-        entity_type: str = "concept",
+        entity_type: str = "Concept",
         properties_json: str = "{}",
     ) -> str:
         """Create an entity in the knowledge graph.
@@ -131,7 +131,9 @@ def create_trellis_tools(
 
         Args:
             name: Entity name.
-            entity_type: Type (e.g., "concept", "service", "person", "system").
+            entity_type: Type (e.g., "Concept", "SoftwareApplication",
+                "Person", "Team"). The save_knowledge tool description
+                lists every canonical type with a one-line description.
             properties_json: Optional JSON string of additional properties.
         """
         try:

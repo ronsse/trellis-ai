@@ -60,13 +60,13 @@ def main() -> None:
             # 2. Create a knowledge-graph entity and link a related concept.
             service_id = client.create_entity(
                 "payments-client",
-                entity_type="service",
+                entity_type="SoftwareApplication",
                 properties={"language": "python"},
             )
             pattern_id = client.create_entity(
-                "retry-with-backoff", entity_type="pattern"
+                "retry-with-backoff", entity_type="Concept"
             )
-            client.create_link(service_id, pattern_id, edge_kind="entity_uses")
+            client.create_link(service_id, pattern_id, edge_kind="dependsOn")
             print(f"Created entities: {service_id}, {pattern_id}")
 
             # 3. Search documents for related context.

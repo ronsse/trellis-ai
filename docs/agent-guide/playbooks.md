@@ -155,7 +155,7 @@ trellis curate promote 01JRK5N7QF8GHTM2XVZP3CWD9E \
 
 ```bash
 trellis curate link 01JRK7A4QF8GHTM2XVZP3CWD9E user_service_entity_id \
-  --kind precedent_applies_to \
+  --kind appliesTo \
   --format json
 ```
 
@@ -230,7 +230,7 @@ executor = MutationExecutor(event_log=event_log)
 cmd = Command(
     operation=Operation.ENTITY_CREATE,
     args={
-        "entity_type": "service",
+        "entity_type": "SoftwareApplication",
         "name": "payment-gateway",
         "properties": {"language": "go", "team": "payments", "tier": "critical"},
     },
@@ -244,7 +244,7 @@ event_log.close()
 2. Link the entity to related entities.
 
 ```bash
-trellis curate link <new_entity_id> <related_entity_id> --kind entity_depends_on --format json
+trellis curate link <new_entity_id> <related_entity_id> --kind dependsOn --format json
 ```
 
 3. Add labels for quick filtering.
@@ -287,7 +287,7 @@ result = executor.execute(cmd)
 
 ### If It Fails
 
-- **Missing required args:** `entity.create` requires `entity_type` and `name`. `entity_type` is any string; well-known agent-centric values in the `EntityType` enum are `person`, `system`, `service`, `team`, `document`, `concept`, `domain`, `file`, `project`, `tool`. Domain-specific integrations (e.g., `uc_table`, `dbt_model`) pass their own strings and are accepted verbatim.
+- **Missing required args:** `entity.create` requires `entity_type` and `name`. `entity_type` is any string; prefer a canonical type such as `Person`, `Team`, `SoftwareApplication`, `CreativeWork` or `Concept` (each has a one-line description in `trellis.schemas.well_known.ENTITY_TYPE_DESCRIPTIONS`, which the `save_knowledge` tool text lists), while legacy lowercase aliases such as `service` are still accepted. Domain-specific integrations (e.g., `uc_table`, `dbt_model`) pass their own strings and are accepted verbatim.
 
 ---
 

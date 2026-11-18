@@ -51,7 +51,7 @@ Sixteen macro tools. The eleven in these tables return **markdown** (not raw JSO
 
 ### Save what you learned
 
-> We just finished hardening the orders API with rate limiting. Use `save_experience` to record the trace, then `save_knowledge` to register `rate-limiter-v2` as a pattern entity related to `orders-api`.
+> We just finished hardening the orders API with rate limiting. Use `save_experience` to record the trace, then `save_knowledge` to register `rate-limiter-v2` as a `Concept` entity related to `orders-api`.
 
 ### Pull lessons for a domain
 

@@ -198,7 +198,7 @@ A named entity in the experience graph.
 
 ```json
 {
-  "entity_type": "service",
+  "entity_type": "SoftwareApplication",
   "name": "auth-service",
   "properties": {"language": "python", "team": "platform", "tier": "critical"},
   "source": {"origin": "manual", "detail": "Registered during onboarding"},
@@ -816,7 +816,7 @@ A directed edge in the experience graph.
 {
   "source_id": "01JRK5N7QF",
   "target_id": "01JRK6M3QF",
-  "edge_kind": "entity_depends_on",
+  "edge_kind": "dependsOn",
   "properties": {"strength": "hard"}
 }
 ```
@@ -908,7 +908,7 @@ A mutation command submitted to the governed write pipeline.
 ```json
 {
   "operation": "entity.create",
-  "args": {"entity_type": "service", "name": "auth-service"},
+  "args": {"entity_type": "SoftwareApplication", "name": "auth-service"},
   "requested_by": "code-orchestrator",
   "idempotency_key": "create_auth_20260310"
 }
