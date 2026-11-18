@@ -64,7 +64,7 @@ class FakeBoltDriver:
         *outcomes: Outcome,
         attempts: int = 3,
         rows_left: int | Exception | None = None,
-        creates: list[bool | Exception] | None = None,
+        creates: list[bool | str | Exception] | None = None,
     ) -> None:
         if not outcomes and creates is None:
             msg = "script at least one purge outcome"
@@ -153,7 +153,11 @@ class FakeTransaction:
             created = self._driver.creates.pop(0)
             if isinstance(created, Exception):
                 raise created
-            return FakeResult({"node_id": 1} if created else None)
+            if not created:
+                return FakeResult(None)
+            # A str names the created row's ``elementId``.
+            row_id = created if isinstance(created, str) else "fake-row"
+            return FakeResult({"node_id": 1, "row_id": row_id})  # type: ignore[dict-item]
         if not cypher.startswith("MATCH (n:Node") or "DETACH DELETE" not in cypher:
             return FakeResult({"deleted": 0})
         if isinstance(self._outcome, Exception):

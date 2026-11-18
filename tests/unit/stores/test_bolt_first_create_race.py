@@ -111,6 +111,24 @@ def test_the_predicate_names_the_node_version_constraint_only() -> None:
     assert _is_first_create_contention(NEO4J_LOSER)
     assert _is_first_create_contention(ARCADEDB_LOSER)
     assert not _is_first_create_contention(ALIAS_CLAIM_VIOLATION)
+    # Neo4j opens every message with ``Node(<id>)``: the label must be read
+    # from ``label `...```, so a version_id violation on another label is not
+    # this race.
+    assert not _is_first_create_contention(
+        Neo4jError._hydrate_neo4j(
+            code="Neo.ClientError.Schema.ConstraintValidationFailed",
+            message=(
+                "Node(12) already exists with label `Alias` and property "
+                "`version_id` = 'x'"
+            ),
+        )
+    )
+    assert not _is_first_create_contention(
+        Neo4jError._hydrate_neo4j(
+            code="Neo.ClientError.Transaction.TransactionNotFound",
+            message="Duplicated key [x] found on index 'Alias[version_id]'",
+        )
+    )
     assert not _is_first_create_contention(
         Neo4jError._hydrate_neo4j(
             code="Neo.ClientError.Statement.SyntaxError",
@@ -131,3 +149,76 @@ def test_the_first_version_prefix_is_per_id_and_never_a_ulid() -> None:
     ulid = generate_ulid()
     assert ulid == ulid.upper()
     assert _first_version_prefix("n1").startswith("first-")
+
+
+class _VerifyingStore(BoltOpenCypherGraphStore):
+    """The ArcadeDB setting, with the re-read and the delete scripted."""
+
+    VERIFY_FIRST_CREATE_UNIQUENESS = True
+
+    def __init__(self, driver: FakeBoltDriver, rows: list[tuple[str, str, str]]):
+        super().__init__(
+            driver=driver,  # type: ignore[arg-type]
+            database="neo4j",
+            owns_driver=False,
+            init_schema=False,
+        )
+        self.rows = rows
+        self.removed: list[list[str]] = []
+
+    def _current_node_rows(self, node_id: str) -> list[tuple[str, str, str]]:
+        return list(self.rows)
+
+    def _remove_node_rows(self, node_id: str, row_ids: list[str]) -> None:
+        self.removed.append(row_ids)
+
+
+def test_the_re_read_of_a_single_row_writes_nothing_more() -> None:
+    store = _VerifyingStore(
+        FakeBoltDriver(creates=["#1:1"]), [("2026-01-01", "first-x-0", "#1:1")]
+    )
+
+    assert store.create_node_if_absent("n1", "service", {}) is True
+    assert store.removed == []
+
+
+# Two writers whose commits the engine let both through: same version_id,
+# both rows current. Each re-read sees both and picks the same survivor.
+_BOTH = [
+    ("2026-01-01T00:00:00.000002+00:00", "first-x-0", "#1:1"),
+    ("2026-01-01T00:00:00.000001+00:00", "first-x-0", "#1:2"),
+]
+
+
+def test_a_duplicate_found_by_the_loser_is_removed_and_it_answers_false() -> None:
+    store = _VerifyingStore(FakeBoltDriver(creates=["#1:1"]), _BOTH)
+
+    assert store.create_node_if_absent("n1", "service", {}) is False
+    assert store.removed == [["#1:1"]]
+
+
+def test_the_survivor_writer_answers_true_and_removes_the_same_row() -> None:
+    store = _VerifyingStore(FakeBoltDriver(creates=["#1:2"]), _BOTH)
+
+    assert store.create_node_if_absent("n1", "service", {}) is True
+    assert store.removed == [["#1:1"]]
+
+
+def test_an_equal_stamp_tie_breaks_on_the_row_id() -> None:
+    tied = [("t", "first-x-0", "#1:9"), ("t", "first-x-0", "#1:10")]
+    answers = [
+        _VerifyingStore(FakeBoltDriver(creates=[own]), tied).create_node_if_absent(
+            "n1", "service", {}
+        )
+        for own in ("#1:9", "#1:10")
+    ]
+
+    assert sorted(answers) == [False, True]
+
+
+def test_neo4j_does_not_re_read_and_arcadedb_does() -> None:
+    from trellis.stores.arcadedb.graph import ArcadeDBGraphStore
+    from trellis.stores.neo4j.graph import Neo4jGraphStore
+
+    assert Neo4jGraphStore.VERIFY_FIRST_CREATE_UNIQUENESS is False
+    assert ArcadeDBGraphStore.VERIFY_FIRST_CREATE_UNIQUENESS is True
