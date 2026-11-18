@@ -269,9 +269,13 @@ def list_precedents(
     graph store handy gets no lifecycle filter, since there is nothing to
     check against, but still the miner filter.
 
-    A precedent carries no label of its own, so below ``restricted`` a row is
-    **left out** (never rewritten) when either of these holds, judged with
-    :func:`~trellis.retrieve.sensitivity.readable_ids` against ``document_store``:
+    Below ``restricted`` a row whose current node carries a
+    ``data_classification`` property above ``clearance`` is **left out**
+    (#1264), as the direct graph reads leave out such a node; a node without the
+    key is not judged by it. A precedent has no label of its own type, so a row
+    is also **left out** (never rewritten) when either of these holds, judged
+    with :func:`~trellis.retrieve.sensitivity.readable_ids` against
+    ``document_store``:
 
     * a document row exists at its entity id (a promotion writes one, and the
       keyword and semantic axes withhold it above the caller's clearance) and
@@ -640,8 +644,10 @@ class PrecedentClearance:
         """The ``event_id`` of each of ``events`` the caller may not be served.
 
         Judges every id the window needs (each entity id, each source id) in one
-        :meth:`judge` call, then applies the two rules in
-        :func:`list_precedents` and the third, :meth:`_nothing_to_judge`.
+        :meth:`judge` call, then applies the precedent node's own label
+        (:meth:`node_label_reason`), the two rules in :func:`list_precedents`
+        and the third, :meth:`_nothing_to_judge`. Each barred event's reason is
+        recorded for :attr:`counts`.
         """
         planned = []
         wanted: list[str] = []
@@ -657,13 +663,37 @@ class PrecedentClearance:
         self.judge(wanted)
         barred: set[str] = set()
         for e, node, source, exempt in planned:
-            reason = self._bar_reason(e.entity_id, source, exempt=exempt)
+            # The precedent node's own label first (#1264), as ``verdict_of``
+            # reads it for a by-id read or a search hit.
+            reason = self.node_label_reason(node) if node is not None else None
+            if reason is None:
+                reason = self._bar_reason(e.entity_id, source, exempt=exempt)
             if reason is None and self._nothing_to_judge(e.entity_id, node, source):
                 reason = PRECEDENT_WITHHELD_UNREADABLE
             if reason is not None:
                 barred.add(e.event_id)
                 self._reasons[e.event_id] = reason
         return frozenset(barred)
+
+    def node_label_reason(self, node: dict[str, Any]) -> str | None:
+        """Why ``node``'s own label bars it from this caller, or ``None`` (#1029).
+
+        :data:`PRECEDENT_WITHHELD_LABELLED` when its
+        ``properties["data_classification"]`` is above the clearance (read by
+        :func:`~trellis.schemas.classification.sensitivity_of`, so a malformed
+        record is ``restricted``), :data:`PRECEDENT_WITHHELD_UNREADABLE` when its
+        ``properties`` is not a mapping. A node without the key is not judged
+        here at any clearance, and ``restricted`` reads nothing. Not memoised.
+        """
+        if self._clearance == "restricted":
+            return None
+        props = node.get("properties")
+        if isinstance(props, Mapping) and DATA_CLASSIFICATION_KEY in props:
+            if not permits(self._clearance, sensitivity_of(props)):
+                return PRECEDENT_WITHHELD_LABELLED
+        elif props is not None and not isinstance(props, Mapping):
+            return PRECEDENT_WITHHELD_UNREADABLE
+        return None
 
     def verdict_of(
         self, entity_id: str, node: dict[str, Any] | None = None
@@ -695,12 +725,9 @@ class PrecedentClearance:
         if self._clearance == "restricted":
             return None
         if node is not None:
-            props = node.get("properties")
-            if isinstance(props, Mapping) and DATA_CLASSIFICATION_KEY in props:
-                if not permits(self._clearance, sensitivity_of(props)):
-                    return PRECEDENT_WITHHELD_LABELLED
-            elif props is not None and not isinstance(props, Mapping):
-                return PRECEDENT_WITHHELD_UNREADABLE
+            label_reason = self.node_label_reason(node)
+            if label_reason is not None:
+                return label_reason
         if entity_id not in self._served:
             reason = self._verdict(entity_id, node)
             self._served[entity_id] = reason

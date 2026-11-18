@@ -145,7 +145,8 @@ def query_observations(
     Returns:
         A JSON object with ``observations``: a list of Observation
         property dicts. Each dict carries ``node_id`` plus the
-        schema's payload fields.
+        schema's payload fields. A node labelled above the caller's
+        clearance is left out, so fewer than ``limit`` may be returned.
     """
     _refuse_public_caller("query_observations")
     from trellis.schemas.well_known import OBSERVATION  # noqa: PLC0415
@@ -177,19 +178,19 @@ def query_observations(
         detail = _exception_detail(exc)
         return json.dumps({"status": "error", "message": f"Query failed: {detail}"})
 
-    # This read does not judge a node's own ``data_classification`` property
-    # (the doors of #1029 do), so every match is served; what is dropped is an
-    # ``evidence_ref`` naming a document this caller may not read.
+    # A node whose own ``data_classification`` property is above the caller is
+    # left out, as the graph doors of #1029 leave it out (#1264); of every other
+    # match what is dropped is an ``evidence_ref`` naming a document this
+    # caller may not read.
     clearance = current_clearance()
-    rows = conceal_node_pointers(
-        rows,
+    precedents = PrecedentClearance(
         registry.knowledge.document_store,
         clearance,
-        precedents=PrecedentClearance(
-            registry.knowledge.document_store,
-            clearance,
-            registry.knowledge.graph_store,
-        ),
+        registry.knowledge.graph_store,
+    )
+    rows = [r for r in rows if precedents.verdict_of(r["node_id"], r) is None]
+    rows = conceal_node_pointers(
+        rows, registry.knowledge.document_store, clearance, precedents=precedents
     )
     projected: list[dict[str, Any]] = []
     for row in rows:

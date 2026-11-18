@@ -67,9 +67,10 @@ A graph node carries no label of its own type, but a raw
 the item metadata :class:`GraphSearch` copies the properties into, and a direct
 graph read that asks
 :meth:`~trellis.retrieve.precedents.PrecedentClearance.verdict_of` about the node
-withholds it (#1029). Edges, traces, advisories and observations carry no label
-in this slice; ``tests/unit/test_sensitivity_surface_rule.py`` rosters every MCP
-tool as gated or free of document content so a new one cannot slip in unread.
+withholds it (#1029), as do the observation, measurement and precedent
+listings (#1264). Edges, traces and advisories carry no label in this slice;
+``tests/unit/test_sensitivity_surface_rule.py`` rosters every MCP tool as gated
+or free of document content so a new one cannot slip in unread.
 A ``public`` caller is refused those surfaces outright instead.
 """
 
