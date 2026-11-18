@@ -8,12 +8,12 @@ the backing node through the paired graph store and writing no vector;
 every assertion is the one every other backend runs.
 
 Every case runs, including the ones that reach
-:meth:`Neo4jVectorStore.query`. ``neo4j:2025.12``, the image
-``live-infra.yml`` provisions, refuses its Cypher 25 ``SEARCH`` clause, so
-on that image those cases run through the store's
+:meth:`Neo4jVectorStore.query`. ``neo4j:2026.10.2``, the image
+``live-infra.yml`` provisions, runs its Cypher 25 ``SEARCH`` clause, so
+there those cases take the ``SEARCH`` path. ``neo4j:2025.12``, the image
+before 2026-11, refuses that clause, and on it they run through the store's
 ``db.index.vector.queryNodes`` fallback (they skipped behind a capability
-gate before the fallback existed). The ``SEARCH`` form itself runs on no CI
-server.
+gate before the fallback existed).
 
 One thing differs from ``test_arcadedb_vector_contract.py``, and it is
 about sharing the CI container rather than about vector semantics.

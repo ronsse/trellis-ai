@@ -9,8 +9,10 @@ reads the summary's ``nodes_deleted`` instead, and a hard bound on the
 rounds turns any server that keeps reporting removals into a
 ``StoreError`` naming the node rather than a call that never returns.
 
-No database is needed: the fake transactions below report one removed row
-on every statement, in both the returned row and the summary counters.
+No database is needed. The scripted transactions below pin the normal path
+(rounds until the counter reads 0, returning the total) and that the count
+is the summary counter rather than the returned row; the always-one fakes
+report one removed row on every statement, in both the row and the counter.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ import pytest
 
 pytest.importorskip("neo4j")
 
-from tests.fake_bolt_driver import FakeBoltDriver, FakeTransaction
+from tests.fake_bolt_driver import FakeBoltDriver, FakeResult, FakeTransaction
 from trellis.errors import StoreError
 from trellis.stores.bolt_opencypher import graph as bolt_graph
 from trellis.stores.bolt_opencypher.graph import BoltOpenCypherGraphStore
@@ -70,6 +72,57 @@ def test_a_delete_that_always_reports_a_row_raises_instead_of_spinning() -> None
     assert NODE in caught.value.message
     assert caught.value.store == "graph"
     assert tx.runs == bolt_graph._DETACH_DELETE_MAX_ROUNDS
+
+
+class _ScriptedTx:
+    """Answer each statement with the next scripted result, then fail."""
+
+    def __init__(self, *results: FakeResult) -> None:
+        self._results = list(results)
+        self.runs = 0
+
+    def run(self, cypher: str, **_params: Any) -> FakeResult:
+        self.runs += 1
+        if not self._results:
+            msg = "the delete loop ran past its scripted rounds"
+            raise AssertionError(msg)
+        return self._results.pop(0)
+
+
+_CYPHER = "MATCH (n:Node {node_id: $nid}) DETACH DELETE n"
+
+
+def test_a_delete_runs_until_the_counter_reads_zero_and_returns_the_total() -> None:
+    tx = _ScriptedTx(FakeResult({"deleted": 2}), FakeResult({"deleted": 0}))
+
+    removed = bolt_graph._detach_delete_until_none(
+        tx,  # type: ignore[arg-type]
+        _CYPHER,
+        NODE,
+    )
+
+    assert removed == 2
+    assert tx.runs == 2
+
+
+def test_the_count_is_the_summary_counter_not_the_returned_row() -> None:
+    # The returned row disagrees with the counter on every round, as a
+    # ``RETURN count(n)`` did on ``neo4j:2026.10.2`` (#1272). Reading the row
+    # would return 0 at once; reading the counter removes 3 + 2.
+    tx = _ScriptedTx(
+        FakeResult({"deleted": 0}, nodes_deleted=3),
+        FakeResult({"deleted": 0}, nodes_deleted=2),
+        FakeResult({"deleted": 0}, nodes_deleted=0),
+    )
+
+    removed = bolt_graph._detach_delete_until_none(
+        tx,  # type: ignore[arg-type]
+        _CYPHER,
+        NODE,
+    )
+
+    assert removed == 5
+    assert tx.runs == 3
 
 
 class _AlwaysOneFakeTransaction(FakeTransaction):

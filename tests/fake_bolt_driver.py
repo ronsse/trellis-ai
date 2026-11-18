@@ -149,14 +149,27 @@ class FakeTransaction:
 
 class FakeResult:
     """A statement's result: ``single()`` is its one row, and ``consume()``
-    its summary, whose ``counters.nodes_deleted`` is the row's ``deleted``."""
+    its summary, whose ``counters.nodes_deleted`` is ``nodes_deleted`` when
+    given and the row's ``deleted`` otherwise.
 
-    def __init__(self, row: dict[str, int]) -> None:
+    Scripting the counter apart from the row lets a test tell code that
+    reads the summary from code that reads the returned row; on
+    ``neo4j:2026.10.2`` the two disagree (#1272).
+    """
+
+    def __init__(
+        self, row: dict[str, int], *, nodes_deleted: int | None = None
+    ) -> None:
         self._row = row
+        self._nodes_deleted = nodes_deleted
 
     def single(self, strict: bool = False) -> dict[str, int]:
         return self._row
 
     def consume(self) -> Any:
-        deleted = self._row.get("deleted", 0)
+        deleted = (
+            self._row.get("deleted", 0)
+            if self._nodes_deleted is None
+            else self._nodes_deleted
+        )
         return SimpleNamespace(counters=SimpleNamespace(nodes_deleted=deleted))
