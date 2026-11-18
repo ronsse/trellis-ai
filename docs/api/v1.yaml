@@ -5517,11 +5517,15 @@ paths:
 
         matches that caller may read, so a withheld match shortens no page and
 
-        stepping ``offset`` by ``limit`` serves every readable match once. The
+        stepping ``offset`` by ``limit`` serves every readable match once while
 
-        cost is one walk of every match of ``q`` per request. A ``restricted``
+        the graph does not change (a write between requests can repeat or skip a
 
-        caller reads the stored page with one store call.'
+        row, as on any offset paging). The cost is one walk of every match of
+
+        ``q`` per request. A ``restricted`` caller reads the stored page with one
+
+        store call.'
       operationId: search_entities_api_v1_graph_search_get
       parameters:
       - description: A case-insensitive substring of the name, node_id or node_type

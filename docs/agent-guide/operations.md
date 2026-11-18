@@ -3514,7 +3514,9 @@ node's label is read from the row in hand; only a node under
 `precedent://learning/` costs the reads above. Nothing reports what was left
 out. `offset` counts readable matches too, so a withheld match shortens no page
 and cannot be located by paging, and stepping `offset` by `limit` until
-`offset` reaches `total` serves every readable match once. The cost is one walk
+`offset` reaches `total` serves every readable match once while the graph does
+not change (a write between requests can repeat or skip a row, as on any offset
+paging). The cost is one walk
 of every match of `q` per request (`ceil(matches/500)` store calls), whatever
 `limit` is; a `restricted` caller and auth off read the stored page with one
 call. A node under `precedent://learning/` stored as another type is judged the

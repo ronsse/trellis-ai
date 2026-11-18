@@ -402,7 +402,7 @@ def assemble_sectioned_pack(
     )
 
 
-# The node type the learning promoter stores a precedent under.
+# Rows per store call when walking the matches for a caller below restricted.
 _PRECEDENT_SCAN_PAGE = 500
 
 
@@ -476,9 +476,11 @@ def search_entities(
 
     For a caller below ``restricted``, ``offset`` and ``total`` both count the
     matches that caller may read, so a withheld match shortens no page and
-    stepping ``offset`` by ``limit`` serves every readable match once. The
-    cost is one walk of every match of ``q`` per request. A ``restricted``
-    caller reads the stored page with one store call.
+    stepping ``offset`` by ``limit`` serves every readable match once while
+    the graph does not change (a write between requests can repeat or skip a
+    row, as on any offset paging). The cost is one walk of every match of
+    ``q`` per request. A ``restricted`` caller reads the stored page with one
+    store call.
     """
     registry = get_registry()
     store = registry.knowledge.graph_store
