@@ -5907,7 +5907,14 @@ paths:
       - admin
   /api/v1/measurements:
     get:
-      description: Query Measurement nodes by subject / metric_name / observer.
+      description: 'Query Measurement nodes by subject / metric_name / observer.
+
+
+        A node whose own ``data_classification`` property is above the caller''s
+
+        clearance is left out, as the graph doors of #1029 leave it out (#1264), so
+
+        a response can hold fewer than ``limit`` rows.'
       operationId: list_measurements_api_v1_measurements_get
       parameters:
       - in: query
@@ -6092,13 +6099,17 @@ paths:
 
         Filters apply on the graph store''s property-level WHERE clause —
 
-        matches against the same keys the Pydantic schema declares. This read does
+        matches against the same keys the Pydantic schema declares. A node whose
 
-        not judge a node''s own ``data_classification`` property (the doors of #1029
+        own ``data_classification`` property is above the caller''s clearance is
 
-        do), so every match is served; one whose ``evidence_ref`` (normally a
+        left out, as the graph doors of #1029 leave it out (#1264), so a response
 
-        document id) names a document the caller may not read is served without it.'
+        can hold fewer than ``limit`` rows; every other match is served, and one
+
+        whose ``evidence_ref`` (normally a document id) names a document the
+
+        caller may not read is served without it.'
       operationId: list_observations_api_v1_observations_get
       parameters:
       - in: query
@@ -6565,11 +6576,15 @@ paths:
       description: 'List promoted precedents.
 
 
-        Below ``restricted`` a precedent is withheld when its own document row or
+        Below ``restricted`` a precedent is withheld when its current node carries a
 
-        its source document is above the caller''s clearance, unless the promotion
+        ``data_classification`` property above the caller''s clearance (#1264), or
 
-        was made under the source-label rule. A learning promotion''s
+        when its own document row or its source document is above the caller''s
+
+        clearance, unless the promotion was made under the source-label rule.
+
+        ``count`` is the number of rows served. A learning promotion''s
 
         ``payload.source_item_id`` is left out when it names a document above the
 

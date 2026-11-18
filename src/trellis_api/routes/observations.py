@@ -137,10 +137,12 @@ def list_observations(
     """Query Observation nodes by subject and/or observer.
 
     Filters apply on the graph store's property-level WHERE clause —
-    matches against the same keys the Pydantic schema declares. This read does
-    not judge a node's own ``data_classification`` property (the doors of #1029
-    do), so every match is served; one whose ``evidence_ref`` (normally a
-    document id) names a document the caller may not read is served without it.
+    matches against the same keys the Pydantic schema declares. A node whose
+    own ``data_classification`` property is above the caller's clearance is
+    left out, as the graph doors of #1029 leave it out (#1264), so a response
+    can hold fewer than ``limit`` rows; every other match is served, and one
+    whose ``evidence_ref`` (normally a document id) names a document the
+    caller may not read is served without it.
     """
     registry = get_registry()
     props: dict[str, Any] = {}
@@ -155,15 +157,14 @@ def list_observations(
         limit=limit,
     )
     clearance = request_clearance(ctx)
-    rows = conceal_node_pointers(
-        rows,
+    precedents = PrecedentClearance(
         registry.knowledge.document_store,
         clearance,
-        precedents=PrecedentClearance(
-            registry.knowledge.document_store,
-            clearance,
-            registry.knowledge.graph_store,
-        ),
+        registry.knowledge.graph_store,
+    )
+    rows = [r for r in rows if precedents.verdict_of(r["node_id"], r) is None]
+    rows = conceal_node_pointers(
+        rows, registry.knowledge.document_store, clearance, precedents=precedents
     )
     return {"observations": [_projected_node(r) for r in rows]}
 
@@ -214,8 +215,14 @@ def list_measurements(
     metric_name: str | None = Query(None),
     observer_agent_id: str | None = Query(None),
     limit: int = Query(100, ge=1, le=1000),
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
 ) -> dict[str, Any]:
-    """Query Measurement nodes by subject / metric_name / observer."""
+    """Query Measurement nodes by subject / metric_name / observer.
+
+    A node whose own ``data_classification`` property is above the caller's
+    clearance is left out, as the graph doors of #1029 leave it out (#1264), so
+    a response can hold fewer than ``limit`` rows.
+    """
     registry = get_registry()
     props: dict[str, Any] = {}
     if subject_entity_id is not None:
@@ -230,4 +237,10 @@ def list_measurements(
         properties=props or None,
         limit=limit,
     )
+    precedents = PrecedentClearance(
+        registry.knowledge.document_store,
+        request_clearance(ctx),
+        registry.knowledge.graph_store,
+    )
+    rows = [r for r in rows if precedents.verdict_of(r["node_id"], r) is None]
     return {"measurements": [_projected_node(r) for r in rows]}
