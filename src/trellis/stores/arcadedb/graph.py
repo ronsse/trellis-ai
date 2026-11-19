@@ -217,9 +217,10 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
         while the winner's commit is landing, and ArcadeDB can resolve the
         ``node_id`` index entry to a record it cannot yet load. In 16 captured
         occurrences this was the statement's first run every time, and the
-        failing writer's own row was never present. The server log shows ``RecordNotFoundException: Record #1:0
-        not found`` under the statement's ``OPTIONAL MATCH``, and the client
-        sees only :data:`_GENERIC_ENGINE_ERROR_CODE` with ``Error executing
+        failing writer's own row was never present. The server log shows
+        ``RecordNotFoundException: Record #1:0 not found`` under
+        the statement's ``OPTIONAL MATCH``, and the client sees only
+        :data:`_GENERIC_ENGINE_ERROR_CODE` with ``Error executing
         Cypher command: <the cypher>`` (the cause does not cross Bolt, as
         :meth:`_is_alias_write_contention` records). Measured against
         ``arcadedata/arcadedb:26.8.1``: 1 of 3 runs of the 8-writer race
