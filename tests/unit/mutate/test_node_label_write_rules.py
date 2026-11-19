@@ -21,7 +21,14 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from trellis.mutate import build_curate_executor
-from trellis.mutate.commands import Command, CommandStatus, Operation
+from trellis.mutate.commands import (
+    BatchStrategy,
+    Command,
+    CommandBatch,
+    CommandResult,
+    CommandStatus,
+    Operation,
+)
 from trellis.schemas.classification import DataClassification
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
@@ -483,6 +490,153 @@ class TestUnreadableSuppliedRecord:
         assert _stored(registry)["data_classification"] == supplied
 
 
+# --- #1287 item 2: a malformed field on the winning supplied record ---
+#
+# A readable supplied record that wins or ties on sensitivity but holds a
+# ``regulatory_tags`` or ``jurisdiction`` that is not a list of strings cannot
+# be unioned with the stored one, so writing it would discard the stored value.
+# It is refused as the level-less record is, but only when the stored record
+# holds a value for that field.
+
+MALFORMED = [None, "phi", ["phi", 3], {"tag": "phi"}]
+FIELDS = ["regulatory_tags", "jurisdiction"]
+
+
+def _batch(route: str, record: object) -> CommandBatch:
+    """A bulk write: a neighbour create, then the label write, continuing on error."""
+    neighbour = Command(
+        operation=Operation.ENTITY_CREATE,
+        args={
+            "entity_id": "dataset:test:other",
+            "entity_type": "dataset",
+            "name": "other",
+        },
+        requested_by="tester",
+    )
+    return CommandBatch(
+        commands=[neighbour, _route(route, record)],
+        strategy=BatchStrategy.CONTINUE_ON_ERROR,
+        requested_by="tester",
+    )
+
+
+def _run_via(
+    registry: StoreRegistry, route: str, via: str, record: object
+) -> CommandResult:
+    executor = build_curate_executor(registry, clearance="restricted")
+    if via == "single":
+        return executor.execute(_route(route, record))
+    results = executor.execute_batch(_batch(route, record))
+    assert len(results) == 2
+    assert results[0].status == CommandStatus.SUCCESS
+    return results[-1]
+
+
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("via", ["single", "batch"])
+@pytest.mark.parametrize("field", FIELDS)
+@pytest.mark.parametrize("malformed", MALFORMED)
+class TestMalformedWinningField:
+    @pytest.mark.parametrize("level", ["confidential", "restricted"])
+    def test_over_a_stored_value_it_is_refused(
+        self,
+        registry: StoreRegistry,
+        route: str,
+        via: str,
+        field: str,
+        malformed: object,
+        level: str,
+    ) -> None:
+        stored = _labelled("confidential", **{field: ["phi"]})
+        _seed(registry, stored)
+        before = _version_count(registry)
+        supplied = _labelled(level, **{field: malformed})
+        result = _run_via(registry, route, via, supplied)
+        assert result.status == CommandStatus.REJECTED
+        assert NODE_ID in result.message
+        assert field in result.message
+        assert _version_count(registry) == before
+        assert _stored(registry)["data_classification"] == stored
+        rejected = _events(registry, EventType.MUTATION_REJECTED)[-1]
+        assert rejected.payload["error_code"] == "node_label_discards"
+        assert len(_events(registry, EventType.ENTITY_CREATED)) == (
+            1 if via == "single" else 2
+        )
+        assert _events(registry, EventType.ENTITY_UPDATED) == []
+
+    def test_with_nothing_stored_for_it_it_is_written_as_supplied(
+        self,
+        registry: StoreRegistry,
+        route: str,
+        via: str,
+        field: str,
+        malformed: object,
+    ) -> None:
+        # Nothing to discard, so the winner is written as it stands, the
+        # malformed value included (the behaviour before #1287).
+        other = "jurisdiction" if field == "regulatory_tags" else "regulatory_tags"
+        _seed(registry, _labelled("confidential", **{field: [], other: ["eu"]}))
+        supplied = _labelled("confidential", **{field: malformed})
+        _ok(_run_via(registry, route, via, supplied))
+        assert _stored(registry)["data_classification"] == {
+            **supplied,
+            other: ["eu"],
+        }
+
+    def test_a_kept_stricter_stored_record_is_kept_as_before(
+        self,
+        registry: StoreRegistry,
+        route: str,
+        via: str,
+        field: str,
+        malformed: object,
+    ) -> None:
+        stored = _labelled("restricted", **{field: ["phi"]})
+        _seed(registry, stored)
+        supplied = _labelled("internal", **{field: malformed})
+        _ok(_run_via(registry, route, via, supplied))
+        assert _stored(registry)["data_classification"] == stored
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_the_malformed_refusal_emits_the_level_less_refusal_event(
+    tmp_path: Path, route: str
+) -> None:
+    def refusal(name: str, supplied: object) -> tuple[Any, str]:
+        reg = StoreRegistry(stores_dir=tmp_path / name)
+        try:
+            _seed(reg, _labelled("confidential", regulatory_tags=["phi"]))
+            result = _run(reg, _route(route, supplied), "restricted")
+            assert result.status == CommandStatus.REJECTED
+            events = reg.operational.event_log.get_events(entity_id=None, limit=1000)
+            return events[-1], result.message
+        finally:
+            reg.close()
+
+    level_less, _ = refusal("level-less", None)
+    malformed, _ = refusal("malformed", _labelled("confidential", regulatory_tags=None))
+    assert malformed.event_type == level_less.event_type == EventType.MUTATION_REJECTED
+    assert set(malformed.payload) == set(level_less.payload)
+    for key in set(level_less.payload) - {"command_id", "message", "errors"}:
+        assert malformed.payload[key] == level_less.payload[key], key
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_a_supplied_record_without_the_key_still_carries_the_stored_value(
+    registry: StoreRegistry, route: str
+) -> None:
+    _seed(
+        registry,
+        _labelled("confidential", regulatory_tags=["phi"], jurisdiction=["eu"]),
+    )
+    _ok(_run(registry, _route(route, _labelled("restricted")), "restricted"))
+    assert _stored(registry)["data_classification"] == {
+        "sensitivity": "restricted",
+        "regulatory_tags": ["phi"],
+        "jurisdiction": ["eu"],
+    }
+
+
 def _keep_stricter_node_label_before_1265(
     properties: dict[str, Any], stored_properties: Any, **_: Any
 ) -> None:
@@ -529,8 +683,23 @@ def _replay_keyless_writes(registry: StoreRegistry) -> list[list[dict[str, Any]]
     )
     for command in (obs, meas, obs, meas):
         _ok(_run(registry, command, "restricted"))
-    # Labelled nodes (stored record with tags) written without the key.
+    # The record verbs again, over record nodes whose stored label holds tags
+    # and a jurisdiction: those verbs never supply the key, so neither the
+    # #1265 merge nor the #1287 refusal applies to them.
     graph = registry.knowledge.graph_store
+    for node_id in ("obs-1", "meas-1"):
+        node = graph.get_node(node_id)
+        assert node is not None
+        tagged = {
+            "sensitivity": "confidential",
+            "regulatory_tags": ["phi"],
+            "jurisdiction": ["eu"],
+        }
+        props = {**node["properties"], "data_classification": tagged}
+        graph.upsert_node(node_id, node["node_type"], props)
+    for command in (obs, meas):
+        _ok(_run(registry, command, "restricted"))
+    # Labelled nodes (stored record with tags) written without the key.
     for level in ("public", "internal", "restricted"):
         node_id = f"dataset:test:{level}"
         record = {"sensitivity": level, "regulatory_tags": ["phi"]}
@@ -556,13 +725,21 @@ def _replay_keyless_writes(registry: StoreRegistry) -> list[list[dict[str, Any]]
     node_ids = [NODE_ID, "obs-1", "meas-1"] + [
         f"dataset:test:{level}" for level in ("public", "internal", "restricted")
     ]
-    return [
+    histories = [
         [
             {"node_type": v["node_type"], "properties": v["properties"]}
             for v in graph.get_node_history(node_id)
         ]
         for node_id in node_ids
     ]
+    # The events too: type, entity and payload keys (values carry run ids).
+    events = [
+        [str(event.event_type), event.entity_id, sorted(event.payload)]
+        for event in registry.operational.event_log.get_events(
+            entity_id=None, limit=1000
+        )
+    ]
+    return [*histories, events]
 
 
 def test_writes_that_supply_no_label_are_unchanged_by_1265(
