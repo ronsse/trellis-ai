@@ -32,6 +32,12 @@ each takes the next entry, played at its ``CREATE (n:Node)`` statement.
 current row and returned none, and an exception is raised by the statement.
 The parameters of every such statement are kept on
 :attr:`FakeBoltDriver.create_params`.
+
+``node_reads`` scripts the read transactions (``execute_read``) the store
+runs, such as the re-read after a committed first create: each takes the next
+entry, a list of row mappings it returns or an exception it raises. The
+parameters of every such read are kept on :attr:`FakeBoltDriver.node_read_params`,
+and a read the test did not script fails it.
 """
 
 from __future__ import annotations
@@ -65,6 +71,7 @@ class FakeBoltDriver:
         attempts: int = 3,
         rows_left: int | Exception | None = None,
         creates: list[bool | str | Exception] | None = None,
+        node_reads: list[list[dict[str, Any]] | Exception] | None = None,
     ) -> None:
         if not outcomes and creates is None:
             msg = "script at least one purge outcome"
@@ -72,6 +79,8 @@ class FakeBoltDriver:
         self._outcomes = list(outcomes) or [0]
         self.creates = list(creates or [])
         self.create_params: list[dict[str, Any]] = []
+        self.node_reads = list(node_reads or [])
+        self.node_read_params: list[dict[str, Any]] = []
         self.attempts = attempts
         self.rows_left = rows_left
         self.transactions: list[FakeTransaction] = []
@@ -117,6 +126,11 @@ class FakeSession:
                 return result
         raise errors[-1]
 
+    def execute_read(
+        self, transaction_function: Callable[[FakeReadTransaction], Any]
+    ) -> Any:
+        return transaction_function(FakeReadTransaction(self._driver))
+
     def run(self, cypher: str, **params: Any) -> FakeResult:
         """Answer an auto-commit query with the scripted ``rows_left``."""
         self._driver.reads.append(params)
@@ -127,6 +141,23 @@ class FakeSession:
         if isinstance(rows_left, Exception):
             raise rows_left
         return FakeResult({"remaining": rows_left})
+
+
+class FakeReadTransaction:
+    """A read transaction; each statement plays the next ``node_reads`` entry."""
+
+    def __init__(self, driver: FakeBoltDriver) -> None:
+        self._driver = driver
+
+    def run(self, cypher: str, **params: Any) -> list[dict[str, Any]]:
+        self._driver.node_read_params.append(params)
+        if not self._driver.node_reads:
+            msg = f"no read is scripted: {cypher}"
+            raise AssertionError(msg)
+        rows = self._driver.node_reads.pop(0)
+        if isinstance(rows, Exception):
+            raise rows
+        return rows
 
 
 class FakeTransaction:
