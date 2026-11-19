@@ -64,6 +64,14 @@ def _render_text(report: NearDuplicatesReport) -> None:
         f"{basis.neighbors}",
         soft_wrap=True,
     )
+    console.print(
+        f"  probes: {report.neighbor_hits_returned} rows returned, "
+        f"{report.neighbor_hits_outside_population} outside the population; "
+        f"{report.probes_saturated} saturated, "
+        f"{report.probes_with_no_population_neighbor} with no population "
+        f"neighbour, {report.neighbor_queries_failed} failed",
+        soft_wrap=True,
+    )
     for row in report.thresholds:
         console.print(
             f"  cosine >= {row.threshold}: {row.pairs} pairs, "

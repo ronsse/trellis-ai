@@ -10,6 +10,7 @@ counts and clusters, the document cap, and that nothing is written.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -233,3 +234,60 @@ class TestReadOnly:
 
         assert report.embedded == 6
         assert (docs.count(), vecs.count(), docs.get("kb:para-a")) == before
+
+
+def _at_angle(theta: float) -> list[float]:
+    vec = [0.0] * seed.DIMS
+    vec[0], vec[1] = math.cos(theta), math.sin(theta)
+    return vec
+
+
+def _crowded(stores: StoreRegistry) -> None:
+    """A real residue pair whose probes are crowded by each member's own chunks.
+
+    Each chunk sits 0.03 rad from its parent (cosine ~0.9996), nearer than the
+    pair's other member (0.97) and short of the parent itself, so with
+    ``top_k=3`` a probe returns the document and two of its chunks, in that
+    order, and never the other member.
+    """
+    theta_b = math.acos(0.97)
+    seed.put(stores, "kb:para-a", seed.PARA_A, _at_angle(0.0))
+    seed.put(stores, "kb:para-b", seed.PARA_B, _at_angle(theta_b))
+    for parent, theta in (("kb:para-a", -0.03), ("kb:para-b", theta_b + 0.03)):
+        for index in range(3):
+            seed.put(
+                stores,
+                f"{parent}#chunk-{index}",
+                seed.OTHER,
+                _at_angle(theta),
+                {"parent_doc_id": parent, "chunk_index": index},
+            )
+
+
+class TestSaturation:
+    def test_chunks_crowding_a_small_top_k_are_reported(
+        self, stores: StoreRegistry
+    ) -> None:
+        _crowded(stores)
+
+        report = _run(stores, neighbors=3)
+
+        # The pair is missed, and the report says why rather than reading 0.
+        assert _at(report, 0.90).residue_pairs == 0
+        assert report.neighbor_hits_returned == 6
+        assert report.neighbor_hits_outside_population == 4
+        assert report.probes_saturated == 2
+        assert report.probes_with_no_population_neighbor == 2
+        assert any("--neighbors" in note for note in report.notes)
+
+    def test_a_wide_enough_probe_finds_the_pair_and_is_not_saturated(
+        self, stores: StoreRegistry
+    ) -> None:
+        _crowded(stores)
+
+        report = _run(stores, neighbors=20)
+
+        assert _at(report, 0.90).residue_pairs == 1
+        assert report.probes_saturated == 0
+        assert report.probes_with_no_population_neighbor == 0
+        assert not any("--neighbors" in note for note in report.notes)

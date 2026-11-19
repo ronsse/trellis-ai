@@ -180,6 +180,20 @@ class NearDuplicatesReport(TrellisModel):
     neighbor_queries_failed: int = 0
     #: Candidate pairs whose two vectors differ in length; not compared.
     dimension_mismatches: int = 0
+    #: Rows all probe queries returned, the probing document itself included.
+    neighbor_hits_returned: int = 0
+    #: Returned rows that are not in the population (a chunk, another item
+    #: kind, a skipped document) and so were discarded. The probe itself is
+    #: not counted here.
+    neighbor_hits_outside_population: int = 0
+    #: Probes whose list was full and partly spent on rows the report
+    #: discards, so pairs may be missing: the query returned ``top_k`` rows
+    #: and its lowest-ranked (last) row is either outside the population, or
+    #: in it with a recomputed cosine still at or above the lowest threshold.
+    probes_saturated: int = 0
+    #: Probes whose every returned row, apart from the document itself, was
+    #: outside the population.
+    probes_with_no_population_neighbor: int = 0
     thresholds: list[ThresholdResult] = Field(default_factory=list)
     cannot_tell: list[str] = Field(default_factory=lambda: list(CANNOT_TELL))
     notes: list[str] = Field(default_factory=list)
@@ -285,6 +299,39 @@ def _classify(
     return docs
 
 
+def _tally_probe(
+    doc: _Doc,
+    hits: Sequence[Mapping[str, Any]],
+    by_id: Mapping[str, _Doc],
+    *,
+    floor: float,
+    neighbors: int,
+    report: NearDuplicatesReport,
+) -> None:
+    """Count one probe's returned rows and whether its list was saturated."""
+    report.neighbor_hits_returned += len(hits)
+    members: list[_Doc | None] = []
+    for hit in hits:
+        hit_id = hit.get("item_id")
+        if hit_id == doc.doc_id:
+            members.append(doc)
+            continue
+        member = by_id.get(hit_id) if isinstance(hit_id, str) else None
+        if member is None:
+            report.neighbor_hits_outside_population += 1
+        members.append(member)
+    if not any(m is not None and m is not doc for m in members):
+        report.probes_with_no_population_neighbor += 1
+    if not hits or len(hits) < neighbors:
+        return
+    last = members[-1]
+    if last is None or (
+        last.unit.shape == doc.unit.shape
+        and float(np.dot(doc.unit, last.unit)) >= floor
+    ):
+        report.probes_saturated += 1
+
+
 def _candidate_pairs(
     docs: list[_Doc],
     vectors: VectorStore,
@@ -304,6 +351,7 @@ def _candidate_pairs(
             logger.warning("near_duplicates_neighbor_query_failed")
             report.neighbor_queries_failed += 1
             continue
+        _tally_probe(doc, hits, by_id, floor=floor, neighbors=neighbors, report=report)
         for hit in hits:
             other_id = hit.get("item_id")
             other = by_id.get(other_id) if isinstance(other_id, str) else None
@@ -418,6 +466,13 @@ def _notes(report: NearDuplicatesReport) -> list[str]:
             f"Document cap hit: {report.documents_considered} of "
             f"{report.documents_in_store} whole documents were read (newest "
             f"first, --max-docs {report.max_docs}); older ones are not counted."
+        )
+    if report.embedded and report.probes_saturated * 10 > report.embedded:
+        notes.append(
+            f"{report.probes_saturated} of {report.embedded} probes were "
+            "saturated (a full top-k list partly spent on rows outside the "
+            "population, such as chunks), so pairs are likely missing; raise "
+            "--neighbors."
         )
     if report.neighbor_queries_failed:
         notes.append(

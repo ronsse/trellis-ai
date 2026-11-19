@@ -163,3 +163,13 @@ class TestReadOnly:
             assert _invoke("--format", fmt, "--no-meta-trace").exit_code == EXIT_OK
 
         assert _snapshot(seeded, root) == before
+
+
+class TestSaturationText:
+    @pytest.mark.usefixtures("seeded")
+    def test_probe_counters_are_printed(self) -> None:
+        out = plain(_invoke("--no-meta-trace", "--neighbors", "1").output)
+
+        assert "probes:" in out
+        assert "saturated" in out
+        assert "outside the population" in out
