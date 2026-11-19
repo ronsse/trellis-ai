@@ -1488,9 +1488,11 @@ class TestComputeAgreementMetric:
         assert metric.undecided == 1  # cand-2 flagged, no decision recorded yet
         assert metric.rate == 1.0
 
-    def test_disagree_is_structurally_always_zero(self, event_log: EventLog) -> None:
-        """No reject event exists for this surface today — documented in
-        the module docstring as a fact about the data, not a shortcut."""
+    def test_no_decision_is_undecided_not_disagreement(
+        self, event_log: EventLog
+    ) -> None:
+        """A flagged candidate with no recorded decision is undecided; only
+        a decline counts as disagreement (``test_review_decisions.py``)."""
         event_log.emit(
             EventType.LEARNING_AUTO_PROMOTE_EVALUATED,
             source="candidate_auto_promote",
@@ -1573,9 +1575,7 @@ class TestSerializationHelpers:
 
     def test_agreement_metric_to_dict_shape(self) -> None:
         """F1: the serialised payload carries the raw ``agree``/``disagree``/
-        ``undecided`` counts *and* ``note`` — a reader must never mistake
-        the structural ``rate`` ceiling (``None`` or exactly ``1.0``) for a
-        measured agreement rate."""
+        ``undecided`` counts *and* ``note`` saying how ``rate`` is derived."""
         metric = AgreementMetric(agree=1, disagree=0, undecided=2, rate=1.0)
         data = agreement_metric_to_dict(metric)
         assert data == {
@@ -1585,7 +1585,8 @@ class TestSerializationHelpers:
             "rate": 1.0,
             "note": metric.note,
         }
-        assert "disagree is always 0" in data["note"]
+        assert "decline" in data["note"]
+        assert "Display only" in data["note"]
 
     def test_agreement_metric_note_has_a_default(self) -> None:
         """F1: a caller that builds ``AgreementMetric`` without naming

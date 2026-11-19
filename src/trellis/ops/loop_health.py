@@ -42,13 +42,17 @@ path rather than opening a new one.
 from __future__ import annotations
 
 from collections.abc import Mapping as MappingABC
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
+import structlog
 from pydantic import Field
 
 from trellis.core.base import TrellisModel
 from trellis.learning.candidate_auto_promote import compute_agreement_metric
+from trellis.learning.review_decisions import read_learning_decisions
+from trellis.learning.scoring import PROMOTE_RECOMMENDATIONS
 from trellis.retrieve.precedents import is_miner_candidate_event
 from trellis.stores.base.event_log import (
     DEFAULT_SCAN_LIMIT,
@@ -60,6 +64,8 @@ from trellis.stores.base.event_log import (
     scan_events,
 )
 from trellis.stores.base.tuner_state import TunerStateStore
+
+logger = structlog.get_logger(__name__)
 
 #: Proposals fetched per status when sizing the tuner's live pending
 #: backlog. Generous relative to ``GET /admin/proposals``'s default
@@ -657,3 +663,214 @@ def summarize_loop_health(
         ],
         scan=scan_coverage,
     )
+
+
+# -- Review backlog --------------------------------------------------------
+#
+# How much is waiting in each section of the Review view, and for how long.
+# Reported beside the loop rows on ``GET /api/v1/loops`` rather than in
+# ``trellis analyze health``. Each kind reads the same source its Review
+# section lists from. A source that cannot be read reports ``pending_count``
+# ``None`` with ``status`` saying why, never ``0``.
+
+#: Review-view kinds, in the order the view lists them.
+REVIEW_BACKLOG_KINDS: tuple[str, ...] = (
+    "tuner_proposal",
+    "learning_candidate",
+    "schema_evolution",
+    "code_proposal",
+)
+
+ReviewBacklogStatus = Literal["ok", "not_written", "unreadable"]
+
+
+class ReviewBacklogRow(TrellisModel):
+    """Pending items of one Review-view kind.
+
+    ``status`` is ``"ok"`` when the source was read (``pending_count`` may be
+    ``0``, and ``oldest_pending_at`` is then ``None``), ``"not_written"`` when
+    the learning artifact has not been written yet, and ``"unreadable"`` when
+    the source could not be read. Under the last two ``pending_count`` and
+    the age fields are ``None`` and ``reason`` names the cause. ``truncated``
+    is true when the read hit its cap, so ``pending_count`` is a floor.
+    """
+
+    kind: str
+    status: ReviewBacklogStatus = "ok"
+    reason: str | None = None
+    pending_count: int | None = None
+    oldest_pending_at: datetime | None = None
+    oldest_pending_age_seconds: float | None = None
+    truncated: bool = False
+
+
+def _backlog_row(
+    kind: str,
+    *,
+    count: int,
+    oldest: datetime | None,
+    now: datetime,
+    truncated: bool = False,
+) -> ReviewBacklogRow:
+    oldest_utc = _as_aware_utc(oldest) if oldest is not None else None
+    return ReviewBacklogRow(
+        kind=kind,
+        pending_count=count,
+        oldest_pending_at=oldest_utc,
+        oldest_pending_age_seconds=(
+            (now - oldest_utc).total_seconds() if oldest_utc is not None else None
+        ),
+        truncated=truncated,
+    )
+
+
+def _as_aware_utc(moment: datetime) -> datetime:
+    return moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment
+
+
+def _unreadable(kind: str, exc: Exception) -> ReviewBacklogRow:
+    logger.warning(
+        "review_backlog_source_unreadable", kind=kind, error_type=type(exc).__name__
+    )
+    return ReviewBacklogRow(
+        kind=kind, status="unreadable", reason=f"source_unreadable:{type(exc).__name__}"
+    )
+
+
+def _event_backlog_row(
+    event_log: EventLog,
+    kind: str,
+    event_type: EventType,
+    id_key: str,
+    *,
+    now: datetime,
+    limit: int,
+) -> ReviewBacklogRow:
+    """Distinct ids among one event type's newest ``limit`` events."""
+    try:
+        events = event_log.get_events(event_type=event_type, limit=limit, order="desc")
+    except Exception as exc:  # an advisory read: degrade, say so
+        return _unreadable(kind, exc)
+    first_seen: dict[str, datetime] = {}
+    for event in events:
+        item_id = str((event.payload or {}).get(id_key) or event.entity_id or "")
+        if not item_id:
+            continue
+        at = _as_aware_utc(event.occurred_at)
+        if item_id not in first_seen or at < first_seen[item_id]:
+            first_seen[item_id] = at
+    return _backlog_row(
+        kind,
+        count=len(first_seen),
+        oldest=min(first_seen.values()) if first_seen else None,
+        now=now,
+        truncated=len(events) >= limit,
+    )
+
+
+def _learning_backlog_row(
+    event_log: EventLog,
+    *,
+    candidates: Sequence[MappingABC[str, Any]] | None,
+    generated_at: datetime | None,
+    unavailable: tuple[ReviewBacklogStatus, str] | None,
+    now: datetime,
+) -> ReviewBacklogRow:
+    """Promotable candidates in the artifact with no recorded decision.
+
+    A report-only candidate has no decision to make, so it is not pending.
+    Candidates carry no per-item timestamp, so the age is the artifact's
+    own ``generated_at_utc``.
+    """
+    kind = "learning_candidate"
+    if unavailable is not None:
+        status, reason = unavailable
+        return ReviewBacklogRow(kind=kind, status=status, reason=reason)
+    if candidates is None:
+        return ReviewBacklogRow(
+            kind=kind, status="unreadable", reason="learning_candidates_not_supplied"
+        )
+    try:
+        decisions = read_learning_decisions(event_log)
+    except Exception as exc:  # an advisory read: degrade, say so
+        return _unreadable(kind, exc)
+    pending = 0
+    for candidate in candidates:
+        if not isinstance(candidate, MappingABC):
+            continue
+        candidate_id = str(candidate.get("candidate_id", "")).strip()
+        recommendation = str(candidate.get("recommendation_type", "")).strip()
+        if (
+            candidate_id
+            and recommendation in PROMOTE_RECOMMENDATIONS
+            and candidate_id not in decisions
+        ):
+            pending += 1
+    return _backlog_row(
+        kind, count=pending, oldest=generated_at if pending else None, now=now
+    )
+
+
+def summarize_review_backlog(
+    event_log: EventLog,
+    tuner_state: TunerStateStore,
+    *,
+    learning_candidates: Sequence[MappingABC[str, Any]] | None,
+    learning_generated_at: datetime | None,
+    learning_unavailable: tuple[ReviewBacklogStatus, str] | None = None,
+    now: datetime | None = None,
+    limit: int = DEFAULT_SCAN_LIMIT,
+) -> list[ReviewBacklogRow]:
+    """One :class:`ReviewBacklogRow` per kind in :data:`REVIEW_BACKLOG_KINDS`.
+
+    - ``tuner_proposal``: pending proposals in the tuner-state store, aged
+      by ``created_at``.
+    - ``learning_candidate``: the caller-supplied artifact's promotable
+      candidates with no recorded reviewer decision. The artifact is read by
+      the API (this module does not resolve its directory); pass
+      ``learning_unavailable`` as ``(status, code)`` when it could not be.
+    - ``schema_evolution``: distinct ``candidate_id`` over
+      ``WELL_KNOWN_CANDIDATE`` events, aged by each id's first event.
+    - ``code_proposal``: distinct ``proposal_id`` over ``PROPOSAL_DRAFTED``
+      events, aged the same way.
+    """
+    now = now or datetime.now(UTC)
+    try:
+        proposals = tuner_state.list_proposals(
+            status="pending", limit=_PENDING_PROPOSAL_LIMIT
+        )
+        tuner_row = _backlog_row(
+            "tuner_proposal",
+            count=len(proposals),
+            oldest=min((p.created_at for p in proposals), default=None),
+            now=now,
+            truncated=len(proposals) >= _PENDING_PROPOSAL_LIMIT,
+        )
+    except Exception as exc:  # an advisory read: degrade, say so
+        tuner_row = _unreadable("tuner_proposal", exc)
+    return [
+        tuner_row,
+        _learning_backlog_row(
+            event_log,
+            candidates=learning_candidates,
+            generated_at=learning_generated_at,
+            unavailable=learning_unavailable,
+            now=now,
+        ),
+        _event_backlog_row(
+            event_log,
+            "schema_evolution",
+            EventType.WELL_KNOWN_CANDIDATE,
+            "candidate_id",
+            now=now,
+            limit=limit,
+        ),
+        _event_backlog_row(
+            event_log,
+            "code_proposal",
+            EventType.PROPOSAL_DRAFTED,
+            "proposal_id",
+            now=now,
+            limit=limit,
+        ),
+    ]

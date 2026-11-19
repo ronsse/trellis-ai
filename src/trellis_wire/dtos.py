@@ -911,6 +911,30 @@ class LearningCandidateListResponse(WireModel):
     candidate_count: int = 0
     candidates: list[dict[str, Any]] = Field(default_factory=list)
     hint: str | None = None
+    #: ``True`` when the decline record behind each candidate's
+    #: ``last_declined_at`` could not be read, so every stamp reads ``None``
+    #: for want of evidence rather than because nobody declined.
+    declines_unreadable: bool = False
+
+
+class LearningDeclineRequest(WireRequestModel):
+    """Body for ``POST /learning/candidates/{id}/decline``: an optional reason."""
+
+    reason: str = "declined_by_reviewer"
+
+
+class LearningDeclineResponse(WireModel):
+    """Outcome of declining one learning candidate.
+
+    A decline is recorded as a ``REVIEW_DECISION_RECORDED`` event and nothing
+    else: the candidate stays listed, can still be approved, and no gate
+    reads the decline.
+    """
+
+    candidate_id: str
+    status: Literal["declined"] = "declined"
+    reason: str
+    declined_at: str
 
 
 class LearningPromotionDecision(WireRequestModel):
@@ -1295,11 +1319,35 @@ class LoopHealthRowResponse(WireModel):
     stale: bool = False
 
 
+class ReviewBacklogRowResponse(WireModel):
+    """Pending items of one Review-view kind, on ``GET /api/v1/loops``.
+
+    ``kind`` is ``tuner_proposal``, ``learning_candidate``,
+    ``schema_evolution`` or ``code_proposal``. ``status`` is ``"ok"`` when
+    the source was read, ``"not_written"`` when the learning artifact does
+    not exist yet, ``"unreadable"`` when the source could not be read; under
+    the last two ``pending_count`` and both age fields are ``None`` (never
+    ``0``) and ``reason`` says why. With ``"ok"``, ``pending_count`` may be
+    ``0`` and the age fields are then ``None``. ``truncated`` means the read
+    hit its cap and ``pending_count`` is a floor.
+    """
+
+    kind: str
+    status: Literal["ok", "not_written", "unreadable"] = "ok"
+    reason: str | None = None
+    pending_count: int | None = None
+    #: ISO-8601 UTC.
+    oldest_pending_at: str | None = None
+    oldest_pending_age_seconds: float | None = None
+    truncated: bool = False
+
+
 class LoopHealthResponse(WireModel):
-    """Response for ``GET /api/v1/loops``: one row per loop."""
+    """Response for ``GET /api/v1/loops``: one row per loop, plus the Review backlog."""
 
     generated_at: str
     loops: list[LoopHealthRowResponse] = Field(default_factory=list)
+    review_backlog: list[ReviewBacklogRowResponse] = Field(default_factory=list)
 
 
 # -- Admin: scheduled jobs --

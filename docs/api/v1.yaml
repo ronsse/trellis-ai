@@ -1963,6 +1963,10 @@ components:
           - type: string
           - type: 'null'
           title: Code
+        declines_unreadable:
+          default: false
+          title: Declines Unreadable
+          type: boolean
         generated_at_utc:
           anyOf:
           - type: string
@@ -1978,6 +1982,47 @@ components:
           title: Status
           type: string
       title: LearningCandidateListResponse
+      type: object
+    LearningDeclineRequest:
+      additionalProperties: false
+      description: 'Body for ``POST /learning/candidates/{id}/decline``: an optional reason.'
+      properties:
+        reason:
+          default: declined_by_reviewer
+          title: Reason
+          type: string
+      title: LearningDeclineRequest
+      type: object
+    LearningDeclineResponse:
+      additionalProperties: false
+      description: 'Outcome of declining one learning candidate.
+
+
+        A decline is recorded as a ``REVIEW_DECISION_RECORDED`` event and nothing
+
+        else: the candidate stays listed, can still be approved, and no gate
+
+        reads the decline.'
+      properties:
+        candidate_id:
+          title: Candidate Id
+          type: string
+        declined_at:
+          title: Declined At
+          type: string
+        reason:
+          title: Reason
+          type: string
+        status:
+          const: declined
+          default: declined
+          title: Status
+          type: string
+      required:
+      - candidate_id
+      - reason
+      - declined_at
+      title: LearningDeclineResponse
       type: object
     LearningPromotionDecision:
       additionalProperties: false
@@ -2185,7 +2230,7 @@ components:
       type: object
     LoopHealthResponse:
       additionalProperties: false
-      description: 'Response for ``GET /api/v1/loops``: one row per loop.'
+      description: 'Response for ``GET /api/v1/loops``: one row per loop, plus the Review backlog.'
       properties:
         generated_at:
           title: Generated At
@@ -2194,6 +2239,11 @@ components:
           items:
             $ref: '#/components/schemas/LoopHealthRowResponse'
           title: Loops
+          type: array
+        review_backlog:
+          items:
+            $ref: '#/components/schemas/ReviewBacklogRowResponse'
+          title: Review Backlog
           type: array
       required:
       - generated_at
@@ -2852,6 +2902,66 @@ components:
           title: Tags
           type: array
       title: RegulatoryTagsRequest
+      type: object
+    ReviewBacklogRowResponse:
+      additionalProperties: false
+      description: 'Pending items of one Review-view kind, on ``GET /api/v1/loops``.
+
+
+        ``kind`` is ``tuner_proposal``, ``learning_candidate``,
+
+        ``schema_evolution`` or ``code_proposal``. ``status`` is ``"ok"`` when
+
+        the source was read, ``"not_written"`` when the learning artifact does
+
+        not exist yet, ``"unreadable"`` when the source could not be read; under
+
+        the last two ``pending_count`` and both age fields are ``None`` (never
+
+        ``0``) and ``reason`` says why. With ``"ok"``, ``pending_count`` may be
+
+        ``0`` and the age fields are then ``None``. ``truncated`` means the read
+
+        hit its cap and ``pending_count`` is a floor.'
+      properties:
+        kind:
+          title: Kind
+          type: string
+        oldest_pending_age_seconds:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Oldest Pending Age Seconds
+        oldest_pending_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Oldest Pending At
+        pending_count:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Pending Count
+        reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Reason
+        status:
+          default: ok
+          enum:
+          - ok
+          - not_written
+          - unreadable
+          title: Status
+          type: string
+        truncated:
+          default: false
+          title: Truncated
+          type: boolean
+      required:
+      - kind
+      title: ReviewBacklogRowResponse
       type: object
     RuntimeResponse:
       additionalProperties: false
@@ -5767,6 +5877,63 @@ paths:
       security:
       - APIKeyHeader: []
       summary: List Learning Candidates
+      tags:
+      - admin
+  /api/v1/learning/candidates/{candidate_id}/decline:
+    post:
+      description: 'Record that a reviewer declined one learning candidate.
+
+
+        Emits a ``REVIEW_DECISION_RECORDED`` event (``surface=
+
+        "learning_promotion"``, ``action="decline"``, ``candidate_ids=[id]``)
+
+        with the reviewer identity, and writes nothing else. The candidate
+
+        stays listed with ``last_declined_at`` set and can still be approved.
+
+        The decline is display only: the agreement metric counts it as a
+
+        disagreement, the Review backlog stops counting the candidate as
+
+        pending, and no gate (auto-promotion included) reads it.'
+      operationId: decline_learning_candidate_api_v1_learning_candidates__candidate_id__decline_post
+      parameters:
+      - in: path
+        name: candidate_id
+        required: true
+        schema:
+          title: Candidate Id
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              anyOf:
+              - $ref: '#/components/schemas/LearningDeclineRequest'
+              - type: 'null'
+              title: Req
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LearningDeclineResponse'
+          description: Successful Response
+        '404':
+          description: The current artifact lists no such candidate.
+        '409':
+          description: There is no learning-candidate artifact to decline against; `detail` has the same `code` / `message`
+            / `path` as `POST /learning/promotions`.
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - APIKeyHeader: []
+      summary: Decline Learning Candidate
       tags:
       - admin
   /api/v1/learning/promotions:

@@ -75,20 +75,16 @@ silently discounted or silently counted.
 
 **The agreement metric's disagree count.** :func:`compute_agreement_metric`
 compares this policy's ``would_promote`` dispositions against later human
-Review-queue decisions on the same candidate. Read against the real
-``REVIEW_DECISION_RECORDED`` payload (``trellis_api.routes.admin``'s
-``promote_learning_candidates`` route and ``prepare_learning_promotions``,
-which silently drops every ``approved=False`` decision before building any
-result row), there is no event anywhere that records a human *rejecting* a
-candidate for this surface — only ``action="promote"`` exists, and its
-``candidate_ids`` can only ever contain approved ids. ``disagree`` is
-therefore always ``0`` today: a fact about what the system currently
-records, not a shortcut taken here. ``AgreementMetric.rate`` is ``None``
-(never a divide-by-zero) when ``agree + disagree == 0``, and is otherwise
-always exactly ``1.0`` for the same reason — :func:`agreement_metric_to_dict`
-carries the raw ``agree``/``disagree``/``undecided`` counts and an explicit
-note alongside ``rate`` so a reader never mistakes a structural ceiling for
-a measured agreement rate.
+Review-queue decisions on the same candidate, read by
+:func:`trellis.learning.review_decisions.read_learning_decisions`: a
+``promote`` decision (the promotion run accepted the approved row) is
+agreement, a ``decline`` (``POST /learning/candidates/{id}/decline``) is
+disagreement, and the latest decision per candidate wins. An unchecked row
+in a promotion submission (``approved=False``) is not a decline and records
+nothing. ``AgreementMetric.rate`` is ``None`` (never a divide-by-zero) when
+no flagged candidate has a decision yet. The metric is display only: the
+loop-health counters read it and no gate does, so a decline never changes
+what this module promotes.
 """
 
 from __future__ import annotations
@@ -104,6 +100,11 @@ import structlog
 
 from trellis.core.write_config import TRUTHY, parse_finite_int
 from trellis.errors import ConfigError
+from trellis.learning.review_decisions import (
+    DECLINE_ACTION,
+    PROMOTE_ACTION,
+    read_learning_decisions,
+)
 from trellis.learning.scoring import (
     PROMOTE_RECOMMENDATIONS,
     build_learning_promotion_payloads,
@@ -1075,19 +1076,14 @@ def run_candidate_auto_promotion(
     )
 
 
-#: Why :attr:`AgreementMetric.rate` structurally cannot be anything but
-#: ``None`` or ``1.0`` today: no event records a human *rejecting* a
-#: learning-promotion candidate (see :func:`compute_agreement_metric`), so
-#: ``disagree`` is always ``0`` and ``rate = agree / (agree + disagree)``
-#: collapses to ``agree / agree`` whenever there is any data at all.
-#: Carried verbatim in every :class:`AgreementMetric` so a reader of the
-#: serialised payload (:func:`agreement_metric_to_dict`) sees the
-#: constraint next to the number, not only in this module's prose.
+#: How to read :attr:`AgreementMetric.rate`, carried verbatim in every
+#: :class:`AgreementMetric` so a reader of the serialised payload
+#: (:func:`agreement_metric_to_dict`) sees it next to the number.
 _AGREEMENT_RATE_NOTE = (
-    "rate can only be None (no would_promote candidates reviewed by a "
-    "human yet) or 1.0 (no event today records a human rejecting a "
-    "learning-promotion candidate, so disagree is always 0) — never a "
-    "value in between."
+    "rate is agree / (agree + disagree): a reviewer's promote counts as "
+    "agree, a decline as disagree, and the latest decision per candidate "
+    "wins. None until a would_promote candidate has a human decision. "
+    "Display only: no gate reads it."
 )
 
 
@@ -1098,11 +1094,11 @@ class AgreementMetric:
 
     ``agree``, ``disagree`` and ``undecided`` are the raw counts ``rate``
     is derived from — read them directly rather than reconstructing them
-    from ``rate``, which loses the denominator. ``disagree`` is, as of
-    today's data, structurally always ``0`` — see the module docstring's
-    "agreement metric's disagree count" section. ``rate`` is ``None``
-    (never a divide-by-zero) when ``agree + disagree == 0``. ``note``
-    states that structural constraint in plain language; see
+    from ``rate``, which loses the denominator. ``disagree`` counts
+    flagged candidates whose latest human decision is a decline — see the
+    module docstring's "agreement metric's disagree count" section.
+    ``rate`` is ``None`` (never a divide-by-zero) when
+    ``agree + disagree == 0``. ``note`` says how to read it; see
     :data:`_AGREEMENT_RATE_NOTE`.
     """
 
@@ -1122,14 +1118,12 @@ def compute_agreement_metric(
     """Compare past ``would_promote`` dispositions against human decisions.
 
     Reads every candidate this policy ever marked ``would_promote`` from
-    past :attr:`EventType.LEARNING_AUTO_PROMOTE_EVALUATED` events, and
-    every candidate id a human has since approved from
-    :attr:`EventType.REVIEW_DECISION_RECORDED` events for
-    ``surface="learning_promotion"`` / ``action="promote"``. ``agree`` is
-    the intersection; ``undecided`` is everything this policy flagged that
-    no human decision has touched yet (approved or rejected). ``disagree``
-    is always ``0`` today — no event records a human rejecting a candidate
-    for this surface (see module docstring).
+    past :attr:`EventType.LEARNING_AUTO_PROMOTE_EVALUATED` events, and the
+    latest human decision per candidate from
+    :func:`~trellis.learning.review_decisions.read_learning_decisions`.
+    ``agree`` counts flagged candidates whose latest decision is
+    ``promote``, ``disagree`` those whose latest is ``decline``, and
+    ``undecided`` those with no decision yet. Display only.
     """
     evaluated_events = event_log.get_events(
         event_type=EventType.LEARNING_AUTO_PROMOTE_EVALUATED,
@@ -1147,23 +1141,17 @@ def compute_agreement_metric(
     if not would_promote_ids:
         return AgreementMetric(agree=0, disagree=0, undecided=0, rate=None)
 
-    decision_events = event_log.get_events(
-        event_type=EventType.REVIEW_DECISION_RECORDED,
-        since=since,
-        payload_filters={"surface": "learning_promotion", "action": "promote"},
-        limit=limit,
-    )
-    approved_ids: set[str] = set()
-    for event in decision_events:
-        for candidate_id in (event.payload or {}).get("candidate_ids") or []:
-            if isinstance(candidate_id, str) and candidate_id:
-                approved_ids.add(candidate_id)
-
-    # No "reject" event exists for this surface today — `disagree` is
-    # always 0 as a fact about the data, never a shortcut taken here.
-    agree = len(would_promote_ids & approved_ids)
-    disagree = 0
-    undecided = len(would_promote_ids - approved_ids)
+    decisions = read_learning_decisions(event_log, since=since, limit=limit)
+    agree = disagree = 0
+    for candidate_id in would_promote_ids:
+        state = decisions.get(candidate_id)
+        if state is None:
+            continue
+        if state.last_action == PROMOTE_ACTION:
+            agree += 1
+        elif state.last_action == DECLINE_ACTION:
+            disagree += 1
+    undecided = len(would_promote_ids) - agree - disagree
     denom = agree + disagree
     rate = (agree / denom) if denom else None
     return AgreementMetric(

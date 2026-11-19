@@ -433,6 +433,25 @@ flagged `stale` when that age exceeds 36h regardless of its own
 `last_status`, `null` rendered as "Not measured", and a fetch failure
 rendered as a visible error rather than a silent empty list.
 
+**Review backlog.** `review_backlog` sizes each kind the Review tab lists,
+one row per kind in a fixed order: `tuner_proposal` (pending tuner
+proposals), `learning_candidate` (promotable candidates in the current
+artifact with no recorded promote or decline), `schema_evolution`
+(distinct candidate ids among `WELL_KNOWN_CANDIDATE`
+events) and `code_proposal` (distinct proposal ids among
+`PROPOSAL_DRAFTED` events). Each row carries `pending_count`,
+`oldest_pending_at` and `oldest_pending_age_seconds`, with `truncated: true`
+when a capped read may have missed older items. The learning row's age is
+the artifact's `generated_at_utc`, because a candidate carries no
+timestamp of its own. A kind with nothing pending reads `0` and a `null`
+age. A kind whose count is unknown reads `pending_count: null`, never `0`,
+with `status` saying why: `not_written` (no learning artifact yet; `reason`
+is the artifact code) or `unreadable` (`reason` is the artifact code or
+`source_unreadable:<ExceptionType>`). The Review nav badge shows the total
+across rows, as `N+` when any row is `null` or truncated. Tag-rule
+candidates are not counted here, and `trellis analyze health` does not
+report these counts.
+
 ### `trellis admin migrate`
 
 Report, and explicitly apply, the schema version of each store.
@@ -6840,7 +6859,8 @@ decide which surfaces are human-gated are described in
 | POST | `/proposals/{id}/promote` | Promote through the governed pipeline (same logic as `trellis metrics promote --commit`) |
 | POST | `/proposals/{id}/reject` | Reject (human-gated); body `{reason?}` |
 | GET | `/learning/candidates` | Serve the most-recent `intent_learning_candidates.json` artifact (`status: "error"` + `code` + a `hint` naming the path when there is none to read) |
-| POST | `/learning/promotions` | Promote approved candidates via `MutationExecutor`; body `{decisions: [{candidate_id, approved, rationale?}]}`. The response's `status` is the verdict `promote-learning` states (`ok` / `refused` / `failed`, from the same function; an approved row with a blank `candidate_id` makes it `refused`, and rows that promoted still landed), `named_count` the approved rows that name a candidate, and `promoted_count` the rows this run fully wrote, `already_promoted_count` the rows whose precedent already held the promotion and were written not at all (re-submitting is safe; the row reads `already_promoted`); the HTTP status is 200 for every verdict |
+| POST | `/learning/candidates/{candidate_id}/decline` | Record that a reviewer declined one candidate; body `{reason?}` (default `declined_by_reviewer`). Emits `REVIEW_DECISION_RECORDED` (`surface: "learning_promotion"`, `action: "decline"`, `candidate_ids: [id]`, reviewer `key_id` / `key_name`) and writes nothing else. The candidate stays listed: `GET /learning/candidates` adds `last_declined_at` to every candidate (`null` when never declined; `declines_unreadable: true` when the decision events could not be read) and it can still be approved. Display only: the agreement metric counts a decline as a disagreement, the Review backlog stops counting the candidate, and no gate reads it. `404` for an id the artifact does not list, `409` with the same `detail` as below when there is no artifact |
+| POST | `/learning/promotions` | Promote approved candidates via `MutationExecutor`; body `{decisions: [{candidate_id, approved, rationale?}]}`. The response's `status` is the verdict `promote-learning` states (`ok` / `refused` / `failed`, from the same function; an approved row with a blank `candidate_id` makes it `refused`, and rows that promoted still landed), `named_count` the approved rows that name a candidate, and `promoted_count` the rows this run fully wrote, `already_promoted_count` the rows whose precedent already held the promotion and were written not at all (re-submitting is safe; the row reads `already_promoted`); the HTTP status is 200 for every verdict. The `REVIEW_DECISION_RECORDED` event it emits names in `candidate_ids` only the approvals the run accepted (landed or already promoted) and in `refused_candidate_ids` the rest |
 | GET | `/schema-evolution/candidates` | List latest `WELL_KNOWN_CANDIDATE` event per `candidate_id` |
 | POST | `/schema-evolution/{id}/draft-adr` | Render the promotion-ADR markdown (copyable/downloadable in the UI). **Only** action — there is no promote endpoint; promotion is a one-way ADR commitment |
 | GET | `/code-proposals` | List recent `PROPOSAL_DRAFTED` events with `markdown_preview` (read-only) |

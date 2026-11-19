@@ -3239,6 +3239,7 @@
         // data-action and carries the id in data-id; this listener calls it.
         const ID_ACTIONS = {
             confirmPromoteProposal, confirmRejectProposal, promoteProposal,
+            declineLearningCandidate,
             draftAdr, copyAdr, downloadAdr,
             loadTraceDetail, navigateToEntity, navigateToDocument,
             loadMemoryDetail, loadEventDetail, navigateToPack, loadPackDetail,
@@ -3830,29 +3831,34 @@
 
         // Pending-items count shown on the Review nav entry itself, so an
         // operator sees there is work waiting before they ever open the
-        // tab. Reuses `/proposals` -- the same endpoint loadReviewProposals()
-        // above already calls -- rather than adding a second count route.
-        // Fetched once on load and again whenever the Review view opens or
-        // a proposal is resolved; never polled. A held-but-under-scoped key
-        // and an absent key both hide the badge the same way a genuinely
-        // empty queue would -- "unknown" must never render as "0".
+        // tab. The total across every kind the tab lists comes from
+        // `/loops`' `review_backlog` (tuner proposals, learning candidates,
+        // schema-evolution candidates, code proposals), not from one
+        // section's own list. Fetched once on load and again whenever the
+        // Review view opens or a decision is recorded; never polled. A
+        // held-but-under-scoped key and an absent key both hide the badge
+        // the same way a genuinely empty queue would -- "unknown" must never
+        // render as "0".
         //
-        // The call sends no explicit `limit`, so the server's default
-        // (`GET /proposals`'s `limit: int = Query(100, ...)`) caps `count`
-        // at 100 -- `count` is `len(rows)` after that cap, never a true
-        // total. A queue that is at or past the cap must not render as
-        // exactly "100": that reads as a real total when it is really
-        // "at least this many".
-        const REVIEW_BADGE_CAP = 100;
+        // A kind whose source could not be read has `pending_count: null`,
+        // and a capped read has `truncated: true`; either makes the known
+        // total a floor, so it renders as "N+" rather than a bare total.
         async function refreshReviewBadge() {
             const el = document.getElementById('nav-badge-review');
             if (!el) return;
             if (!getApiKey()) { el.hidden = true; return; }
             try {
-                const data = await fetchJSON('/proposals');
-                const n = typeof data.count === 'number' ? data.count : (data.proposals || []).length;
+                const data = await fetchJSON('/loops');
+                const rows = data.review_backlog || [];
+                let n = 0;
+                let floor = false;
+                rows.forEach(r => {
+                    if (typeof r.pending_count === 'number') n += r.pending_count;
+                    else floor = true;
+                    if (r.truncated) floor = true;
+                });
                 if (n > 0) {
-                    el.textContent = n >= REVIEW_BADGE_CAP ? `${REVIEW_BADGE_CAP}+` : String(n);
+                    el.textContent = floor ? `${n}+` : String(n);
                     el.hidden = false;
                 } else {
                     el.hidden = true;
@@ -4105,11 +4111,19 @@
                     const m = c.metrics || {};
                     const cid = c.candidate_id || ('cand-' + i);
                     const promotable = c.promotable === true;
+                    // A decline is recorded, never hidden: the card stays and
+                    // says when, and Approve stays available.
+                    const declined = c.last_declined_at
+                        ? `<div class="review-kv"><span class="badge badge-warn">declined on ${escHtml(fmtTime(c.last_declined_at))}</span></div>`
+                        : '';
                     const approveControl = promotable
-                        ? `<label class="fs-3" style="display:flex; align-items:center; gap:0.4rem">
+                        ? `${declined}<label class="fs-3" style="display:flex; align-items:center; gap:0.4rem">
                             <input type="checkbox" class="learn-approve" data-candidate="${escHtml(cid)}"> Approve
                         </label>
-                        <textarea class="review-rationale" data-candidate="${escHtml(cid)}" placeholder="Rationale (optional)"></textarea>`
+                        <textarea class="review-rationale" data-candidate="${escHtml(cid)}" placeholder="Rationale (optional)"></textarea>
+                        <div class="review-actions">
+                            <button class="btn btn-sm btn-danger" data-action="declineLearningCandidate" data-id="${escHtml(cid)}">Decline</button>
+                        </div>`
                         : `<div class="review-actions">
                             <span class="badge badge-warn">report-only — not promotable</span>
                             <span class="review-tooltip" title="This candidate's recommendation type ('${escHtml(c.recommendation_type || '')}') is report-only: it informs reviewers but is not a promotable precedent, so there is deliberately no Approve control here.">Why no approve?</span>
@@ -4167,6 +4181,24 @@
                 toastReview('Learning promotion failed: ' + err.message, false);
             }
             loadReviewLearning();
+            refreshReviewBadge();
+        }
+
+        // Records the decline and nothing else: the candidate stays listed
+        // with "declined on", and can still be approved later, so there is
+        // no confirmation step. The rationale box doubles as the reason.
+        async function declineLearningCandidate(cid) {
+            const body = document.getElementById('review-learning-body');
+            const ta = body.querySelector(`textarea.review-rationale[data-candidate="${CSS.escape(cid)}"]`);
+            const reason = ta && ta.value.trim() ? ta.value.trim() : 'declined_by_reviewer';
+            try {
+                const r = await postJSON(`/learning/candidates/${encodeURIComponent(cid)}/decline`, { reason });
+                toastReview(`Candidate ${r.status}: ${r.reason}`, true);
+            } catch (err) {
+                toastReview('Decline failed: ' + err.message, false);
+            }
+            loadReviewLearning();
+            refreshReviewBadge();
         }
 
         // -- Section 3: Schema-evolution candidates --

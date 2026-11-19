@@ -3,11 +3,11 @@
 The Review tab already has four per-section counts
 (``review-proposals-count`` and siblings), but nothing on the nav entry
 itself told an operator there was work waiting before they opened the
-tab. ``refreshReviewBadge`` reuses ``/proposals`` -- the same endpoint
-``loadReviewProposals`` already calls -- rather than adding a second
-count route, and is wired to three triggers only (page load, the Review
-view opening, a proposal being promoted/rejected), never a ``setInterval``
-poll.
+tab. ``refreshReviewBadge`` totals ``/loops``' ``review_backlog`` across
+every kind the tab lists (tuner proposals, learning candidates,
+schema-evolution candidates, code proposals) rather than adding a count
+route, and is wired to a fixed set of triggers (page load, the Review view
+opening, a decision being recorded), never a ``setInterval`` poll.
 
 Two states must never render as each other:
 
@@ -112,30 +112,33 @@ def test_a_fetch_failure_hides_the_badge_not_an_error_glyph() -> None:
     assert "'!'" not in catch_block
 
 
-def test_badge_renders_100_plus_at_the_proposals_default_limit() -> None:
-    # `/proposals` is called with no explicit `limit`, so the server's
-    # `Query(100, ...)` default caps `count` at 100 -- that cap is a
-    # floor on the real total, not the total itself, so it must never
-    # render as a bare "100".
+def test_badge_renders_a_floor_when_a_kind_is_unknown_or_capped() -> None:
+    # A kind with ``pending_count: null`` (unreadable, or not written) or a
+    # ``truncated`` read makes the known total a floor, never a bare total.
     page = _page()
     body = _function_body(
         page,
         "async function refreshReviewBadge() {",
         "function reachabilityHtml(p) {",
     )
-    assert "REVIEW_BADGE_CAP" in page
-    assert "n >= REVIEW_BADGE_CAP ? `${REVIEW_BADGE_CAP}+`" in body
+    assert "if (typeof r.pending_count === 'number') n += r.pending_count;" in body
+    assert "else floor = true;" in body
+    assert "if (r.truncated) floor = true;" in body
+    assert "el.textContent = floor ? `${n}+` : String(n);" in body
 
 
-def test_badge_reuses_the_proposals_endpoint_already_called_by_the_tab() -> None:
+def test_badge_totals_every_review_kind_from_loop_health() -> None:
     page = _page()
     body = _function_body(
         page,
         "async function refreshReviewBadge() {",
         "function reachabilityHtml(p) {",
     )
-    assert "fetchJSON('/proposals')" in body
-    # No second, dedicated count route was added for this.
+    assert "fetchJSON('/loops')" in body
+    assert "data.review_backlog" in body
+    # Not one section's own list: that counted tuner proposals only.
+    assert "fetchJSON('/proposals')" not in body
+    # No dedicated count route was added for this.
     assert "proposals/count" not in page
     assert "/review/pending" not in page
 
@@ -178,6 +181,22 @@ def test_badge_refreshed_after_a_proposal_is_promoted_or_rejected() -> None:
     assert "refreshReviewBadge();" in reject_body
 
 
+def test_badge_refreshed_after_a_learning_decision() -> None:
+    page = _page()
+    submit_body = _function_body(
+        page,
+        "async function submitLearningPromotions() {",
+        "async function declineLearningCandidate(cid) {",
+    )
+    assert "refreshReviewBadge();" in submit_body
+    decline_body = _function_body(
+        page,
+        "async function declineLearningCandidate(cid) {",
+        "// -- Section 3: Schema-evolution candidates --",
+    )
+    assert "refreshReviewBadge();" in decline_body
+
+
 def test_no_polling_interval_was_added_for_the_badge() -> None:
     page = _page()
     body = _function_body(
@@ -204,4 +223,5 @@ def test_each_pattern_catches_a_deliberately_defective_subject() -> None:
     )
     assert "if (n > 0) {" not in defective
     assert "if (!getApiKey())" not in defective
-    assert "REVIEW_BADGE_CAP" not in defective
+    assert "review_backlog" not in defective
+    assert "floor" not in defective
