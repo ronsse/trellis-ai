@@ -137,6 +137,7 @@ from trellis_wire.dtos import (
     ProposalDecisionResponse,
     ProposalPreviewResponse,
     ProposalRejectRequest,
+    ReviewBacklogResponse,
     ReviewBacklogRowResponse,
     RuntimeResponse,
     SchemaEvolutionCandidate,
@@ -428,7 +429,7 @@ def _parse_utc(value: object) -> datetime | None:
 
 
 def _review_backlog(
-    registry: StoreRegistry, *, now: datetime
+    registry: StoreRegistry, *, now: datetime, actionable_only: bool = False
 ) -> list[ReviewBacklogRow]:
     """Size every Review-view kind; the learning artifact is read here."""
     candidates: list[Any] | None = None
@@ -450,6 +451,25 @@ def _review_backlog(
         learning_generated_at=generated_at,
         learning_unavailable=unavailable,
         now=now,
+        actionable_only=actionable_only,
+    )
+
+
+@router.get("/review/backlog", response_model=ReviewBacklogResponse)
+def review_backlog() -> ReviewBacklogResponse:
+    """Size the Review-view kinds a reviewer can resolve, and nothing else.
+
+    The nav badge's read: the tuner-proposal and learning-candidate rows of
+    ``GET /loops``' ``review_backlog``, without the loop report or the
+    schema-evolution and code-proposal event scans.
+    """
+    now = utc_now()
+    return ReviewBacklogResponse(
+        generated_at=now.isoformat(),
+        review_backlog=[
+            _review_backlog_row_response(row)
+            for row in _review_backlog(get_registry(), now=now, actionable_only=True)
+        ],
     )
 
 
@@ -464,6 +484,8 @@ def _review_backlog_row_response(row: ReviewBacklogRow) -> ReviewBacklogRowRespo
         ),
         oldest_pending_age_seconds=row.oldest_pending_age_seconds,
         truncated=row.truncated,
+        actionable=row.actionable,
+        scan_limit=row.scan_limit,
     )
 
 

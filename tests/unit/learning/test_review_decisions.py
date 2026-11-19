@@ -82,15 +82,25 @@ class TestAgreementCountsDeclines:
         assert metric.rate == 0.5
 
     def test_the_latest_decision_per_candidate_wins(self, event_log: EventLog) -> None:
-        _would_promote(event_log, "cand-1", "cand-2")
+        # Asymmetric on purpose: folding newest-first instead would read
+        # (agree, disagree) as (1, 2) and flip every candidate's state.
+        _would_promote(event_log, "cand-1", "cand-2", "cand-3")
         _decide(event_log, "decline", "cand-1")
         _decide(event_log, "promote", "cand-1")
         _decide(event_log, "promote", "cand-2")
         _decide(event_log, "decline", "cand-2")
+        _decide(event_log, "decline", "cand-3")
+        _decide(event_log, "promote", "cand-3")
 
         metric = compute_agreement_metric(event_log)
+        states = read_learning_decisions(event_log)
 
-        assert (metric.agree, metric.disagree, metric.undecided) == (1, 1, 0)
+        assert (metric.agree, metric.disagree, metric.undecided) == (2, 1, 0)
+        assert {cid: s.last_action for cid, s in states.items()} == {
+            "cand-1": "promote",
+            "cand-2": "decline",
+            "cand-3": "promote",
+        }
 
     def test_other_surfaces_and_actions_are_ignored(self, event_log: EventLog) -> None:
         _would_promote(event_log, "cand-1")

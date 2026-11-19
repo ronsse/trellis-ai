@@ -920,7 +920,7 @@ class LearningCandidateListResponse(WireModel):
 class LearningDeclineRequest(WireRequestModel):
     """Body for ``POST /learning/candidates/{id}/decline``: an optional reason."""
 
-    reason: str = "declined_by_reviewer"
+    reason: str = Field(default="declined_by_reviewer", max_length=2000)
 
 
 class LearningDeclineResponse(WireModel):
@@ -1330,6 +1330,13 @@ class ReviewBacklogRowResponse(WireModel):
     ``0``) and ``reason`` says why. With ``"ok"``, ``pending_count`` may be
     ``0`` and the age fields are then ``None``. ``truncated`` means the read
     hit its cap and ``pending_count`` is a floor.
+
+    ``actionable`` is true only for ``tuner_proposal`` and
+    ``learning_candidate``, the kinds a reviewer resolves in the Review view.
+    For the other two ``pending_count`` is the number drafted in the scanned
+    window, which no action clears. ``scan_limit`` is the most rows the count
+    read (``None`` for the whole learning artifact); it differs from what the
+    Review view lists (200 schema-evolution, 50 code-proposal events).
     """
 
     kind: str
@@ -1340,6 +1347,19 @@ class ReviewBacklogRowResponse(WireModel):
     oldest_pending_at: str | None = None
     oldest_pending_age_seconds: float | None = None
     truncated: bool = False
+    actionable: bool = False
+    scan_limit: int | None = None
+
+
+class ReviewBacklogResponse(WireModel):
+    """``GET /api/v1/review/backlog``: the actionable backlog rows only.
+
+    The nav badge reads this instead of the whole ``GET /loops`` report; it
+    runs no schema-evolution or code-proposal event scan.
+    """
+
+    generated_at: str
+    review_backlog: list[ReviewBacklogRowResponse] = Field(default_factory=list)
 
 
 class LoopHealthResponse(WireModel):

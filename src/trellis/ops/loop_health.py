@@ -670,8 +670,15 @@ def summarize_loop_health(
 # How much is waiting in each section of the Review view, and for how long.
 # Reported beside the loop rows on ``GET /api/v1/loops`` rather than in
 # ``trellis analyze health``. Each kind reads the same source its Review
-# section lists from. A source that cannot be read reports ``pending_count``
-# ``None`` with ``status`` saying why, never ``0``.
+# section lists from, over a different window (``scan_limit``: the Review
+# view lists the newest 200 schema-evolution and 50 code-proposal events).
+# A source that cannot be read reports ``pending_count`` ``None`` with
+# ``status`` saying why, never ``0``.
+#
+# Only an actionable kind is one a reviewer can resolve in the Review view;
+# the nav badge totals those alone. Schema-evolution candidates and code
+# proposals have no resolving action, so their ``pending_count`` is "drafted,
+# in the scanned window", not a queue that ever drains.
 
 #: Review-view kinds, in the order the view lists them.
 REVIEW_BACKLOG_KINDS: tuple[str, ...] = (
@@ -679,6 +686,12 @@ REVIEW_BACKLOG_KINDS: tuple[str, ...] = (
     "learning_candidate",
     "schema_evolution",
     "code_proposal",
+)
+
+#: Kinds a reviewer can resolve in the Review view (promote / reject /
+#: decline). The others are listed for visibility and never clear.
+ACTIONABLE_REVIEW_KINDS: frozenset[str] = frozenset(
+    {"tuner_proposal", "learning_candidate"}
 )
 
 ReviewBacklogStatus = Literal["ok", "not_written", "unreadable"]
@@ -693,6 +706,12 @@ class ReviewBacklogRow(TrellisModel):
     the source could not be read. Under the last two ``pending_count`` and
     the age fields are ``None`` and ``reason`` names the cause. ``truncated``
     is true when the read hit its cap, so ``pending_count`` is a floor.
+
+    ``actionable`` is true only for a kind a reviewer resolves in the Review
+    view (:data:`ACTIONABLE_REVIEW_KINDS`); for the others ``pending_count``
+    counts items drafted in the scanned window, which no action clears.
+    ``scan_limit`` is the most rows the count read (``None`` when it read a
+    whole artifact).
     """
 
     kind: str
@@ -702,6 +721,8 @@ class ReviewBacklogRow(TrellisModel):
     oldest_pending_at: datetime | None = None
     oldest_pending_age_seconds: float | None = None
     truncated: bool = False
+    actionable: bool = False
+    scan_limit: int | None = None
 
 
 def _backlog_row(
@@ -711,10 +732,13 @@ def _backlog_row(
     oldest: datetime | None,
     now: datetime,
     truncated: bool = False,
+    scan_limit: int | None = None,
 ) -> ReviewBacklogRow:
     oldest_utc = _as_aware_utc(oldest) if oldest is not None else None
     return ReviewBacklogRow(
         kind=kind,
+        actionable=kind in ACTIONABLE_REVIEW_KINDS,
+        scan_limit=scan_limit,
         pending_count=count,
         oldest_pending_at=oldest_utc,
         oldest_pending_age_seconds=(
@@ -733,7 +757,10 @@ def _unreadable(kind: str, exc: Exception) -> ReviewBacklogRow:
         "review_backlog_source_unreadable", kind=kind, error_type=type(exc).__name__
     )
     return ReviewBacklogRow(
-        kind=kind, status="unreadable", reason=f"source_unreadable:{type(exc).__name__}"
+        kind=kind,
+        status="unreadable",
+        reason=f"source_unreadable:{type(exc).__name__}",
+        actionable=kind in ACTIONABLE_REVIEW_KINDS,
     )
 
 
@@ -765,6 +792,7 @@ def _event_backlog_row(
         oldest=min(first_seen.values()) if first_seen else None,
         now=now,
         truncated=len(events) >= limit,
+        scan_limit=limit,
     )
 
 
@@ -785,10 +813,15 @@ def _learning_backlog_row(
     kind = "learning_candidate"
     if unavailable is not None:
         status, reason = unavailable
-        return ReviewBacklogRow(kind=kind, status=status, reason=reason)
+        return ReviewBacklogRow(
+            kind=kind, status=status, reason=reason, actionable=True
+        )
     if candidates is None:
         return ReviewBacklogRow(
-            kind=kind, status="unreadable", reason="learning_candidates_not_supplied"
+            kind=kind,
+            status="unreadable",
+            reason="learning_candidates_not_supplied",
+            actionable=True,
         )
     try:
         decisions = read_learning_decisions(event_log)
@@ -820,8 +853,13 @@ def summarize_review_backlog(
     learning_unavailable: tuple[ReviewBacklogStatus, str] | None = None,
     now: datetime | None = None,
     limit: int = DEFAULT_SCAN_LIMIT,
+    actionable_only: bool = False,
 ) -> list[ReviewBacklogRow]:
     """One :class:`ReviewBacklogRow` per kind in :data:`REVIEW_BACKLOG_KINDS`.
+
+    ``actionable_only`` returns the :data:`ACTIONABLE_REVIEW_KINDS` rows
+    alone and skips the schema-evolution and code-proposal event scans; the
+    nav badge reads that.
 
     - ``tuner_proposal``: pending proposals in the tuner-state store, aged
       by ``created_at``.
@@ -845,10 +883,11 @@ def summarize_review_backlog(
             oldest=min((p.created_at for p in proposals), default=None),
             now=now,
             truncated=len(proposals) >= _PENDING_PROPOSAL_LIMIT,
+            scan_limit=_PENDING_PROPOSAL_LIMIT,
         )
     except Exception as exc:  # an advisory read: degrade, say so
         tuner_row = _unreadable("tuner_proposal", exc)
-    return [
+    actionable = [
         tuner_row,
         _learning_backlog_row(
             event_log,
@@ -857,6 +896,11 @@ def summarize_review_backlog(
             unavailable=learning_unavailable,
             now=now,
         ),
+    ]
+    if actionable_only:
+        return actionable
+    return [
+        *actionable,
         _event_backlog_row(
             event_log,
             "schema_evolution",

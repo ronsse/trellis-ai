@@ -79,6 +79,18 @@ class TestDeclineRoute:
         assert resp.status_code == 404
         assert _decisions(registry, "decline") == []
 
+    def test_an_overlong_reason_is_rejected(
+        self, client, registry, tmp_path, monkeypatch
+    ):
+        cand = _learning_candidate()
+        _write_learning_candidates(tmp_path, monkeypatch, [cand])
+        resp = client.post(
+            f"/api/v1/learning/candidates/{cand['candidate_id']}/decline",
+            json={"reason": "x" * 2001},
+        )
+        assert resp.status_code == 422
+        assert _decisions(registry, "decline") == []
+
     def test_decline_without_an_artifact_is_409(self, client, registry):
         resp = client.post("/api/v1/learning/candidates/any/decline")
         assert resp.status_code == 409
@@ -143,6 +155,41 @@ class TestReviewBacklog:
             "schema_evolution",
             "code_proposal",
         }
+
+    def test_only_reviewer_resolvable_kinds_are_actionable(self, client, registry):
+        rows = _backlog(client)
+        assert {k: r["actionable"] for k, r in rows.items()} == {
+            "tuner_proposal": True,
+            "learning_candidate": True,
+            "schema_evolution": False,
+            "code_proposal": False,
+        }
+        # Each row states the window it counted over.
+        assert rows["schema_evolution"]["scan_limit"] == 5000
+        assert rows["code_proposal"]["scan_limit"] == 5000
+
+    def test_backlog_route_sizes_only_actionable_kinds_without_event_scans(
+        self, client, registry, monkeypatch
+    ):
+        _seed_proposal(registry)
+        _seed_well_known_candidate(registry, "entity_type:one")
+        log = registry.operational.event_log
+        real = log.get_events
+        asked: list[object] = []
+
+        def spy(*args, **kwargs):
+            asked.append(kwargs.get("event_type"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(log, "get_events", spy)
+        resp = client.get("/api/v1/review/backlog")
+        assert resp.status_code == 200, resp.text
+        rows = {r["kind"]: r for r in resp.json()["review_backlog"]}
+        assert set(rows) == {"tuner_proposal", "learning_candidate"}
+        assert all(r["actionable"] for r in rows.values())
+        assert rows["tuner_proposal"]["pending_count"] == 1
+        assert EventType.WELL_KNOWN_CANDIDATE not in asked
+        assert EventType.PROPOSAL_DRAFTED not in asked
 
     def test_empty_event_kinds_read_zero_with_no_age(self, client, registry):
         rows = _backlog(client)

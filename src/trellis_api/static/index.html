@@ -3831,31 +3831,30 @@
 
         // Pending-items count shown on the Review nav entry itself, so an
         // operator sees there is work waiting before they ever open the
-        // tab. The total across every kind the tab lists comes from
-        // `/loops`' `review_backlog` (tuner proposals, learning candidates,
-        // schema-evolution candidates, code proposals), not from one
-        // section's own list. Fetched once on load and again whenever the
-        // Review view opens or a decision is recorded; never polled. A
-        // held-but-under-scoped key and an absent key both hide the badge
-        // the same way a genuinely empty queue would -- "unknown" must never
-        // render as "0".
+        // tab. The total comes from `/review/backlog`, which sizes only the
+        // kinds a reviewer can resolve here (tuner proposals and learning
+        // candidates): schema-evolution and code proposals have no
+        // resolving action, so counting them would never clear. Fetched
+        // once on load and again whenever the Review view opens or a
+        // decision is recorded; never polled. A held-but-under-scoped key
+        // and an absent key both hide the badge the same way a genuinely
+        // empty queue would -- "unknown" must never render as "0".
         //
-        // A kind whose source could not be read has `pending_count: null`,
-        // and a capped read has `truncated: true`; either makes the known
-        // total a floor, so it renders as "N+" rather than a bare total.
+        // An unreadable source or a capped read makes the known total a
+        // floor, so it renders as "N+". A learning artifact that is not
+        // written yet adds 0: there is nothing to review, not an unknown.
         async function refreshReviewBadge() {
             const el = document.getElementById('nav-badge-review');
             if (!el) return;
             if (!getApiKey()) { el.hidden = true; return; }
             try {
-                const data = await fetchJSON('/loops');
-                const rows = data.review_backlog || [];
+                const data = await fetchJSON('/review/backlog');
+                const rows = (data.review_backlog || []).filter(r => r.actionable);
                 let n = 0;
                 let floor = false;
                 rows.forEach(r => {
                     if (typeof r.pending_count === 'number') n += r.pending_count;
-                    else floor = true;
-                    if (r.truncated) floor = true;
+                    if (r.status === 'unreadable' || r.truncated) floor = true;
                 });
                 if (n > 0) {
                     el.textContent = floor ? `${n}+` : String(n);

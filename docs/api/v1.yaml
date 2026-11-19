@@ -1989,6 +1989,7 @@ components:
       properties:
         reason:
           default: declined_by_reviewer
+          maxLength: 2000
           title: Reason
           type: string
       title: LearningDeclineRequest
@@ -2903,6 +2904,27 @@ components:
           type: array
       title: RegulatoryTagsRequest
       type: object
+    ReviewBacklogResponse:
+      additionalProperties: false
+      description: '``GET /api/v1/review/backlog``: the actionable backlog rows only.
+
+
+        The nav badge reads this instead of the whole ``GET /loops`` report; it
+
+        runs no schema-evolution or code-proposal event scan.'
+      properties:
+        generated_at:
+          title: Generated At
+          type: string
+        review_backlog:
+          items:
+            $ref: '#/components/schemas/ReviewBacklogRowResponse'
+          title: Review Backlog
+          type: array
+      required:
+      - generated_at
+      title: ReviewBacklogResponse
+      type: object
     ReviewBacklogRowResponse:
       additionalProperties: false
       description: 'Pending items of one Review-view kind, on ``GET /api/v1/loops``.
@@ -2922,8 +2944,25 @@ components:
 
         ``0`` and the age fields are then ``None``. ``truncated`` means the read
 
-        hit its cap and ``pending_count`` is a floor.'
+        hit its cap and ``pending_count`` is a floor.
+
+
+        ``actionable`` is true only for ``tuner_proposal`` and
+
+        ``learning_candidate``, the kinds a reviewer resolves in the Review view.
+
+        For the other two ``pending_count`` is the number drafted in the scanned
+
+        window, which no action clears. ``scan_limit`` is the most rows the count
+
+        read (``None`` for the whole learning artifact); it differs from what the
+
+        Review view lists (200 schema-evolution, 50 code-proposal events).'
       properties:
+        actionable:
+          default: false
+          title: Actionable
+          type: boolean
         kind:
           title: Kind
           type: string
@@ -2947,6 +2986,11 @@ components:
           - type: string
           - type: 'null'
           title: Reason
+        scan_limit:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Scan Limit
         status:
           default: ok
           enum:
@@ -7236,6 +7280,29 @@ paths:
       security:
       - APIKeyHeader: []
       summary: Reject Proposal Route
+      tags:
+      - admin
+  /api/v1/review/backlog:
+    get:
+      description: 'Size the Review-view kinds a reviewer can resolve, and nothing else.
+
+
+        The nav badge''s read: the tuner-proposal and learning-candidate rows of
+
+        ``GET /loops``'' ``review_backlog``, without the loop report or the
+
+        schema-evolution and code-proposal event scans.'
+      operationId: review_backlog_api_v1_review_backlog_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewBacklogResponse'
+          description: Successful Response
+      security:
+      - APIKeyHeader: []
+      summary: Review Backlog
       tags:
       - admin
   /api/v1/runtime:
