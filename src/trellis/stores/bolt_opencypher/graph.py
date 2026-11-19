@@ -1194,9 +1194,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                     self._is_first_create_write_contention(exc)
                 ):
                     raise
-                logger.debug(
-                    "bolt_first_create_lost_race", node_id=node_id, attempt=attempt
-                )
+                self._log_first_create_retry(node_id, attempt, exc)
                 continue
             if record is None:
                 return False
@@ -1217,6 +1215,57 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         :meth:`~trellis.stores.arcadedb.graph.ArcadeDBGraphStore._is_first_create_write_contention`.
         """
         return _is_first_create_contention(exc)
+
+    def _log_first_create_retry(
+        self,
+        node_id: str,
+        attempt: int,
+        exc: Exception,  # noqa: ARG002 - read by the ArcadeDB override
+    ) -> None:
+        """Record a first-create attempt the retry loop is about to re-run.
+
+        Called only after :meth:`_is_first_create_write_contention` said yes,
+        so it never changes what is retried. A lost ``node_version_unique``
+        race is routine and logs at debug; ArcadeDB overrides this to warn on
+        its generic-code channel, which also absorbs faults that are not races.
+        """
+        logger.debug("bolt_first_create_lost_race", node_id=node_id, attempt=attempt)
+
+    def _is_settle_read_contention(self, exc: Exception) -> bool:  # noqa: ARG002
+        """Return True when the settle re-read's ``exc`` may be read again.
+
+        Off on the portable store and Neo4j: their read raises nothing of the
+        kind. ArcadeDB opts in, see
+        :meth:`~trellis.stores.arcadedb.graph.ArcadeDBGraphStore._is_settle_read_contention`.
+        """
+        return False
+
+    def _read_settle_rows(self, node_id: str) -> list[tuple[str, str, str]]:
+        """Run the settle re-read, reading again while the backend says it may.
+
+        The write has committed by now, so a raise here tells the caller a
+        create failed that happened. Only the read is re-run, never the
+        create, and at most ``_FIRST_CREATE_ATTEMPTS`` times; a fault that
+        persists is raised unchanged. A re-run read writes nothing, so it is
+        safe whatever the fault was.
+        """
+        for attempt in range(1, _FIRST_CREATE_ATTEMPTS + 1):
+            try:
+                return self._current_node_rows(node_id)
+            except Exception as exc:
+                if attempt == _FIRST_CREATE_ATTEMPTS or not (
+                    self._is_settle_read_contention(exc)
+                ):
+                    raise
+                logger.warning(
+                    "bolt_first_create_settle_read_retried",
+                    node_id=node_id,
+                    attempt=attempt,
+                    error_code=getattr(exc, "code", None),
+                )
+        # Unreachable: the last attempt returns or raises.
+        msg = f"create_node_if_absent({node_id!r}): no settle read ran"
+        raise StoreError(msg, store="graph")
 
     def _current_node_rows(self, node_id: str) -> list[tuple[str, str, str]]:
         """``(valid_from, version_id, row id)`` of each current row of ``node_id``."""
@@ -1263,7 +1312,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         been told they created the node. A failed delete is logged, not
         raised: the write has committed.
         """
-        rows = self._current_node_rows(node_id)
+        rows = self._read_settle_rows(node_id)
         if not rows:
             # Created, then deleted by another writer before this read.
             return True
