@@ -4700,6 +4700,19 @@ payload as `--format json`.
 
 Read-only measurement for #1208: how often a later pack of one session serves a near-duplicate sibling (a different id, MinHash-similar text at the pack builder's own threshold) of an item an earlier pack already served, beside exact repeats, chunk siblings, fresh and unreadable items, with estimated tokens per class (`trellis analyze session-repeats [--days N] [--window-minutes M] [--format text|json] [--no-meta-trace]`; held-out packs dropped, text output carries counts and an opaque session handle only, and it changes no serving).
 
+### `trellis analyze near-duplicates`
+
+Read-only count of stored documents that say the same thing in different words. Ingest dedup is an exact content hash plus character-trigram MinHash (Jaccard 0.85), both lexical, so a reworded fact passes them. This pairs whole documents whose stored embeddings have cosine at or above each threshold (default 0.90 and 0.95) and splits the pairs into *lexical* (the shipped ingest MinHash predicate, a default `MinHashIndex` over full content, already catches them) and *paraphrase residue* (it does not), with the documents in a residue pair, connected-component clusters and the largest one, a breakdown by `metadata.source_system` (else the doc id before the first `:`), and a sample of pair ids with their cosine.
+
+```bash
+trellis analyze near-duplicates [--threshold 0.90 --threshold 0.95] [--max-docs N] [--neighbors K] [--format text|json] [--no-meta-trace]
+```
+
+- **Population.** `list_documents(include_chunks=False)`, newest first, up to `--max-docs` (default 5000; a hit cap is reported with the store's total). Each document lands in one class: archived, superseded, noise, unreadable (non-text content), no embedding, unusable embedding, or embedded. Only embedded documents are paired, and every other class is counted.
+- **How embeddings are read.** The `VectorStore` ABC has no enumeration, so each document's vector is fetched with `get(doc_id)` (vector rows are keyed by doc id) and used as the probe of one `query(top_k=--neighbors)` (default 20). Neighbours outside the population are discarded and the cosine is recomputed from the two fetched vectors. Cost: `n` gets, `n` queries (a full scan each on SQLite) and at most `n × k` cosines; no all-pairs loop. MinHash signatures are computed only for documents in a candidate pair.
+- **What it cannot tell.** Whether a residue pair is the same fact or an update, correction or contradiction; whether merging would help outcomes; anything about unembedded documents; pairs a bounded top-k probe did not return (every count is a lower bound). The thresholds are uncalibrated. The report carries these as `cannot_tell`.
+- **Read-only.** It writes nothing, emits no event and builds no `MutationExecutor`; with `--no-meta-trace` the stores are byte-for-byte unchanged. The exit code is the same on both formats. Both formats print document ids in the sample, never document text. It changes no serving.
+
 ### `trellis analyze replay`
 
 Read-only counterfactual over the window's already-served packs: the same
