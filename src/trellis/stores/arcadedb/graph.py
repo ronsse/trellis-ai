@@ -212,10 +212,12 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
         """Widen the base first-create predicate over the generic error channel.
 
         A first creator that loses the ``node_version_unique`` race fails at
-        commit with the duplicate key, which the base predicate reads. Its
-        re-run then re-reads the id while the winner's commit is landing, and
-        ArcadeDB can resolve the ``node_id`` index entry to a record it cannot
-        yet load: the server log shows ``RecordNotFoundException: Record #1:0
+        commit with the duplicate key, which the base predicate reads. A
+        creator can also lose before it commits: its statement reads the id
+        while the winner's commit is landing, and ArcadeDB can resolve the
+        ``node_id`` index entry to a record it cannot yet load. In 16 captured
+        occurrences this was the statement's first run every time, and the
+        failing writer's own row was never present. The server log shows ``RecordNotFoundException: Record #1:0
         not found`` under the statement's ``OPTIONAL MATCH``, and the client
         sees only :data:`_GENERIC_ENGINE_ERROR_CODE` with ``Error executing
         Cypher command: <the cypher>`` (the cause does not cross Bolt, as
