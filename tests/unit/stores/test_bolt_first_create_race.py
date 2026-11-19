@@ -344,3 +344,117 @@ def test_arcadedb_persistent_stale_re_read_is_raised_after_the_bound() -> None:
         _arcadedb_store(driver).create_node_if_absent("n1", "service", {})
     assert caught.value is ARCADEDB_STALE_RE_READ
     assert len(driver.transactions) == 3
+
+
+def test_an_absorbed_generic_fault_is_a_warning_with_its_code() -> None:
+    # The edge path warns on the same code; the first-create path must too, or
+    # a transient fault that is not a race disappears once retried.
+    from structlog.testing import capture_logs
+
+    driver = FakeBoltDriver(creates=[ARCADEDB_STALE_RE_READ, False])
+    with capture_logs() as logs:
+        assert (
+            _arcadedb_store(driver).create_node_if_absent("n1", "service", {}) is False
+        )
+    warnings = [e for e in logs if e["log_level"] == "warning"]
+    assert warnings == [
+        {
+            "event": "arcadedb_first_create_generic_fault_retried",
+            "log_level": "warning",
+            "node_id": "n1",
+            "attempt": 1,
+            "error_code": "Neo.DatabaseError.General.UnknownError",
+        }
+    ]
+
+
+@pytest.mark.parametrize("arcadedb", [False, True], ids=["portable", "arcadedb"])
+def test_a_lost_duplicate_key_race_stays_at_debug(arcadedb: bool) -> None:
+    from structlog.testing import capture_logs
+
+    loser = ARCADEDB_LOSER if arcadedb else NEO4J_LOSER
+    driver = FakeBoltDriver(creates=[loser, False])
+    store = _arcadedb_store(driver) if arcadedb else _store(driver)
+    with capture_logs() as logs:
+        assert store.create_node_if_absent("n1", "service", {}) is False
+    assert [e["log_level"] for e in logs] == ["debug"]
+    assert logs[0]["event"] == "bolt_first_create_lost_race"
+
+
+# The settle re-read's own statement, echoed under the generic code: the shape
+# the create statement's stale read arrives in, applied to the read that runs
+# after the create committed. Not reproduced live; the re-read is defensive.
+ARCADEDB_STALE_SETTLE_READ = Neo4jError._hydrate_neo4j(
+    code="Neo.DatabaseError.General.UnknownError",
+    message=(
+        "Error executing Cypher command: MATCH (n:Node {node_id: $node_id}) "
+        "WHERE n.valid_to IS NULL RETURN n.valid_from AS valid_from, "
+        "n.version_id AS version_id, elementId(n) AS row_id"
+    ),
+)
+_OWN_ROW = {"valid_from": "t", "version_id": "first-x-0", "row_id": "#1:1"}
+
+
+def _arcadedb_store_reading(driver: FakeBoltDriver) -> BoltOpenCypherGraphStore:
+    """An ArcadeDB store on the fake driver whose settle read reaches the driver."""
+    from trellis.stores.arcadedb.graph import ArcadeDBGraphStore
+
+    store = object.__new__(ArcadeDBGraphStore)
+    BoltOpenCypherGraphStore.__init__(
+        store, driver=driver, database="neo4j", owns_driver=False, init_schema=False
+    )
+    return store
+
+
+def test_a_stale_settle_read_is_re_read_without_re_running_the_create() -> None:
+    from structlog.testing import capture_logs
+
+    driver = FakeBoltDriver(
+        creates=["#1:1"], node_reads=[ARCADEDB_STALE_SETTLE_READ, [_OWN_ROW]]
+    )
+    with capture_logs() as logs:
+        assert (
+            _arcadedb_store_reading(driver).create_node_if_absent("n1", "service", {})
+            is True
+        )
+    # One create, committed; only the read ran twice.
+    assert [t.ended for t in driver.transactions] == ["commit"]
+    assert len(driver.create_params) == 1
+    assert driver.node_read_params == [{"node_id": "n1"}, {"node_id": "n1"}]
+    assert [e for e in logs if e["log_level"] == "warning"] == [
+        {
+            "event": "bolt_first_create_settle_read_retried",
+            "log_level": "warning",
+            "node_id": "n1",
+            "attempt": 1,
+            "error_code": "Neo.DatabaseError.General.UnknownError",
+        }
+    ]
+
+
+def test_a_persistent_settle_read_fault_is_raised_after_the_bound() -> None:
+    driver = FakeBoltDriver(
+        creates=["#1:1"], node_reads=[ARCADEDB_STALE_SETTLE_READ] * 5
+    )
+    with pytest.raises(Neo4jError) as caught:
+        _arcadedb_store_reading(driver).create_node_if_absent("n1", "service", {})
+    assert caught.value is ARCADEDB_STALE_SETTLE_READ
+    assert len(driver.node_read_params) == _FIRST_CREATE_ATTEMPTS
+    assert len(driver.create_params) == 1
+
+
+def test_another_settle_read_error_is_raised_at_once() -> None:
+    other = Neo4jError._hydrate_neo4j(
+        code="Neo.ClientError.Statement.SyntaxError", message="bad"
+    )
+    driver = FakeBoltDriver(creates=["#1:1"], node_reads=[other, [_OWN_ROW]])
+    with pytest.raises(Neo4jError) as caught:
+        _arcadedb_store_reading(driver).create_node_if_absent("n1", "service", {})
+    assert caught.value is other
+    assert len(driver.node_read_params) == 1
+
+
+def test_the_portable_settle_read_retries_nothing() -> None:
+    # The portable store and Neo4j never re-read a failed settle read.
+    store = _store(FakeBoltDriver(creates=[True]))
+    assert not store._is_settle_read_contention(ARCADEDB_STALE_SETTLE_READ)
