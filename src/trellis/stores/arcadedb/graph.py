@@ -212,12 +212,15 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
         """Widen the base first-create predicate over the generic error channel.
 
         A first creator that loses the ``node_version_unique`` race fails at
-        commit with the duplicate key, which the base predicate reads. Its
-        re-run then re-reads the id while the winner's commit is landing, and
-        ArcadeDB can resolve the ``node_id`` index entry to a record it cannot
-        yet load: the server log shows ``RecordNotFoundException: Record #1:0
-        not found`` under the statement's ``OPTIONAL MATCH``, and the client
-        sees only :data:`_GENERIC_ENGINE_ERROR_CODE` with ``Error executing
+        commit with the duplicate key, which the base predicate reads. A
+        creator can also lose before it commits: its statement reads the id
+        while the winner's commit is landing, and ArcadeDB can resolve the
+        ``node_id`` index entry to a record it cannot yet load. In 16 captured
+        occurrences this was the statement's first run every time, and the
+        failing writer's own row was never present. The server log shows
+        ``RecordNotFoundException: Record #1:0 not found`` under
+        the statement's ``OPTIONAL MATCH``, and the client sees only
+        :data:`_GENERIC_ENGINE_ERROR_CODE` with ``Error executing
         Cypher command: <the cypher>`` (the cause does not cross Bolt, as
         :meth:`_is_alias_write_contention` records). Measured against
         ``arcadedata/arcadedb:26.8.1``: 1 of 3 runs of the 8-writer race
@@ -241,6 +244,46 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
             return False
         message = str(getattr(exc, "message", "") or exc)
         return _FIRST_CREATE_STATEMENT_MARKER in message
+
+    def _log_first_create_retry(
+        self, node_id: str, attempt: int, exc: Exception
+    ) -> None:
+        """Warn when a generic-code fault is absorbed; a lost race stays at debug.
+
+        The generic channel is not race-specific (see
+        :meth:`_is_first_create_write_contention`), so, as on the edge path
+        (:meth:`_is_edge_write_contention`), an absorbed one is logged where
+        the default level shows it. Measured on ``arcadedata/arcadedb:26.8.1``
+        (16 occurrences in 30 loops of the live race checks, with a temporary
+        probe that is not in the tree; the capture is on #1232): every one was
+        raised on attempt 1, and in none did the raising writer's own row
+        exist when the error was seen, so the re-run answering "already
+        present" did not hide a create that had happened.
+        """
+        if getattr(exc, "code", None) == _GENERIC_ENGINE_ERROR_CODE:
+            logger.warning(
+                "arcadedb_first_create_generic_fault_retried",
+                node_id=node_id,
+                attempt=attempt,
+                error_code=_GENERIC_ENGINE_ERROR_CODE,
+            )
+            return
+        super()._log_first_create_retry(node_id, attempt, exc)
+
+    def _is_settle_read_contention(self, exc: Exception) -> bool:
+        """Read the settle re-read again when it fails on the generic code.
+
+        The create statement's stale read (:meth:`_is_first_create_write_contention`)
+        resolves an index entry to a record it cannot load yet. The settle
+        re-read in
+        :meth:`~trellis.stores.bolt_opencypher.graph.BoltOpenCypherGraphStore._settle_first_create`
+        reads the same index after the create committed, so it could meet
+        the same fault and tell the caller a create failed that happened.
+        That fault on this read has **not** been reproduced live; the re-read
+        is defensive. The code alone is enough because only that read reaches
+        this predicate and re-running a read changes nothing.
+        """
+        return getattr(exc, "code", None) == _GENERIC_ENGINE_ERROR_CODE
 
     @staticmethod
     def _is_transaction_not_begun(exc: Exception) -> bool:
