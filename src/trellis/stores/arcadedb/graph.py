@@ -254,7 +254,8 @@ class ArcadeDBGraphStore(BoltOpenCypherGraphStore):
         :meth:`_is_first_create_write_contention`), so, as on the edge path
         (:meth:`_is_edge_write_contention`), an absorbed one is logged where
         the default level shows it. Measured on ``arcadedata/arcadedb:26.8.1``
-        (16 occurrences in 30 loops of the live race checks): every one was
+        (16 occurrences in 30 loops of the live race checks, with a temporary
+        probe that is not in the tree; the capture is on #1232): every one was
         raised on attempt 1, and in none did the raising writer's own row
         exist when the error was seen, so the re-run answering "already
         present" did not hide a create that had happened.
