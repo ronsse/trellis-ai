@@ -5241,6 +5241,12 @@ from trellis_cli.analyze_session_repeats import (  # noqa: E402
 
 _reg_session_repeats(analyze_app)
 
+from trellis_cli.analyze_near_duplicates import (  # noqa: E402
+    register as _reg_near_duplicates,
+)
+
+_reg_near_duplicates(analyze_app)
+
 from trellis_cli.analyze_pack_scenario import (  # noqa: E402
     register as _reg_pack_scenario,
 )
