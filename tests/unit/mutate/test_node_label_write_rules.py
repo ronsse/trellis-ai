@@ -637,6 +637,62 @@ def test_a_supplied_record_without_the_key_still_carries_the_stored_value(
     }
 
 
+# A stored field that is itself malformed: a write that leaves it as it stands
+# discards nothing, so it is not refused (the #1293 review).
+STORED_MALFORMED = [
+    _labelled("confidential", jurisdiction="eu"),
+    _labelled("confidential", regulatory_tags="phi"),
+    _labelled("confidential", regulatory_tags=["phi", 3]),
+]
+
+
+@pytest.mark.parametrize("stored", STORED_MALFORMED)
+def test_an_update_without_the_key_over_a_malformed_stored_field_succeeds(
+    registry: StoreRegistry, stored: dict[str, Any]
+) -> None:
+    _seed(registry, stored)
+    _ok(_run(registry, _update({"owner": "sales"}), "restricted"))
+    props = _stored(registry)
+    assert props["owner"] == "sales"
+    assert props["data_classification"] == stored
+
+
+@pytest.mark.parametrize("stored", STORED_MALFORMED)
+def test_an_identical_recreate_over_a_malformed_stored_field_succeeds(
+    registry: StoreRegistry, stored: dict[str, Any]
+) -> None:
+    _seed(registry, stored)
+    _ok(_run(registry, _create({"data_classification": dict(stored)}), "restricted"))
+    assert _stored(registry)["data_classification"] == stored
+
+
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("field", FIELDS)
+def test_a_different_malformed_value_over_a_stored_list_is_refused(
+    registry: StoreRegistry, route: str, field: str
+) -> None:
+    stored = _labelled("confidential", **{field: ["phi"]})
+    _seed(registry, stored)
+    result = _run(
+        registry,
+        _route(route, _labelled("confidential", **{field: "phi"})),
+        "restricted",
+    )
+    assert result.status == CommandStatus.REJECTED
+    assert _stored(registry)["data_classification"] == stored
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_an_omitted_field_does_not_carry_a_malformed_stored_value(
+    registry: StoreRegistry, route: str
+) -> None:
+    # As before #1287: only a list of strings is carried into a winner that
+    # leaves the field out, so a malformed stored value is dropped, unrefused.
+    _seed(registry, _labelled("confidential", jurisdiction="eu"))
+    _ok(_run(registry, _route(route, _labelled("confidential")), "restricted"))
+    assert "jurisdiction" not in _stored(registry)["data_classification"]
+
+
 def _keep_stricter_node_label_before_1265(
     properties: dict[str, Any], stored_properties: Any, **_: Any
 ) -> None:

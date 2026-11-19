@@ -297,13 +297,18 @@ def _malformed_fields_discarding(
 
     A field counts when ``supplied`` names it with a value that is not a list
     of strings, so :func:`_label_carrying_the_other` cannot carry the stored
-    value into it, and ``stored`` holds it non-empty. A field ``supplied``
-    leaves out is carried, and one ``stored`` does not hold discards nothing.
+    value into it, ``stored`` holds it non-empty, and the two values differ. A
+    value left as it stands discards nothing: ``entity.update`` without the key
+    merges the stored record back in, and an identical re-create resends it.
+    A field ``supplied`` leaves out reads empty here and is not counted; it
+    takes a stored list of strings, and a malformed stored value is dropped
+    unrefused, as before #1287.
     """
     return [
         name
         for name in _held_label_fields(stored)
-        if name in supplied and _string_list(supplied, name) is None
+        if _string_list(supplied, name) is None
+        and supplied.get(name) != stored.get(name)
     ]
 
 
@@ -336,8 +341,10 @@ def _keep_stricter_node_label(
     wins or ties but names ``regulatory_tags`` or ``jurisdiction`` with a value
     that is not a list of strings (``null``, a string, a list holding a
     non-string) is refused the same way when the stored record holds that
-    field non-empty (#1287); when it holds nothing there, the supplied record
-    is written as it stands. A write that supplies no
+    field non-empty and the supplied value differs from it (#1287); when it
+    holds nothing there, the supplied record is written as it stands. A
+    supplied record that leaves the field out takes a stored list of strings;
+    a malformed stored value is not carried. A write that supplies no
     ``data_classification`` key is judged as before #1265: the stored record
     is kept whole when stricter than ``internal``, and nothing is merged.
     """
