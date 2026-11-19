@@ -290,6 +290,28 @@ def _held_label_fields(record: Mapping[str, Any]) -> list[str]:
     return [name for name in _CARRIED_LABEL_FIELDS if record.get(name)]
 
 
+def _malformed_fields_discarding(
+    stored: Mapping[str, Any], supplied: Mapping[str, Any]
+) -> list[str]:
+    """The carried fields a winning ``supplied`` record would discard (#1287).
+
+    A field counts when ``supplied`` names it with a value that is not a list
+    of strings, so :func:`_label_carrying_the_other` cannot carry the stored
+    value into it, ``stored`` holds it non-empty, and the two values differ. A
+    value left as it stands discards nothing: ``entity.update`` without the key
+    merges the stored record back in, and an identical re-create resends it.
+    A field ``supplied`` leaves out reads empty here and is not counted; it
+    takes a stored list of strings, and a malformed stored value is dropped
+    unrefused, as before #1287.
+    """
+    return [
+        name
+        for name in _held_label_fields(stored)
+        if _string_list(supplied, name) is None
+        and supplied.get(name) != stored.get(name)
+    ]
+
+
 def _keep_stricter_node_label(
     properties: dict[str, Any],
     stored_properties: Mapping[str, Any] | None,
@@ -315,7 +337,14 @@ def _keep_stricter_node_label(
     ``restricted`` and so always wins, but it cannot hold tags: over a stored
     record that names a level and holds tags or a jurisdiction it is refused
     (``node_label_discards``) with nothing written, as ``classification.set``
-    refuses a relabel that would discard them. A write that supplies no
+    refuses a relabel that would discard them. A readable supplied record that
+    wins or ties but names ``regulatory_tags`` or ``jurisdiction`` with a value
+    that is not a list of strings (``null``, a string, a list holding a
+    non-string) is refused the same way when the stored record holds that
+    field non-empty and the supplied value differs from it (#1287); when it
+    holds nothing there, the supplied record is written as it stands. A
+    supplied record that leaves the field out takes a stored list of strings;
+    a malformed stored value is not carried. A write that supplies no
     ``data_classification`` key is judged as before #1265: the stored record
     is kept whole when stricter than ``internal``, and nothing is merged.
     """
@@ -331,6 +360,18 @@ def _keep_stricter_node_label(
         return
     supplied = properties[DATA_CLASSIFICATION_KEY]
     if _readable_label(stored) and _readable_label(supplied):
+        malformed = (
+            [] if stored_wins else _malformed_fields_discarding(stored, supplied)
+        )
+        if malformed:
+            msg = (
+                f"entity {node_id!r} carries {', '.join(malformed)} in its "
+                "classification record, and the supplied data_classification "
+                "holds a value for it that is not a list of strings, so it "
+                "cannot carry them; writing it would discard them. Nothing "
+                "was written."
+            )
+            raise ValidationError(msg, errors=[msg], code="node_label_discards")
         properties[DATA_CLASSIFICATION_KEY] = _label_carrying_the_other(
             stored, supplied, stored_wins=stored_wins
         )
