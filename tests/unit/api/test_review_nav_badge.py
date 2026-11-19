@@ -3,11 +3,11 @@
 The Review tab already has four per-section counts
 (``review-proposals-count`` and siblings), but nothing on the nav entry
 itself told an operator there was work waiting before they opened the
-tab. ``refreshReviewBadge`` reuses ``/proposals`` -- the same endpoint
-``loadReviewProposals`` already calls -- rather than adding a second
-count route, and is wired to three triggers only (page load, the Review
-view opening, a proposal being promoted/rejected), never a ``setInterval``
-poll.
+tab. ``refreshReviewBadge`` totals ``GET /review/backlog``, which sizes
+only the kinds a reviewer can resolve in the view (tuner proposals and
+learning candidates), and is wired to a fixed set of triggers (page load,
+the Review view opening, a decision being recorded), never a
+``setInterval`` poll.
 
 Two states must never render as each other:
 
@@ -21,7 +21,10 @@ Two states must never render as each other:
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
+
+import pytest
 
 import trellis_api
 
@@ -112,30 +115,116 @@ def test_a_fetch_failure_hides_the_badge_not_an_error_glyph() -> None:
     assert "'!'" not in catch_block
 
 
-def test_badge_renders_100_plus_at_the_proposals_default_limit() -> None:
-    # `/proposals` is called with no explicit `limit`, so the server's
-    # `Query(100, ...)` default caps `count` at 100 -- that cap is a
-    # floor on the real total, not the total itself, so it must never
-    # render as a bare "100".
+def _badge_for(rows: list[dict], tmp_path: Path) -> dict:
+    """Run the page's own ``refreshReviewBadge`` against a stub response."""
+    import json
+    import os
+    import subprocess
+
+    from tests.integration._live_server import repo_src_pythonpath
+    from tests.unit.api.test_ui_review_truth import NODE
+
+    fn = (
+        "async function refreshReviewBadge() {"
+        + _between(_page(), "async function refreshReviewBadge() {", "\n        }\n")
+        + "\n        }\n"
+    )
+    harness = f"""
+const el = {{ hidden: true, textContent: '' }};
+const urls = [];
+const document = {{ getElementById: () => el }};
+const getApiKey = () => 'k';
+const fetchJSON = async (u) => {{
+    urls.push(u);
+    return {{ review_backlog: {json.dumps(rows)} }};
+}};
+{fn}
+refreshReviewBadge().then(() => console.log(JSON.stringify(
+    {{ hidden: el.hidden, text: String(el.textContent), urls }})));
+"""
+    script = tmp_path / "badge_harness.js"
+    script.write_text(harness, encoding="utf-8")
+    done = subprocess.run(  # noqa: S603
+        [str(NODE), str(script)],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": repo_src_pythonpath()},
+        timeout=30,
+    )
+    return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+def _row(kind, *, count, status="ok", truncated=False, actionable=True):
+    return {
+        "kind": kind,
+        "status": status,
+        "pending_count": count,
+        "truncated": truncated,
+        "actionable": actionable,
+    }
+
+
+_needs_node = pytest.mark.skipif(shutil.which("node") is None, reason="no node")
+
+
+@_needs_node
+def test_badge_renders_a_floor_when_a_kind_is_unreadable_or_capped(tmp_path) -> None:
+    # Only an unreadable source or a capped read makes the total a floor.
+    unreadable = _badge_for(
+        [
+            _row("tuner_proposal", count=3),
+            _row("learning_candidate", count=None, status="unreadable"),
+        ],
+        tmp_path,
+    )
+    assert (unreadable["hidden"], unreadable["text"]) == (False, "3+")
+    capped = _badge_for([_row("tuner_proposal", count=4, truncated=True)], tmp_path)
+    assert (capped["hidden"], capped["text"]) == (False, "4+")
+
+
+@_needs_node
+def test_a_not_written_learning_artifact_adds_zero_not_a_floor(tmp_path) -> None:
+    shown = _badge_for(
+        [
+            _row("tuner_proposal", count=2),
+            _row("learning_candidate", count=None, status="not_written"),
+        ],
+        tmp_path,
+    )
+    assert (shown["hidden"], shown["text"]) == (False, "2")
+    nothing = _badge_for(
+        [_row("learning_candidate", count=None, status="not_written")], tmp_path
+    )
+    assert nothing["hidden"] is True
+
+
+@_needs_node
+def test_badge_totals_only_actionable_rows_from_the_backlog_route(tmp_path) -> None:
+    shown = _badge_for(
+        [
+            _row("tuner_proposal", count=1),
+            _row("learning_candidate", count=1),
+            _row("schema_evolution", count=40, actionable=False),
+            _row("code_proposal", count=None, status="unreadable", actionable=False),
+        ],
+        tmp_path,
+    )
+    assert (shown["hidden"], shown["text"]) == (False, "2")
+    assert shown["urls"] == ["/review/backlog"]
+
+
+def test_badge_reads_the_backlog_route_not_loop_health() -> None:
     page = _page()
     body = _function_body(
         page,
         "async function refreshReviewBadge() {",
         "function reachabilityHtml(p) {",
     )
-    assert "REVIEW_BADGE_CAP" in page
-    assert "n >= REVIEW_BADGE_CAP ? `${REVIEW_BADGE_CAP}+`" in body
-
-
-def test_badge_reuses_the_proposals_endpoint_already_called_by_the_tab() -> None:
-    page = _page()
-    body = _function_body(
-        page,
-        "async function refreshReviewBadge() {",
-        "function reachabilityHtml(p) {",
-    )
-    assert "fetchJSON('/proposals')" in body
-    # No second, dedicated count route was added for this.
+    assert "fetchJSON('/review/backlog')" in body
+    assert "fetchJSON('/loops')" not in body
+    assert "fetchJSON('/proposals')" not in body
     assert "proposals/count" not in page
     assert "/review/pending" not in page
 
@@ -178,6 +267,22 @@ def test_badge_refreshed_after_a_proposal_is_promoted_or_rejected() -> None:
     assert "refreshReviewBadge();" in reject_body
 
 
+def test_badge_refreshed_after_a_learning_decision() -> None:
+    page = _page()
+    submit_body = _function_body(
+        page,
+        "async function submitLearningPromotions() {",
+        "async function declineLearningCandidate(cid) {",
+    )
+    assert "refreshReviewBadge();" in submit_body
+    decline_body = _function_body(
+        page,
+        "async function declineLearningCandidate(cid) {",
+        "// -- Section 3: Schema-evolution candidates --",
+    )
+    assert "refreshReviewBadge();" in decline_body
+
+
 def test_no_polling_interval_was_added_for_the_badge() -> None:
     page = _page()
     body = _function_body(
@@ -204,4 +309,5 @@ def test_each_pattern_catches_a_deliberately_defective_subject() -> None:
     )
     assert "if (n > 0) {" not in defective
     assert "if (!getApiKey())" not in defective
-    assert "REVIEW_BADGE_CAP" not in defective
+    assert "review_backlog" not in defective
+    assert "floor" not in defective

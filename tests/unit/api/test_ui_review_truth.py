@@ -508,7 +508,7 @@ def _submit_learning_promotions_source(page: str) -> str:
     return "async function submitLearningPromotions() {" + _between(
         page,
         "async function submitLearningPromotions() {",
-        "// -- Section 3: Schema-evolution candidates --",
+        "async function declineLearningCandidate(cid) {",
     )
 
 
@@ -520,6 +520,7 @@ const document = {{ getElementById: () => ({{ querySelectorAll: () => [] }}) }};
 const postJSON = async () => ({json.dumps(response)});
 const toastReview = (msg, ok) => toasts.push([msg, ok]);
 const loadReviewLearning = () => {{}};
+const refreshReviewBadge = () => {{}};
 {_submit_learning_promotions_source(_page())}
 submitLearningPromotions().then(() => console.log(JSON.stringify(toasts)));
 """

@@ -110,6 +110,9 @@ ROSTER: dict[str, str] = {
     "admin:reject_proposal_route": ADMIN,  # POST /proposals/{proposal_id}/reject
     "admin:list_learning_candidates": ADMIN,  # GET /learning/candidates
     "admin:promote_learning_candidates": ADMIN,  # POST /learning/promotions
+    # The decline route under POST /learning/candidates.
+    "admin:decline_learning_candidate": ADMIN,
+    "admin:review_backlog": ADMIN,  # GET /review/backlog
     "admin:list_schema_evolution_candidates": ADMIN,  # GET /schema-evolution/candidates
     "admin:draft_schema_evolution_adr": ADMIN,  # POST /schema-evolution/.../draft-adr
     "admin:list_code_proposals": ADMIN,  # GET /code-proposals

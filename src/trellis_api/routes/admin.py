@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +38,11 @@ from trellis.learning.artifacts import (
     LEARNING_ARTIFACTS_DIR_ENV,
     LEARNING_CANDIDATES_FILENAME,
     resolve_learning_artifacts_dir,
+)
+from trellis.learning.review_decisions import (
+    DECLINE_ACTION,
+    LEARNING_REVIEW_SURFACE,
+    read_learning_decisions,
 )
 from trellis.learning.scoring import (
     PROMOTE_RECOMMENDATIONS,
@@ -66,7 +71,14 @@ from trellis.mutate import (
     build_schedule_executor,
 )
 from trellis.mutate.commands import STORE_REFUSAL_REASONS
-from trellis.ops.loop_health import JOB_LOOPS, LoopHealthRow, summarize_loop_health
+from trellis.ops.loop_health import (
+    JOB_LOOPS,
+    LoopHealthRow,
+    ReviewBacklogRow,
+    ReviewBacklogStatus,
+    summarize_loop_health,
+    summarize_review_backlog,
+)
 from trellis.ops.parameter_reachability import (
     READ_POINTS,
     reachability_reasons,
@@ -86,6 +98,7 @@ from trellis.schemas.schedule import ScheduledJob
 from trellis.stores.advisory_source import load_advisory_store
 from trellis.stores.base.event_log import EventLog, EventType
 from trellis.stores.base.vector import VectorStore
+from trellis.stores.registry import StoreRegistry
 from trellis.stores.schedule_store import ScheduleStore
 from trellis.stores.settings_store import load_settings_values
 from trellis_api.app import get_bind_info, get_registry
@@ -113,6 +126,8 @@ from trellis_wire.dtos import (
     DraftAdrResponse,
     HealthResponse,
     LearningCandidateListResponse,
+    LearningDeclineRequest,
+    LearningDeclineResponse,
     LearningPromotionRequest,
     LearningPromotionResponse,
     LearningPromotionResultRow,
@@ -122,6 +137,8 @@ from trellis_wire.dtos import (
     ProposalDecisionResponse,
     ProposalPreviewResponse,
     ProposalRejectRequest,
+    ReviewBacklogResponse,
+    ReviewBacklogRowResponse,
     RuntimeResponse,
     SchemaEvolutionCandidate,
     SchemaEvolutionListResponse,
@@ -386,6 +403,89 @@ def loop_health() -> LoopHealthResponse:
     return LoopHealthResponse(
         generated_at=report.generated_at.isoformat(),
         loops=[_loop_health_row_response(row, store, now) for row in report.loops],
+        review_backlog=[
+            _review_backlog_row_response(row)
+            for row in _review_backlog(registry, now=now)
+        ],
+    )
+
+
+#: Learning-artifact codes that mean "not written yet", the same two the
+#: Review view renders as an empty queue; every other code is unreadable.
+_LEARNING_NOT_WRITTEN_CODES = frozenset(
+    {"learning_artifacts_dir_missing", "learning_candidates_missing"}
+)
+
+
+def _parse_utc(value: object) -> datetime | None:
+    """Parse an ISO-8601 stamp (``Z`` allowed), or ``None`` if it is not one."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _review_backlog(
+    registry: StoreRegistry, *, now: datetime, actionable_only: bool = False
+) -> list[ReviewBacklogRow]:
+    """Size every Review-view kind; the learning artifact is read here."""
+    candidates: list[Any] | None = None
+    generated_at: datetime | None = None
+    unavailable: tuple[ReviewBacklogStatus, str] | None = None
+    try:
+        _, payload = _load_learning_candidates()
+        candidates = list(payload.get("candidates", []))
+        generated_at = _parse_utc(payload.get("generated_at_utc"))
+    except _LearningCandidatesUnavailableError as exc:
+        status: ReviewBacklogStatus = (
+            "not_written" if exc.code in _LEARNING_NOT_WRITTEN_CODES else "unreadable"
+        )
+        unavailable = (status, exc.code)
+    return summarize_review_backlog(
+        registry.operational.event_log,
+        registry.operational.tuner_state_store,
+        learning_candidates=candidates,
+        learning_generated_at=generated_at,
+        learning_unavailable=unavailable,
+        now=now,
+        actionable_only=actionable_only,
+    )
+
+
+@router.get("/review/backlog", response_model=ReviewBacklogResponse)
+def review_backlog() -> ReviewBacklogResponse:
+    """Size the Review-view kinds a reviewer can resolve, and nothing else.
+
+    The nav badge's read: the tuner-proposal and learning-candidate rows of
+    ``GET /loops``' ``review_backlog``, without the loop report or the
+    schema-evolution and code-proposal event scans.
+    """
+    now = utc_now()
+    return ReviewBacklogResponse(
+        generated_at=now.isoformat(),
+        review_backlog=[
+            _review_backlog_row_response(row)
+            for row in _review_backlog(get_registry(), now=now, actionable_only=True)
+        ],
+    )
+
+
+def _review_backlog_row_response(row: ReviewBacklogRow) -> ReviewBacklogRowResponse:
+    return ReviewBacklogRowResponse(
+        kind=row.kind,
+        status=row.status,
+        reason=row.reason,
+        pending_count=row.pending_count,
+        oldest_pending_at=(
+            row.oldest_pending_at.isoformat() if row.oldest_pending_at else None
+        ),
+        oldest_pending_age_seconds=row.oldest_pending_age_seconds,
+        truncated=row.truncated,
+        actionable=row.actionable,
+        scan_limit=row.scan_limit,
     )
 
 
@@ -1399,6 +1499,23 @@ def list_learning_candidates() -> LearningCandidateListResponse:
             artifacts_dir=None if exc.artifacts_dir is None else str(exc.artifacts_dir),
             hint=sanitize_error_message(exc.message),
         )
+    # A declined candidate stays listed; it only carries when it was last
+    # declined. A decline record that cannot be read says so rather than
+    # reading as "never declined".
+    declines_unreadable = False
+    try:
+        decisions = read_learning_decisions(get_registry().operational.event_log)
+    except Exception as exc:  # display only: degrade, say so
+        logger.warning("learning_declines_read_failed", error_type=type(exc).__name__)
+        decisions = {}
+        declines_unreadable = True
+
+    def _last_declined_at(candidate: dict[str, Any]) -> str | None:
+        state = decisions.get(str(candidate.get("candidate_id", "")).strip())
+        if state is None or state.last_declined_at is None:
+            return None
+        return state.last_declined_at.isoformat()
+
     candidates = [
         {
             **candidate,
@@ -1406,6 +1523,7 @@ def list_learning_candidates() -> LearningCandidateListResponse:
                 str(candidate.get("recommendation_type", "")).strip()
                 in PROMOTE_RECOMMENDATIONS
             ),
+            "last_declined_at": _last_declined_at(candidate),
         }
         if isinstance(candidate, dict)
         else candidate
@@ -1416,6 +1534,73 @@ def list_learning_candidates() -> LearningCandidateListResponse:
         generated_at_utc=payload.get("generated_at_utc"),
         candidate_count=len(candidates),
         candidates=candidates,
+        declines_unreadable=declines_unreadable,
+    )
+
+
+@router.post(
+    "/learning/candidates/{candidate_id}/decline",
+    response_model=LearningDeclineResponse,
+    responses={
+        404: {"description": "The current artifact lists no such candidate."},
+        409: {
+            "description": (
+                "There is no learning-candidate artifact to decline against; "
+                "`detail` has the same `code` / `message` / `path` as "
+                "`POST /learning/promotions`."
+            )
+        },
+    },
+)
+def decline_learning_candidate(
+    candidate_id: str,
+    req: LearningDeclineRequest | None = None,
+    ctx: AuthContext = Depends(authenticate),  # noqa: B008 — FastAPI DI idiom
+) -> LearningDeclineResponse:
+    """Record that a reviewer declined one learning candidate.
+
+    Emits a ``REVIEW_DECISION_RECORDED`` event (``surface=
+    "learning_promotion"``, ``action="decline"``, ``candidate_ids=[id]``)
+    with the reviewer identity, and writes nothing else. The candidate
+    stays listed with ``last_declined_at`` set and can still be approved.
+    The decline is display only: the agreement metric counts it as a
+    disagreement, the Review backlog stops counting the candidate as
+    pending, and no gate (auto-promotion included) reads it.
+    """
+    try:
+        _, payload = _load_learning_candidates()
+    except _LearningCandidatesUnavailableError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": exc.code,
+                "message": sanitize_error_message(exc.message),
+                "path": None if exc.path is None else str(exc.path),
+            },
+        ) from exc
+    listed = {
+        str(c.get("candidate_id", "")).strip()
+        for c in payload.get("candidates", [])
+        if isinstance(c, dict)
+    }
+    if not candidate_id or candidate_id not in listed:
+        raise HTTPException(
+            status_code=404,
+            detail="The current learning-candidate artifact lists no such candidate.",
+        )
+    reason = (req.reason if req else None) or "declined_by_reviewer"
+    _emit_review_decision(
+        get_registry().operational.event_log,
+        surface=LEARNING_REVIEW_SURFACE,
+        action=DECLINE_ACTION,
+        ctx=ctx,
+        entity_id=candidate_id,
+        detail={"candidate_ids": [candidate_id], "reason": reason},
+    )
+    return LearningDeclineResponse(
+        candidate_id=candidate_id,
+        reason=reason,
+        declined_at=utc_now().isoformat(),
     )
 
 
@@ -1547,7 +1732,19 @@ def promote_learning_candidates(
             "ready_count": len(ready),
             "promoted_count": promoted_count,
             "already_promoted_count": already_promoted_count,
-            "candidate_ids": [r.candidate_id for r in rows],
+            # Only the approvals the run accepted: a refused approval is not
+            # a promote decision, so the agreement metric must not read it
+            # as one.
+            "candidate_ids": [
+                o["candidate_id"]
+                for o in outcomes
+                if promotion_landed(o) or promotion_already_promoted(o)
+            ],
+            "refused_candidate_ids": [
+                o["candidate_id"]
+                for o in outcomes
+                if not (promotion_landed(o) or promotion_already_promoted(o))
+            ],
         },
     )
     # HTTP 200 whatever the verdict: ``status`` is the run's outcome, not the
