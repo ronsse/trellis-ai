@@ -35,7 +35,10 @@ fields; ``graph_seeding``
 catalog entries outside ``WriteBehaviourConfig``; ``class_prior_mode``
 (:mod:`trellis.retrieve.class_prior`) the same way — the gate's other two
 fields, ``forms``/``axes``, stay env-only since this module has no
-list-typed field, so they are deliberately not catalog entries; eight more
+list-typed field, so they are deliberately not catalog entries;
+``pack_provenance_line``
+(:func:`trellis.retrieve.builder_factory.resolve_pack_provenance_line`)
+the same way again; eight more
 read-side knobs, also outside ``WriteBehaviourConfig``:
 the knowledge-graph
 subgraph depth cap, the two noise-demotion evidence thresholds, the two
@@ -808,6 +811,39 @@ _SPECS: tuple[SettingSpec, ...] = (
         settings_live=True,
         env_var="TRELLIS_CLASS_PRIOR_MODE",
         enum=("off", "withhold"),
+    ),
+    SettingSpec(
+        name="pack_provenance_line",
+        label="Pack provenance line",
+        type="str",
+        default="off",
+        description=(
+            "Adds one line under each pack item served with a body on the "
+            "MCP pack replies (flat and sectioned, not index mode and not "
+            "one-line pointers), saying where the item came from and how it "
+            "was reached: its document form, source system, session capture "
+            "or curated graph node; the age of the timestamp recency scoring "
+            "read, when that stamp is on the item; and the retrieval axis. "
+            "It states provenance, not that the item is correct, and shows "
+            "no score. 'off' (the default) leaves every reply byte-identical "
+            "to before this setting existed. The line counts against the "
+            "reply's token budget, so with it on a reply can show fewer "
+            "items than the pack selected."
+        ),
+        # Read-side rendering knob, kept out of write_config.py for the same
+        # reason as class_prior_mode. Resolved by
+        # trellis.retrieve.builder_factory.resolve_pack_provenance_line.
+        surfaces=("mcp",),
+        restart_required=False,
+        risk="caution",
+        risk_note=(
+            "'on' changes the text of every pack reply and can push tail "
+            "items out of a reply's token budget."
+        ),
+        group="retrieval",
+        settings_live=True,
+        env_var="TRELLIS_PACK_PROVENANCE_LINE",
+        enum=("off", "on"),
     ),
     SettingSpec(
         name="get_context_max_tokens",

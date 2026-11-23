@@ -269,6 +269,14 @@ def _effective_values(
     class_prior_config = resolve_class_prior_config(settings=settings_values)
     effective["class_prior_mode"] = class_prior_config.mode
 
+    from trellis.retrieve.builder_factory import (  # noqa: PLC0415
+        resolve_pack_provenance_line,
+    )
+
+    effective["pack_provenance_line"] = (
+        "on" if resolve_pack_provenance_line(settings_values) else "off"
+    )
+
     # The three auto-promote/demote families resolve env > settings >
     # default here, through the same resolver functions every other
     # caller of AutoPromotePolicy, LearningCandidateAutoPromotePolicy and

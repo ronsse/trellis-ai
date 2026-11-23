@@ -3078,6 +3078,38 @@ write after that first call has no effect until the next process starts.
 `SettingSpec.settings_live` is `False` only for that one knob, which
 instead carries `restart_required=True`.
 
+### Pack provenance line (`TRELLIS_PACK_PROVENANCE_LINE`)
+
+| Setting | Env var | Values | Default | What it changes |
+|---|---|---|---|---|
+| `pack_provenance_line` | `TRELLIS_PACK_PROVENANCE_LINE` | `off` / `on` | `off` | `on` adds one line under each item the MCP pack replies (`get_context` and the other flat and sectioned pack tools) show with a body. One-line disclosure pointers and index mode get none. Resolved `env > settings > default`; an unrecognised env value logs `pack_provenance_line_env_unrecognised` and reads `off` whatever the stored setting says. |
+
+The line reads `Provenance: <origin>; <age> old (<clock> clock); via <axis>`,
+for example `Provenance: reference document; 12 days old (source clock); via keyword`.
+Each clause is left out when its value is not on the served item, and an item
+with none gets no line. `<origin>` is the first of: the document form, `from
+<source_system>`, `session capture`, `curated graph node`. The age is the one
+recency scoring read, and only when that stamp came from the item's own
+metadata (`recency_clock` is `source`); a `row`-clock stamp is a store column
+that is not on the item, so the clause is left out rather than adding a store
+read. An item the semantic axis served gets no age either: its metadata is
+the vector row's snapshot, whose `created_at` is the embed time when the
+document carried none, and the item cannot tell that apart from a source
+stamp. The line states where an item came from and how it was reached, not
+that it is correct, and carries no score. Every value is reduced to letters,
+digits and `. - _ / : @ +` and cut to 40 characters, so a stored value cannot
+add a line, a code span or a clause (`trellis_wire.provenance`).
+
+The line sits inside the item block the formatter prices against the reply's
+`max_tokens`, so the reply stays within budget and, with the line on, can show
+fewer items than the pack selected. The builder's `budget_trace` does not
+price it, so `PACK_ASSEMBLED` is unchanged either way; reply-size telemetry
+(`token.tracked`'s `response_tokens`) reflects the longer reply. Off, every
+reply is byte-identical to a build without the setting
+(`tests/unit/retrieve/test_formatters_provenance.py`). The SDK's
+`format_pack_as_markdown` does not render the line: REST items carry neither
+the normalised form nor the age.
+
 ### Pack-size and excerpt knobs
 
 Seven `group="retrieval"` tunables, all `settings_live=True`, cover the
