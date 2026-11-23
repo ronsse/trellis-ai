@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final, Literal
 
 import structlog
 from mcp.shared.exceptions import MCPError
@@ -198,13 +198,21 @@ def get_graph(
 #: anything larger is a bulk export, which is the REST/CLI surface's job.
 _GET_ITEMS_MAX_IDS = 50
 
+#: What :func:`_render_fetched_item` returns for an id that resolved to a row
+#: the caller may not read. The caller is answered exactly as for a missing id;
+#: only the ``PACK_ITEMS_FETCHED`` record tells the two apart (#1264).
+WITHHELD: Final = "withheld"
+
 
 def _render_fetched_item(
     registry: StoreRegistry,
     item_id: str,
     precedents: PrecedentClearance | None = None,
-) -> tuple[str, str] | None:
-    """Resolve ``item_id`` to ``(kind, markdown body)``, or ``None``.
+) -> tuple[str, str] | Literal["withheld"] | None:
+    """Resolve ``item_id`` to ``(kind, markdown body)``, ``WITHHELD`` or ``None``.
+
+    ``WITHHELD`` is a row this caller may not read and ``None`` an id that
+    resolved to nothing; the reply treats both as not found.
 
     Resolution order mirrors where pack item ids point: the document
     store (keyword/semantic items — vector ``item_id``s are doc ids),
@@ -233,23 +241,24 @@ def _render_fetched_item(
         if not DocumentClearance(
             registry.knowledge.document_store, current_clearance()
         ).permits(item_id, doc.get("metadata")):
-            return None
+            return WITHHELD
         # A precedent's own row holds the source's excerpt and carries no
         # label, so its source's label decides.
         if precedents.verdict_of(item_id) is not None:
-            return None
+            return WITHHELD
         return "document", fetched_body(doc.get("content", ""), doc.get("metadata"))
 
     if is_public_only(current_clearance()):
         # A graph node or a trace has no label to compare, so a public-only
         # caller is never shown one, and the reply is the not-found a missing
         # id gets: no other kind is tried, so it cannot say the id exists.
+        # Not looking is also why such an id is not recorded as withheld.
         return None
 
     node = registry.knowledge.graph_store.get_node(item_id)
     if node is not None:
         if precedents.verdict_of(item_id, node) is not None:
-            return None
+            return WITHHELD
         # The node is served; a pointer to a document above the caller's
         # clearance is not.
         (node,) = conceal_node_pointers(
@@ -323,6 +332,7 @@ def get_items(
     try:
         fetched: list[dict[str, Any]] = []
         not_found: list[str] = []
+        withheld: list[str] = []
         # One judgement per precedent for the whole call.
         precedents = PrecedentClearance(
             registry.knowledge.document_store,
@@ -331,11 +341,13 @@ def get_items(
         )
         for item_id in unique_ids:
             resolved = _render_fetched_item(registry, item_id, precedents)
-            if resolved is None:
-                not_found.append(item_id)
-            else:
+            if isinstance(resolved, tuple):
                 kind, body = resolved
                 fetched.append({"item_id": item_id, "kind": kind, "body": body})
+            else:
+                not_found.append(item_id)
+                if resolved == WITHHELD:
+                    withheld.append(item_id)
 
         result, served_ids, omitted_ids = format_fetched_items_as_markdown(
             fetched,
@@ -361,6 +373,7 @@ def get_items(
                 "requested_item_ids": unique_ids,
                 "served_item_ids": served_ids,
                 "not_found_item_ids": not_found,
+                "withheld_item_ids": withheld,
                 "omitted_item_ids": omitted_ids,
                 "response_tokens": estimate_tokens(result),
                 "budget_tokens": max_tokens,

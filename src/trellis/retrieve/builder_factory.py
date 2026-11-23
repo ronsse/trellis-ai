@@ -148,6 +148,16 @@ GET_LESSONS_PACK_EVENT_SETTING = "get_lessons_pack_event"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _FALSEY = frozenset({"0", "false", "no", "off"})
 
+#: Whether the MCP pack formatters render a provenance line under each
+#: bodied item (:mod:`trellis_wire.provenance`). Values ``off`` (the
+#: default) and ``on``.
+PACK_PROVENANCE_LINE_ENV = "TRELLIS_PACK_PROVENANCE_LINE"
+
+#: Settings-store key for the same knob.
+PACK_PROVENANCE_LINE_SETTING = "pack_provenance_line"
+
+_PROVENANCE_LINE_VALUES = frozenset({"off", "on"})
+
 
 class AxisReport(TypedDict):
     """What :func:`describe_axes` returns. Serialised verbatim into JSON.
@@ -375,6 +385,31 @@ def _get_lessons_pack_event_enabled(settings: Mapping[str, Any] | None = None) -
     return True
 
 
+def resolve_pack_provenance_line(settings: Mapping[str, Any] | None = None) -> bool:
+    """Read :data:`PACK_PROVENANCE_LINE_ENV`, env > settings > default off.
+
+    Only ``on`` turns the line on. An unrecognised env value warns and reads
+    as off whatever the stored setting says, the same posture as the other
+    kill switches here; an unrecognised stored value reads as off quietly,
+    since the settings route already flags it. The line changes reply text
+    only: the builder and ``PACK_ASSEMBLED`` are unchanged, while reply-size
+    telemetry (``token.tracked``'s ``response_tokens``) reflects the longer
+    reply.
+    """
+    raw = os.environ.get(PACK_PROVENANCE_LINE_ENV, "").strip().lower()
+    if not raw:
+        value = (settings or {}).get(PACK_PROVENANCE_LINE_SETTING)
+        return isinstance(value, str) and value.strip().lower() == "on"
+    if raw not in _PROVENANCE_LINE_VALUES:
+        logger.warning(
+            "pack_provenance_line_env_unrecognised",
+            var=PACK_PROVENANCE_LINE_ENV,
+            effective=False,
+        )
+        return False
+    return raw == "on"
+
+
 def describe_axes(
     builder: PackBuilder,
     strategies_used: list[str],
@@ -521,6 +556,8 @@ __all__ = [
     "GET_LESSONS_PACK_EVENT_ENV",
     "GRAPH_RECENCY_FALLBACK_ENV",
     "GRAPH_SEEDING_ENV",
+    "PACK_PROVENANCE_LINE_ENV",
+    "PACK_PROVENANCE_LINE_SETTING",
     "SEMANTIC_AXIS",
     "SEMANTIC_AXIS_NOTES",
     "AxisReport",
@@ -529,4 +566,5 @@ __all__ = [
     "format_embedder_failed_note",
     "format_failed_axes_note",
     "format_misconfigured_semantic_note",
+    "resolve_pack_provenance_line",
 ]

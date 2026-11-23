@@ -13,6 +13,7 @@ from trellis.retrieve.reference import summary_link_line
 from trellis.retrieve.withholding import WithholdingSummary, format_withholding_note
 from trellis.schemas.advisory import Advisory
 from trellis_wire.loop_text import feedback_call, is_pack_id
+from trellis_wire.provenance import format_provenance_line
 
 logger = structlog.get_logger(__name__)
 
@@ -62,6 +63,30 @@ def _advisories_block(advisories: list[Advisory] | None) -> str:
     return f"\n{rendered.rstrip()}" if rendered else ""
 
 
+def _provenance_text(item: dict[str, Any]) -> str | None:
+    """The provenance line for ``item``, or ``None``.
+
+    Reads only the item's ``provenance`` key: a mapping of the plain values
+    :func:`trellis_wire.provenance.format_provenance_line` takes, which the
+    MCP surface attaches (via :func:`trellis.retrieve.provenance.provenance_inputs`)
+    only when ``TRELLIS_PACK_PROVENANCE_LINE`` is on, and sets to ``None`` for
+    an item served as a pointer. Anything that is not a mapping renders no
+    line, so a stray value under that key cannot reach the pack as text.
+    """
+    inputs = item.get("provenance")
+    if not isinstance(inputs, dict):
+        return None
+    return format_provenance_line(
+        form=inputs.get("form"),
+        source_system=inputs.get("source_system"),
+        captured=inputs.get("captured") is True,
+        node_role=inputs.get("node_role"),
+        age_days=inputs.get("age_days"),
+        clock=inputs.get("clock"),
+        axis=inputs.get("axis"),
+    )
+
+
 def _truncate_to_tokens(text: str, max_tokens: int) -> str:
     """Truncate text to fit within token budget.
 
@@ -90,6 +115,7 @@ def format_pack_as_markdown(
     empty_text: str | None = None,
     axis_note: str = "",
     advisories: list[Advisory] | None = None,
+    provenance_line: bool = False,
 ) -> str:
     """Format pack items as concise markdown for LLM consumption.
 
@@ -137,6 +163,20 @@ def format_pack_as_markdown(
         advisories: Advisories to render between the items and the citation
             footer. Not charged against ``max_tokens`` — they ride outside
             the item budget.
+        provenance_line: Render each item's ``Provenance: ...`` line (see
+            :func:`_provenance_text`) under its body, after any summary
+            link. Off by default, and off renders exactly what this
+            function rendered before the option existed. The line is part
+            of the item block this function prices against ``max_tokens``,
+            so the output budget still holds and a longer block can push
+            tail items into the omitted count. The truncated-first-item
+            fallback below, which renders outside that walk when no block
+            fits, gets no line. The builder's
+            ``budget_trace`` does **not** price the line: the builder never
+            sees it, so with this on, the rendered pack can hold fewer items
+            than ``PACK_ASSEMBLED`` records as selected. ``PACK_ASSEMBLED``
+            itself is unchanged; reply-size telemetry measures the longer
+            reply.
 
     Returns:
         Markdown-formatted string within token budget.
@@ -172,6 +212,8 @@ def format_pack_as_markdown(
 
         link = summary_link_line(item.get("metadata"))
         block = f"{header}\n{excerpt}\n" + (f"{link}\n" if link else "")
+        provenance = _provenance_text(item) if provenance_line else None
+        block += f"{provenance}\n" if provenance else ""
         block_tokens = _estimate_tokens(block)
 
         if used + block_tokens > token_budget:
@@ -783,6 +825,7 @@ def format_sectioned_pack_as_markdown(
     withholding: WithholdingSummary | None = None,
     axis_note: str = "",
     advisories: list[Advisory] | None = None,
+    provenance_line: bool = False,
 ) -> str:
     """Format a sectioned pack as markdown with section headings.
 
@@ -806,6 +849,9 @@ def format_sectioned_pack_as_markdown(
             :func:`format_pack_as_markdown`.
         axis_note: As in :func:`format_pack_as_markdown`.
         advisories: As in :func:`format_pack_as_markdown`.
+        provenance_line: As in :func:`format_pack_as_markdown`: an indented
+            line under each item, inside the block this function prices, and
+            not priced by the builder's per-section budget walk.
 
     Returns:
         Markdown-formatted string within token budget.
@@ -849,6 +895,8 @@ def format_sectioned_pack_as_markdown(
             link = summary_link_line(item.get("metadata"))
             if link:
                 block += f"\n  {link}"
+            provenance = _provenance_text(item) if provenance_line else None
+            block += f"\n  {provenance}" if provenance else ""
             block_tokens = _estimate_tokens(block)
 
             if used + block_tokens > max_tokens:
