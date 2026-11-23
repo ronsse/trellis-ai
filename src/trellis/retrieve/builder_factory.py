@@ -32,6 +32,7 @@ import structlog
 from trellis.core.knobs import resolve_body_items, resolve_excerpt_max_chars
 from trellis.core.write_config import WriteBehaviourConfig
 from trellis.ops import ParameterRegistry
+from trellis.retrieve.authority_rank import resolve_authority_rank_config
 from trellis.retrieve.class_prior import resolve_class_prior_config
 from trellis.retrieve.disclosure import DisclosureConfig
 from trellis.retrieve.pack_builder import (
@@ -243,6 +244,10 @@ def build_pack_builder(
         # through this factory gets the gate wired in, even while every
         # shipped default keeps it a no-op.
         class_prior_config=resolve_class_prior_config(settings=settings),
+        # Default-off post-rerank authority boost (see
+        # trellis.retrieve.authority_rank), resolved once with settings like
+        # the class prior above.
+        authority_rank_config=resolve_authority_rank_config(settings=settings),
         # Lets the collect seam resolve a chunk's parent so an
         # archived/noise verdict recorded against the parent reaches its
         # chunks (trellis.retrieve.parent_verdicts). Every surface that

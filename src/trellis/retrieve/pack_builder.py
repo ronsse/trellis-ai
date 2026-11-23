@@ -49,6 +49,12 @@ from trellis.core.precedent_document import is_promoted_precedent_document
 from trellis.core.variants import VARIANTS_KEY, active_variants
 from trellis.learning.scoring import normalize_intent_family
 from trellis.meta.agents import META_AGENT_PREFIX
+from trellis.retrieve.authority_rank import (
+    AuthorityRankConfig,
+    apply_authority_rank,
+    authority_rank_telemetry,
+    resolve_authority_rank_config,
+)
 from trellis.retrieve.class_prior import (
     CLASS_PRIOR_REJECTION_REASON,
     PARENTS_AND_CHUNKS_SCOPE,
@@ -840,6 +846,8 @@ class PackBuilder:
         document_store: DocumentStore | None = None,
         excerpt_max_chars: int = EXCERPT_MAX_CHARS,
         graph_store: GraphStore | None = None,
+        *,
+        authority_rank_config: AuthorityRankConfig | None = None,
     ) -> None:
         if not 0.0 <= holdout_rate <= 1.0:
             msg = f"holdout_rate must be in [0.0, 1.0]; got {holdout_rate!r}"
@@ -924,6 +932,11 @@ class PackBuilder:
         #: :func:`trellis.retrieve.builder_factory.build_pack_builder` resolves
         #: this once, with settings, and passes the :class:`ClassPriorConfig` in.
         self._class_prior_config = class_prior_config
+        #: Post-rerank authority boost (:mod:`trellis.retrieve.authority_rank`),
+        #: or ``None`` to defer to an env-only read in
+        #: :meth:`_effective_authority_rank_config`, the same shape as
+        #: ``class_prior_config`` above. Off by default.
+        self._authority_rank_config = authority_rank_config
         #: Resolves a chunk's parent document at the collect seam so an
         #: archived or noise verdict recorded against the parent reaches
         #: its chunks (see :mod:`trellis.retrieve.parent_verdicts`).
@@ -955,6 +968,12 @@ class PackBuilder:
         if self._class_prior_config is not None:
             return self._class_prior_config
         return resolve_class_prior_config()
+
+    def _effective_authority_rank_config(self) -> AuthorityRankConfig:
+        """``self._authority_rank_config``, or a fresh env-only resolve."""
+        if self._authority_rank_config is not None:
+            return self._authority_rank_config
+        return resolve_authority_rank_config()
 
     @property
     def holdout_rate(self) -> float:
@@ -1391,6 +1410,13 @@ class PackBuilder:
                 )
                 raise PackAssemblyError(msg, strategy_failures) from exc
 
+        # Authority boost (off by default): after fusion, which would discard
+        # a collect-seam multiplier, and before the sort below that makes it
+        # move the item. Off returns ``deduped`` itself.
+        authority_config = self._effective_authority_rank_config()
+        deduped = apply_authority_rank(deduped, authority_config)
+        authority_block = authority_rank_telemetry(authority_config, deduped)
+
         # Content floor: demote (or, when configured, drop) items whose
         # excerpt carries no substance — the logic lives in
         # ``trellis.retrieve.excerpts``. Applied after rerank so the
@@ -1524,6 +1550,10 @@ class PackBuilder:
             "class_prior": class_prior_telemetry(class_prior_config),
             "parent_verdict_degraded": parent_verdict_cache.degraded,
         }
+        # Present only when the boost is on, so an off build's event is
+        # unchanged. A held-out pack's telemetry is replaced below.
+        if authority_block is not None:
+            telemetry["authority_rank"] = authority_block
         # The pack-effect holdout (:mod:`trellis.core.pack_holdout`), drawn
         # once the pack id exists and the would-be pack is known. A withheld
         # caller receives an ordinary empty pack: blind, so nothing in the
@@ -1831,6 +1861,12 @@ class PackBuilder:
                 )
                 raise PackAssemblyError(msg, strategy_failures) from exc
 
+        # 3b'. Authority boost (off by default) — mirrors build(): after
+        # fusion, before the per-section sort that makes it move an item.
+        authority_config = self._effective_authority_rank_config()
+        deduped = apply_authority_rank(deduped, authority_config)
+        authority_block = authority_rank_telemetry(authority_config, deduped)
+
         # 3c. Content floor over the shared pool — mirrors build(). The floor
         # runs before items are assigned to sections, so a dropped item has
         # no single "best" section to be attributed to; it is recorded on
@@ -2016,6 +2052,8 @@ class PackBuilder:
             "class_prior": class_prior_telemetry(class_prior_config),
             "parent_verdict_degraded": parent_verdict_cache.degraded,
         }
+        if authority_block is not None:
+            telemetry["authority_rank"] = authority_block
         # The pack-effect holdout, drawn as in :meth:`build`: the whole
         # sectioned pack is withheld or none of it.
         withheld_from: SectionedPack | None = None
@@ -2256,6 +2294,8 @@ class PackBuilder:
                     f"{type(exc).__name__}: {exc}"
                 )
                 raise PackAssemblyError(msg, strategy_failures) from exc
+        # Off returns ``pool`` itself; see the matching seam in :meth:`build`.
+        pool = apply_authority_rank(pool, self._effective_authority_rank_config())
         pool = apply_content_floor(pool, self._content_floor).items
         return [project_for_public(item) for item in pool]
 
@@ -2633,6 +2673,7 @@ class PackBuilder:
         advisories_explored: list[str] | None = None,
         advisories_filtered_legacy: int | None = None,
         class_prior: dict[str, Any],
+        authority_rank: dict[str, Any] | None = None,
         withheld_from: SectionedPack | None = None,
         retrieval_phase: str | None = None,
         refresh: bool = False,
@@ -2780,6 +2821,8 @@ class PackBuilder:
                 "refresh": refresh,
                 "class_prior": class_prior,
                 "parent_verdict_degraded": parent_verdict_degraded,
+                # Only when the boost was on: an off build adds no key.
+                **({"authority_rank": authority_rank} if authority_rank else {}),
                 **holdout,
                 VARIANTS_KEY: active_variants(
                     holdout_rate=self._holdout_rate,
@@ -2884,6 +2927,7 @@ class PackBuilder:
         advisories_explored: list[str] | None = None,
         advisories_filtered_legacy: int | None = None,
         class_prior: dict[str, Any],
+        authority_rank: dict[str, Any] | None = None,
         withheld_from: Pack | None = None,
         retrieval_phase: str | None = None,
         refresh: bool = False,
@@ -3144,6 +3188,8 @@ class PackBuilder:
                 "refresh": refresh,
                 "class_prior": class_prior,
                 "parent_verdict_degraded": parent_verdict_degraded,
+                # Only when the boost was on: an off build adds no key.
+                **({"authority_rank": authority_rank} if authority_rank else {}),
                 **holdout,
                 VARIANTS_KEY: active_variants(
                     holdout_rate=self._holdout_rate,

@@ -509,6 +509,37 @@ class TestReplay:
         assert "Class-Prior Replay" in rendered
         assert "mode=off" in rendered
 
+    def test_authority_rank_flag_replays_a_real_pack(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        from tests.unit.retrieve.replay_seeds import seed_authority_rank
+
+        seed_authority_rank(temp_stores.operational.event_log)
+        result = runner.invoke(
+            app, ["analyze", "replay", "--authority-rank", "--format", "json"]
+        )
+        assert result.exit_code == 0, result.stdout
+        data = json.loads(result.stdout.strip())
+        assert data["replayed_packs"] == 1
+        assert data["packs_order_changed"] == 1
+        assert data["helpful_up"] == 1
+        assert data["boosted_by_signal"] == {"curated_node": 1}
+
+        text = runner.invoke(app, ["analyze", "replay", "--authority-rank"])
+        assert text.exit_code == 0
+        rendered = plain(text.stdout)
+        assert "Authority-Rank Replay" in rendered
+        assert "curated_node 1" in rendered
+
+    @pytest.mark.parametrize("fmt", ["text", "json"])
+    def test_authority_rank_refuses_another_arm_with_exit_two(self, fmt: str) -> None:
+        result = runner.invoke(
+            app,
+            ["analyze", "replay", "--authority-rank", "--class-prior", "--format", fmt],
+        )
+        assert result.exit_code == 2
+        assert "--class-prior" in plain(result.stdout)
+
     @staticmethod
     def _seed_chunk_serving(registry: StoreRegistry) -> None:
         """One pack serving a chunk whose own row records no form, over a

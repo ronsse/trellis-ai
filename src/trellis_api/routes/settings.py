@@ -269,6 +269,15 @@ def _effective_values(
     class_prior_config = resolve_class_prior_config(settings=settings_values)
     effective["class_prior_mode"] = class_prior_config.mode
 
+    # Same never-raises posture as the class prior resolver above.
+    from trellis.retrieve.authority_rank import (  # noqa: PLC0415
+        resolve_authority_rank_config,
+    )
+
+    effective["authority_rank_mode"] = resolve_authority_rank_config(
+        settings=settings_values
+    ).mode
+
     from trellis.retrieve.builder_factory import (  # noqa: PLC0415
         resolve_pack_provenance_line,
     )

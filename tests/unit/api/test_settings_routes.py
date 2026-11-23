@@ -378,6 +378,31 @@ class TestListSettings:
         assert row["parse_error"] == "stored value is not one of the allowed options"
         assert "not-a-mode" not in row["parse_error"]
 
+    def test_authority_rank_mode_effective_value_reads_the_store(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The route reports what ``build_pack_builder`` will resolve:
+        default ``off``, a stored ``on`` shows ``on``, and an unrecognised
+        stored value degrades to ``off`` and is flagged by the enum check.
+        """
+        monkeypatch.delenv("TRELLIS_AUTHORITY_RANK_MODE", raising=False)
+        row = _entry(client.get("/api/v1/settings").json(), "authority_rank_mode")
+        assert row["effective_value"] == "off"
+
+        settings_path = resolve_settings_path(registry.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set("authority_rank_mode", "on")
+        row = _entry(client.get("/api/v1/settings").json(), "authority_rank_mode")
+        assert row["effective_value"] == "on"
+
+        SettingsStore(settings_path).set("authority_rank_mode", "boost")
+        row = _entry(client.get("/api/v1/settings").json(), "authority_rank_mode")
+        assert row["effective_value"] == "off"
+        assert row["parse_error"] == "stored value is not one of the allowed options"
+
     def test_pack_provenance_line_effective_value_follows_the_store(
         self,
         client: TestClient,

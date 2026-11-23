@@ -813,6 +813,36 @@ _SPECS: tuple[SettingSpec, ...] = (
         enum=("off", "withhold"),
     ),
     SettingSpec(
+        name="authority_rank_mode",
+        label="Authority ranking boost",
+        type="str",
+        default="off",
+        description=(
+            "Boosts, after rank fusion, items from promoted precedent "
+            "documents and curated graph nodes: each such item's score is "
+            "multiplied by 1.15. Boost-only — "
+            "nothing is ever scaled down for lacking a signal. 'off' (the "
+            "default) changes nothing. Not measured yet: price it with "
+            "`trellis analyze replay --authority-rank` before turning it on."
+        ),
+        # See trellis.retrieve.authority_rank for the signals and weights.
+        surfaces=("mcp", "api", "cli"),
+        restart_required=False,
+        risk="caution",
+        risk_note=(
+            "'on' reorders every pack, which changes which items are "
+            "served as bodies and which as pointers. A curated node needs "
+            "only a non-null generation_spec on entity create, so a writer "
+            "can reach that signal. With the flag on, a held-out pack's "
+            "withheld_from rows record the boosted would-be pack, so turning "
+            "it on during a holdout changes what the holdout records."
+        ),
+        group="retrieval",
+        settings_live=True,
+        env_var="TRELLIS_AUTHORITY_RANK_MODE",
+        enum=("off", "on"),
+    ),
+    SettingSpec(
         name="pack_provenance_line",
         label="Pack provenance line",
         type="str",

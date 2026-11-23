@@ -119,6 +119,7 @@ class TestCatalogMembership:
                 "get_lessons_pack_event",
                 "filter_legacy_advisories",
                 "class_prior_mode",
+                "authority_rank_mode",
                 "pack_provenance_line",
                 "graph_max_subgraph_depth",
                 "noise_demotion_min_attributed_packs",
@@ -134,8 +135,8 @@ class TestCatalogMembership:
             | _PACK_BUDGET_KNOB_NAMES
         )
 
-    def test_fortyeight_entries_total(self) -> None:
-        assert len(SETTINGS_REGISTRY) == 48
+    def test_fortynine_entries_total(self) -> None:
+        assert len(SETTINGS_REGISTRY) == 49
 
     def test_class_prior_mode_enum_has_no_demote_option(self) -> None:
         """A dropped mode must not linger in the registry as an allowed
@@ -427,6 +428,7 @@ class TestRiskTiersMatchThePlanPlusOneDocumentedExtension:
             "advisory_min_effect_size",
             "capture_strict",
             "class_prior_mode",
+            "authority_rank_mode",
             "get_context_max_tokens",
             "get_context_max_items",
             "search_max_tokens",
