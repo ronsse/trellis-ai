@@ -254,3 +254,77 @@ def class_prior_edge_dump(log: Any, docs: Any) -> dict[str, Any]:
             log, config=cfg({"conversation"}, {"keyword", "semantic"}, "parents")
         ).model_dump(),
     }
+
+
+def authority_rank_strategies() -> list[Any]:
+    """Two axes whose second-ranked semantic item is the only high-signal one.
+
+    Long excerpts, so graduated disclosure makes real pointers past the
+    first body item; ``s2`` is a pointer as built and a body once boosted.
+    """
+    from unittest.mock import MagicMock
+
+    from trellis.retrieve.strategies import SearchStrategy
+    from trellis.schemas.pack import PackItem
+
+    def item(item_id: str, score: float, axis: str, **meta: Any) -> PackItem:
+        return PackItem(
+            item_id=item_id,
+            item_type="document",
+            excerpt=f"distinct body text about {item_id} and more " * 12,
+            relevance_score=score,
+            strategy_source=axis,
+            metadata=meta,
+        )
+
+    def strategy(name: str, items: list[PackItem]) -> Any:
+        mock = MagicMock(spec=SearchStrategy)
+        mock.name = name
+        mock.search.return_value = items
+        return mock
+
+    return [
+        strategy("keyword", [item("k1", 0.9, "keyword"), item("k2", 0.8, "keyword")]),
+        strategy(
+            "semantic",
+            [
+                item("s1", 0.99, "semantic"),
+                item("s2", 0.1, "semantic", content_tags={"signal_quality": "high"}),
+            ],
+        ),
+    ]
+
+
+def seed_authority_rank(log: Any) -> str:
+    """One real default-built flat pack, graded, in ``log``; returns its id.
+
+    Built by ``PackBuilder`` itself (boost off, the default), so the replay
+    reads the ``budget_trace``, ``rejected_items`` and ``disclosure`` blocks
+    serving writes, not a hand-written imitation of them. ``s2`` is cited
+    helpful and ``k1`` unhelpful.
+    """
+    from trellis.retrieve.disclosure import DisclosureConfig
+    from trellis.retrieve.excerpts import ContentFloorConfig
+    from trellis.retrieve.pack_builder import PackBuilder
+    from trellis.retrieve.rerankers.rrf import RRFReranker
+
+    pack = PackBuilder(
+        strategies=authority_rank_strategies(),
+        reranker=RRFReranker(),
+        content_floor=ContentFloorConfig(mode="off"),
+        disclosure=DisclosureConfig(mode="graduated", body_items=1),
+        event_log=log,
+    ).build("q", clearance="restricted")
+    log.emit(
+        EventType.FEEDBACK_RECORDED,
+        source="mcp",
+        entity_id=pack.pack_id,
+        payload={
+            "pack_id": pack.pack_id,
+            "helpful_item_ids": ["s2"],
+            "unhelpful_item_ids": ["k1"],
+            "rating": 0.5,
+            "success": True,
+        },
+    )
+    return pack.pack_id

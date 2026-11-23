@@ -810,6 +810,33 @@ _SPECS: tuple[SettingSpec, ...] = (
         enum=("off", "withhold"),
     ),
     SettingSpec(
+        name="authority_rank_mode",
+        label="Authority ranking boost",
+        type="str",
+        default="off",
+        description=(
+            "Boosts, after rank fusion, items from promoted precedent or "
+            "reference documents, curated graph nodes and high-signal items: "
+            "each such item's score is multiplied by 1 plus the largest "
+            "weight among the signals it carries (0.15 each). Boost-only — "
+            "nothing is ever scaled down for lacking a signal. 'off' (the "
+            "default) changes nothing. Not measured yet: price it with "
+            "`trellis analyze replay --authority-rank` before turning it on."
+        ),
+        # See trellis.retrieve.authority_rank for the signals and weights.
+        surfaces=("mcp", "api", "cli"),
+        restart_required=False,
+        risk="caution",
+        risk_note=(
+            "'on' reorders every pack, which changes which items are "
+            "served as bodies and which as pointers."
+        ),
+        group="retrieval",
+        settings_live=True,
+        env_var="TRELLIS_AUTHORITY_RANK_MODE",
+        enum=("off", "on"),
+    ),
+    SettingSpec(
         name="get_context_max_tokens",
         label="get_context token budget",
         type="int",

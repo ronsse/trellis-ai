@@ -42,7 +42,10 @@ Four limits, none of them hideable:
    baseline, so a body the pack never served is not a body the policy took.
 4. **Rank order is held fixed.** A width policy changes what the content
    floor measures and could in principle reorder a pack. The replay does
-   not model that; it re-prices and re-admits, it does not re-rank.
+   not model that; it re-prices and re-admits, it does not re-rank. The
+   one exception is :func:`replay_authority_rank`, which re-ranks served
+   rows by a multiplier read from their own recorded fields and holds every
+   unserved candidate's score fixed.
 
 The verdict join is :func:`~trellis.retrieve.pack_value.collect_pack_verdicts`
 and the event join is
@@ -71,6 +74,12 @@ from trellis.feedback.pack_rows import has_served_rows, served_rows_from_payload
 from trellis.learning.pack_observations import (
     join_pack_events_with_coverage,
     join_pack_feedback,
+)
+from trellis.retrieve.authority_rank import (
+    AUTHORITY_BOOST_KEY,
+    AuthorityRankConfig,
+    multiplier_for,
+    signals_of,
 )
 from trellis.retrieve.class_prior import (
     DEFAULT_SCOPE,
@@ -2329,8 +2338,379 @@ def replay_graph_selection(
     return report
 
 
+class AuthorityRankReplayReport(TrellisModel):
+    """What the default-off authority boost would have reordered.
+
+    Same population and unit as :class:`GraphSelectionReplayReport`: flat,
+    attributed, non-holdout packs, counted per ``(pack_id, item_id)``
+    serving. Each served row is re-scored as ``rrf_total`` (times its
+    ``content_floor_penalty``, if any) times the multiplier
+    :func:`trellis.retrieve.authority_rank.signals_of` derives from the
+    row's own recorded fields. Unserved candidates keep their recorded
+    ``rejected_items[].relevance_score`` and a multiplier of ``1.0``: the
+    event does not record their fields, so they cannot be boosted (status-quo
+    bias). The pool is re-sorted, the ``max_items`` cut and the token walk
+    are re-run, and the first ``disclosure.body_items`` admitted items are
+    bodies. A pack is replayed only when, with every multiplier ``1.0``, that
+    re-run reproduces the recorded order, admission and pointers.
+    """
+
+    window_days: int
+    attributed_packs: int = 0
+    #: Attributed packs the re-run reproduced and then re-ordered.
+    replayed_packs: int = 0
+    #: Attributed packs not re-run; ``unmodelled_reasons`` says why.
+    unmodelled_packs: int = 0
+    unmodelled_reasons: dict[str, int] = Field(default_factory=dict)
+    #: Replayed packs in which no served row carries a signal: the boost
+    #: cannot change them under this arm.
+    packs_without_boost: int = 0
+    #: Replayed packs whose admitted items, in order, differ.
+    packs_order_changed: int = 0
+    #: Servings in replayed packs that carry at least one signal.
+    boosted_servings: int = 0
+    #: Servings per signal; one serving can carry several.
+    boosted_by_signal: dict[str, int] = Field(default_factory=dict)
+    #: Servings that move across the body/pointer line, any verdict.
+    body_to_pointer: int = 0
+    pointer_to_body: int = 0
+    #: Servings the re-run no longer admits at all.
+    served_now_dropped: int = 0
+    #: Candidates the re-run admits that were never served, so never judged.
+    newly_served: int = 0
+    #: Cited servings by direction, ordering dropped < pointer < body.
+    helpful_up: int = 0
+    helpful_down: int = 0
+    unhelpful_up: int = 0
+    unhelpful_down: int = 0
+
+    notes: list[str] = Field(default_factory=list)
+
+
+_AUTHORITY_UNMODELLED = {
+    **_UNMODELLED_REASONS,
+    "index_pack": "were index-mode packs (all pointers by construction)",
+    "already_boosted": "were built with the boost on",
+    "no_rrf_score": "carried a served row with no rrf_total",
+    "candidate_unscored": "carried an unserved candidate with no relevance_score",
+    "order_not_reproduced": (
+        "did not reproduce their recorded order from the recorded scores"
+    ),
+    "pointers_not_reproduced": "did not reproduce their recorded pointers",
+}
+
+#: Body/pointer/dropped as a rank, so "up" and "down" are comparisons.
+_DROPPED, _POINTER, _BODY = 0, 1, 2
+
+
+def _served_base_score(row: Mapping[str, Any]) -> float | None:
+    breakdown = row.get("score_breakdown")
+    if not isinstance(breakdown, Mapping):
+        return None
+    total = breakdown.get("rrf_total")
+    if not isinstance(total, int | float) or not math.isfinite(total):
+        return None
+    penalty = breakdown.get("content_floor_penalty")
+    if isinstance(penalty, int | float) and math.isfinite(penalty):
+        return float(total) * float(penalty)
+    return float(total)
+
+
+def _body_items(payload: Mapping[str, Any]) -> int | None:
+    """``disclosure.body_items`` when graduation ran, else ``None`` (all bodies)."""
+    disclosure = payload.get("disclosure")
+    if not isinstance(disclosure, Mapping) or disclosure.get("mode") != "graduated":
+        return None
+    return _int_or_none(disclosure.get("body_items"))
+
+
+def _states(
+    order: list[str], admitted: set[str], body_items: int | None, exempt: set[str]
+) -> dict[str, int]:
+    """Each admitted id's state; past ``body_items`` it is a pointer unless exempt.
+
+    ``exempt`` is the served rows the original pack kept as bodies past the
+    line (a pointer no smaller than its body is not made), which the event
+    shows only for servings, so a newly admitted item past the line is
+    counted a pointer.
+    """
+    out: dict[str, int] = {}
+    position = 0
+    for item_id in order:
+        if item_id not in admitted:
+            continue
+        past = body_items is not None and position >= body_items
+        out[item_id] = _POINTER if past and item_id not in exempt else _BODY
+        position += 1
+    return out
+
+
+@dataclass
+class _AuthorityTally:
+    replayed: int = 0
+    unmodelled_reasons: dict[str, int] = field(default_factory=dict)
+    without_boost: int = 0
+    order_changed: int = 0
+    boosted: int = 0
+    by_signal: dict[str, int] = field(default_factory=dict)
+    body_to_pointer: int = 0
+    pointer_to_body: int = 0
+    dropped: int = 0
+    newly_served: int = 0
+    moves: dict[tuple[str, str], int] = field(default_factory=dict)
+
+    def unmodelled(self, reason: str) -> None:
+        self.unmodelled_reasons[reason] = self.unmodelled_reasons.get(reason, 0) + 1
+
+
+def _replay_authority_pack(  # noqa: PLR0911, PLR0912, PLR0915 - one guard per refusal
+    payload: Mapping[str, Any],
+    rows: list[Mapping[str, Any]],
+    verdicts: tuple[set[str], set[str]],
+    config: AuthorityRankConfig,
+    tally: _AuthorityTally,
+) -> None:
+    if _is_index_pack(payload):
+        tally.unmodelled("index_pack")
+        return
+    rejected_rows = [
+        r for r in (payload.get("rejected_items") or []) if isinstance(r, Mapping)
+    ]
+    plan = _plan_refill(payload, rejected_rows, set(), verdicts)
+    if isinstance(plan, str):
+        tally.unmodelled(plan)
+        return
+    row_by_id = {r["item_id"]: r for r in rows if isinstance(r.get("item_id"), str)}
+    rejected_score = {
+        r["item_id"]: r.get("relevance_score")
+        for r in rejected_rows
+        if isinstance(r.get("item_id"), str)
+        and r.get("reason") in ("token_budget", "max_items")
+    }
+    pool = [*plan.candidates, *plan.cut]
+    base: dict[str, float] = {}
+    multiplier: dict[str, float] = {}
+    signals_by_id: dict[str, frozenset[str]] = {}
+    for candidate in pool:
+        row = row_by_id.get(candidate.item_id) if candidate.included else None
+        if row is not None:
+            breakdown = row.get("score_breakdown")
+            if isinstance(breakdown, Mapping) and AUTHORITY_BOOST_KEY in breakdown:
+                tally.unmodelled("already_boosted")
+                return
+            score = _served_base_score(row)
+            if score is None:
+                tally.unmodelled("no_rrf_score")
+                return
+            signals = signals_of(
+                candidate.item_id,
+                document_form=row.get("document_form"),
+                node_role=row.get("node_role"),
+                signal_quality=row.get("signal_quality"),
+            )
+            signals_by_id[candidate.item_id] = signals
+            multiplier[candidate.item_id] = multiplier_for(signals, config)
+        else:
+            raw = rejected_score.get(candidate.item_id)
+            if not isinstance(raw, int | float) or not math.isfinite(raw):
+                tally.unmodelled("candidate_unscored")
+                return
+            score = float(raw)
+            multiplier[candidate.item_id] = 1.0
+        base[candidate.item_id] = score
+
+    recorded = [c.item_id for c in pool]
+    # A stable sort keeps the recorded order among ties, as the builder's does.
+    if sorted(recorded, key=lambda i: -base[i]) != recorded:
+        tally.unmodelled("order_not_reproduced")
+        return
+    body_items = _body_items(payload)
+    old_admitted = {c.item_id for c in plan.candidates if c.included}
+    pointers = _served_pointer_ids(payload)
+    old_order_admitted = [i for i in recorded if i in old_admitted]
+    exempt = {
+        item_id
+        for position, item_id in enumerate(old_order_admitted)
+        if body_items is not None and position >= body_items and item_id not in pointers
+    }
+    old_states = _states(recorded, old_admitted, body_items, exempt)
+    if {i for i, s in old_states.items() if s == _POINTER} != set(pointers):
+        tally.unmodelled("pointers_not_reproduced")
+        return
+
+    tally.replayed += 1
+    boosted_ids = [i for i, s in signals_by_id.items() if s]
+    if not boosted_ids:
+        tally.without_boost += 1
+    tally.boosted += len(boosted_ids)
+    for item_id in boosted_ids:
+        for name in signals_by_id[item_id]:
+            tally.by_signal[name] = tally.by_signal.get(name, 0) + 1
+
+    by_id = {c.item_id: c for c in pool}
+    new_order = sorted(recorded, key=lambda i: -(base[i] * multiplier[i]))
+    new_admitted = _walk([by_id[i] for i in new_order], plan.budget, plan.max_items)
+    new_states = _states(new_order, new_admitted, body_items, exempt)
+    if [i for i in new_order if i in new_admitted] != old_order_admitted:
+        tally.order_changed += 1
+    tally.newly_served += len(new_admitted - old_admitted)
+    for item_id, old in old_states.items():
+        new = new_states.get(item_id, _DROPPED)
+        if new == old:
+            continue
+        if new == _DROPPED:
+            tally.dropped += 1
+        elif old == _BODY:
+            tally.body_to_pointer += 1
+        else:
+            tally.pointer_to_body += 1
+        verdict = by_id[item_id].verdict
+        if verdict in ("helpful", "unhelpful"):
+            key = (verdict, "up" if new > old else "down")
+            tally.moves[key] = tally.moves.get(key, 0) + 1
+
+
+def _authority_rank_notes(
+    *, attributed_packs: int, tally: _AuthorityTally, config: AuthorityRankConfig
+) -> list[str]:
+    weights = ", ".join(f"{k}={v}" for k, v in sorted(config.weights.items()))
+    notes = [
+        (
+            "Counterfactual over the SAME packs and the SAME citations, with "
+            f"weights {weights} (multiplier 1 + the largest weight a row "
+            "carries). Only served rows are re-scored: the event records no "
+            "document_form, node_role or signal_quality for a candidate it did "
+            "not serve, so every unserved candidate keeps a multiplier of 1.0. "
+            "This is a status-quo bias: the arm can only lift what was already "
+            "served, never a boosted candidate the original walk turned away."
+        ),
+        (
+            f"{tally.newly_served} newly served candidate(s) were never shown, "
+            "so nobody judged them; they are counted, not scored."
+        ),
+        (
+            f"{tally.without_boost} of {tally.replayed} replayed pack(s) had no "
+            "boosted served row, so the boost cannot change them here."
+        ),
+        (
+            "A newly admitted item past disclosure.body_items is counted a "
+            "pointer; a served row the original pack kept as a body past that "
+            "line (its pointer was no smaller) stays a body. Served token cost "
+            "after re-pricing is not reported."
+        ),
+        (
+            "The precedent signal counts only ids in the reserved promoted-"
+            "precedent namespace; reference_form, curated_node and high_signal "
+            "read caller-influenced metadata and reward a write shape, not a "
+            "verified quality."
+        ),
+    ]
+    if attributed_packs < MIN_ATTRIBUTED_PACKS:
+        notes.append(
+            f"{attributed_packs} attributed pack(s) is below the "
+            f"{MIN_ATTRIBUTED_PACKS}-pack minimum every other ratio in "
+            "`analyze value` is held to; read these counts as raw tallies."
+        )
+    for reason, count in sorted(tally.unmodelled_reasons.items()):
+        notes.append(
+            f"{count} pack(s) {_AUTHORITY_UNMODELLED.get(reason, reason)}; "
+            "they are not re-run and count as unmodelled."
+        )
+    return notes
+
+
+def replay_authority_rank(
+    event_log: EventLog,
+    *,
+    days: int = 30,
+    limit: int = _DEFAULT_EVENT_LIMIT,
+    config: AuthorityRankConfig | None = None,
+) -> AuthorityRankReplayReport:
+    """Price turning ``authority_rank_mode`` on over recorded flat packs.
+
+    Args:
+        event_log: Operational log holding ``PACK_ASSEMBLED`` and
+            ``FEEDBACK_RECORDED``. Read only; holdout packs and the
+            feedback naming them are dropped by the join.
+        days: Look-back window, matching ``trellis analyze value``.
+        limit: Per-event-type scan limit.
+        config: Weights to price; defaults to ``mode="on"`` with
+            :data:`~trellis.retrieve.authority_rank.DEFAULT_WEIGHTS`.
+
+    Returns:
+        An :class:`AuthorityRankReplayReport`; its ``notes`` say what this
+        arm cannot measure.
+    """
+    config = config or AuthorityRankConfig(mode="on")
+    since = datetime.now(tz=UTC) - timedelta(days=days)
+    feedback_events, pack_payloads, _ = join_pack_feedback(
+        event_log, since=since, limit=limit
+    )
+    flat_packs = {
+        pack_id: payload
+        for pack_id, payload in pack_payloads.items()
+        if has_served_rows(payload) and not is_sectioned_payload(payload)
+    }
+    verdicts = collect_pack_verdicts(feedback_events, flat_packs)
+    helpful_by_pack = verdicts["helpful"]
+    unhelpful_by_pack = verdicts["unhelpful"]
+    attributed = sorted(set(helpful_by_pack) | set(unhelpful_by_pack))
+
+    tally = _AuthorityTally()
+    for pack_id in attributed:
+        payload = flat_packs[pack_id]
+        rows = [
+            served.row
+            for served in served_rows_from_payload(
+                pack_id, payload, include_sectioned=False, include_holdout=True
+            )
+            if served.item_id is not None
+        ]
+        _replay_authority_pack(
+            payload,
+            rows,
+            (
+                helpful_by_pack.get(pack_id, set()),
+                unhelpful_by_pack.get(pack_id, set()),
+            ),
+            config,
+            tally,
+        )
+
+    report = AuthorityRankReplayReport(
+        window_days=days,
+        attributed_packs=len(attributed),
+        replayed_packs=tally.replayed,
+        unmodelled_packs=sum(tally.unmodelled_reasons.values()),
+        unmodelled_reasons=dict(sorted(tally.unmodelled_reasons.items())),
+        packs_without_boost=tally.without_boost,
+        packs_order_changed=tally.order_changed,
+        boosted_servings=tally.boosted,
+        boosted_by_signal=dict(sorted(tally.by_signal.items())),
+        body_to_pointer=tally.body_to_pointer,
+        pointer_to_body=tally.pointer_to_body,
+        served_now_dropped=tally.dropped,
+        newly_served=tally.newly_served,
+        helpful_up=tally.moves.get(("helpful", "up"), 0),
+        helpful_down=tally.moves.get(("helpful", "down"), 0),
+        unhelpful_up=tally.moves.get(("unhelpful", "up"), 0),
+        unhelpful_down=tally.moves.get(("unhelpful", "down"), 0),
+        notes=_authority_rank_notes(
+            attributed_packs=len(attributed), tally=tally, config=config
+        ),
+    )
+    logger.debug(
+        "pack_value_authority_rank_replayed",
+        window_days=days,
+        attributed_packs=report.attributed_packs,
+        replayed_packs=report.replayed_packs,
+    )
+    return report
+
+
 __all__ = [
     "EXCERPT_MAX_CHARS",
+    "AuthorityRankReplayReport",
     "SUBSTANCE_BASIS_AS_SERVED",
     "SUBSTANCE_BASIS_CURRENT_STATE",
     "ClassPriorReplayReport",
@@ -2340,6 +2720,7 @@ __all__ = [
     "ReplayReport",
     "SubstanceReplayReport",
     "SubstanceTally",
+    "replay_authority_rank",
     "replay_class_prior",
     "replay_graph_selection",
     "replay_pack_value",

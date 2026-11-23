@@ -1184,3 +1184,80 @@ class TestResolveIntKnobWarningEventNames:
         assert len(lines) == 1
         assert lines[0]["setting"] == BODY_ITEMS_SETTING
         assert "value" not in lines[0]
+
+
+class TestAuthorityRankWiring:
+    """``authority_rank_config`` is resolved once, with settings, by the
+    factory, beside ``class_prior_config`` — proven end to end through a
+    real keyword-axis document whose content tags say ``high``.
+    """
+
+    @staticmethod
+    def _seeded(tmp_path: Path) -> StoreRegistry:
+        registry = TestBuildPackBuilder._registry(tmp_path)
+        registry.knowledge.document_store.put(
+            "d1",
+            "a canary rollout runbook body",
+            metadata={"content_tags": {"signal_quality": "high"}},
+        )
+        return registry
+
+    def test_default_is_off_and_adds_no_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trellis.retrieve.authority_rank import (
+            AUTHORITY_BOOST_KEY,
+            AUTHORITY_RANK_MODE_ENV,
+        )
+
+        monkeypatch.delenv(AUTHORITY_RANK_MODE_ENV, raising=False)
+        pack = build_pack_builder(self._seeded(tmp_path), surface="test").build(
+            "canary rollout", clearance="restricted"
+        )
+
+        [item] = pack.items
+        assert AUTHORITY_BOOST_KEY not in item.score_breakdown
+
+    def test_a_settings_only_override_boosts_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trellis.retrieve.authority_rank import (
+            AUTHORITY_BOOST_KEY,
+            AUTHORITY_RANK_MODE_ENV,
+        )
+
+        monkeypatch.delenv(AUTHORITY_RANK_MODE_ENV, raising=False)
+        registry = self._seeded(tmp_path)
+        assert registry.stores_dir is not None
+        SettingsStore(registry.stores_dir / "settings.json").set(
+            "authority_rank_mode", "on"
+        )
+
+        pack = build_pack_builder(registry, surface="test").build(
+            "canary rollout", clearance="restricted"
+        )
+
+        [item] = pack.items
+        assert item.score_breakdown[AUTHORITY_BOOST_KEY] == pytest.approx(1.15)
+
+    def test_env_beats_a_settings_override_here_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trellis.retrieve.authority_rank import (
+            AUTHORITY_BOOST_KEY,
+            AUTHORITY_RANK_MODE_ENV,
+        )
+
+        registry = self._seeded(tmp_path)
+        assert registry.stores_dir is not None
+        SettingsStore(registry.stores_dir / "settings.json").set(
+            "authority_rank_mode", "on"
+        )
+        monkeypatch.setenv(AUTHORITY_RANK_MODE_ENV, "off")
+
+        pack = build_pack_builder(registry, surface="test").build(
+            "canary rollout", clearance="restricted"
+        )
+
+        [item] = pack.items
+        assert AUTHORITY_BOOST_KEY not in item.score_breakdown

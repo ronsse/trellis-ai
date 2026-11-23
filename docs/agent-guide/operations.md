@@ -3048,7 +3048,7 @@ flag), so this is additive, not a breaking change to `describe()`'s shape.
 registry catalogs every tunable `write_config.py` knows about plus
 retrieval-side knobs resolved outside it (`graph_seeding`,
 `graph_recency_fallback`, `filter_legacy_advisories`, `class_prior_mode`,
-`get_lessons_pack_event`);
+`authority_rank_mode`, `get_lessons_pack_event`);
 `graph_seeding` gates only
 seeds *inferred* from the intent, never a sectioned pack's `entity_ids` or an
 explicit `seed_ids`, which are instructions; `graph_recency_fallback`
@@ -3066,8 +3066,9 @@ default at its real enforcement site — each per-knob reader
 `builder_factory.py` / `pack_builder.py`, and `class_prior_mode`
 resolves the same way through
 `trellis.retrieve.class_prior.resolve_class_prior_config`, wired in by
-`builder_factory.py` — so a settings override reaches runtime the moment
-you set one. The lone exception is
+`builder_factory.py` (as does `authority_rank_mode`, through
+`trellis.retrieve.authority_rank.resolve_authority_rank_config`) — so a
+settings override reaches runtime the moment you set one. The lone exception is
 `minhash_seed_max_docs`: it is read once, lazily, at an MCP process's first
 `save_memory` call and cached for that process's lifetime, so a settings
 write after that first call has no effect until the next process starts.
@@ -3818,6 +3819,7 @@ Every `PackBuilder` build with an `event_log` configured emits one `PACK_ASSEMBL
 | `injected_items[]` | Per-item detail — `item_id`, `item_type`, `rank`, `selection_reason`, `score_breakdown`, `document_form` (`trellis.schemas.document_metadata.document_form_of`, omitted when absent), `estimated_tokens`, `strategy_source`, `injected_advisory_ids`, plus the **attribution fields** below. This is the per-item row the learning join reads, and `trellis.retrieve.pack_replay.replay_class_prior` reads `document_form` off it to grade the class-prior gate counterfactually over already-served items — it does not re-run the budget walk, since `budget_trace[]` carries no form for non-served candidates. Under `TRELLIS_CLASS_PRIOR_SCOPE=parents_and_chunks` a chunk's row carries no form (nor does any historical row), so replay resolves it through the document store as it is *now*: for a chunk id on a configured axis (any `item_type`, `vector` included), the stored row's `parent_doc_id` (else the id's prefix, as serving reads it), then that parent's `document_form`, memoized (one `get` per distinct id and parent); a non-chunk id is never looked up; the report adds `matched_via_parent`, `parent_lookups`, `parent_form_resolved` and `parent_form_unresolved`, and an unresolvable row counts as not matched. Price it with `TRELLIS_CLASS_PRIOR_MODE=withhold TRELLIS_CLASS_PRIOR_SCOPE=parents_and_chunks trellis analyze replay --class-prior --format json` (add `TRELLIS_CLASS_PRIOR_AXES=keyword,semantic,graph` for every axis). The gate is axis-scoped, so a matched row for which the off pack has a dedup row for a copy of the same id on an axis outside `config.axes` (see `rejected_items[]` below) is counted under `still_served_by_other_axis`, not as removed: withhold would let that other copy win the pack instead. |
 | `rejected_items[]` | `{item_id, item_type, relevance_score, reason, strategy_source, estimated_tokens}`. `estimated_tokens` is the budget walk's charge for the item and is set only on the two budget cuts, `max_items` and `token_budget`; it is `null` on every other reason and absent from an event written before the field existed (read both as unpriced, never zero). A `max_items` row never reaches the walk, so `budget_trace[]` lists it nowhere and this is the only record of its cost; it is priced as the walk would have charged it (the excerpt, or the index line in `index_mode`), not as a graduated-disclosure pointer, since disclosure runs after the cut. A sectioned pack emits no `rejected_items[]` payload. Known `reason` values: `dedup`, `archived`, `noise`, `structural_filter`, `meta_activity_filter`, `max_items`, `token_budget`, `session_dedup`, `semantic_dedup`, `content_floor`, `superseded`, `class_prior` — `archived` and `noise` are the collect-seam gates #404 started recording; `superseded` is the pairwise gate below; `class_prior` is `class_prior_mode="withhold"` dropping an imported-conversation-document candidate, a class-level prior rather than a per-item judgment (`trellis.retrieve.class_prior`), off by default. Withholds conversation parent documents; their chunks are untouched unless `TRELLIS_CLASS_PRIOR_SCOPE=parents_and_chunks` (env-only, default `parents`; an unrecognised value degrades to `parents` with a `class_prior_scope_env_unrecognised` warning), which also withholds a chunk whose *parent* carries a configured form. Only a chunk id (`<parent>#chunk-N`) resolves through a parent, by the same `ParentVerdictCache.resolve` call the archived and noise gates make (the item's `parent_doc_id`, else the id's own prefix for a vector snapshot that predates that key), so it adds no document-store read and a plain item that merely names a parent is not withheld; an unresolvable parent serves the item. The rejection reason and the `withholding` summary are the same, and the summary does not tell a chunk from a parent. On a sectioned pack this gate's rejections have no single section to be blamed on, so they are not copied into any `PackSection.retrieval_report` — they land in `SectionedPack.metadata["withholding"]` instead, same as the other pool-level gates. Rows are per **(strategy, item)**, so one id retrieved by two axes and gated on both appears twice; the `withholding` summary counts distinct ids and is the per-item number. |
 | `class_prior` | `{mode, forms, axes}`, plus `scope` only when it is not the default `parents` (absent reads as `parents`, which covers every row written before #986) (`trellis.retrieve.class_prior.class_prior_telemetry`) — the gate's own *configuration*, not its outcome; the outcome is the `class_prior` rows above and in `withholding`. `forms`/`axes` are sorted lists (JSON has no frozenset). Emitted on every flat and sectioned build, including `mode: "off"`, so a reader can tell whether the gate was on for this pack without re-deriving it from env/settings state that may have since changed. |
+| `authority_rank` | `{mode, weights, boosted_count}`, present **only** when `authority_rank_mode` is `on` (`trellis.retrieve.authority_rank`); an off build, the default, writes no such key and no item carries `score_breakdown["authority_boost"]`, so its event is byte-identical to one written before the knob existed. When on, each boosted item's `score_breakdown["authority_boost"]` is its multiplier, `1 +` the largest weight among the signals it carries (`precedent_form`: `document_form` `precedent` *and* an id in the reserved `precedent://learning/` namespace; `reference_form`; `curated_node`: `node_role` `curated`; `high_signal`: `signal_quality` `high`; `0.15` each, fixed). It is applied after rank fusion and before the sort, on flat, sectioned and public-only builds, and never lowers a score. `boosted_count` counts candidates touched at that seam, served or not. A held-out pack's telemetry is replaced wholesale, so it carries no block. Emitted on both pack kinds. |
 | `content_floor` | `{mode, min_distinct_words, penalty, exempt_item_types, penalized_count, penalized_item_ids, excluded_count, excluded_item_ids}`. Emitted even when nothing tripped, so "floor ran, nothing thin" is distinguishable from "floor never ran". |
 | `index_mode` | `true` when the pack was assembled for the one-line-per-item index rendering (`get_context(index=True)` / `search(index=True)`, #305) instead of excerpt bodies. Always present on packs built after #305; read it with a `False` default. **Branch on it before aggregating token numbers** — see the two rows below. |
 | `retrieval_phase` | `"pre_work"`, `"mid_task"`, `"post_hoc"`, or `null` when the caller stated none. Always present on packs built after this field was added; `null` is not "unknown", it is "not stated". A `post_hoc` pack — most often a stop hook retrieving after the work is already done — is a hindsight relevance check, not a pack that could have changed the outcome; exclude it before grading retrieval against a holdout. |
@@ -4756,6 +4758,32 @@ the feedback naming it, reaches no count in any arm. The width arms
 budget walk; `--class-prior` and `--graph-selection` are removal-only and count
 servings per `(pack_id, item_id)`. The `PACK_ASSEMBLED` table rows for
 `injected_items[]` and `budget_trace[]` describe what each reads.
+
+**Authority-rank arm.** `trellis analyze replay --authority-rank [--days N]
+[--format text|json]` prices turning on `authority_rank_mode`
+(`TRELLIS_AUTHORITY_RANK_MODE`, settings key `authority_rank_mode`, values
+`off`/`on`, default **off**, risk `caution`), the post-fusion boost described
+under `authority_rank` in the `PACK_ASSEMBLED` table. Over flat, attributed,
+non-holdout packs it re-scores each served row as `rrf_total` (times its
+`content_floor_penalty`) times the multiplier read from the row's own
+`document_form`, `node_role` and `signal_quality`; every unserved candidate
+keeps its recorded `rejected_items[].relevance_score` and a multiplier of 1.0.
+It re-sorts the pool, re-runs the `max_items` cut and the token walk, and
+treats the first `disclosure.body_items` admitted items as bodies. A pack is
+re-run only when, at multiplier 1.0, that reproduces the recorded order,
+admission and pointers; otherwise it counts under `unmodelled_reasons`
+(`index_pack`, `already_boosted`, `no_rrf_score`, `candidate_unscored`,
+`order_not_reproduced`, `pointers_not_reproduced`, plus the shared walk tags).
+It reports, per `(pack_id, item_id)` serving: `packs_order_changed`,
+`packs_without_boost`, `boosted_servings` and `boosted_by_signal`,
+`body_to_pointer` / `pointer_to_body` / `served_now_dropped`, `newly_served`,
+and `helpful_up` / `helpful_down` / `unhelpful_up` / `unhelpful_down` (dropped
+< pointer < body). Limits, also in `notes`: an unserved candidate is never
+re-scored, because the event records no attribution fields for it (status-quo
+bias: a boosted candidate the original walk turned away is never lifted);
+a newly served item is unjudged; a newly admitted item past the body line is
+counted a pointer; served token cost after re-pricing is not reported; and
+sectioned packs are not replayed. It combines with no other option (exit `2`).
 
 ```bash
 trellis analyze replay --entity-requires-description [--class-prior] [--days N] [--format text|json]

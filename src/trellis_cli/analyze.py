@@ -1330,6 +1330,15 @@ def replay(  # noqa: PLR0912, PLR0915 - one flag per arm, dispatched here
             "what the freed budget would have admitted instead."
         ),
     ),
+    authority_rank: bool = typer.Option(
+        False,
+        "--authority-rank",
+        help=(
+            "Re-rank served rows as authority_rank_mode=on would (default "
+            "weights) and re-run the walk and graduated disclosure: reports "
+            "packs re-ordered, body/pointer moves and how cited items moved."
+        ),
+    ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
     no_meta_trace: bool = typer.Option(
         False,
@@ -1379,8 +1388,15 @@ def replay(  # noqa: PLR0912, PLR0915 - one flag per arm, dispatched here
     other and with ``--class-prior`` (a serving two rules remove counts
     once), not with the width options.
 
+    ``--authority-rank`` re-ranks instead of withholding: it scores each
+    served row as the default-off authority boost would and re-runs the item
+    cut, the token walk and graduated disclosure; see
+    ``trellis.retrieve.pack_replay.replay_authority_rank``. Unserved
+    candidates are not re-scored. It combines with no other option.
+
     Examples::
 
+        trellis analyze replay --authority-rank
         trellis analyze replay --body-items 12
         trellis analyze replay --excerpt-max-chars 300
         trellis analyze replay --excerpt-max-chars 300 --no-refill
@@ -1390,6 +1406,37 @@ def replay(  # noqa: PLR0912, PLR0915 - one flag per arm, dispatched here
         trellis analyze replay --entity-requires-description
         trellis analyze replay --min-distinct-words 5 --class-prior
     """
+    if authority_rank:
+        conflicts = [
+            flag
+            for flag, given in (
+                ("--class-prior", class_prior),
+                ("--graph-selection", graph_selection is not None),
+                ("--excerpt-max-chars", excerpt_max_chars is not None),
+                ("--body-items", body_items is not None),
+                ("--max-items", max_items is not None),
+                ("--no-refill", no_refill),
+                ("--entity-requires-description", entity_requires_description),
+                ("--min-distinct-words", min_distinct_words is not None),
+            )
+            if given
+        ]
+        if conflicts:
+            authority_refusal = (
+                "--authority-rank cannot be combined with "
+                f"{escape(', '.join(conflicts))}"
+            )
+            # The exit sits below the format branch
+            # (``tests/unit/test_format_exit_parity_rule.py``).
+            if output_format == "json":
+                emit_json({"status": "error", "message": authority_refusal})
+            else:
+                console.print(f"[red]{authority_refusal}[/red]", soft_wrap=True)
+            raise typer.Exit(code=2)
+        _replay_authority_rank_command(
+            days=days, output_format=output_format, no_meta_trace=no_meta_trace
+        )
+        return
     if graph_selection is not None:
         refusal = _graph_selection_refusal(
             graph_selection,
@@ -1735,6 +1782,69 @@ def _replay_graph_selection_command(
         print(json.dumps(report.model_dump()))
         return
     _render_graph_selection_replay(report)
+
+
+def _replay_authority_rank_command(
+    *, days: int, output_format: str, no_meta_trace: bool
+) -> None:
+    """The ``--authority-rank`` arm of ``analyze replay``."""
+    from trellis.retrieve.pack_replay import (  # noqa: PLC0415
+        replay_authority_rank,
+    )
+
+    event_log = get_event_log()
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.replay-authority-rank",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        report = replay_authority_rank(event_log, days=days)
+        if _meta_record.enabled and report.attributed_packs > 0:
+            _meta_record.produced_finding(
+                f"pack-replay-authority-rank-report-d{days}",
+                finding_type="AuthorityRankReplayReport",
+            )
+    if output_format == "json":
+        print(json.dumps(report.model_dump()))
+        return
+    _render_authority_rank_replay(report)
+
+
+def _render_authority_rank_replay(report: Any) -> None:
+    """Render an AuthorityRankReplayReport."""
+    console.print(
+        f"[bold]Authority-Rank Replay[/bold] (last {report.window_days} days, "
+        f"n={report.attributed_packs} attributed packs)"
+    )
+    console.print(
+        f"  replayed: {report.replayed_packs}   "
+        f"not re-runnable: {report.unmodelled_packs}   "
+        f"no boosted row: {report.packs_without_boost}"
+    )
+    console.print(f"  packs re-ordered:    {report.packs_order_changed}")
+    by_signal = ", ".join(
+        f"{escape(name)} {count}" for name, count in report.boosted_by_signal.items()
+    )
+    console.print(
+        f"  boosted servings:    {report.boosted_servings}"
+        + (f" [dim]({by_signal})[/dim]" if by_signal else "")
+    )
+    console.print(
+        f"  body -> pointer:     {report.body_to_pointer}   "
+        f"pointer -> body: {report.pointer_to_body}   "
+        f"dropped: {report.served_now_dropped}"
+    )
+    console.print(
+        f"  helpful up/down:     {report.helpful_up}/{report.helpful_down}   "
+        f"unhelpful up/down: {report.unhelpful_up}/{report.unhelpful_down}"
+    )
+    console.print(
+        f"  newly served:        {report.newly_served} [dim](never judged)[/dim]"
+    )
+    if report.notes:
+        console.print()
+        for note in report.notes:
+            console.print(f"  [dim]{escape(note)}[/dim]")
 
 
 def _render_graph_selection_replay(report: Any) -> None:
