@@ -35,6 +35,7 @@ from tests.unit.retrieve.test_precedent_listing_clearance import (
 )
 from trellis.retrieve.precedents import PrecedentClearance
 from trellis.schemas.well_known import OBSERVATION
+from trellis.stores.base.event_log import EventType
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -196,6 +197,25 @@ class TestGetItems:
         assert withheld.replace(precedent, "X") == missing.replace(
             "precedent://learning/nothing-here", "X"
         )
+
+    def test_the_fetch_record_lists_a_withheld_precedent_as_withheld(
+        self, temp_registry, precedent
+    ):
+        """The precedent's own row is readable; its source's label refuses it.
+
+        That refusal is a withheld id on ``PACK_ITEMS_FETCHED`` (#1264), not
+        an id that resolved to nothing.
+        """
+        assert temp_registry.knowledge.document_store.get(precedent) is not None
+        missing = "precedent://learning/nothing-here"
+        with as_http(BELOW):
+            get_items([precedent, missing])
+
+        (event,) = temp_registry.operational.event_log.get_events(
+            event_type=EventType.PACK_ITEMS_FETCHED, limit=10
+        )
+        assert event.payload["not_found_item_ids"] == [precedent, missing]
+        assert event.payload["withheld_item_ids"] == [precedent]
 
     def test_a_precedent_with_no_document_row_is_judged_by_its_node(
         self, temp_registry
