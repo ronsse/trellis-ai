@@ -7,7 +7,8 @@ carries — not their sum, so an item with three signals is boosted exactly as
 much as one with its strongest signal alone. The boosted item records the
 multiplier as ``score_breakdown["authority_boost"]``. Nothing is ever
 scaled down: every multiplier is ``>= 1.0`` and an item without a signal is
-returned untouched. That is the project rule
+returned untouched, as is an item whose ``relevance_score`` is not above
+``0`` (multiplying a negative score would lower it). That is the project rule
 (:mod:`trellis.classify.demotion_gate`) applied to ranking: demotion needs
 evidence of unhelpfulness, and *lacking* an authority signal is not that.
 
@@ -21,26 +22,33 @@ by fusion — the reason :mod:`trellis.retrieve.class_prior` removed its
 ``build_sectioned`` and the public-only path). Each caller already sorts by
 ``relevance_score`` after that seam, so the boost moves an item in the pack.
 
-**Signals** (:data:`DEFAULT_WEIGHTS`, each ``0.15``). Every one is read from
-a field ``PACK_ASSEMBLED.injected_items[]`` already records, so
+**Signals.** Four are recognised (:data:`KNOWN_SIGNALS`); only two carry a
+default weight (:data:`DEFAULT_WEIGHTS`, each ``0.15``). Every one is read
+from a field ``PACK_ASSEMBLED.injected_items[]`` already records, so
 :func:`~trellis.retrieve.pack_replay.replay_authority_rank` re-derives the
 same multiplier from a served row that serving computed from the item:
 
-* ``precedent_form`` — ``document_form == "precedent"`` **and** the item id is
-  in the reserved promoted-precedent namespace
+* ``precedent_form`` (weighted) — ``document_form == "precedent"`` **and**
+  the item id is in the reserved promoted-precedent namespace
   (:func:`~trellis.core.precedent_document.is_promoted_precedent_document`).
   The form alone is caller-writable metadata (``save_memory`` and
   ``POST /documents`` forward the bag verbatim), so keying on it would let a
   caller rank their own memory as a precedent; the id namespace is minted
   only by promotion.
-* ``reference_form`` — ``document_form == "reference"``
+* ``curated_node`` (weighted) — graph ``node_role == "curated"``. An entity
+  create needs only to name that role with any non-null ``generation_spec``
+  (:mod:`trellis.schemas.entity` checks nothing more), so this signal is
+  writer-reachable too, through a policy gate that ships with no policies.
+* ``reference_form`` (recognised, weight 0 by default) —
+  ``document_form == "reference"``
   (:data:`~trellis.retrieve.reference.REFERENCE_FORM`). A reference is
-  caller-declared by design (``save_memory(summary=...)``), so this signal
-  rewards a write shape, not a verified quality; it is listed separately so
-  the replay can price it on its own.
-* ``curated_node`` — graph ``node_role == "curated"``.
-* ``high_signal`` — ``content_tags.signal_quality == "high"``.
+  caller-declared by design (``save_memory(summary=...)``), so it rewards a
+  write shape, not a verified quality.
+* ``high_signal`` (recognised, weight 0 by default) —
+  ``content_tags.signal_quality == "high"``, which a caller can also write.
 
+A config built in code may weight the two unweighted signals; an item whose
+only signals weigh ``0`` is not boosted, carries no key and is not counted.
 The weights are fixed defaults, not env-parsed: :mod:`class_prior` parses
 comma-separated *names*, not a weight map, so there is no existing pattern to
 reuse, and a weight is a code change reviewed with its replay.
@@ -86,12 +94,21 @@ REFERENCE_FORM_SIGNAL = "reference_form"
 CURATED_NODE_SIGNAL = "curated_node"
 HIGH_SIGNAL_SIGNAL = "high_signal"
 
-#: Every signal's weight; the multiplier is ``1 + max(weights carried)``.
+#: Every signal :func:`signals_of` can report; a config may weight any of them.
+KNOWN_SIGNALS: frozenset[str] = frozenset(
+    {
+        PRECEDENT_FORM_SIGNAL,
+        REFERENCE_FORM_SIGNAL,
+        CURATED_NODE_SIGNAL,
+        HIGH_SIGNAL_SIGNAL,
+    }
+)
+
+#: The default weights; the multiplier is ``1 + max(weights carried)``. A
+#: recognised signal absent here weighs ``0`` and boosts nothing.
 DEFAULT_WEIGHTS: Mapping[str, float] = {
     PRECEDENT_FORM_SIGNAL: 0.15,
-    REFERENCE_FORM_SIGNAL: 0.15,
     CURATED_NODE_SIGNAL: 0.15,
-    HIGH_SIGNAL_SIGNAL: 0.15,
 }
 
 _VALID_MODES: frozenset[str] = frozenset({"off", "on"})
@@ -108,7 +125,7 @@ class AuthorityRankConfig:
         if self.mode not in _VALID_MODES:
             msg = f"mode must be one of {sorted(_VALID_MODES)}; got {self.mode!r}"
             raise ValueError(msg)
-        unknown = set(self.weights) - set(DEFAULT_WEIGHTS)
+        unknown = set(self.weights) - KNOWN_SIGNALS
         if unknown:
             msg = f"unknown authority signals: {sorted(unknown)}"
             raise ValueError(msg)
@@ -198,7 +215,7 @@ def item_signals(item: PackItem) -> frozenset[str]:
 
 
 def multiplier_for(signals: frozenset[str], config: AuthorityRankConfig) -> float:
-    """``1 + max(weight)`` over ``signals``; ``1.0`` when none apply."""
+    """``1 + max(weight)`` over ``signals``; ``1.0`` when none is weighted."""
     weights = [config.weights.get(name, 0.0) for name in signals]
     return 1.0 + max(weights, default=0.0)
 
@@ -210,12 +227,17 @@ def apply_authority_rank(
 
     Order is preserved — callers sort by ``relevance_score`` afterwards, as
     they already do after the content floor. Only an item whose multiplier
-    is above ``1.0`` is copied; every other item is the same object.
+    is above ``1.0`` and whose score is above ``0`` is copied; every other
+    item is the same object.
     """
     if config.mode == "off":
         return items
     out: list[PackItem] = []
     for item in items:
+        if not item.relevance_score > 0:
+            # Boost-only: multiplying a negative score would lower it.
+            out.append(item)
+            continue
         multiplier = multiplier_for(item_signals(item), config)
         if multiplier <= 1.0:
             out.append(item)
@@ -260,6 +282,7 @@ __all__ = [
     "CURATED_NODE_SIGNAL",
     "DEFAULT_WEIGHTS",
     "HIGH_SIGNAL_SIGNAL",
+    "KNOWN_SIGNALS",
     "OFF",
     "PRECEDENT_DOCUMENT_FORM",
     "PRECEDENT_FORM_SIGNAL",

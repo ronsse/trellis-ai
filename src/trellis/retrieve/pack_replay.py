@@ -2508,8 +2508,14 @@ def _replay_authority_pack(  # noqa: PLR0911, PLR0912, PLR0915 - one guard per r
                 node_role=row.get("node_role"),
                 signal_quality=row.get("signal_quality"),
             )
-            signals_by_id[candidate.item_id] = signals
-            multiplier[candidate.item_id] = multiplier_for(signals, config)
+            # Serving's rule: a score not above 0 is never boosted.
+            factor = multiplier_for(signals, config) if score > 0 else 1.0
+            multiplier[candidate.item_id] = factor
+            if factor > 1.0:
+                # Only signals that carry weight boosted the item.
+                signals_by_id[candidate.item_id] = frozenset(
+                    name for name in signals if config.weights.get(name, 0.0) > 0
+                )
         else:
             raw = rejected_score.get(candidate.item_id)
             if not isinstance(raw, int | float) or not math.isfinite(raw):
@@ -2539,7 +2545,7 @@ def _replay_authority_pack(  # noqa: PLR0911, PLR0912, PLR0915 - one guard per r
         return
 
     tally.replayed += 1
-    boosted_ids = [i for i, s in signals_by_id.items() if s]
+    boosted_ids = list(signals_by_id)
     if not boosted_ids:
         tally.without_boost += 1
     tally.boosted += len(boosted_ids)
@@ -2600,9 +2606,9 @@ def _authority_rank_notes(
         ),
         (
             "The precedent signal counts only ids in the reserved promoted-"
-            "precedent namespace; reference_form, curated_node and high_signal "
-            "read caller-influenced metadata and reward a write shape, not a "
-            "verified quality."
+            "precedent namespace; curated_node reads a node role any entity "
+            "create can name, and reference_form and high_signal carry no "
+            "default weight. Only weighted signals are counted."
         ),
     ]
     if attributed_packs < MIN_ATTRIBUTED_PACKS:

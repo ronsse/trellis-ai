@@ -523,13 +523,13 @@ class TestReplay:
         assert data["replayed_packs"] == 1
         assert data["packs_order_changed"] == 1
         assert data["helpful_up"] == 1
-        assert data["boosted_by_signal"] == {"high_signal": 1}
+        assert data["boosted_by_signal"] == {"curated_node": 1}
 
         text = runner.invoke(app, ["analyze", "replay", "--authority-rank"])
         assert text.exit_code == 0
         rendered = plain(text.stdout)
         assert "Authority-Rank Replay" in rendered
-        assert "high_signal 1" in rendered
+        assert "curated_node 1" in rendered
 
     @pytest.mark.parametrize("fmt", ["text", "json"])
     def test_authority_rank_refuses_another_arm_with_exit_two(self, fmt: str) -> None:

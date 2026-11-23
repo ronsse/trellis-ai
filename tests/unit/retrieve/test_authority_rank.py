@@ -18,16 +18,20 @@ from trellis.retrieve.authority_rank import (
     AUTHORITY_BOOST_KEY,
     AUTHORITY_RANK_MODE_ENV,
     CURATED_NODE_SIGNAL,
+    DEFAULT_WEIGHTS,
     HIGH_SIGNAL_SIGNAL,
+    KNOWN_SIGNALS,
     OFF,
     PRECEDENT_DOCUMENT_FORM,
     PRECEDENT_FORM_SIGNAL,
     REFERENCE_FORM_SIGNAL,
     AuthorityRankConfig,
     apply_authority_rank,
+    authority_rank_telemetry,
     item_signals,
     resolve_authority_rank_config,
 )
+from trellis.core.pack_holdout import HOLDOUT_ITEMS_KEY, HOLDOUT_KEY
 from trellis.retrieve.excerpts import ContentFloorConfig
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.rerankers.rrf import RRFReranker
@@ -73,7 +77,7 @@ def _item(
 
 
 def _two_axis_pool() -> list[SearchStrategy]:
-    """Two axes; ``s2`` is second on its axis and the only high-signal item.
+    """Two axes; ``s2`` is second on its axis and the only curated node.
 
     Under RRF ``k1``/``s1`` score 1/61 and ``k2``/``s2`` 1/62, whatever
     their native scores, so only a post-fusion boost can lift ``s2`` past
@@ -88,7 +92,7 @@ def _two_axis_pool() -> list[SearchStrategy]:
             "semantic",
             [
                 _item("s1", 0.99, axis="semantic"),
-                _item("s2", 0.10, axis="semantic", signal_quality="high"),
+                _item("s2", 0.10, axis="semantic", node_role="curated"),
             ],
         ),
     ]
@@ -146,6 +150,32 @@ class TestSignals:
         assert out.score_breakdown[AUTHORITY_BOOST_KEY] == pytest.approx(1.2)
         assert out.relevance_score == pytest.approx(2.4)
 
+    def test_default_weights_only_precedent_and_curated(self) -> None:
+        """reference_form and high_signal are recognised but weigh nothing."""
+        assert dict(DEFAULT_WEIGHTS) == {
+            PRECEDENT_FORM_SIGNAL: 0.15,
+            CURATED_NODE_SIGNAL: 0.15,
+        }
+        assert {REFERENCE_FORM_SIGNAL, HIGH_SIGNAL_SIGNAL} <= KNOWN_SIGNALS
+        # A config built in code may still weight them.
+        AuthorityRankConfig(mode="on", weights={HIGH_SIGNAL_SIGNAL: 0.1})
+
+    def test_zero_weight_signals_leave_the_item_untouched(self) -> None:
+        items = [
+            _item("r", 1.0, form="reference"),
+            _item("h", 1.0, signal_quality="high"),
+            _item("rh", 1.0, form="reference", signal_quality="high"),
+            _item("c", 1.0, node_role="curated"),
+        ]
+        out = apply_authority_rank(items, ON)
+        assert out[0] is items[0]
+        assert out[1] is items[1]
+        assert out[2] is items[2]
+        assert out[3].score_breakdown[AUTHORITY_BOOST_KEY] == pytest.approx(1.15)
+        telemetry = authority_rank_telemetry(ON, out)
+        assert telemetry is not None
+        assert telemetry["boosted_count"] == 1
+
     def test_negative_weight_is_refused(self) -> None:
         with pytest.raises(ValueError, match=">= 0"):
             AuthorityRankConfig(mode="on", weights={HIGH_SIGNAL_SIGNAL: -0.1})
@@ -201,12 +231,16 @@ class TestOnAfterFusion:
         top = on.items[0]
         assert top.score_breakdown[AUTHORITY_BOOST_KEY] == pytest.approx(1.15)
         assert top.score_breakdown["rrf_total"] == pytest.approx(1 / 62)
+        # Applied exactly once: the served score is the fused score x 1.15.
+        assert top.relevance_score == pytest.approx(
+            top.score_breakdown["rrf_total"] * 1.15, rel=1e-9
+        )
 
     def test_a_collect_seam_multiplier_would_not_have(self) -> None:
         """The control: scaling s2's native score is erased by fusion."""
         strategies = _two_axis_pool()
         strategies[1].search.return_value[1] = _item(  # type: ignore[attr-defined]
-            "s2", 0.10 * 1.15, axis="semantic", signal_quality="high"
+            "s2", 0.10 * 1.15, axis="semantic", node_role="curated"
         )
         pack = PackBuilder(
             strategies=strategies,
@@ -218,10 +252,14 @@ class TestOnAfterFusion:
 
     def test_boost_only_no_score_ever_decreases(self) -> None:
         items = [
-            _item("a", 0.5, signal_quality="high"),
+            _item("a", 0.5, node_role="curated"),
             _item("b", 0.4),
             _item("c", 0.3, form="reference", node_role="curated"),
             _item("d", 0.0, signal_quality="low"),
+            # Weighted signals on a score not above 0: multiplying would lower
+            # a negative score, so neither is touched.
+            _item("neg", -0.5, node_role="curated"),
+            _item("zero", 0.0, node_role="curated"),
         ]
         out = apply_authority_rank(items, ON)
         for before, after in zip(items, out, strict=True):
@@ -230,6 +268,11 @@ class TestOnAfterFusion:
             assert boost >= 1.0
         assert out[1] is items[1]
         assert out[3] is items[3]
+        assert out[4] is items[4]
+        assert out[5] is items[5]
+        telemetry = authority_rank_telemetry(ON, out)
+        assert telemetry is not None
+        assert telemetry["boosted_count"] == 2
 
     def test_on_event_carries_the_block_and_per_item_boost(
         self, tmp_path: Path
@@ -260,6 +303,10 @@ class TestOnAfterFusion:
         )
         assert on.sections[0].items[0].item_id == "s2"
         assert off.sections[0].items[0].item_id != "s2"
+        top = on.sections[0].items[0]
+        assert top.relevance_score == pytest.approx(
+            top.score_breakdown["rrf_total"] * 1.15, rel=1e-9
+        )
         assert event.payload["authority_rank"]["mode"] == "on"
 
     def test_sectioned_off_event_has_no_block(self, tmp_path: Path) -> None:
@@ -285,7 +332,59 @@ class TestOnAfterFusion:
         by_id_off = {i.item_id: i for i in off}
         assert by_id_on["s2"].relevance_score > by_id_on["s1"].relevance_score
         assert by_id_off["s2"].relevance_score < by_id_off["s1"].relevance_score
-        assert all(AUTHORITY_BOOST_KEY not in i.score_breakdown for i in off)
+        # Applied exactly once on this path too.
+        assert by_id_on["s2"].relevance_score == pytest.approx(
+            by_id_on["s2"].score_breakdown["rrf_total"] * 1.15, rel=1e-9
+        )
+        # The public projection strips the multiplier with ``original_score``.
+        for item in [*on, *off]:
+            assert AUTHORITY_BOOST_KEY not in item.score_breakdown
+            assert "original_score" not in item.score_breakdown
+
+    def test_project_for_public_strips_the_boost_key(self) -> None:
+        from trellis.retrieve.public_pack import project_for_public
+
+        [boosted] = apply_authority_rank([_item("c", 0.5, node_role="curated")], ON)
+        assert AUTHORITY_BOOST_KEY in boosted.score_breakdown
+        public = project_for_public(boosted)
+        assert AUTHORITY_BOOST_KEY not in public.score_breakdown
+        assert public.relevance_score == boosted.relevance_score
+
+
+class TestHeldOutWithFlagOn:
+    """A held-out pack's telemetry is replaced wholesale, block included.
+
+    The would-be pack it records is the boosted one, which is why turning the
+    flag on during a holdout changes what the holdout records.
+    """
+
+    def test_flat_held_out_event_has_no_block(self, tmp_path: Path) -> None:
+        log = SQLiteEventLog(tmp_path / "e.db")
+        try:
+            pack = _builder(ON, event_log=log, holdout_rate=1.0).build(
+                "q", clearance="restricted"
+            )
+            [event] = log.get_events(limit=5)
+        finally:
+            log.close()
+        assert pack.items == []
+        assert event.payload[HOLDOUT_KEY] is True
+        assert "authority_rank" not in event.payload
+        would_be = event.payload[HOLDOUT_ITEMS_KEY]
+        assert would_be[0]["item_id"] == "s2"
+
+    def test_sectioned_held_out_event_has_no_block(self, tmp_path: Path) -> None:
+        sections = [SectionRequest(name="all", max_items=10, max_tokens=4000)]
+        log = SQLiteEventLog(tmp_path / "e.db")
+        try:
+            _builder(ON, event_log=log, holdout_rate=1.0).build_sectioned(
+                "q", sections=sections, clearance="restricted"
+            )
+            [event] = log.get_events(limit=5)
+        finally:
+            log.close()
+        assert event.payload[HOLDOUT_KEY] is True
+        assert "authority_rank" not in event.payload
 
 
 class TestResolve:
@@ -343,7 +442,7 @@ class TestReplayArm:
         assert report.packs_order_changed == 1
         assert report.packs_without_boost == 0
         assert report.boosted_servings == 1
-        assert report.boosted_by_signal == {HIGH_SIGNAL_SIGNAL: 1}
+        assert report.boosted_by_signal == {CURATED_NODE_SIGNAL: 1}
         # s2 rises from pointer to the one body slot; the old body falls.
         assert report.pointer_to_body == 1
         assert report.body_to_pointer == 1

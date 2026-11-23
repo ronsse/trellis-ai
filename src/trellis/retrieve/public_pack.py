@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from trellis.retrieve.authority_rank import AUTHORITY_BOOST_KEY
 from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.retrieve.parent_verdicts import ParentVerdictCache
 from trellis.retrieve.public_rank import (
@@ -106,6 +107,12 @@ def public_search_page(
     return [{**row, "rank": score} for row, score in rows[:limit]]
 
 
+#: ``score_breakdown`` keys a public-only caller never receives.
+_PRIVATE_BREAKDOWN_KEYS: frozenset[str] = frozenset(
+    {"original_score", AUTHORITY_BOOST_KEY}
+)
+
+
 def project_for_public(item: PackItem) -> PackItem:
     """``item`` as a public-only caller receives it.
 
@@ -113,10 +120,15 @@ def project_for_public(item: PackItem) -> PackItem:
     ``strategy_source`` first, because the reranker and the response read the
     field, not the metadata key. ``score_breakdown["original_score"]`` is the
     raw strategy score (a keyword score is a function of corpus statistics);
-    the fused rank-based score stays.
+    the fused rank-based score stays. ``score_breakdown["authority_boost"]``
+    is dropped too: its value names which authority signal an item carries.
     """
     source = item.strategy_source or (item.metadata or {}).get("source_strategy")
-    breakdown = {k: v for k, v in item.score_breakdown.items() if k != "original_score"}
+    breakdown = {
+        k: v
+        for k, v in item.score_breakdown.items()
+        if k not in _PRIVATE_BREAKDOWN_KEYS
+    }
     return item.model_copy(
         update={
             "metadata": public_metadata(item.metadata),

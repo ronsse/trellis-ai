@@ -257,7 +257,7 @@ def class_prior_edge_dump(log: Any, docs: Any) -> dict[str, Any]:
 
 
 def authority_rank_strategies() -> list[Any]:
-    """Two axes whose second-ranked semantic item is the only high-signal one.
+    """Two axes whose second-ranked semantic item is the only curated node.
 
     Long excerpts, so graduated disclosure makes real pointers past the
     first body item; ``s2`` is a pointer as built and a body once boosted.
@@ -289,7 +289,7 @@ def authority_rank_strategies() -> list[Any]:
             "semantic",
             [
                 item("s1", 0.99, "semantic"),
-                item("s2", 0.1, "semantic", content_tags={"signal_quality": "high"}),
+                item("s2", 0.1, "semantic", node_role="curated"),
             ],
         ),
     ]

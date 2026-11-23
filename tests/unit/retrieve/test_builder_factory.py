@@ -1189,7 +1189,7 @@ class TestResolveIntKnobWarningEventNames:
 class TestAuthorityRankWiring:
     """``authority_rank_config`` is resolved once, with settings, by the
     factory, beside ``class_prior_config`` — proven end to end through a
-    real keyword-axis document whose content tags say ``high``.
+    real keyword-axis item whose metadata names the ``curated`` node role.
     """
 
     @staticmethod
@@ -1198,7 +1198,7 @@ class TestAuthorityRankWiring:
         registry.knowledge.document_store.put(
             "d1",
             "a canary rollout runbook body",
-            metadata={"content_tags": {"signal_quality": "high"}},
+            metadata={"node_role": "curated"},
         )
         return registry
 

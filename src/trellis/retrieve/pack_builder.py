@@ -845,8 +845,9 @@ class PackBuilder:
         class_prior_config: ClassPriorConfig | None = None,
         document_store: DocumentStore | None = None,
         excerpt_max_chars: int = EXCERPT_MAX_CHARS,
-        authority_rank_config: AuthorityRankConfig | None = None,
         graph_store: GraphStore | None = None,
+        *,
+        authority_rank_config: AuthorityRankConfig | None = None,
     ) -> None:
         if not 0.0 <= holdout_rate <= 1.0:
             msg = f"holdout_rate must be in [0.0, 1.0]; got {holdout_rate!r}"
