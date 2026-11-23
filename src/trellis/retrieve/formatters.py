@@ -174,7 +174,9 @@ def format_pack_as_markdown(
             fits, gets no line. The builder's
             ``budget_trace`` does **not** price the line: the builder never
             sees it, so with this on, the rendered pack can hold fewer items
-            than ``PACK_ASSEMBLED`` records as selected.
+            than ``PACK_ASSEMBLED`` records as selected. ``PACK_ASSEMBLED``
+            itself is unchanged; reply-size telemetry measures the longer
+            reply.
 
     Returns:
         Markdown-formatted string within token budget.

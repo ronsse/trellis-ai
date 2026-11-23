@@ -207,8 +207,9 @@ def _context_banner(registry: StoreRegistry) -> str:
 def _provenance_line_enabled(registry: StoreRegistry) -> bool:
     """Whether this reply renders provenance lines; any failure reads off.
 
-    Read after the pack is built, so it can change only the reply text,
-    never the builder's work or a ``PACK_ASSEMBLED`` payload.
+    Read after the pack is built, so it never changes the builder's work or
+    the ``PACK_ASSEMBLED`` payload; reply-size telemetry
+    (``token.tracked``'s ``response_tokens``) reflects the longer reply.
     """
     try:
         return resolve_pack_provenance_line(load_settings_values(registry.stores_dir))

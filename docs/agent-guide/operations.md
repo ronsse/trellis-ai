@@ -3088,7 +3088,10 @@ with none gets no line. `<origin>` is the first of: the document form, `from
 recency scoring read, and only when that stamp came from the item's own
 metadata (`recency_clock` is `source`); a `row`-clock stamp is a store column
 that is not on the item, so the clause is left out rather than adding a store
-read. The line states where an item came from and how it was reached, not
+read. An item the semantic axis served gets no age either: its metadata is
+the vector row's snapshot, whose `created_at` is the embed time when the
+document carried none, and the item cannot tell that apart from a source
+stamp. The line states where an item came from and how it was reached, not
 that it is correct, and carries no score. Every value is reduced to letters,
 digits and `. - _ / : @ +` and cut to 40 characters, so a stored value cannot
 add a line, a code span or a clause (`trellis_wire.provenance`).
@@ -3096,7 +3099,8 @@ add a line, a code span or a clause (`trellis_wire.provenance`).
 The line sits inside the item block the formatter prices against the reply's
 `max_tokens`, so the reply stays within budget and, with the line on, can show
 fewer items than the pack selected. The builder's `budget_trace` does not
-price it, so `PACK_ASSEMBLED` records the same selection either way. Off, every
+price it, so `PACK_ASSEMBLED` is unchanged either way; reply-size telemetry
+(`token.tracked`'s `response_tokens`) reflects the longer reply. Off, every
 reply is byte-identical to a build without the setting
 (`tests/unit/retrieve/test_formatters_provenance.py`). The SDK's
 `format_pack_as_markdown` does not render the line: REST items carry neither

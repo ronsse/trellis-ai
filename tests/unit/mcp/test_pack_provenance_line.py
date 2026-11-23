@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from tests.unit.mcp.conftest import unwrap_tool
@@ -81,3 +83,24 @@ def test_a_failing_input_read_drops_the_line_not_the_pack(
     result = get_context(_INTENT)
     assert "`doc-widget`" in result
     assert "Provenance:" not in result
+
+
+_PACK_ID = re.compile(r"[0-9A-HJKMNP-TV-Z]{26}")
+
+
+def test_a_failing_flag_read_renders_exactly_the_off_reply(
+    temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import trellis.mcp.tools.context as context_mod
+
+    def _boom(*_args: object, **_kwargs: object) -> bool:
+        msg = "made-up failure"
+        raise RuntimeError(msg)
+
+    monkeypatch.delenv(PACK_PROVENANCE_LINE_ENV, raising=False)
+    _seed(temp_registry)
+    off = get_context(_INTENT)
+    monkeypatch.setattr(context_mod, "resolve_pack_provenance_line", _boom)
+    failed = get_context(_INTENT)
+    assert "Provenance:" not in failed
+    assert _PACK_ID.sub("<pack>", failed) == _PACK_ID.sub("<pack>", off)

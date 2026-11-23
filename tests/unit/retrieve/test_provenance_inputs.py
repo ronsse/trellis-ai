@@ -125,3 +125,57 @@ def test_keys_match_the_wire_renderer() -> None:
     inputs = provenance_inputs(_item({}), now=_NOW)
     assert inputs is not None
     assert set(inputs) == set(format_provenance_line.__kwdefaults__ or {})
+
+
+def test_semantic_axis_stamp_is_a_vector_row_snapshot_so_no_age() -> None:
+    # The embed hook stamps a vector row's created_at with embed time when
+    # the document carried none, and the search then labels it "source".
+    # The item cannot tell that default from a copied source stamp, so the
+    # semantic axis gets no age clause; origin and axis still render.
+    item = _item(
+        {
+            "source_system": "example-wiki",
+            "created_at": "2026-02-28T00:00:00+00:00",
+            "recency_clock": "source",
+        },
+        strategy_source="semantic",
+    )
+    inputs = provenance_inputs(item, now=_NOW)
+    assert inputs is not None
+    assert inputs["age_days"] is None
+    line = format_provenance_line(**inputs)
+    assert line == "Provenance: from example-wiki; via semantic"
+    assert "source clock" not in line
+    assert " old" not in line
+
+
+def test_semantic_axis_named_only_in_metadata_also_has_no_age() -> None:
+    item = _item(
+        {
+            "created_at": "2026-02-28T00:00:00+00:00",
+            "recency_clock": "source",
+            "source_strategy": "semantic",
+        }
+    )
+    inputs = provenance_inputs(item, now=_NOW)
+    assert inputs is not None
+    assert inputs["age_days"] is None
+
+
+def test_keyword_axis_source_stamp_keeps_its_age() -> None:
+    item = _item(
+        {"created_at": "2026-02-20T00:00:00+00:00", "recency_clock": "source"},
+        strategy_source="keyword",
+    )
+    inputs = provenance_inputs(item, now=_NOW)
+    assert inputs is not None
+    assert format_provenance_line(**inputs) == (
+        "Provenance: 9 days old (source clock); via keyword"
+    )
+
+
+def test_semantic_axis_name_matches_the_builder_factory() -> None:
+    from trellis.retrieve import provenance as provenance_mod
+    from trellis.retrieve.builder_factory import SEMANTIC_AXIS
+
+    assert provenance_mod.VECTOR_SNAPSHOT_AXIS == SEMANTIC_AXIS

@@ -38,6 +38,7 @@ _DAYS_PER_MONTH = 30
 _DAYS_PER_YEAR = 365
 _MONTHS_FROM_DAYS = 60
 _YEARS_FROM_DAYS = 730
+_MAX_AGE_DAYS = 365 * 200
 
 
 def clean_provenance_label(
@@ -64,6 +65,8 @@ def _age_text(age_days: float | None) -> str | None:
     if age_days is None or isinstance(age_days, bool):
         return None
     if not isinstance(age_days, int | float) or not math.isfinite(age_days):
+        return None
+    if age_days > _MAX_AGE_DAYS:  # a corrupt stamp, not an age worth stating
         return None
     days = max(int(age_days), 0)
     if days < 1:

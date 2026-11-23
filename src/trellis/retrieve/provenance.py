@@ -16,6 +16,14 @@ returns the same stamp, and the age is taken from it. When it is ``row`` the
 stamp was a store column that is not on the served item, and when it is
 ``none`` there was no usable stamp; in both cases the age is left out rather
 than read from the store.
+
+**An item the semantic axis served gets no age.** Its metadata is the vector
+row's embed-time snapshot, and the embed hook writes ``created_at`` as embed
+time when the document carried none
+(:func:`~trellis.retrieve.embed_ingest_hook.build_vector_row`). The search
+then labels that stamp ``source``, and nothing on the item tells it from a
+copied source stamp, so the age is left out. The decision keys on the axis
+that served the item, not on the stamp's value.
 """
 
 from __future__ import annotations
@@ -33,6 +41,11 @@ from trellis.schemas.document_metadata import document_form_of
 from trellis.schemas.pack import PackItem
 
 _SECONDS_PER_DAY = 86400.0
+
+#: The axis whose items carry a vector row's metadata snapshot; equal to
+#: :data:`trellis.retrieve.builder_factory.SEMANTIC_AXIS` (pinned by a test;
+#: importing it here would pull the builder into the formatter's path).
+VECTOR_SNAPSHOT_AXIS = "semantic"
 
 
 def _parse(value: Any) -> datetime | None:
@@ -76,15 +89,21 @@ def provenance_inputs(
         return None
     metadata = item.metadata if isinstance(item.metadata, dict) else {}
     clock = metadata.get(RECENCY_CLOCK_METADATA_KEY)
+    axis = item.strategy_source or metadata.get("source_strategy")
+    age_days = (
+        None
+        if axis == VECTOR_SNAPSHOT_AXIS
+        else _source_age_days(metadata, now or datetime.now(UTC))
+    )
     return {
         "form": document_form_of(metadata),
         "source_system": metadata.get("source_system"),
         "captured": metadata.get("distilled") is True,
         "node_role": metadata.get("node_role"),
-        "age_days": _source_age_days(metadata, now or datetime.now(UTC)),
+        "age_days": age_days,
         "clock": clock if isinstance(clock, str) else None,
-        "axis": item.strategy_source or metadata.get("source_strategy"),
+        "axis": axis,
     }
 
 
-__all__ = ["provenance_inputs"]
+__all__ = ["VECTOR_SNAPSHOT_AXIS", "provenance_inputs"]

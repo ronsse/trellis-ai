@@ -386,8 +386,10 @@ def resolve_pack_provenance_line(settings: Mapping[str, Any] | None = None) -> b
     Only ``on`` turns the line on. An unrecognised env value warns and reads
     as off whatever the stored setting says, the same posture as the other
     kill switches here; an unrecognised stored value reads as off quietly,
-    since the settings route already flags it. The line changes only reply
-    text, never the builder or any event payload.
+    since the settings route already flags it. The line changes reply text
+    only: the builder and ``PACK_ASSEMBLED`` are unchanged, while reply-size
+    telemetry (``token.tracked``'s ``response_tokens``) reflects the longer
+    reply.
     """
     raw = os.environ.get(PACK_PROVENANCE_LINE_ENV, "").strip().lower()
     if not raw:

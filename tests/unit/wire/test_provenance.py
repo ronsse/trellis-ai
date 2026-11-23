@@ -154,3 +154,10 @@ class TestSanitising:
         assert line is not None
         assert "\n" not in line
         assert "`" not in line
+
+
+def test_an_absurd_age_is_omitted() -> None:
+    assert format_provenance_line(age_days=1e300, clock="source") is None
+    assert format_provenance_line(age_days=365 * 199, clock="source") == (
+        "Provenance: 199 years old (source clock)"
+    )
