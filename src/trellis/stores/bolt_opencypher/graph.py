@@ -1378,8 +1378,15 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         and an edge can land after this writer's edge read) is followed by
         one more read of rows and edges and one more pick, bounded by
         :data:`_SETTLE_ROUNDS`, so the answer is whether this writer's row is
-        the one kept as of the last read. A writer told ``False`` re-applies
-        its fields through the update branch. The kept row can be the later
+        the one kept as of the last read. With more than one row current,
+        ``True`` needs this writer's own delete to have gone through in the
+        round that picked its row; a final refused delete or a failed
+        re-read answers ``False``. ``False`` means "not confirmed as the sole
+        creator", not "another row won", and it is the safe error: the
+        caller's rewrite loop (``mutate/handlers/_common.py``) reads the
+        shown row and re-applies its fields through
+        ``update_node_if_current``, which closes every current row, at the
+        cost of one extra version. The kept row can be the later
         creator's: its properties and ``valid_from`` win, and an ``as_of``
         between the two creators' stamps finds no row.
         """
@@ -1416,7 +1423,9 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                 kept_own_row=survivor == own_row,
                 settle_round=settle_round,
             )
-            if removed or settle_round == _SETTLE_ROUNDS:
+            if removed:
+                return survivor == own_row
+            if settle_round == _SETTLE_ROUNDS:
                 break
             # Refused, most often because an edge landed on a row this
             # writer's edge read saw bare: read rows and edges again and pick
@@ -1430,7 +1439,10 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                     error_type=type(exc).__name__,
                 )
                 break
-        return survivor == own_row
+        # More than one row may still be current: this writer is not
+        # confirmed as the sole creator, which is not the same as another
+        # row having won.
+        return False
 
     def upsert_nodes_bulk(
         self,

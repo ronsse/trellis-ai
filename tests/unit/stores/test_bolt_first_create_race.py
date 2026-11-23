@@ -391,6 +391,73 @@ def test_an_edge_landing_after_one_writers_edge_read_tells_only_the_keeper_true(
     assert settled[-1]["rows_with_edges"] == 1
 
 
+def test_a_failed_round_two_edge_read_leaves_exactly_one_writer_told_true() -> None:
+    # Writer 1's round-two edge read raises, so the pick falls back to its
+    # own earliest row and the delete of the edged row is refused again.
+    # Picking its own row is not enough: only a delete that went through
+    # confirms it.
+    class _SecondEdgeReadFails(_SharedWriter):
+        edge_read_count = 0
+
+        def _rows_with_edges(self, node_id: str, row_ids: list[str]) -> set[str]:
+            self.edge_read_count += 1
+            if self.edge_read_count == 2:
+                msg = "edge read failed"
+                raise RuntimeError(msg)
+            return super()._rows_with_edges(node_id, row_ids)
+
+    world = _SharedRows()
+    w1 = _SecondEdgeReadFails(
+        world, "#1:2", after_edge_read=lambda: world.edged.add("#1:1")
+    )
+    w2 = _SharedWriter(world, "#1:1")
+
+    first = w1.create_node_if_absent("n1", "service", {})
+    second = w2.create_node_if_absent("n1", "service", {})
+
+    assert (first, second) == (False, True)
+    assert sorted(world.rows) == ["#1:1"]
+
+
+def test_a_refused_delete_then_a_late_edge_leaves_exactly_one_writer_told_true() -> (
+    None
+):
+    # Writer 1's first delete is refused for a reason that is not an edge;
+    # an edge then lands on #1:1 after its round-two edge read, so the
+    # round-two delete is refused too.
+    class _FirstDeleteFails(_SharedWriter):
+        def _remove_node_rows(self, node_id: str, row_ids: list[str]) -> None:
+            if not self.removed:
+                self.removed.append(row_ids)
+                msg = "transient"
+                raise RuntimeError(msg)
+            super()._remove_node_rows(node_id, row_ids)
+
+    world = _SharedRows()
+    w1 = _FirstDeleteFails(world, "#1:2")
+
+    def land_edge_on_second_read() -> None:
+        world.edged.add("#1:1")
+
+    original = w1._rows_with_edges
+
+    def edge_read(node_id: str, row_ids: list[str]) -> set[str]:
+        seen = original(node_id, row_ids)
+        if len(w1.edge_reads) == 2:
+            land_edge_on_second_read()
+        return seen
+
+    w1._rows_with_edges = edge_read  # type: ignore[method-assign]
+    w2 = _SharedWriter(world, "#1:1")
+
+    first = w1.create_node_if_absent("n1", "service", {})
+    second = w2.create_node_if_absent("n1", "service", {})
+
+    assert len(w1.removed) == 2
+    assert (first, second) == (False, True)
+    assert sorted(world.rows) == ["#1:1"]
+
+
 def test_a_refused_delete_re_picks_once_and_then_answers() -> None:
     # Every delete refused: one extra round, no third.
     class _AlwaysRefused(_VerifyingStore):
@@ -399,11 +466,21 @@ def test_a_refused_delete_re_picks_once_and_then_answers() -> None:
             msg = "refused"
             raise RuntimeError(msg)
 
-    store = _AlwaysRefused(FakeBoltDriver(creates=["#1:2"]), _BOTH)
+    class _CountingReads(_AlwaysRefused):
+        row_reads = 0
 
-    assert store.create_node_if_absent("n1", "service", {}) is True
+        def _current_node_rows(self, node_id: str) -> list[tuple[str, str, str]]:
+            self.row_reads += 1
+            return list(self.rows)
+
+    store = _CountingReads(FakeBoltDriver(creates=["#1:2"]), _BOTH)
+
+    # Its own row was picked both times, but no delete went through, so it
+    # is not confirmed as the sole creator and re-applies as an update.
+    assert store.create_node_if_absent("n1", "service", {}) is False
     assert store.removed == [["#1:1"], ["#1:1"]]
     assert len(store.edge_reads) == 2
+    assert store.row_reads == 2
 
 
 def test_a_failed_re_read_after_a_refused_delete_does_not_escape() -> None:
@@ -425,7 +502,7 @@ def test_a_failed_re_read_after_a_refused_delete_does_not_escape() -> None:
 
     store = _ReReadFails(FakeBoltDriver(creates=["#1:2"]), _BOTH)
     with capture_logs() as logs:
-        assert store.create_node_if_absent("n1", "service", {}) is True
+        assert store.create_node_if_absent("n1", "service", {}) is False
     assert "node_first_create_duplicate_reread_failed" in [e["event"] for e in logs]
 
 
