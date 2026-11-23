@@ -119,6 +119,7 @@ class TestCatalogMembership:
                 "get_lessons_pack_event",
                 "filter_legacy_advisories",
                 "class_prior_mode",
+                "pack_provenance_line",
                 "graph_max_subgraph_depth",
                 "noise_demotion_min_attributed_packs",
                 "noise_demotion_min_unhelpful_citations",
@@ -133,8 +134,8 @@ class TestCatalogMembership:
             | _PACK_BUDGET_KNOB_NAMES
         )
 
-    def test_fortyseven_entries_total(self) -> None:
-        assert len(SETTINGS_REGISTRY) == 47
+    def test_fortyeight_entries_total(self) -> None:
+        assert len(SETTINGS_REGISTRY) == 48
 
     def test_class_prior_mode_enum_has_no_demote_option(self) -> None:
         """A dropped mode must not linger in the registry as an allowed
@@ -395,7 +396,9 @@ class TestRiskTiersMatchThePlanPlusOneDocumentedExtension:
     writes nodes and aliases into the live graph and can change which
     packs seed the graph axis. ``grading_trailer`` joins it too: on, it adds a
     line to every pack reply, which is part of a running holdout's treatment
-    environment. None of this is an oversight, so pin both tiers
+    environment. ``pack_provenance_line`` joins it for the same reason: on,
+    it adds a line under every bodied pack item and can push tail items out
+    of a reply's token budget. None of this is an oversight, so pin both tiers
     rather than let them silently drift.
     """
 
@@ -433,6 +436,7 @@ class TestRiskTiersMatchThePlanPlusOneDocumentedExtension:
             "excerpt_max_chars",
             "knowledge_link_or_mint",
             "grading_trailer",
+            "pack_provenance_line",
         }
 
     def test_minhash_seed_max_docs_is_low_risk_but_restart_required(self) -> None:

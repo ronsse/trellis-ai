@@ -40,6 +40,7 @@ from trellis.retrieve.builder_factory import (
     format_embedder_failed_note,
     format_failed_axes_note,
     format_misconfigured_semantic_note,
+    resolve_pack_provenance_line,
 )
 from trellis.retrieve.formatters import (
     format_pack_as_index_markdown,
@@ -47,10 +48,11 @@ from trellis.retrieve.formatters import (
     format_sectioned_pack_as_markdown,
     index_render_overhead_tokens,
 )
+from trellis.retrieve.provenance import provenance_inputs
 from trellis.retrieve.sensitivity import is_public_only
 from trellis.retrieve.token_tracker import estimate_tokens, track_token_usage
 from trellis.retrieve.withholding import withholding_from_payload
-from trellis.schemas.pack import PackBudget, SectionRequest
+from trellis.schemas.pack import PackBudget, PackItem, SectionRequest
 from trellis.stores.registry import StoreRegistry
 from trellis.stores.settings_store import load_settings_values
 
@@ -200,6 +202,31 @@ def _context_banner(registry: StoreRegistry) -> str:
     if is_public_only(current_clearance()):
         return ""
     return _capture_warning_banner(registry)
+
+
+def _provenance_line_enabled(registry: StoreRegistry) -> bool:
+    """Whether this reply renders provenance lines; any failure reads off.
+
+    Read after the pack is built, so it can change only the reply text,
+    never the builder's work or a ``PACK_ASSEMBLED`` payload.
+    """
+    try:
+        return resolve_pack_provenance_line(load_settings_values(registry.stores_dir))
+    except Exception:
+        logger.exception("pack_provenance_line_resolve_failed")
+        return False
+
+
+def _provenance_of(item: PackItem) -> dict[str, Any] | None:
+    """``item``'s provenance inputs, or ``None`` if they cannot be read.
+
+    Advisory text: a failure here drops the line, never the pack.
+    """
+    try:
+        return provenance_inputs(item)
+    except Exception:
+        logger.exception("pack_provenance_inputs_failed", item_id=item.item_id)
+        return None
 
 
 def _flat_context(
@@ -376,19 +403,37 @@ def _flat_context(
         }
         for item in pack.items
     ]
-    formatter = format_pack_as_index_markdown if index else format_pack_as_markdown
-    result = formatter(
-        item_dicts,
-        title or intent,
-        max_tokens=max_tokens,
-        pack_id=pack.pack_id,
-        withholding=withholding,
-        axis_note=axis_note,
-        # Advisories ride outside the item budget on both pack shapes, and
-        # the formatter places them above the citation footer so the
-        # footer stays the last thing read (see ``_advisories_block``).
-        advisories=pack.advisories,
-    )
+    if index:
+        result = format_pack_as_index_markdown(
+            item_dicts,
+            title or intent,
+            max_tokens=max_tokens,
+            pack_id=pack.pack_id,
+            withholding=withholding,
+            axis_note=axis_note,
+            # Advisories ride outside the item budget on both pack shapes,
+            # and the formatter places them above the citation footer so
+            # the footer stays the last thing read (see
+            # ``_advisories_block``).
+            advisories=pack.advisories,
+        )
+    else:
+        # Index mode never renders the provenance line; off, no item dict
+        # gains a key and the formatter is called exactly as before.
+        provenance_line = _provenance_line_enabled(registry)
+        if provenance_line:
+            for item_dict, item in zip(item_dicts, pack.items, strict=True):
+                item_dict["provenance"] = _provenance_of(item)
+        result = format_pack_as_markdown(
+            item_dicts,
+            title or intent,
+            max_tokens=max_tokens,
+            pack_id=pack.pack_id,
+            withholding=withholding,
+            axis_note=axis_note,
+            advisories=pack.advisories,
+            provenance_line=provenance_line,
+        )
     # The pack's own ids, kept only if the formatter printed them: it stops
     # listing items when the token budget runs out.
     note_printed_items(result, (item.item_id for item in pack.items))
@@ -447,7 +492,7 @@ def _sectioned_context(
             retrieval_phase=retrieval_phase,
             principal_id=current_principal_id(),
         )
-        section_dicts = [
+        section_dicts: list[dict[str, Any]] = [
             {
                 "name": s.name,
                 "items": [
@@ -478,6 +523,18 @@ def _sectioned_context(
                 public_only=is_public_only(current_clearance()),
             )
             axis_note = _axis_note(axes)
+        provenance_line = _provenance_line_enabled(registry)
+        if provenance_line:
+            # A separate key, not ``metadata``: the sectioned formatter
+            # reads metadata for summary links, and these dicts never
+            # carried it.
+            for section_dict, section in zip(
+                section_dicts, sectioned_pack.sections, strict=True
+            ):
+                for item_dict, item in zip(
+                    section_dict["items"], section.items, strict=True
+                ):
+                    item_dict["provenance"] = _provenance_of(item)
         result = format_sectioned_pack_as_markdown(
             section_dicts,
             intent,
@@ -488,6 +545,7 @@ def _sectioned_context(
             ),
             axis_note=axis_note,
             advisories=sectioned_pack.advisories,
+            provenance_line=provenance_line,
         )
         note_printed_items(
             result,
