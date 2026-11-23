@@ -52,6 +52,20 @@ def _as_utc(moment: datetime) -> datetime:
     return moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment
 
 
+@dataclass(frozen=True, slots=True)
+class LearningDecisionRead:
+    """The decision states one bounded read produced, and whether it was cut.
+
+    ``truncated`` is true when more than ``limit`` decision events matched,
+    so the oldest fell outside the read and a candidate decided only by
+    them reads as undecided. ``limit`` is the cap the read used.
+    """
+
+    states: dict[str, LearningDecisionState]
+    truncated: bool
+    limit: int
+
+
 def read_learning_decisions(
     event_log: EventLog,
     *,
@@ -60,18 +74,36 @@ def read_learning_decisions(
 ) -> dict[str, LearningDecisionState]:
     """Return the decision state per learning candidate id.
 
-    Reads the newest ``limit`` learning-promotion decision events and folds
-    them oldest to newest, so the latest decision per candidate wins.
-    Raises whatever the EventLog raises; a caller that must degrade wraps
-    the call and says the source was unreadable rather than reading empty.
+    The states of :func:`read_learning_decisions_bounded`; a caller that
+    must say when the read was cut calls that instead.
     """
-    events = event_log.get_events(
+    return read_learning_decisions_bounded(event_log, since=since, limit=limit).states
+
+
+def read_learning_decisions_bounded(
+    event_log: EventLog,
+    *,
+    since: datetime | None = None,
+    limit: int = DEFAULT_DECISION_SCAN_LIMIT,
+) -> LearningDecisionRead:
+    """Fold the newest ``limit`` decision events and say whether any were left.
+
+    Reads one event past ``limit`` so a cut is observable rather than
+    inferred from a full page: exactly ``limit`` matching events is not
+    truncated. Only the newest ``limit`` are folded, oldest to newest, so
+    the latest decision per candidate wins. Raises whatever the EventLog
+    raises; a caller that must degrade wraps the call and says the source
+    was unreadable rather than reading empty.
+    """
+    fetched = event_log.get_events(
         event_type=EventType.REVIEW_DECISION_RECORDED,
         since=since,
         payload_filters={"surface": LEARNING_REVIEW_SURFACE},
-        limit=limit,
+        limit=limit + 1,
         order="desc",
     )
+    truncated = len(fetched) > limit
+    events = fetched[:limit]
     states: dict[str, LearningDecisionState] = {}
     # Reverse first: the sort is stable, so same-instant events keep
     # the store's own order rather than the newest-first read's.
@@ -94,4 +126,4 @@ def read_learning_decisions(
                 last_decided_at=at,
                 last_declined_at=declined_at,
             )
-    return states
+    return LearningDecisionRead(states=states, truncated=truncated, limit=limit)
