@@ -182,11 +182,17 @@ def test_paging_across_a_withheld_row(client, registry) -> None:
 _WIDE = 12
 
 
-def _seed_wide(registry: StoreRegistry) -> list[str]:
-    """Seed ``_WIDE`` matches and return the readable ids in name order."""
+def _seed_wide(
+    registry: StoreRegistry, write_order: list[int] | None = None
+) -> list[str]:
+    """Seed ``_WIDE`` matches and return the readable ids in name order.
+
+    ``write_order`` is the order the indices are written in, which is the
+    ``created_at`` order; by default it is name order.
+    """
     graph = registry.knowledge.graph_store
     readable: list[str] = []
-    for i in range(_WIDE):
+    for i in write_order if write_order is not None else range(_WIDE):
         node_id = f"entity://w{i:02d}"
         labelled = i % 3 == 1
         graph.upsert_node(
@@ -196,7 +202,12 @@ def _seed_wide(registry: StoreRegistry) -> list[str]:
         )
         if not labelled:
             readable.append(node_id)
-    return readable
+    return sorted(readable)
+
+
+#: A write order that is neither name order nor its reverse, so a walk that
+#: sorted by name whatever it was asked would not match ``created_at``.
+_SHUFFLED = [7, 2, 10, 0, 5, 11, 3, 8, 1, 6, 9, 4]
 
 
 def _walk(client, registry, scopes, limit, **params) -> tuple[list[str], set[int]]:
@@ -228,6 +239,47 @@ def test_stepping_offset_serves_each_readable_row_once_in_order(
 
     assert served == expected
     assert totals == {len(served)}
+
+
+@pytest.mark.parametrize("sort", ["created_at", "node_type"])
+@pytest.mark.parametrize("order", ["asc", "desc"])
+@pytest.mark.parametrize("limit", [1, 3, 5])
+def test_every_sort_pages_the_stored_order_less_the_withheld_rows(
+    client, registry, monkeypatch, sort, order, limit
+) -> None:
+    """The walk below the label keeps each sort's stored order, labelled rows out.
+
+    The oracle is the cleared key's single store call for the same sort and
+    order. Rows are written out of name order, so ``created_at`` differs from
+    ``name``. ``node_type`` ties six rows per type, so the ``node_id`` tie-break
+    decides the order inside a type, and the walk's store pages of two split
+    those ties.
+    """
+    monkeypatch.setattr(retrieve_routes, "_PRECEDENT_SCAN_PAGE", 2)
+    readable = set(_seed_wide(registry, _SHUFFLED))
+    stored = _get(
+        client,
+        "/api/v1/graph/search",
+        {"q": QUERY, "sort": sort, "order": order, "limit": _WIDE},
+        _headers(registry, CLEARED),
+    )
+    stored_ids = [r["entity_id"] for r in stored["results"]]
+    by_name = sorted(stored_ids)
+    assert stored_ids not in (by_name, by_name[::-1]), "the sort must differ"
+    expected = [i for i in stored_ids if i in readable]
+    # In stored order a labelled row lies within the first three rows, ahead
+    # of readable ones, so withholding it moves every page boundary after it.
+    first_labelled = min(
+        n for n, node_id in enumerate(stored_ids) if node_id not in readable
+    )
+    assert first_labelled <= 2
+    assert len(stored_ids) == _WIDE
+    assert len(expected) > limit
+
+    served, totals = _walk(client, registry, BELOW, limit, sort=sort, order=order)
+
+    assert served == expected
+    assert totals == {len(expected)}
 
 
 def test_a_full_page_is_never_short_while_rows_remain(

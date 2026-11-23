@@ -89,8 +89,13 @@ class EventType(StrEnum):
     #: Emitted by the MCP ``get_items`` batch fetch-by-id tool (#305) so a
     #: full-body fetch stays attributable to the pack whose index served
     #: the ids. Payload schema: ``{pack_id, requested_item_ids,
-    #: served_item_ids, not_found_item_ids, omitted_item_ids,
-    #: response_tokens, budget_tokens}``. ``pack_id`` is ``None`` for a
+    #: served_item_ids, not_found_item_ids, withheld_item_ids,
+    #: omitted_item_ids, response_tokens, budget_tokens}``.
+    #: ``withheld_item_ids`` is the subset of ``not_found_item_ids`` that
+    #: resolved to a row the caller may not read (the caller is answered
+    #: not-found for both); rows written before it existed lack the key, and a
+    #: public-only caller's graph and trace ids are never looked up, so they
+    #: are not counted in it (#1264). ``pack_id`` is ``None`` for a
     #: fetch with no originating pack; ``omitted_item_ids`` are ids that
     #: resolved but did not fit the token budget (re-fetchable);
     #: ``entity_id`` carries the pack_id when present, so the event joins

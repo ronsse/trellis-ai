@@ -7051,7 +7051,7 @@ Reading a full pack to decide which items were worth reading is the expensive wa
 
 The index is a **real pack**, not a preview: same `pack_id`, same `PACK_ASSEMBLED` telemetry (per-item hashes, `injected_items`, session dedup), so `record_feedback(pack_id=..., helpful_item_ids=[...])` attributes exactly as it does for a full pack. Only the budget charge and the rendering differ — the payload carries `index_mode: true` so analysis can tell the two serve shapes apart, and an index serve counts as a serve for session dedup (`refresh=True` is still the re-injection escape hatch).
 
-Passing `pack_id` to `get_items` is what keeps the fetch attributable: the `PACK_ITEMS_FETCHED` event records `served_item_ids` against the pack whose index surfaced them, so "fetched but graded unhelpful" is distinguishable from "never fetched at all".
+Passing `pack_id` to `get_items` is what keeps the fetch attributable: the `PACK_ITEMS_FETCHED` event records `served_item_ids` against the pack whose index surfaced them, so "fetched but graded unhelpful" is distinguishable from "never fetched at all". An id the caller may not read is answered "not found", exactly as a missing one; the event lists it under `not_found_item_ids` and again under `withheld_item_ids`, so an auditor can tell the two apart. A public-only caller's graph and trace ids are never looked up, so they are not counted as withheld.
 
 ```
 get_context("pgbouncer failover", index=True)
