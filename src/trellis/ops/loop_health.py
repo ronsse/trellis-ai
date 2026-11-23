@@ -51,7 +51,10 @@ from pydantic import Field
 
 from trellis.core.base import TrellisModel
 from trellis.learning.candidate_auto_promote import compute_agreement_metric
-from trellis.learning.review_decisions import read_learning_decisions
+from trellis.learning.review_decisions import (
+    DEFAULT_DECISION_SCAN_LIMIT,
+    read_learning_decisions_bounded,
+)
 from trellis.learning.scoring import PROMOTE_RECOMMENDATIONS
 from trellis.retrieve.precedents import is_miner_candidate_event
 from trellis.stores.base.event_log import (
@@ -710,8 +713,11 @@ class ReviewBacklogRow(TrellisModel):
     ``actionable`` is true only for a kind a reviewer resolves in the Review
     view (:data:`ACTIONABLE_REVIEW_KINDS`); for the others ``pending_count``
     counts items drafted in the scanned window, which no action clears.
-    ``scan_limit`` is the most rows the count read (``None`` when it read a
-    whole artifact).
+    ``scan_limit`` is the most rows the count read. For
+    ``learning_candidate`` the artifact is read whole and the bounded read
+    is the review decisions, so ``scan_limit`` is the decision-event cap and
+    ``truncated`` means older decisions fell outside it: a candidate decided
+    only by them counts as pending, so ``pending_count`` can overcount.
     """
 
     kind: str
@@ -803,12 +809,16 @@ def _learning_backlog_row(
     generated_at: datetime | None,
     unavailable: tuple[ReviewBacklogStatus, str] | None,
     now: datetime,
+    decision_limit: int,
 ) -> ReviewBacklogRow:
     """Promotable candidates in the artifact with no recorded decision.
 
     A report-only candidate has no decision to make, so it is not pending.
     Candidates carry no per-item timestamp, so the age is the artifact's
-    own ``generated_at_utc``.
+    own ``generated_at_utc``. The decisions are read newest first up to
+    ``decision_limit``; when more exist the row is ``truncated`` with
+    ``scan_limit`` set to that cap, because a candidate decided only by a
+    dropped decision reads as pending and the count is no longer exact.
     """
     kind = "learning_candidate"
     if unavailable is not None:
@@ -824,7 +834,7 @@ def _learning_backlog_row(
             actionable=True,
         )
     try:
-        decisions = read_learning_decisions(event_log)
+        read = read_learning_decisions_bounded(event_log, limit=decision_limit)
     except Exception as exc:  # an advisory read: degrade, say so
         return _unreadable(kind, exc)
     pending = 0
@@ -836,11 +846,16 @@ def _learning_backlog_row(
         if (
             candidate_id
             and recommendation in PROMOTE_RECOMMENDATIONS
-            and candidate_id not in decisions
+            and candidate_id not in read.states
         ):
             pending += 1
     return _backlog_row(
-        kind, count=pending, oldest=generated_at if pending else None, now=now
+        kind,
+        count=pending,
+        oldest=generated_at if pending else None,
+        now=now,
+        truncated=read.truncated,
+        scan_limit=read.limit,
     )
 
 
@@ -854,6 +869,7 @@ def summarize_review_backlog(
     now: datetime | None = None,
     limit: int = DEFAULT_SCAN_LIMIT,
     actionable_only: bool = False,
+    decision_limit: int = DEFAULT_DECISION_SCAN_LIMIT,
 ) -> list[ReviewBacklogRow]:
     """One :class:`ReviewBacklogRow` per kind in :data:`REVIEW_BACKLOG_KINDS`.
 
@@ -867,6 +883,8 @@ def summarize_review_backlog(
       candidates with no recorded reviewer decision. The artifact is read by
       the API (this module does not resolve its directory); pass
       ``learning_unavailable`` as ``(status, code)`` when it could not be.
+      The decisions are read up to ``decision_limit`` events; past it the
+      row is ``truncated`` and its ``scan_limit`` is that cap.
     - ``schema_evolution``: distinct ``candidate_id`` over
       ``WELL_KNOWN_CANDIDATE`` events, aged by each id's first event.
     - ``code_proposal``: distinct ``proposal_id`` over ``PROPOSAL_DRAFTED``
@@ -895,6 +913,7 @@ def summarize_review_backlog(
             generated_at=learning_generated_at,
             unavailable=learning_unavailable,
             now=now,
+            decision_limit=decision_limit,
         ),
     ]
     if actionable_only:
