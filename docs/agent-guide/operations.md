@@ -441,7 +441,7 @@ count read.
 | `kind` | `actionable` | `pending_count` counts | `scan_limit` |
 |---|---|---|---|
 | `tuner_proposal` | yes | pending tuner proposals | 2,000 proposals |
-| `learning_candidate` | yes | promotable candidates in the current artifact with no recorded promote or decline | `null` (whole artifact) |
+| `learning_candidate` | yes | promotable candidates in the current artifact with no recorded promote or decline | 5,000 decision events (the artifact itself is read whole) |
 | `schema_evolution` | no | distinct candidate ids drafted, in the scanned window (`WELL_KNOWN_CANDIDATE` events; the view lists the newest 200) | 5,000 events |
 | `code_proposal` | no | distinct proposal ids drafted, in the scanned window (`PROPOSAL_DRAFTED` events; the view lists the newest 50) | 5,000 events |
 
@@ -449,7 +449,11 @@ count read.
 view. The other two have no resolving action, so their count never
 drains. Each row also carries `oldest_pending_at` and
 `oldest_pending_age_seconds`, plus `truncated: true` when the read hit
-`scan_limit`, which makes the count a floor. The learning row's age is the
+`scan_limit`, which makes the count a floor. On the learning row the cap is
+on the newest review decisions read, so `truncated` there means older
+decisions were not read and a candidate only they decided counts as
+pending: the count is not exact, though the badge still shows it as `N+`.
+The learning row's age is the
 artifact's `generated_at_utc`, because a candidate carries no timestamp of
 its own. A kind with nothing pending reads `0` and a `null` age. A kind
 whose count is unknown reads `pending_count: null`, never `0`, and `status`

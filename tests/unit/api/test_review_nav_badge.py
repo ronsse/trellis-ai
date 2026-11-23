@@ -21,12 +21,12 @@ Two states must never render as each other:
 from __future__ import annotations
 
 import re
-import shutil
 from pathlib import Path
 
 import pytest
 
 import trellis_api
+from tests.unit.api.test_ui_review_truth import NODE as _HARNESS_NODE
 
 INDEX_HTML = Path(trellis_api.__file__).parent / "static" / "index.html"
 
@@ -166,7 +166,8 @@ def _row(kind, *, count, status="ok", truncated=False, actionable=True):
     }
 
 
-_needs_node = pytest.mark.skipif(shutil.which("node") is None, reason="no node")
+# The same binary the harness runs, so the guard and the run cannot disagree.
+_needs_node = pytest.mark.skipif(_HARNESS_NODE is None, reason="no node")
 
 
 @_needs_node
@@ -182,6 +183,15 @@ def test_badge_renders_a_floor_when_a_kind_is_unreadable_or_capped(tmp_path) -> 
     assert (unreadable["hidden"], unreadable["text"]) == (False, "3+")
     capped = _badge_for([_row("tuner_proposal", count=4, truncated=True)], tmp_path)
     assert (capped["hidden"], capped["text"]) == (False, "4+")
+    # A capped decision read on the learning row marks the total the same way.
+    learning = _badge_for(
+        [
+            _row("tuner_proposal", count=1),
+            _row("learning_candidate", count=2, truncated=True),
+        ],
+        tmp_path,
+    )
+    assert (learning["hidden"], learning["text"]) == (False, "3+")
 
 
 @_needs_node
