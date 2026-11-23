@@ -706,6 +706,15 @@ _NODE_VERSION_KEY_PROPERTY = "version_id"
 #: that race surface as an error instead of spinning.
 _FIRST_CREATE_ATTEMPTS = 3
 
+#: Sleeps before each re-run of the settle re-read after a committed first
+#: create (:meth:`BoltOpenCypherGraphStore._read_settle_rows`). The fault it
+#: waits out is a row not readable yet, the one the edge write's endpoint
+#: re-run waits out, so it takes that schedule rather than a second one, cut
+#: to the read's own bound: at most ``_FIRST_CREATE_ATTEMPTS - 1`` waits.
+_SETTLE_READ_BACKOFF_SECONDS: tuple[float, ...] = _EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS[
+    : _FIRST_CREATE_ATTEMPTS - 1
+]
+
 
 def _first_version_prefix(node_id: str) -> str:
     """The prefix of the ``version_id`` ``create_node_if_absent`` writes.
@@ -1245,9 +1254,10 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
 
         The write has committed by now, so a raise here tells the caller a
         create failed that happened. Only the read is re-run, never the
-        create, and at most ``_FIRST_CREATE_ATTEMPTS`` times; a fault that
-        persists is raised unchanged. A re-run read writes nothing, so it is
-        safe whatever the fault was.
+        create, and at most ``_FIRST_CREATE_ATTEMPTS`` times, each re-run
+        after a :data:`_SETTLE_READ_BACKOFF_SECONDS` wait; a fault that
+        persists is raised unchanged, with no wait after the last read. A
+        re-run read writes nothing, so it is safe whatever the fault was.
         """
         for attempt in range(1, _FIRST_CREATE_ATTEMPTS + 1):
             try:
@@ -1263,6 +1273,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
                     attempt=attempt,
                     error_code=getattr(exc, "code", None),
                 )
+                time.sleep(_SETTLE_READ_BACKOFF_SECONDS[attempt - 1])
         # Unreachable: the last attempt returns or raises.
         msg = f"create_node_if_absent({node_id!r}): no settle read ran"
         raise StoreError(msg, store="graph")
@@ -1279,6 +1290,53 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             (str(r["valid_from"]), str(r["version_id"]), str(r["row_id"]))
             for r in records
         ]
+
+    def _rows_with_edges(self, node_id: str, row_ids: list[str]) -> set[str]:
+        """The rows of ``node_id`` named by ``row_ids`` that a relationship touches.
+
+        Edges are native relationships on one row, not a ``node_id`` match,
+        so a duplicate row an edge hangs from cannot be removed by
+        :meth:`_remove_node_rows` without losing the edge.
+        """
+        records = self._run_read_list(
+            "MATCH (n:Node {node_id: $node_id}) WHERE elementId(n) IN $row_ids "
+            "MATCH (n)-[]-() RETURN DISTINCT elementId(n) AS row_id",
+            node_id=node_id,
+            row_ids=row_ids,
+        )
+        return {str(r["row_id"]) for r in records}
+
+    def _settle_survivor(
+        self, node_id: str, rows: list[tuple[str, str, str]]
+    ) -> tuple[str, int | None]:
+        """Pick the row of a duplicate first create the settle keeps.
+
+        The earliest ``valid_from``, the row id breaking a tie, unless exactly
+        one row has a relationship: then that row. An edge written while both
+        rows are current attaches to the shown row (:func:`_shown_row`, the
+        *later* stamp), which a plain ``DELETE`` refuses to remove, so the
+        earliest pick alone left both rows current. Every writer reading the
+        same rows picks the same survivor. With edges on more than one row no
+        pick removes every extra without losing an edge, so the earliest is
+        kept and the refused delete is logged by the caller. The edge read is
+        advisory: if it fails, the earliest is kept, as before it existed.
+
+        Returns the kept row id and how many of *rows* a relationship
+        touches (``None`` when that read failed).
+        """
+        earliest = min(rows, key=lambda row: (row[0], row[2]))[2]
+        try:
+            edged = self._rows_with_edges(node_id, [row[2] for row in rows])
+        except Exception as exc:
+            logger.warning(
+                "node_first_create_duplicate_edge_read_failed",
+                node_id=node_id,
+                error_type=type(exc).__name__,
+            )
+            return earliest, None
+        if len(edged) == 1:
+            return next(iter(edged)), 1
+        return earliest, len(edged)
 
     def _remove_node_rows(self, node_id: str, row_ids: list[str]) -> None:
         """Delete the rows of ``node_id`` named by ``row_ids``.
@@ -1299,8 +1357,9 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         The edge path's post-commit re-read (``VERIFY_EDGE_WRITE_UNIQUENESS``,
         #1078) applied to ``node_version_unique``: when the commit check misses,
         two first creators both commit, with the same ``version_id``. Every
-        writer that sees more than one current row picks the same survivor,
-        the earliest ``valid_from`` with the row id breaking a tie (the
+        writer that sees more than one current row picks the same survivor
+        (:meth:`_settle_survivor`: the one row an edge hangs from, else the
+        earliest ``valid_from`` with the row id breaking a tie; the
         ``version_id`` is equal by construction, :func:`_earliest_row` picks
         the earliest the same way), deletes every other current row, and
         returns ``True`` only if the survivor is its own row. One row with no
@@ -1320,7 +1379,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             # One row that is not this writer's: another creator's re-read
             # already settled the duplicate and removed this writer's row.
             return rows[0][2] == own_row
-        survivor = min(rows, key=lambda row: (row[0], row[2]))[2]
+        survivor, rows_with_edges = self._settle_survivor(node_id, rows)
         extras = [row[2] for row in rows if row[2] != survivor]
         try:
             self._remove_node_rows(node_id, extras)
@@ -1338,6 +1397,7 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
             "node_first_create_duplicate_settled",
             node_id=node_id,
             current_rows=len(rows),
+            rows_with_edges=rows_with_edges,
             removed=removed,
             kept_own_row=survivor == own_row,
         )

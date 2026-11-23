@@ -32,6 +32,7 @@ import pytest
 pytest.importorskip("neo4j")
 
 from neo4j import ManagedTransaction
+from neo4j.exceptions import Neo4jError
 
 from tests.unit.stores import (
     bolt_duplicate_current,
@@ -1170,3 +1171,66 @@ class TestDuplicateCurrentRow:
         bolt_duplicate_current.check_filtered_listing_as_of_shows_the_version_then(
             graph_store
         )
+
+
+def _current_rows_with_edges(store, node_id: str) -> dict[str, int]:
+    """Each current row of *node_id* and how many relationships hang off it."""
+    records = store._run_read_list(
+        "MATCH (n:Node {node_id: $node_id}) WHERE n.valid_to IS NULL "
+        "OPTIONAL MATCH (n)-[r]-() "
+        "RETURN elementId(n) AS row_id, count(r) AS edges",
+        node_id=node_id,
+    )
+    return {str(r["row_id"]): int(r["edges"]) for r in records}
+
+
+@pytest.mark.parametrize("own", ["edged", "edgeless"])
+def test_first_create_settle_keeps_the_duplicate_an_edge_hangs_from(graph_store, own):
+    # #1232: a duplicate first row with an edge attached. The engine's commit
+    # check only rarely lets two first creates in, so the duplicate is built
+    # directly: a second current row with a later stamp (``version_id``
+    # differs, because the unique index refuses the same one written apart
+    # from a race). An edge written now attaches to the shown row, the later
+    # stamp, which is the row the earliest-stamp pick would delete; a plain
+    # DELETE of it is refused. The settle must leave one current row and
+    # the edge.
+    graph_store.create_node_if_absent("dup", "service", {"name": "first"})
+    bolt_duplicate_current.add_current_row(
+        graph_store,
+        "dup",
+        name="second",
+        shift=bolt_duplicate_current.LATER,
+        greater_version_id=False,
+    )
+    graph_store.upsert_node("peer", "service", {"name": "peer"})
+    edge_id = graph_store.upsert_edge("dup", "peer", "depends_on", {})
+
+    before = _current_rows_with_edges(graph_store, "dup")
+    assert sorted(before.values()) == [0, 1], before
+    edged = next(row for row, edges in before.items() if edges)
+    edgeless = next(row for row, edges in before.items() if not edges)
+    own_row = edged if own == "edged" else edgeless
+
+    answered = graph_store._settle_first_create("dup", own_row)
+
+    assert answered is (own == "edged")
+    assert _current_rows_with_edges(graph_store, "dup") == {edged: 1}
+    assert [e["edge_id"] for e in graph_store.get_edges("dup")] == [edge_id]
+    node = graph_store.get_node("dup")
+    assert node is not None
+    assert node["properties"]["name"] == "second"
+
+
+def test_a_plain_delete_of_a_row_with_an_edge_is_refused(graph_store):
+    # The premise the settle rests on: ArcadeDB's Cypher DELETE does not
+    # take a row's relationships with it.
+    graph_store.upsert_node("a", "service", {"name": "a"})
+    graph_store.upsert_node("b", "service", {"name": "b"})
+    graph_store.upsert_edge("a", "b", "depends_on", {})
+    (row_id,) = _current_rows_with_edges(graph_store, "a")
+
+    with pytest.raises(Neo4jError):
+        graph_store._remove_node_rows("a", [row_id])
+
+    assert _current_rows_with_edges(graph_store, "a") == {row_id: 1}
+    assert len(graph_store.get_edges("a")) == 1

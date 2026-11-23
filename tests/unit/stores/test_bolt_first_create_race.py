@@ -167,9 +167,16 @@ class _VerifyingStore(BoltOpenCypherGraphStore):
         )
         self.rows = rows
         self.removed: list[list[str]] = []
+        # Row ids with a relationship attached, as the edge read reports them.
+        self.edged: set[str] = set()
+        self.edge_reads: list[list[str]] = []
 
     def _current_node_rows(self, node_id: str) -> list[tuple[str, str, str]]:
         return list(self.rows)
+
+    def _rows_with_edges(self, node_id: str, row_ids: list[str]) -> set[str]:
+        self.edge_reads.append(row_ids)
+        return self.edged & set(row_ids)
 
     def _remove_node_rows(self, node_id: str, row_ids: list[str]) -> None:
         self.removed.append(row_ids)
@@ -235,6 +242,91 @@ def test_an_equal_stamp_tie_breaks_on_the_row_id() -> None:
     ]
 
     assert sorted(answers) == [False, True]
+
+
+def test_the_one_row_with_an_edge_survives_and_its_writer_answers_true() -> None:
+    # An edge attaches to the shown row, the later ``valid_from`` (#1:1), which
+    # is not the earliest-stamp pick. A plain DELETE of it is refused, so the
+    # settle keeps it and removes the edgeless row instead.
+    store = _VerifyingStore(FakeBoltDriver(creates=["#1:1"]), _BOTH)
+    store.edged = {"#1:1"}
+
+    assert store.create_node_if_absent("n1", "service", {}) is True
+    assert store.removed == [["#1:2"]]
+    assert store.edge_reads == [["#1:1", "#1:2"]]
+
+
+def test_the_other_writer_also_keeps_the_row_with_an_edge() -> None:
+    store = _VerifyingStore(FakeBoltDriver(creates=["#1:2"]), _BOTH)
+    store.edged = {"#1:1"}
+
+    assert store.create_node_if_absent("n1", "service", {}) is False
+    assert store.removed == [["#1:2"]]
+
+
+def test_an_edge_on_the_earliest_row_keeps_the_earliest_row() -> None:
+    store = _VerifyingStore(FakeBoltDriver(creates=["#1:2"]), _BOTH)
+    store.edged = {"#1:2"}
+
+    assert store.create_node_if_absent("n1", "service", {}) is True
+    assert store.removed == [["#1:1"]]
+
+
+def test_edges_on_both_rows_fall_back_to_the_earliest_row_and_say_so() -> None:
+    # No row can be removed without its edge; the settle does not pick a
+    # different victim, and the warning records why both rows stay.
+    from structlog.testing import capture_logs
+
+    store = _VerifyingStore(FakeBoltDriver(creates=["#1:2"]), _BOTH)
+    store.edged = {"#1:1", "#1:2"}
+
+    with capture_logs() as logs:
+        assert store.create_node_if_absent("n1", "service", {}) is True
+    assert store.removed == [["#1:1"]]
+    (settled,) = (
+        e for e in logs if e["event"] == "node_first_create_duplicate_settled"
+    )
+    assert settled["rows_with_edges"] == 2
+    assert settled["node_id"] == "n1"
+
+
+def test_a_failed_edge_read_keeps_the_earliest_row() -> None:
+    class _EdgeReadFails(_VerifyingStore):
+        def _rows_with_edges(self, node_id: str, row_ids: list[str]) -> set[str]:
+            msg = "edge read failed"
+            raise RuntimeError(msg)
+
+    from structlog.testing import capture_logs
+
+    store = _EdgeReadFails(FakeBoltDriver(creates=["#1:2"]), _BOTH)
+    with capture_logs() as logs:
+        assert store.create_node_if_absent("n1", "service", {}) is True
+    assert store.removed == [["#1:1"]]
+    (failed,) = (
+        e for e in logs if e["event"] == "node_first_create_duplicate_edge_read_failed"
+    )
+    assert failed["node_id"] == "n1"
+    assert failed["error_type"] == "RuntimeError"
+
+
+def test_one_current_row_never_reads_edges() -> None:
+    store = _VerifyingStore(
+        FakeBoltDriver(creates=["#1:1"]), [("2026-01-01", "first-x-0", "#1:1")]
+    )
+    store.edged = {"#1:1"}
+
+    assert store.create_node_if_absent("n1", "service", {}) is True
+    assert store.edge_reads == []
+
+
+def test_the_edge_read_names_only_the_current_rows_of_the_node() -> None:
+    # Through the fake driver: the read reaches the server with the node id
+    # and the duplicate rows' ids, and reports the rows it returns.
+    driver = FakeBoltDriver(creates=[True], node_reads=[[{"row_id": "#1:1"}]])
+    store = _store(driver)
+
+    assert store._rows_with_edges("n1", ["#1:1", "#1:2"]) == {"#1:1"}
+    assert driver.node_read_params == [{"node_id": "n1", "row_ids": ["#1:1", "#1:2"]}]
 
 
 def test_neo4j_does_not_re_read_and_arcadedb_does() -> None:
@@ -458,3 +550,61 @@ def test_the_portable_settle_read_retries_nothing() -> None:
     # The portable store and Neo4j never re-read a failed settle read.
     store = _store(FakeBoltDriver(creates=[True]))
     assert not store._is_settle_read_contention(ARCADEDB_STALE_SETTLE_READ)
+
+
+def test_a_stale_settle_read_waits_before_each_re_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The settle re-read waits on the module's one backoff schedule for a row
+    # not yet readable, the edge write's, bounded by the read's own attempts.
+    from trellis.stores.bolt_opencypher import graph as bolt_graph
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(bolt_graph.time, "sleep", sleeps.append)
+    driver = FakeBoltDriver(
+        creates=["#1:1"],
+        node_reads=[ARCADEDB_STALE_SETTLE_READ, ARCADEDB_STALE_SETTLE_READ, [_OWN_ROW]],
+    )
+
+    assert (
+        _arcadedb_store_reading(driver).create_node_if_absent("n1", "service", {})
+        is True
+    )
+    assert sleeps == list(
+        bolt_graph._EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS[: _FIRST_CREATE_ATTEMPTS - 1]
+    )
+    assert sum(sleeps) < 0.5
+
+
+def test_a_persistent_settle_read_fault_waits_only_between_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trellis.stores.bolt_opencypher import graph as bolt_graph
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(bolt_graph.time, "sleep", sleeps.append)
+    driver = FakeBoltDriver(
+        creates=["#1:1"], node_reads=[ARCADEDB_STALE_SETTLE_READ] * 5
+    )
+    with pytest.raises(Neo4jError):
+        _arcadedb_store_reading(driver).create_node_if_absent("n1", "service", {})
+    # No wait after the last read: the fault is raised at once.
+    assert len(sleeps) == _FIRST_CREATE_ATTEMPTS - 1
+
+
+def test_a_clean_settle_read_and_another_error_do_not_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trellis.stores.bolt_opencypher import graph as bolt_graph
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(bolt_graph.time, "sleep", sleeps.append)
+    clean = FakeBoltDriver(creates=["#1:1"], node_reads=[[_OWN_ROW]])
+    assert _arcadedb_store_reading(clean).create_node_if_absent("n1", "s", {}) is True
+    other = Neo4jError._hydrate_neo4j(
+        code="Neo.ClientError.Statement.SyntaxError", message="bad"
+    )
+    failing = FakeBoltDriver(creates=["#1:1"], node_reads=[other])
+    with pytest.raises(Neo4jError):
+        _arcadedb_store_reading(failing).create_node_if_absent("n1", "s", {})
+    assert sleeps == []
