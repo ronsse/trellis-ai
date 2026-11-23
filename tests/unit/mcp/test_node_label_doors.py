@@ -26,6 +26,7 @@ from trellis.retrieve.precedents import (
     PrecedentClearance,
 )
 from trellis.schemas.classification import DATA_CLASSIFICATION_KEY
+from trellis.stores.base.event_log import EventType
 
 if TYPE_CHECKING:
     from trellis.stores.registry import StoreRegistry
@@ -130,6 +131,51 @@ def test_get_items_withholds_a_labelled_node(labelled: StoreRegistry) -> None:
     assert LABELLED in withheld
     assert "not found" in withheld
     assert LEDGER in cleared
+
+
+def _fetch_payload(registry: StoreRegistry) -> dict[str, Any]:
+    (event,) = registry.operational.event_log.get_events(
+        event_type=EventType.PACK_ITEMS_FETCHED, limit=10
+    )
+    return dict(event.payload)
+
+
+def test_the_fetch_record_tells_withheld_from_absent(labelled: StoreRegistry) -> None:
+    """``PACK_ITEMS_FETCHED`` names which not-found ids were withheld (#1264).
+
+    The caller is answered "not found" for both, as before; only the
+    event, which an ``admin`` key (cleared for ``restricted``) reads, tells
+    a labelled node or document from an id that resolves to nothing.
+    """
+    labelled_doc = "doc-labelled"
+    labelled.knowledge.document_store.put(
+        labelled_doc,
+        "a restricted note",
+        {"title": "Secret", DATA_CLASSIFICATION_KEY: {"sensitivity": "restricted"}},
+    )
+    requested = [LABELLED, PLAIN, labelled_doc, "entity://nothing-here"]
+    with as_http(BELOW):
+        reply = str(get_items(requested))
+
+    payload = _fetch_payload(labelled)
+    assert payload["served_item_ids"] == [PLAIN]
+    assert payload["not_found_item_ids"] == [
+        LABELLED,
+        labelled_doc,
+        "entity://nothing-here",
+    ]
+    assert payload["withheld_item_ids"] == [LABELLED, labelled_doc]
+    assert "withheld" not in reply.lower(), "the caller is told only not found"
+
+
+def test_a_cleared_fetch_records_nothing_withheld(labelled: StoreRegistry) -> None:
+    with as_http(CLEARED):
+        get_items([LABELLED, "entity://nothing-here"])
+
+    payload = _fetch_payload(labelled)
+    assert payload["served_item_ids"] == [LABELLED]
+    assert payload["not_found_item_ids"] == ["entity://nothing-here"]
+    assert payload["withheld_item_ids"] == []
 
 
 def test_get_file_context_leaves_out_a_labelled_node(labelled: StoreRegistry) -> None:
