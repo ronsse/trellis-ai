@@ -1006,6 +1006,58 @@ class GraphStoreContractTests:
         assert "b" in ids
         assert "c" not in ids
 
+    @pytest.mark.parametrize(
+        ("edge_types", "expected"),
+        [
+            (
+                None,
+                {
+                    ("a", "b", "depends_on"),
+                    ("d", "a", "depends_on"),
+                    ("b", "d", "depends_on"),
+                    ("a", "x", "calls"),
+                    ("d", "b", "calls"),
+                },
+            ),
+            (
+                ["depends_on"],
+                {
+                    ("a", "b", "depends_on"),
+                    ("d", "a", "depends_on"),
+                    ("b", "d", "depends_on"),
+                },
+            ),
+        ],
+    )
+    def test_subgraph_returns_the_edges_among_its_nodes(
+        self,
+        store: GraphStore,
+        edge_types: list[str] | None,
+        expected: set[tuple[str, str, str]],
+    ) -> None:
+        """``edges`` is every current edge whose two ends are both returned.
+
+        The tests above compare node ids only. ``b -> d`` joins two depth-1
+        nodes and is returned although the walk did not need it; ``b -> c``
+        leaves the returned set (``c`` is two hops out) and is not; an edge
+        type outside ``edge_types`` is not returned, even ``d -> b``, whose
+        two ends are both returned. Each edge appears once.
+        """
+        for node_id in ["a", "b", "c", "d", "x"]:
+            store.upsert_node(node_id, "service", {})
+        store.upsert_edge("a", "b", "depends_on")
+        store.upsert_edge("d", "a", "depends_on")
+        store.upsert_edge("b", "d", "depends_on")
+        store.upsert_edge("b", "c", "depends_on")
+        store.upsert_edge("a", "x", "calls")
+        store.upsert_edge("d", "b", "calls")
+
+        sg = store.get_subgraph(["a"], depth=1, edge_types=edge_types)
+        edges = [(e["source_id"], e["target_id"], e["edge_type"]) for e in sg["edges"]]
+
+        assert len(edges) == len(expected)
+        assert set(edges) == expected
+
     def test_subgraph_rejects_depth_above_cap(self, store: GraphStore) -> None:
         """Backend must reject depths above MAX_SUBGRAPH_DEPTH.
 
