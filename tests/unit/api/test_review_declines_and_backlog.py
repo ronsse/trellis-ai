@@ -285,6 +285,67 @@ class TestReviewBacklog:
         assert rows["learning_candidate"].pending_count is None
 
 
+def _decline_events(event_log, *candidate_ids):
+    for candidate_id in candidate_ids:
+        event_log.emit(
+            EventType.REVIEW_DECISION_RECORDED,
+            source="trellis_api.review",
+            payload={
+                "surface": "learning_promotion",
+                "action": "decline",
+                "candidate_ids": [candidate_id],
+            },
+        )
+
+
+def _learning_row(registry, ids, *, decision_limit):
+    from trellis.ops.loop_health import summarize_review_backlog
+
+    rows = summarize_review_backlog(
+        registry.operational.event_log,
+        registry.operational.tuner_state_store,
+        learning_candidates=[_learning_candidate(i) for i in ids],
+        learning_generated_at=datetime(2026, 6, 1, tzinfo=UTC),
+        actionable_only=True,
+        decision_limit=decision_limit,
+    )
+    return {r.kind: r for r in rows}["learning_candidate"]
+
+
+class TestLearningBacklogDecisionCap:
+    """Past the decision read's cap the oldest decisions drop out, so a
+    decided candidate reads as pending: the row must say it is a floor."""
+
+    def test_a_capped_decision_read_marks_the_row_truncated(self, registry):
+        ids = ["source_analysis:a", "source_analysis:b", "source_analysis:c"]
+        _decline_events(registry.operational.event_log, *ids)
+        row = _learning_row(registry, ids, decision_limit=2)
+        assert row.status == "ok"
+        # One decided candidate fell out of the read and counts as pending.
+        assert row.pending_count == 1
+        assert row.truncated is True
+        assert row.scan_limit == 2
+
+    def test_exactly_the_limit_of_decisions_is_not_truncated(self, registry):
+        ids = ["source_analysis:a", "source_analysis:b"]
+        _decline_events(registry.operational.event_log, *ids)
+        row = _learning_row(registry, ids, decision_limit=2)
+        assert row.pending_count == 0
+        assert row.truncated is False
+        assert row.scan_limit == 2
+
+    def test_the_row_states_the_default_decision_limit(
+        self, client, registry, tmp_path, monkeypatch
+    ):
+        from trellis.learning.review_decisions import DEFAULT_DECISION_SCAN_LIMIT
+
+        _write_learning_candidates(tmp_path, monkeypatch, [_learning_candidate()])
+        row = _backlog(client)["learning_candidate"]
+        assert row["status"] == "ok"
+        assert row["scan_limit"] == DEFAULT_DECISION_SCAN_LIMIT
+        assert row["truncated"] is False
+
+
 # ---------------------------------------------------------------------------
 # The Review view: a Decline control and the "declined on" stamp
 # ---------------------------------------------------------------------------

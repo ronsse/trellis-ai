@@ -1335,8 +1335,11 @@ class ReviewBacklogRowResponse(WireModel):
     ``learning_candidate``, the kinds a reviewer resolves in the Review view.
     For the other two ``pending_count`` is the number drafted in the scanned
     window, which no action clears. ``scan_limit`` is the most rows the count
-    read (``None`` for the whole learning artifact); it differs from what the
-    Review view lists (200 schema-evolution, 50 code-proposal events).
+    read; it differs from what the Review view lists (200 schema-evolution,
+    50 code-proposal events). The learning artifact is read whole, so for
+    ``learning_candidate`` it is the cap on the review-decision events read,
+    and ``truncated`` there means older decisions were not read and a
+    candidate they decided counts as pending.
     """
 
     kind: str
