@@ -714,6 +714,9 @@ _FIRST_CREATE_ATTEMPTS = 3
 _SETTLE_READ_BACKOFF_SECONDS: tuple[float, ...] = _EDGE_ENDPOINT_RETRY_BACKOFF_SECONDS[
     : _FIRST_CREATE_ATTEMPTS - 1
 ]
+# A settle whose removal is refused reads and picks once more, then answers
+# from what that read saw (:meth:`BoltOpenCypherGraphStore._settle_first_create`).
+_SETTLE_ROUNDS = 2
 
 
 def _first_version_prefix(node_id: str) -> str:
@@ -1370,37 +1373,63 @@ class BoltOpenCypherGraphStore(BoltSessionRunner, GraphStore):
         leaves one row, but if its own row is the survivor two callers have
         been told they created the node. A failed delete is logged, not
         raised: the write has committed.
+
+        A refused delete (ArcadeDB refuses to delete a row an edge touches,
+        and an edge can land after this writer's edge read) is followed by
+        one more read of rows and edges and one more pick, bounded by
+        :data:`_SETTLE_ROUNDS`, so the answer is whether this writer's row is
+        the one kept as of the last read. A writer told ``False`` re-applies
+        its fields through the update branch. The kept row can be the later
+        creator's: its properties and ``valid_from`` win, and an ``as_of``
+        between the two creators' stamps finds no row.
         """
         rows = self._read_settle_rows(node_id)
-        if not rows:
-            # Created, then deleted by another writer before this read.
-            return True
-        if len(rows) == 1:
-            # One row that is not this writer's: another creator's re-read
-            # already settled the duplicate and removed this writer's row.
-            return rows[0][2] == own_row
-        survivor, rows_with_edges = self._settle_survivor(node_id, rows)
-        extras = [row[2] for row in rows if row[2] != survivor]
-        try:
-            self._remove_node_rows(node_id, extras)
-            removed = True
-        except Exception as exc:
-            removed = False
+        for settle_round in range(1, _SETTLE_ROUNDS + 1):
+            if not rows:
+                # Created, then deleted by another writer before this read.
+                return True
+            if len(rows) == 1:
+                # One row that is not this writer's: another creator's re-read
+                # already settled the duplicate and removed this writer's row.
+                return rows[0][2] == own_row
+            survivor, rows_with_edges = self._settle_survivor(node_id, rows)
+            extras = [row[2] for row in rows if row[2] != survivor]
+            try:
+                self._remove_node_rows(node_id, extras)
+                removed = True
+            except Exception as exc:
+                removed = False
+                logger.warning(
+                    "node_first_create_duplicate_remove_failed",
+                    node_id=node_id,
+                    error_type=type(exc).__name__,
+                    settle_round=settle_round,
+                )
+            # A warning, not debug: this is the only record that the engine
+            # let a duplicate first version in.
             logger.warning(
-                "node_first_create_duplicate_remove_failed",
+                "node_first_create_duplicate_settled",
                 node_id=node_id,
-                error_type=type(exc).__name__,
+                current_rows=len(rows),
+                rows_with_edges=rows_with_edges,
+                removed=removed,
+                kept_own_row=survivor == own_row,
+                settle_round=settle_round,
             )
-        # A warning, not debug: this is the only record that the engine let a
-        # duplicate first version in.
-        logger.warning(
-            "node_first_create_duplicate_settled",
-            node_id=node_id,
-            current_rows=len(rows),
-            rows_with_edges=rows_with_edges,
-            removed=removed,
-            kept_own_row=survivor == own_row,
-        )
+            if removed or settle_round == _SETTLE_ROUNDS:
+                break
+            # Refused, most often because an edge landed on a row this
+            # writer's edge read saw bare: read rows and edges again and pick
+            # again, so the answer describes the rows as they now stand.
+            try:
+                rows = self._read_settle_rows(node_id)
+            except Exception as exc:
+                logger.warning(
+                    "node_first_create_duplicate_reread_failed",
+                    node_id=node_id,
+                    error_type=type(exc).__name__,
+                )
+                break
         return survivor == own_row
 
     def upsert_nodes_bulk(

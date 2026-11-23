@@ -1184,8 +1184,11 @@ def _current_rows_with_edges(store, node_id: str) -> dict[str, int]:
     return {str(r["row_id"]): int(r["edges"]) for r in records}
 
 
+@pytest.mark.parametrize("edge", ["outgoing", "incoming", "closed"])
 @pytest.mark.parametrize("own", ["edged", "edgeless"])
-def test_first_create_settle_keeps_the_duplicate_an_edge_hangs_from(graph_store, own):
+def test_first_create_settle_keeps_the_duplicate_an_edge_hangs_from(
+    graph_store, own, edge
+):
     # #1232: a duplicate first row with an edge attached. The engine's commit
     # check only rarely lets two first creates in, so the duplicate is built
     # directly: a second current row with a later stamp (``version_id``
@@ -1193,7 +1196,8 @@ def test_first_create_settle_keeps_the_duplicate_an_edge_hangs_from(graph_store,
     # from a race). An edge written now attaches to the shown row, the later
     # stamp, which is the row the earliest-stamp pick would delete; a plain
     # DELETE of it is refused. The settle must leave one current row and
-    # the edge.
+    # the edge, whichever way the edge points, and a closed edge
+    # (``valid_to`` set) still blocks the delete, so it still counts.
     graph_store.create_node_if_absent("dup", "service", {"name": "first"})
     bolt_duplicate_current.add_current_row(
         graph_store,
@@ -1203,7 +1207,17 @@ def test_first_create_settle_keeps_the_duplicate_an_edge_hangs_from(graph_store,
         greater_version_id=False,
     )
     graph_store.upsert_node("peer", "service", {"name": "peer"})
-    edge_id = graph_store.upsert_edge("dup", "peer", "depends_on", {})
+    if edge == "incoming":
+        edge_id = graph_store.upsert_edge("peer", "dup", "depends_on", {})
+    else:
+        edge_id = graph_store.upsert_edge("dup", "peer", "depends_on", {})
+    if edge == "closed":
+        graph_store._run_write_single(
+            "MATCH ()-[r:EDGE {edge_id: $eid}]->() SET r.valid_to = $closed "
+            "RETURN r.edge_id AS edge_id",
+            eid=edge_id,
+            closed="2026-01-02T00:00:00+00:00",
+        )
 
     before = _current_rows_with_edges(graph_store, "dup")
     assert sorted(before.values()) == [0, 1], before
@@ -1215,7 +1229,8 @@ def test_first_create_settle_keeps_the_duplicate_an_edge_hangs_from(graph_store,
 
     assert answered is (own == "edged")
     assert _current_rows_with_edges(graph_store, "dup") == {edged: 1}
-    assert [e["edge_id"] for e in graph_store.get_edges("dup")] == [edge_id]
+    if edge != "closed":
+        assert [e["edge_id"] for e in graph_store.get_edges("dup")] == [edge_id]
     node = graph_store.get_node("dup")
     assert node is not None
     assert node["properties"]["name"] == "second"

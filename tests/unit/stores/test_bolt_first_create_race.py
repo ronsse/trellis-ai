@@ -329,6 +329,129 @@ def test_the_edge_read_names_only_the_current_rows_of_the_node() -> None:
     assert driver.node_read_params == [{"node_id": "n1", "row_ids": ["#1:1", "#1:2"]}]
 
 
+# Two settling writers that share one store state. ArcadeDB refuses a delete
+# whose target row has a relationship, and refuses the statement whole.
+class _SharedRows:
+    def __init__(self) -> None:
+        self.rows = {row[2]: row for row in _BOTH}
+        self.edged: set[str] = set()
+
+
+class _SharedWriter(_VerifyingStore):
+    def __init__(self, world: _SharedRows, own: str, after_edge_read=None) -> None:
+        super().__init__(FakeBoltDriver(creates=[own]), _BOTH)
+        self.world = world
+        self.after_edge_read = after_edge_read
+
+    def _current_node_rows(self, node_id: str) -> list[tuple[str, str, str]]:
+        return list(self.world.rows.values())
+
+    def _rows_with_edges(self, node_id: str, row_ids: list[str]) -> set[str]:
+        self.edge_reads.append(row_ids)
+        seen = self.world.edged & set(row_ids) & set(self.world.rows)
+        if self.after_edge_read is not None:
+            hook, self.after_edge_read = self.after_edge_read, None
+            hook()
+        return seen
+
+    def _remove_node_rows(self, node_id: str, row_ids: list[str]) -> None:
+        self.removed.append(row_ids)
+        if self.world.edged & set(row_ids):
+            msg = "row has a relationship"
+            raise RuntimeError(msg)
+        for row_id in row_ids:
+            self.world.rows.pop(row_id, None)
+
+
+def test_an_edge_landing_after_one_writers_edge_read_tells_only_the_keeper_true() -> (
+    None
+):
+    # Writer 1 (the earliest row, #1:2) reads no edge and keeps its own row;
+    # an edge then lands on #1:1, so its delete of #1:1 is refused. Writer 2
+    # sees the edge, keeps #1:1 and removes #1:2. Only #1:1 is left, so
+    # writer 1 must hear False and re-apply through the update branch.
+    from structlog.testing import capture_logs
+
+    world = _SharedRows()
+    w1 = _SharedWriter(world, "#1:2", after_edge_read=lambda: world.edged.add("#1:1"))
+    w2 = _SharedWriter(world, "#1:1")
+
+    with capture_logs() as logs:
+        first = w1.create_node_if_absent("n1", "service", {})
+    second = w2.create_node_if_absent("n1", "service", {})
+
+    assert sorted(world.rows) == ["#1:1"]
+    assert (first, second) == (False, True)
+    assert w1.removed == [["#1:1"], ["#1:2"]]
+    settled = [e for e in logs if e["event"] == "node_first_create_duplicate_settled"]
+    assert [(e["settle_round"], e["removed"], e["kept_own_row"]) for e in settled] == [
+        (1, False, True),
+        (2, True, False),
+    ]
+    assert settled[-1]["rows_with_edges"] == 1
+
+
+def test_a_refused_delete_re_picks_once_and_then_answers() -> None:
+    # Every delete refused: one extra round, no third.
+    class _AlwaysRefused(_VerifyingStore):
+        def _remove_node_rows(self, node_id: str, row_ids: list[str]) -> None:
+            self.removed.append(row_ids)
+            msg = "refused"
+            raise RuntimeError(msg)
+
+    store = _AlwaysRefused(FakeBoltDriver(creates=["#1:2"]), _BOTH)
+
+    assert store.create_node_if_absent("n1", "service", {}) is True
+    assert store.removed == [["#1:1"], ["#1:1"]]
+    assert len(store.edge_reads) == 2
+
+
+def test_a_failed_re_read_after_a_refused_delete_does_not_escape() -> None:
+    from structlog.testing import capture_logs
+
+    class _ReReadFails(_VerifyingStore):
+        reads = 0
+
+        def _current_node_rows(self, node_id: str) -> list[tuple[str, str, str]]:
+            self.reads += 1
+            if self.reads > 1:
+                msg = "re-read failed"
+                raise RuntimeError(msg)
+            return list(self.rows)
+
+        def _remove_node_rows(self, node_id: str, row_ids: list[str]) -> None:
+            msg = "refused"
+            raise RuntimeError(msg)
+
+    store = _ReReadFails(FakeBoltDriver(creates=["#1:2"]), _BOTH)
+    with capture_logs() as logs:
+        assert store.create_node_if_absent("n1", "service", {}) is True
+    assert "node_first_create_duplicate_reread_failed" in [e["event"] for e in logs]
+
+
+def test_the_edge_read_counts_edges_either_way_and_closed_ones() -> None:
+    # ArcadeDB refuses to delete a row any relationship touches, incoming or
+    # outgoing, current or closed, so the read that predicts the refusal
+    # matches undirected and does not filter on ``valid_to``.
+    driver = FakeBoltDriver(creates=[True], node_reads=[[{"row_id": "#1:2"}]])
+    store = _store(driver)
+    statements: list[str] = []
+    run_read_list = store._run_read_list
+
+    def recording(cypher: str, **params: object) -> list[dict[str, object]]:
+        statements.append(cypher)
+        return run_read_list(cypher, **params)
+
+    store._run_read_list = recording  # type: ignore[method-assign]
+
+    assert store._rows_with_edges("n1", ["#1:1", "#1:2"]) == {"#1:2"}
+    (cypher,) = statements
+    assert "MATCH (n)-[]-()" in cypher
+    assert "->" not in cypher
+    assert "<-" not in cypher
+    assert "valid_to" not in cypher
+
+
 def test_neo4j_does_not_re_read_and_arcadedb_does() -> None:
     from trellis.stores.arcadedb.graph import ArcadeDBGraphStore
     from trellis.stores.neo4j.graph import Neo4jGraphStore
