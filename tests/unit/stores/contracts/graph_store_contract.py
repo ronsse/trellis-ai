@@ -1016,6 +1016,7 @@ class GraphStoreContractTests:
                     ("d", "a", "depends_on"),
                     ("b", "d", "depends_on"),
                     ("a", "x", "calls"),
+                    ("d", "b", "calls"),
                 },
             ),
             (
@@ -1039,7 +1040,8 @@ class GraphStoreContractTests:
         The tests above compare node ids only. ``b -> d`` joins two depth-1
         nodes and is returned although the walk did not need it; ``b -> c``
         leaves the returned set (``c`` is two hops out) and is not; an edge
-        type outside ``edge_types`` is not returned. Each edge appears once.
+        type outside ``edge_types`` is not returned, even ``d -> b``, whose
+        two ends are both returned. Each edge appears once.
         """
         for node_id in ["a", "b", "c", "d", "x"]:
             store.upsert_node(node_id, "service", {})
@@ -1048,6 +1050,7 @@ class GraphStoreContractTests:
         store.upsert_edge("b", "d", "depends_on")
         store.upsert_edge("b", "c", "depends_on")
         store.upsert_edge("a", "x", "calls")
+        store.upsert_edge("d", "b", "calls")
 
         sg = store.get_subgraph(["a"], depth=1, edge_types=edge_types)
         edges = [(e["source_id"], e["target_id"], e["edge_type"]) for e in sg["edges"]]
