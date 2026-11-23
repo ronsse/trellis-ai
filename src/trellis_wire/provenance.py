@@ -64,9 +64,12 @@ def clean_provenance_label(
 def _age_text(age_days: float | None) -> str | None:
     if age_days is None or isinstance(age_days, bool):
         return None
-    if not isinstance(age_days, int | float) or not math.isfinite(age_days):
-        return None
-    if age_days > _MAX_AGE_DAYS:  # a corrupt stamp, not an age worth stating
+    # Past _MAX_AGE_DAYS the stamp is corrupt, not an age worth stating.
+    if (
+        not isinstance(age_days, int | float)
+        or not math.isfinite(age_days)
+        or age_days > _MAX_AGE_DAYS
+    ):
         return None
     days = max(int(age_days), 0)
     if days < 1:
