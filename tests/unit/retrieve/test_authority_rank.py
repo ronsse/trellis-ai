@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from trellis.core.pack_holdout import HOLDOUT_ITEMS_KEY, HOLDOUT_KEY
 from trellis.retrieve.authority_rank import (
     AUTHORITY_BOOST_KEY,
     AUTHORITY_RANK_MODE_ENV,
@@ -31,7 +32,6 @@ from trellis.retrieve.authority_rank import (
     item_signals,
     resolve_authority_rank_config,
 )
-from trellis.core.pack_holdout import HOLDOUT_ITEMS_KEY, HOLDOUT_KEY
 from trellis.retrieve.excerpts import ContentFloorConfig
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.rerankers.rrf import RRFReranker
