@@ -93,9 +93,9 @@ dev = [
     "pytest-cov>=4.0",
     "pytest-xdist>=3.5",
     "hypothesis>=6.92",
-    # THE source of truth for both tool versions. .pre-commit-config.yaml
-    # mirrors these (its `rev:` cannot reference a file) and the workflows
-    # derive them; `scripts/check_tool_pins.py` fails CI on any divergence.
+    # THE only pin for both tools. .pre-commit-config.yaml runs them as
+    # `repo: local` hooks with no `rev:` (#1300) and the workflows derive
+    # them; `scripts/check_tool_pins.py` fails CI if a second copy appears.
     # Do not write "matches X" here — three such comments were carried
     # verbatim across Dependabot bumps that broke what they asserted (#378).
     "ruff==0.17.6",

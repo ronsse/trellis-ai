@@ -1,9 +1,9 @@
 """Fail when the lint/typecheck tool pins disagree across the repo (#378).
 
 ``pyproject.toml``'s ``[project.optional-dependencies] dev`` is the **single
-source of truth** for the ruff and mypy versions. Everything else either
-derives its version from that list at runtime or is a mirror this script
-verifies.
+source of truth** for the ruff and mypy versions, and since #1300 the only
+place either is written down: everything else derives its version from that
+list at run time, and this script fails when something starts restating it.
 
 Why a script and not a comment
 ------------------------------
@@ -36,10 +36,21 @@ What is checked
    would make "the pinned version" meaningless and is rejected), and pins
    *nothing else* with ``==`` that :data:`TOOLS` does not name — so the
    roster below is a verified mirror rather than a declared one.
-2. ``.pre-commit-config.yaml``'s ``rev:`` for ``ruff-pre-commit`` and
-   ``mirrors-mypy`` equals those versions. Pre-commit's ``rev`` cannot
-   reference ``pyproject.toml``, so this mirror is unavoidable — which is
-   exactly why it is verified rather than asserted.
+2. ``.pre-commit-config.yaml`` runs ruff and mypy as ``repo: local`` hooks
+   with ``language: system`` — the binaries installed from ``.[dev]`` — and
+   no remote repo with a ``rev:`` of its own provides either tool. Until
+   #1300 the hooks came from ``ruff-pre-commit`` and ``mirrors-mypy``, and
+   this check compared their ``rev:`` to the pin. That comparison was sound
+   and still cost a human edit per bump: Dependabot's ``pip`` ecosystem
+   rewrites ``pyproject.toml`` only, so every ruff or mypy bump PR failed
+   lint, typecheck and tests until someone bumped the ``rev:`` by hand
+   (#649, #1268, #1300). With no second copy there is nothing to drift, so
+   the check is now that the second copy does not come back — matched by
+   repo URL *or* hook id, so a fork or renamed mirror is caught too — and
+   that each tool still has a local hook, so deleting the hook cannot pass
+   for removing the pin. A local hook with any other ``language`` (e.g.
+   ``python``) is rejected because pre-commit then builds the tool from
+   ``additional_dependencies``, which is a pin again.
 3. No workflow under ``.github/workflows/`` hardcodes a ``ruff==`` or
    ``mypy==`` version. Workflows must install ``.[dev]`` or derive the pin
    from ``pyproject.toml``; restating it is how this started.
@@ -168,20 +179,27 @@ import subprocess
 import sys
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-#: Tools whose versions must agree, mapped to the pre-commit repo whose
-#: ``rev:`` mirrors the ``pyproject.toml`` pin.
-TOOLS: dict[str, str] = {
-    "ruff": "https://github.com/astral-sh/ruff-pre-commit",
-    "mypy": "https://github.com/pre-commit/mirrors-mypy",
-}
+#: Tools pinned once, in ``pyproject.toml`` ``[dev]``, and nowhere else.
+TOOLS: tuple[str, ...] = ("ruff", "mypy")
 
-#: A ``rev:`` line's version, e.g. ``rev: v0.16.4`` -> ``0.16.4``.
-_REV_RE = re.compile(r"^\s*rev:\s*v?([0-9][0-9A-Za-z.\-]*)\s*(?:#.*)?$")
+#: ``language:`` values under which a local hook runs the binary already on
+#: PATH rather than installing one. pre-commit 4.4 added ``unsupported`` as
+#: the new spelling of ``system``; both are accepted so the config is not tied
+#: to either side of that rename.
+SYSTEM_LANGUAGES = frozenset({"system", "unsupported"})
+
+#: A ``rev:`` line's value, e.g. ``rev: v0.16.4`` -> ``v0.16.4``.
+_REV_RE = re.compile(r"^\s*rev:\s*(?P<rev>\S+)")
+
+#: ``key: value`` inside a hook entry, the leading ``- `` optional.
+_HOOK_KEY_RE = re.compile(
+    r"^\s*(?:-\s+)?(?P<key>id|entry|language):\s*(?P<value>.*?)\s*$"
+)
 
 #: A hardcoded pin anywhere in a workflow, e.g. ``ruff==0.15.22``.
 _HARDCODED_RE = re.compile(r"\b(ruff|mypy)==([0-9][0-9A-Za-z.\-]*)")
@@ -302,25 +320,98 @@ def pyproject_pins(pyproject: Path) -> dict[str, str]:
     return pins
 
 
-def precommit_revs(config: Path) -> dict[str, str]:
-    """The ``rev:`` version for each repo in :data:`TOOLS`, by tool name.
+@dataclass
+class PrecommitHook:
+    """One hook entry: the keys this script reads, ``""`` when absent."""
+
+    id: str = ""
+    entry: str = ""
+    language: str = ""
+
+
+@dataclass
+class PrecommitRepo:
+    """One ``- repo:`` block of ``.pre-commit-config.yaml``."""
+
+    url: str
+    line: int
+    rev: str = ""
+    hooks: list[PrecommitHook] = field(default_factory=list)
+
+
+def precommit_repos(config: Path) -> list[PrecommitRepo]:
+    """Every ``- repo:`` block with its ``rev:`` and hooks.
 
     Parsed line-wise rather than with a YAML loader so the script has no
     dependency beyond the stdlib — it runs in the lint job, which installs
-    ruff and nothing else.
+    ruff and nothing else. A hook starts at a ``- id:`` line; ``entry:`` and
+    ``language:`` lines attach to the hook most recently started.
     """
-    repo_by_url = {url: tool for tool, url in TOOLS.items()}
-    revs: dict[str, str] = {}
-    pending: str | None = None
-    for line in config.read_text(encoding="utf-8").splitlines():
+    repos: list[PrecommitRepo] = []
+    for lineno, line in enumerate(config.read_text(encoding="utf-8").splitlines(), 1):
         stripped = line.strip()
         if stripped.startswith("- repo:"):
-            url = stripped.split("- repo:", 1)[1].strip()
-            pending = repo_by_url.get(url)
-        elif pending is not None and (match := _REV_RE.match(line)):
-            revs[pending] = match.group(1)
-            pending = None
-    return revs
+            url = stripped.split("- repo:", 1)[1].split("#", 1)[0].strip()
+            repos.append(PrecommitRepo(url=url, line=lineno))
+            continue
+        if not repos:
+            continue
+        current = repos[-1]
+        if rev := _REV_RE.match(line):
+            current.rev = rev.group("rev")
+        elif key := _HOOK_KEY_RE.match(line):
+            value = key.group("value").split(" #", 1)[0].strip().strip("'\"")
+            if key.group("key") == "id" and stripped.startswith("-"):
+                current.hooks.append(PrecommitHook(id=value))
+            elif current.hooks:
+                setattr(current.hooks[-1], key.group("key"), value)
+    return repos
+
+
+def _tools_named_by(repo: PrecommitRepo) -> list[str]:
+    """Tools in :data:`TOOLS` a remote repo's URL or hook ids mention."""
+    haystack = " ".join([repo.url, *(hook.id for hook in repo.hooks)]).lower()
+    return [tool for tool in TOOLS if tool in haystack]
+
+
+def precommit_problems(config: Path) -> list[str]:
+    """Ways ``.pre-commit-config.yaml`` could restate or lose a tool pin."""
+    problems: list[str] = []
+    repos = precommit_repos(config)
+    hosted: dict[str, list[PrecommitHook]] = {tool: [] for tool in TOOLS}
+    for repo in repos:
+        if repo.url == "local":
+            for hook in repo.hooks:
+                tool = hook.entry.split()[0] if hook.entry.split() else ""
+                if tool not in TOOLS:
+                    continue
+                if hook.language in SYSTEM_LANGUAGES:
+                    hosted[tool].append(hook)
+                else:
+                    problems.append(
+                        f"{config.name}: local hook {hook.id!r} runs {tool} with "
+                        f"'language: {hook.language or '(unset)'}'. Only "
+                        f"'language: system' runs the {tool} installed from "
+                        f"pyproject.toml [dev]; any other language builds its own "
+                        f"copy from additional_dependencies, which is a second pin."
+                    )
+            continue
+        problems.extend(
+            f"{config.name}:{repo.line}: remote repo {repo.url} provides {tool} "
+            f"at rev {repo.rev or '(none)'}. That rev is a second {tool} pin "
+            f"which Dependabot's pip updates never edit, so every {tool} bump "
+            f"fails CI until it is bumped by hand (#1300). Run {tool} from a "
+            f"'repo: local' hook with 'language: system' instead."
+            for tool in _tools_named_by(repo)
+        )
+    problems.extend(
+        f"{config.name}: no 'repo: local' hook runs {tool} (an 'entry:' starting "
+        f"with '{tool}', 'language: system'). The hook must stay; only its "
+        f"version moves to pyproject.toml [dev]."
+        for tool, hooks in hosted.items()
+        if not hooks
+    )
+    return problems
 
 
 def hardcoded_workflow_pins(workflows_dir: Path) -> list[tuple[Path, int, str, str]]:
@@ -341,8 +432,7 @@ def hardcoded_workflow_pins(workflows_dir: Path) -> list[tuple[Path, int, str, s
 def unrostered_exact_pins(pyproject: Path) -> list[str]:
     """``[dev]`` entries pinned with ``==`` that :data:`TOOLS` does not name.
 
-    :data:`TOOLS` is hand-written — it has to be, because the pre-commit URL
-    it maps to is not derivable from anything. A hand-written roster is the
+    :data:`TOOLS` is hand-written. A hand-written roster is the
     shape this repo keeps watching rot (#443 declared three control keys
     against six real sites), so it is *verified* here rather than trusted:
     add a third ``==``-pinned dev tool and this fails until the roster names
@@ -535,22 +625,8 @@ def check(repo_root: Path = REPO_ROOT) -> list[str]:
     workflows = repo_root / ".github" / "workflows"
 
     problems: list[str] = []
-    pins = pyproject_pins(pyproject)
-    revs = precommit_revs(precommit)
-
-    for tool, pinned in pins.items():
-        rev = revs.get(tool)
-        if rev is None:
-            problems.append(
-                f".pre-commit-config.yaml: no 'rev:' found for {tool} "
-                f"({TOOLS[tool]}). Expected 'rev: v{pinned}'."
-            )
-        elif rev != pinned:
-            problems.append(
-                f".pre-commit-config.yaml: {tool} rev is v{rev}, but "
-                f"pyproject.toml [dev] pins {tool}=={pinned}. "
-                f"pyproject.toml is authoritative — set 'rev: v{pinned}'."
-            )
+    pyproject_pins(pyproject)  # raises on a missing or ranged pin
+    problems.extend(precommit_problems(precommit))
 
     for path, lineno, tool, version in hardcoded_workflow_pins(workflows):
         problems.append(
@@ -561,7 +637,7 @@ def check(repo_root: Path = REPO_ROOT) -> list[str]:
 
     problems.extend(
         f"pyproject.toml: [dev] pins {spec!r}, which check_tool_pins.py's TOOLS "
-        f"roster does not name. Add it to TOOLS (with its pre-commit repo URL) "
+        f"roster does not name. Add it to TOOLS "
         f"so the pin is actually checked, or drop the '=='."
         for spec in unrostered_exact_pins(pyproject)
     )

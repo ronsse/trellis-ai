@@ -49,10 +49,11 @@ GATE_TARGET = "env-check"
 
 #: A recipe line invoking a gate tool directly. `python -m ruff` counts, and
 #: so does a path-qualified `./.venv/bin/ruff` — hence `/` in the leading
-#: class. `python -m pre_commit`, which runs ruff from the `rev:` pinned in
-#: `.pre-commit-config.yaml` (itself verified against `pyproject.toml` by
-#: `check_tool_pins.check`), does not — that is a different mechanism with
-#: its own pin, not an ungated invocation.
+#: class. `python -m pre_commit` does not. Its ruff and mypy hooks are
+#: `repo: local` with `language: system` since #1300, so they run the same
+#: PATH binaries `env-check` inspects; whether `hooks-run` and `fix` should
+#: therefore take `env-check` as a prerequisite is an open follow-up, and
+#: until it is decided this rule keeps treating pre-commit as out of scope.
 #:
 #: Two guards keep `clean`'s `rm -rf ... .mypy_cache .ruff_cache` out, and it
 #: is worth knowing which does what, because adding `/` to the leading class
@@ -328,10 +329,11 @@ def test_the_prerequisite_walk_terminates_on_a_cycle() -> None:
 
 
 def test_pre_commit_is_not_counted_as_an_ungated_invocation() -> None:
-    """It runs ruff from a `rev:` that `check_tool_pins.check` verifies.
+    """The rule matches direct tool invocations, not pre-commit runs.
 
-    Without this the rule would demand a prerequisite that would be wrong to
-    add, and the usual resolution to that is to delete the rule.
+    pre-commit's hooks run the PATH ruff since #1300 (see `_GATE_TOOL_RE`),
+    so gating `hooks-run`/`fix` is a separate, undecided change; until then
+    the rule must not demand it, or the usual resolution is deleting the rule.
 
     The recipe line has to **name** ruff for this to test anything. The first
     version of it read `pre_commit run --all-files`, which the tool regex does

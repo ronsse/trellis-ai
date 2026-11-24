@@ -12,32 +12,39 @@
 # The same ruff + mypy commands also run in CI (see .github/workflows/).
 # Catching issues locally avoids round-trip failures on push.
 #
-# TOOL VERSIONS: pyproject.toml [dev] is the single source of truth. The two
-# `rev:` values below are MIRRORS of it — pre-commit's `rev` cannot reference
-# another file, so this duplication is unavoidable. It is not asserted to be
-# in sync; `scripts/check_tool_pins.py` FAILS CI when it is not. If you bump a
-# pin, bump it in pyproject.toml and run that script — it names the edit.
+# TOOL VERSIONS: pyproject.toml [dev] is the ONLY pin for ruff and mypy. Their
+# hooks are `repo: local` with `language: system`, so they run the ruff and
+# mypy installed from `.[dev]` and carry no `rev:` of their own. A remote
+# ruff-pre-commit / mirrors-mypy repo would add a second pin that Dependabot's
+# pip updates never touch, failing every tool bump until a human edited it
+# (#649, #1268, #1300). `scripts/check_tool_pins.py` FAILS CI if one comes back.
+# Consequence: activate the dev venv (or put its bin/ on PATH) before
+# `git commit`; a missing ruff or mypy fails the hook loudly.
 
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    # mirror of pyproject.toml [dev] ruff pin — enforced by scripts/check_tool_pins.py
-    rev: v0.17.6
+  - repo: local
     hooks:
       - id: ruff-format
+        name: ruff format
+        entry: ruff format --force-exclude
+        language: system
+        types_or: [python, pyi, jupyter]
+        require_serial: true
       - id: ruff
+        name: ruff check
+        entry: ruff check --force-exclude
         args: [--fix]
-
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    # mirror of pyproject.toml [dev] mypy pin — enforced by scripts/check_tool_pins.py
-    rev: v2.4.1
-    hooks:
+        language: system
+        types_or: [python, pyi, jupyter]
+        require_serial: true
       - id: mypy
-        args: [--ignore-missing-imports]
-        additional_dependencies:
-          - pydantic>=2.0
-          - types-PyYAML
-        pass_filenames: false
+        name: mypy
         entry: mypy src/
+        args: [--ignore-missing-imports]
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+        require_serial: true
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0

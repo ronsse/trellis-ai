@@ -42,10 +42,10 @@ jobs:
           echo "spec=$RUFF_PIN" >> "$GITHUB_OUTPUT"
       - run: pip install "${{ steps.pin.outputs.spec }}"
 
-      # Fails when pyproject.toml, .pre-commit-config.yaml and the workflows
-      # disagree about a tool version. The mirrors that cannot be eliminated
-      # (pre-commit's `rev:`) are verified rather than asserted — three
-      # comments claimed a sync that had silently stopped holding (#378).
+      # Fails when anything outside pyproject.toml restates a tool version:
+      # a workflow literal, or a remote pre-commit repo whose `rev:` is a
+      # second pin Dependabot never bumps (#378, #1300). The pre-commit hooks
+      # are `repo: local` and run the tools installed from `.[dev]`.
       #
       # `--check-env` additionally compares the *running* environment against
       # those pins (#398). Here that proves the ruff resolved two steps up is

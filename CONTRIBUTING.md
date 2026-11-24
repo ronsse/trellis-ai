@@ -14,7 +14,7 @@ make setup
 trellis admin init
 ```
 
-`make setup` does two things: installs `[dev,vectors]` extras (mirrors CI, so the default SQLiteVectorStore tests run locally) and registers the pre-commit git hook. After that, every `git commit` runs ruff format, ruff lint, mypy, and a handful of safety checks locally — catching anything CI would flag before the push round-trip. See [`.pre-commit-config.yaml`](.pre-commit-config.yaml) for the full list.
+`make setup` does two things: installs `[dev,vectors]` extras (mirrors CI, so the default SQLiteVectorStore tests run locally) and registers the pre-commit git hook. After that, every `git commit` runs ruff format, ruff lint, mypy, and a handful of safety checks locally — catching anything CI would flag before the push round-trip. The ruff and mypy hooks run the versions installed from `[dev]` (they are `repo: local` hooks with no version of their own), so commit from a shell where that virtualenv is active. See [`.pre-commit-config.yaml`](.pre-commit-config.yaml) for the full list.
 
 ### Hooks reference
 
