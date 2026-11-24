@@ -4372,7 +4372,7 @@ paths:
 
         path ``trellis classify apply-rule`` uses — so a denying policy blocks
 
-        both surfaces identically (Stage 2 always runs, CLAUDE.md). The
+        both surfaces identically (Stage 2 always runs, AGENTS.md). The
 
         candidate''s own metrics (``support``/``precision``/``lift``) are
 

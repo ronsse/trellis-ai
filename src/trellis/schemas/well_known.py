@@ -702,7 +702,7 @@ def normalize_alias_raw_id(source_system: str, raw_id: str) -> str:
 #
 # This is *advisory only* — the validator never raises and never rejects a
 # mutation. ``MutationExecutor`` and policy gates are explicitly out of
-# scope (open-string contract preserved per CLAUDE.md). Closing the set
+# scope (open-string contract preserved per AGENTS.md). Closing the set
 # would break domain integrations and the well-known module documents
 # the same openness rationale above.
 

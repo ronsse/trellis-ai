@@ -386,7 +386,7 @@ class ImplicitSignals(TrellisModel):
     is a positive hint about one item and a re-retrieval is a weak hint about
     one pack. Neither is a verdict, and *no fetch* says nothing: an item
     nobody opened is not an unhelpful one, so nothing here may be read as
-    demotion evidence (CLAUDE.md: "Demotion requires evidence of
+    demotion evidence (AGENTS.md: "Demotion requires evidence of
     unhelpfulness, never absence of evidence of helpfulness").
 
     **Population.** Every attributable pack in the window, graded or not,

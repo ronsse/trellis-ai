@@ -116,7 +116,7 @@ Owner review and the adversarial merge gate ([swarm-handoff §4.1](./swarm-hando
 > sets**. Same for C (#348/#362/#363/#364 vs #194/#256/#264/#360/#413) and F (#474–#478 vs
 > Wave 1b, which cites no issues at all). Lane B and B1–B3 share exactly **one** issue of
 > nine and four (#298), which is the worst case: close enough to look like the same thing.
-> Bare codes travel — `CLAUDE.md` cites `C1`, `C2`, `B2`, `A4`, `E2` — so a reader who
+> Bare codes travel — `AGENTS.md` cites `C1`, `C2`, `B2`, `A4`, `E2` — so a reader who
 > resolves one against the wrong scheme lands on unrelated work with no error. Measured
 > 2026-09-20; the letters are left as-is because this section is frozen record.
 

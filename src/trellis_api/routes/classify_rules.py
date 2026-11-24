@@ -607,7 +607,7 @@ def apply_classify_rule(
 
     Routes through ``Operation.CLASSIFY_RULE_APPLY`` — the same governed
     path ``trellis classify apply-rule`` uses — so a denying policy blocks
-    both surfaces identically (Stage 2 always runs, CLAUDE.md). The
+    both surfaces identically (Stage 2 always runs, AGENTS.md). The
     candidate's own metrics (``support``/``precision``/``lift``) are
     carried through onto the audit event so a reviewer never has to join
     back to the original ``TAG_KEYWORD_CANDIDATE`` / ``DOMAIN_ALIAS_CANDIDATE``

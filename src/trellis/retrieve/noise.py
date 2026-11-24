@@ -5,7 +5,7 @@ reach a pack"; :mod:`trellis.retrieve.lifecycle` answers the same question
 for whole items on the ``Lifecycle`` axis. This module answers it on the
 ``ContentTags.signal_quality`` axis: an item the feedback loop demoted to
 ``signal_quality="noise"`` (:func:`trellis.classify.feedback.apply_noise_tags`)
-correlates with task failure, and ``docs/PRD.md`` and ``CLAUDE.md`` both
+correlates with task failure, and ``docs/PRD.md`` and ``AGENTS.md`` both
 state it is excluded from packs by default.
 
 **It was not.** The exclusion was expressed only as a store-side predicate

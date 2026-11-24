@@ -11,7 +11,7 @@ that RuleTuner writes to:
   pipeline.  Dry-run by default; requires ``--commit`` to actually
   write the new snapshot and emit the ``PARAMS_UPDATED`` event.
 
-Every command honours ``--format json`` per CLAUDE.md's hard rule;
+Every command honours ``--format json`` per AGENTS.md's hard rule;
 machine consumers should never parse the human table view.
 """
 

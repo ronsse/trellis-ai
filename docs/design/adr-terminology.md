@@ -11,7 +11,7 @@
 - [`../../src/trellis/schemas/classification.py`](../../src/trellis/schemas/classification.py) — `ContentTags`, and (per the tag-vocabulary ADR) `DataClassification` / `Lifecycle`
 - [`../../src/trellis/schemas/well_known.py`](../../src/trellis/schemas/well_known.py) — canonical entity-type and edge-kind constants + `canonicalize_*` helpers
 - [`../../src/trellis/stores/registry.py`](../../src/trellis/stores/registry.py) — `_BUILTIN_BACKENDS` table
-- [`../../CLAUDE.md`](../../CLAUDE.md) — project guide that indexes into this ADR
+- [`../../AGENTS.md`](../../AGENTS.md) — project guide that indexes into this ADR
 
 ---
 

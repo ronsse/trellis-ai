@@ -8,7 +8,7 @@ metadata plus its *resolved* ``effective_value``/``overridden_by``;
 ``PUT``/``POST /settings/{name}`` writes one value through
 ``Operation.SETTINGS_UPDATE`` -- the same governed path
 ``trellis admin settings set`` uses, so a denying policy blocks both
-surfaces identically (Stage 2 always runs, CLAUDE.md).
+surfaces identically (Stage 2 always runs, AGENTS.md).
 
 Env-pinned writes still succeed
 --------------------------------

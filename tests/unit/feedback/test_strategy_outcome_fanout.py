@@ -327,7 +327,7 @@ class TestRefusesToGuess:
         outcome_store: SQLiteOutcomeStore,
         event_log: SQLiteEventLog,
     ) -> None:
-        """A sectioned build writes no ``injected_items`` (CLAUDE.md).
+        """A sectioned build writes no ``injected_items`` (AGENTS.md).
 
         The right answer is *no rows*, never a row claiming a measured zero
         — the #557 failure this whole change exists to remove.

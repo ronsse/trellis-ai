@@ -124,7 +124,7 @@ Two consequences that will mislead you if you do not hold them in mind:
   time; an editable install's code is the working tree. So CLI writes carry a specific,
   confident, wrong commit — and `version_source: dist-metadata` claims to be authoritative
   while `dirty: false` removes the one hint that might prompt a second look. This inverts
-  the design intent recorded in `CLAUDE.md` ("honestly unidentifiable rather than falsely
+  the design intent recorded in `AGENTS.md` ("honestly unidentifiable rather than falsely
   identified"). Written up on [#348](https://github.com/ronsse/trellis-ai/issues/348).
 
 The useful asymmetry: **analysis is current, the data is not.** `trellis-skynet` executes
@@ -440,7 +440,7 @@ any row as open work.
 
 ## 7. Dispatch template
 
-Every subagent prompt should carry: the item and its acceptance criteria; `CLAUDE.md` is
+Every subagent prompt should carry: the item and its acceptance criteria; `AGENTS.md` is
 authoritative; the venv and `uv run` traps; its file territory and who else is running;
 the Trellis loop (`get_context` before, `save_experience` after with failures in the step's
 `error`, `record_feedback` with item ids); the panel escalation rule (**split → stop and

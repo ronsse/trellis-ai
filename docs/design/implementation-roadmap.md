@@ -30,7 +30,7 @@
 ### The August 2026 wave (2026-08-06 → 08-30) — **read the answered/implemented split**
 
 ~55 merges landed after this file's previous revision. Summarised, not restated: the
-mechanism for each lives in `CLAUDE.md` (which *is* current) and in
+mechanism for each lives in `AGENTS.md` (which *is* current) and in
 [`autonomous-backlog.md`](./autonomous-backlog.md). **The most useful thing to know before
 picking work up is which items were *answered* rather than *implemented*** — an answered
 item has a verdict and must not be re-proposed as if it were open work, and this queue has
@@ -345,7 +345,7 @@ Both `ingest corpus` and `ingest conversations` accept `--extract`, **double-gat
   - (a), packs: `tests/unit/retrieve/test_sensitivity.py::TestBuildersApplyTheGate::test_a_flat_pack_withholds_and_reports_counts_only`.
   - (a), search: `tests/unit/api/test_sensitivity_routes.py::TestRestSurfaces::test_search_withholds`.
   - (b), mutation deny: `tests/unit/mutate/test_sensitivity_floor.py::TestStageTwoFloor::test_a_command_aimed_at_a_document_above_clearance_is_denied[evidence.ingest]`.
-  - **Prerequisite CLEARED 2026-08-27 — the policy gate is wired on every surface.** This bullet previously said the gate "is not wired on any surface" and that production ran "a four-stage pipeline"; **that was true when written (2026-08-26) and is now false.** C1 landed as [#370](https://github.com/ronsse/trellis-ai/pull/370) (`1e6c66e`): `build_curate_executor` — the single factory every surface (CLI, REST, MCP) uses — passes `policy_gate=build_policy_gate(registry)` **unconditionally** ([`mutate/__init__.py:66-71`](../../src/trellis/mutate/__init__.py), with the reasoning in that function's own docstring at `:47-63`). Stage 2 runs everywhere, so "is the gate wired?" has an observable answer instead of depending on file state. A deployment that has declared no policies gets an *empty* gate that is behaviourally and byte-for-byte indistinguishable from the old no-gate world (pinned by `tests/unit/mutate/test_policy_wiring.py::TestDefaultPostureIsTransparent`). **Consequence for #194: acceptance criterion (b) is now reachable** — what remains is populating `DataClassification` on write paths and writing the scope-denying policy, not building the enforcement seam. The row-level `PolicyViolationError` path ([`executor.py`](../../src/trellis/mutate/executor.py)) is still the pattern to extend. Full mechanism: `CLAUDE.md` § "Governed Mutation Pipeline".
+  - **Prerequisite CLEARED 2026-08-27 — the policy gate is wired on every surface.** This bullet previously said the gate "is not wired on any surface" and that production ran "a four-stage pipeline"; **that was true when written (2026-08-26) and is now false.** C1 landed as [#370](https://github.com/ronsse/trellis-ai/pull/370) (`1e6c66e`): `build_curate_executor` — the single factory every surface (CLI, REST, MCP) uses — passes `policy_gate=build_policy_gate(registry)` **unconditionally** ([`mutate/__init__.py:66-71`](../../src/trellis/mutate/__init__.py), with the reasoning in that function's own docstring at `:47-63`). Stage 2 runs everywhere, so "is the gate wired?" has an observable answer instead of depending on file state. A deployment that has declared no policies gets an *empty* gate that is behaviourally and byte-for-byte indistinguishable from the old no-gate world (pinned by `tests/unit/mutate/test_policy_wiring.py::TestDefaultPostureIsTransparent`). **Consequence for #194: acceptance criterion (b) is now reachable** — what remains is populating `DataClassification` on write paths and writing the scope-denying policy, not building the enforcement seam. The row-level `PolicyViolationError` path ([`executor.py`](../../src/trellis/mutate/executor.py)) is still the pattern to extend. Full mechanism: `AGENTS.md` § "Governed Mutation Pipeline".
 
 **H.2 — query-history curation primitives** (#200–#203; spec: [`adr-query-history-promotion.md`](./adr-query-history-promotion.md) §2–§5) — **deferred, issues closed 2026-10-29.** Owner decision 2026-09-30: wait for the consumer-kg pilot. No deployment has produced query-history flow since early June, core already carries what a core-side ask needed (the open-type rule, `JSONRulesExtractor`, the promotion ladder in the ADR), and core has no statement matcher or query-history connector to guard or scout. **Reopen when the data-platform pilot resumes or a second deployer brings query-history or BI data;** the acceptance criteria stay on the closed issues.
 
@@ -383,10 +383,10 @@ whichever gate below has fired — don't invent work from this table.
 
 Read in order:
 
-1. **`CLAUDE.md`** — project conventions, hard rules, terminology.
+1. **`AGENTS.md`** — project conventions, hard rules, terminology.
 2. **This file** — what's done, what's gated, where the gates are (§4).
 3. **The ADR / plan for whichever gate fired.** Don't read every ADR cold; they're long.
-4. **The contract test suites under `tests/unit/stores/contracts/`** — the authoritative behavioural spec for the storage layer. **Which of them actually run, and where, is in `CLAUDE.md`'s test-coverage caveat.** Deliberately a pointer, not a restatement, for the reason given two bullets below — and the pointer's own summary had rotted anyway: this line said the ArcadeDB contract runs nowhere, which stopped being true when `638b241` ([#543](https://github.com/ronsse/trellis-ai/issues/543)) wired it onto `live-infra` at 106 cases. Every contract suite is now covered on some leg; what is not covered is the **unit** suites for the two Bolt backends. Measured 2026-09-16 — re-derive rather than trusting this sentence.
+4. **The contract test suites under `tests/unit/stores/contracts/`** — the authoritative behavioural spec for the storage layer. **Which of them actually run, and where, is in `AGENTS.md`'s test-coverage caveat.** Deliberately a pointer, not a restatement, for the reason given two bullets below — and the pointer's own summary had rotted anyway: this line said the ArcadeDB contract runs nowhere, which stopped being true when `638b241` ([#543](https://github.com/ronsse/trellis-ai/issues/543)) wired it onto `live-infra` at 106 cases. Every contract suite is now covered on some leg; what is not covered is the **unit** suites for the two Bolt backends. Measured 2026-09-16 — re-derive rather than trusting this sentence.
 
 Before writing code:
 
@@ -440,7 +440,7 @@ docs/design/implementation-roadmap.md   # this file
 
 ```
 .gitignore                              # broadened .env coverage; .env.example exception
-CLAUDE.md                               # store table + contract suite pointer
+AGENTS.md                               # store table + contract suite pointer
 TODO.md                                 # multiple sections updated
 pyproject.toml                          # [neo4j] extra, mypy override, pytest marker
 src/trellis/schemas/enums.py            # docstring pointers to well_known.py

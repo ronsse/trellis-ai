@@ -24,7 +24,7 @@ probe.
 no event this EventLog can see — "never run (or ran before this
 build)". A loop that ran and did nothing reports a real timestamp and a
 ``counters`` dict whose values are legitimately ``0``. Collapsing those
-two into one ``0`` is the exact failure CLAUDE.md's health-signal rule
+two into one ``0`` is the exact failure AGENTS.md's health-signal rule
 exists to prevent.
 
 **Documented exception to "events only".** The tuner row's

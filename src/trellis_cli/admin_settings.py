@@ -5,7 +5,7 @@ Both commands submit the same :class:`~trellis.mutate.commands.Command`
 shape the admin-scoped REST route (``trellis_api/routes/settings.py``)
 does, through :func:`~trellis.mutate.build_settings_executor` — so a
 denying policy, a degraded store, or an out-of-range value is refused
-identically on these two surfaces (Stage 2 always runs, CLAUDE.md).
+identically on these two surfaces (Stage 2 always runs, AGENTS.md).
 ``build_settings_executor`` wires ``Operation.SETTINGS_UPDATE`` into
 *no other* executor: MCP's generic ``execute_mutation`` and REST's
 generic ``POST /commands/batch`` build :func:`~trellis.mutate.build_curate_executor`

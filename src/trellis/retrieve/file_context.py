@@ -31,11 +31,12 @@ when one is a ``/``-boundary suffix of the other **and the suffix itself
 spans a directory** — an absolute ``/home/n/vault/notes/foo.md`` finds
 the stored relpath ``notes/foo.md``. A single-segment value matches by
 equality only. That last clause is the whole reason the rule is not
-plain ``endswith``: ``README.md`` / ``CLAUDE.md`` / ``TODO.md`` sit at
-the root of the vault *and* of every repo, so a bare basename identifies
-a file no better than a coin flip — and those are exactly the files a
-read-time hook asks about most. Nothing more: no case folding and no
-separator rewriting, because stored values are POSIX already.
+plain ``endswith``: ``README.md`` / ``AGENTS.md`` / ``CLAUDE.md`` /
+``TODO.md`` sit at the root of the vault *and* of every repo, so a bare
+basename identifies a file no better than a coin flip — and those are
+exactly the files a read-time hook asks about most. Nothing more: no
+case folding and no separator rewriting, because stored values are
+POSIX already.
 
 The second key, and why one key was not enough
 ----------------------------------------------

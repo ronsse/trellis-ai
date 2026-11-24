@@ -37,7 +37,7 @@ A row is yielded even when it names no usable ``item_id`` (``item_id`` is then
 callers count it. Non-mapping rows are skipped.
 
 **Feedback rows.** :func:`feedback_row` / :func:`iter_feedback_rows` read both
-``FEEDBACK_RECORDED`` families (CLAUDE.md, "Feedback path"): the full
+``FEEDBACK_RECORDED`` families (AGENTS.md, "Feedback path"): the full
 ``PackFeedback.to_event_payload()`` and the governed
 ``{target_id, rating, comment, success}`` the executor writes. The attribution
 fields of the governed family are empty (or ``None``), never invented.

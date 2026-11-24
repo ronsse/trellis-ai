@@ -1,6 +1,6 @@
 """Near-miss warnings on ``Entity.entity_type`` and ``Edge.edge_kind``.
 
-CLAUDE.md and ``docs/design/adr-graph-ontology.md`` make the open-string
+AGENTS.md and ``docs/design/adr-graph-ontology.md`` make the open-string
 contract a hard rule: closing the type set would break domain
 integrations. The validator therefore *warns* (via ``structlog``) rather
 than raising — the value is preserved verbatim, but a typo of a

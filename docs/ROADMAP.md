@@ -29,7 +29,7 @@ last-review: 2026-10-29
 | What is actually in flight *right now* | **the tracker and the open PRs** | — nothing in this repo can answer it, see §2 |
 
 Picking up implementation work starts at `implementation-roadmap.md`, exactly as
-`CLAUDE.md` says. This page is for deciding *whether* that is the right door.
+`AGENTS.md` says. This page is for deciding *whether* that is the right door.
 
 ## 2. The queue is not in this repository
 

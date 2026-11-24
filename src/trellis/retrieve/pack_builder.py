@@ -310,7 +310,7 @@ def _audit_message(exc: Exception) -> str:
 
     Wrapped whole, not guarded by a list of exception types the way the
     collect loop's own ``except Exception`` is — :func:`resolve_stamp_staleness`
-    (``trellis.core.version``) is the model CLAUDE.md names for this shape.
+    (``trellis.core.version``) is the model AGENTS.md names for this shape.
     ``summarize_exception`` is not total: it reads ``exc.message`` on a
     :class:`~trellis.errors.TrellisError`, which a subclass whose
     ``__init__`` skips ``super().__init__()`` does not have, and it reads

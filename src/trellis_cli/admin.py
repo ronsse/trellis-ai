@@ -480,7 +480,7 @@ def health(
         # Plain ``print`` (not ``console.print``) so Rich's terminal-
         # width soft-wrap never splits the JSON across lines. Machine
         # consumers expect single-line JSON per the project rule in
-        # CLAUDE.md (`parse JSON output, not human-readable text`).
+        # AGENTS.md (`parse JSON output, not human-readable text`).
         payload: dict[str, Any] = {**checks, "backends": backends}
         if damaged:
             payload["damaged"] = damaged
@@ -783,7 +783,7 @@ def stats(
         # Plain ``print`` (not ``console.print``) so Rich's terminal-
         # width soft-wrap never splits the JSON across lines. Machine
         # consumers expect single-line JSON per the project rule in
-        # CLAUDE.md (`parse JSON output, not human-readable text`).
+        # AGENTS.md (`parse JSON output, not human-readable text`).
         print(json.dumps({"status": "ok", **counts}))
     else:
         table = Table(title="Store Statistics")

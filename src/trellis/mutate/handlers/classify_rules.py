@@ -356,7 +356,7 @@ class ClassifyRuleApplyHandler:
     restart to take effect.
 
     Re-applying an already-applied ``(kind, key)`` with a *different*
-    ``target`` overwrites the row in place -- CLAUDE.md: "a wrong rule
+    ``target`` overwrites the row in place -- AGENTS.md: "a wrong rule
     hides content" -- which is why this operation is classified
     ``DESTRUCTIVE`` in ``immutable_core.py``, the same reasoning as
     ``settings.update``.

@@ -46,6 +46,18 @@ class TestSourcePathMatches:
         assert not source_path_matches("TODO.md", "/home/n/projects/other/TODO.md")
         assert source_path_matches("TODO.md", "TODO.md")
 
+    @pytest.mark.parametrize("name", ["README.md", "AGENTS.md", "CLAUDE.md", "TODO.md"])
+    def test_root_file_every_repo_has_matches_only_itself(self, name: str) -> None:
+        # The files the module docstring names: one at the root of every
+        # repo, and the ones an agent harness reads first. The rule is
+        # structural (a single segment matches by equality only), so this
+        # pins that no name is special-cased into or out of it.
+        assert source_path_matches(name, name)
+        assert not source_path_matches(name, f"/home/n/projects/other/{name}")
+        assert not source_path_matches(f"/home/n/projects/other/{name}", name)
+        assert source_path_matches(f"other/{name}", f"/home/n/projects/other/{name}")
+        assert not source_path_matches(f"other/{name}", f"/home/n/projects/mine/{name}")
+
     def test_conversation_title_shaped_like_a_filename_does_not_match(self) -> None:
         # Conversation ingest reuses ``source_path`` for the chat title,
         # which is free text and can read exactly like a basename.

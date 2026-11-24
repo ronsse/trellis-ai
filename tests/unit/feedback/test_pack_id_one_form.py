@@ -1,6 +1,6 @@
 """A feedback ``pack_id`` has one stored form.
 
-Two families write ``FEEDBACK_RECORDED`` (CLAUDE.md, "Feedback path"). The
+Two families write ``FEEDBACK_RECORDED`` (AGENTS.md, "Feedback path"). The
 governed one (``trellis curate feedback``, ``POST /feedback``) has always
 stripped ``pack_id``. The ``PackFeedback`` one (MCP ``record_feedback``,
 ``POST /packs/{pack_id}/feedback``, the SDK) recorded it as given, so a padded

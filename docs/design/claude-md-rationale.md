@@ -1,8 +1,8 @@
 # CLAUDE.md rationale
 
-This document holds the reasoning, measurements and incident history that used to live in [`CLAUDE.md`](../../CLAUDE.md). It was moved here verbatim on 2026-09-28, when CLAUDE.md was cut down to rules and pointers because every agent loads that file on every call. CLAUDE.md keeps the rule; this document keeps why.
+This document holds the reasoning, measurements and incident history that used to live in [`AGENTS.md`](../../AGENTS.md), the agent instruction file, which was named `CLAUDE.md` until 2026-11-24 (`CLAUDE.md` is now a one-line stub that imports it; this document keeps its filename). It was moved here verbatim on 2026-09-28, when that file was cut down to rules and pointers because every agent loads it on every call. AGENTS.md keeps the rule; this document keeps why.
 
-Where the two disagree, CLAUDE.md and the code win. Each passage below records what was measured and believed when it was written, and some of it has since been superseded. Sections follow CLAUDE.md's headings, and links have been rewritten to resolve from this directory. Add new rationale here rather than to CLAUDE.md.
+Where the two disagree, AGENTS.md and the code win. Each passage below records what was measured and believed when it was written, and some of it has since been superseded. Sections follow AGENTS.md's headings, and links have been rewritten to resolve from this directory. Add new rationale here rather than to AGENTS.md. Passages below that say `CLAUDE.md` mean the same file.
 
 
 ## Hard Rules

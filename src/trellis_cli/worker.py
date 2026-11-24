@@ -770,7 +770,7 @@ def _emit_curate_cycle_completed(
     "nothing else" as including the EventLog's row count.
 
     Advisory, wrapped whole: an EventLog write that fails here must
-    never fail the cycle it is reporting on (CLAUDE.md's rule for an
+    never fail the cycle it is reporting on (AGENTS.md's rule for an
     advisory step on the write path; :func:`record_write_rejection` is
     the existing instance of the same guard). ``emit`` is the one call
     that can raise — the ``try`` wraps it alone, no narrower, so a new

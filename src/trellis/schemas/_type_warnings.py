@@ -1,7 +1,7 @@
 """Near-miss warnings for open-string entity / edge types.
 
 ``Entity.entity_type`` and ``Edge.edge_kind`` are deliberately open
-strings (see CLAUDE.md and ``docs/design/adr-graph-ontology.md``):
+strings (see AGENTS.md and ``docs/design/adr-graph-ontology.md``):
 domain-specific integrations pass their own values verbatim and the
 storage layer accepts them. Closing the type set would break those
 integrations.

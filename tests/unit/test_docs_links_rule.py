@@ -6,7 +6,7 @@ old place keeps reading as a pointer: GitHub renders it, the reader clicks
 and lands on a 404.
 
 The rule: in ``docs/`` (outside ``docs/archive/``), the root ``README*`` and
-``CLAUDE.md``, every relative markdown link resolves to a path that exists,
+``AGENTS.md``, every relative markdown link resolves to a path that exists,
 and a ``#fragment`` on a markdown target names one of its headings. A
 fragment on any other file (``path.py#L12``) is not checked. An editor-style
 ``path.py:12`` suffix is part of the filename, so it fails; write
@@ -104,7 +104,7 @@ def doc_files(root: Path) -> list[Path]:
         for p in docs.rglob("*.md")
         if not p.relative_to(root).as_posix().startswith(ARCHIVE + "/")
     ]
-    files += [*root.glob("README*"), root / "CLAUDE.md"]
+    files += [*root.glob("README*"), root / "AGENTS.md"]
     return sorted(p for p in files if p.is_file())
 
 
@@ -149,7 +149,7 @@ def test_docs_links_resolve() -> None:
     problems = broken_links(REPO)
     assert not problems, (
         f"{len(problems)} broken relative link(s) in docs/ (outside "
-        f"{ARCHIVE}/), README* or CLAUDE.md. Point each at where the target "
+        f"{ARCHIVE}/), README* or AGENTS.md. Point each at where the target "
         "lives now; if it was removed on purpose, reword the sentence so it "
         "does not link there. Cite a line as path.py#L12, not path.py:12.\n"
         + "\n".join(problems)
@@ -161,7 +161,7 @@ def test_rule_still_sees_the_docs() -> None:
     assert len(files) >= MIN_FILES, len(files)
     assert count_links(REPO) >= MIN_LINKS
     assert not any(f.relative_to(REPO).as_posix().startswith(ARCHIVE) for f in files)
-    assert REPO / "CLAUDE.md" in files
+    assert REPO / "AGENTS.md" in files
 
 
 def test_rule_flags_each_defect_and_passes_each_good_shape(tmp_path: Path) -> None:
@@ -172,7 +172,7 @@ def test_rule_flags_each_defect_and_passes_each_good_shape(tmp_path: Path) -> No
     (tmp_path / "src" / "mod.py").write_text("x = 1\n")
     (docs / "other.md").write_text("# Other\n\n## Two words\n\n## Two words\n")
     (docs / "archive" / "old.md").write_text("[gone](nowhere.md)\n")
-    (tmp_path / "CLAUDE.md").write_text("[ok](docs/other.md)\n")
+    (tmp_path / "AGENTS.md").write_text("[ok](docs/other.md)\n")
     (tmp_path / "README.md").write_text("[bad](docs/missing.md)\n")
     (docs / "sub" / "page.md").write_text(
         "# Page\n"

@@ -1,6 +1,6 @@
 """Enforcement for the executor wiring rules (#424, #551).
 
-``CLAUDE.md`` states the pipeline as five stages, and
+``AGENTS.md`` states the pipeline as five stages, and
 :func:`trellis.mutate.build_curate_executor` passes a gate
 **unconditionally** — not only when policies exist — for one stated reason:
 

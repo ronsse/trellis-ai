@@ -1,6 +1,6 @@
 """Noise exclusion has to hold on the **semantic** axis (trellis-ai#338).
 
-``CLAUDE.md`` and ``docs/PRD.md`` both state that items demoted to
+``AGENTS.md`` and ``docs/PRD.md`` both state that items demoted to
 ``signal_quality="noise"`` are excluded from packs by default. Production
 measurement said otherwise, and the reason it stayed invisible is that every
 pack-level test in this repo exercised ``KeywordSearch`` — which reads the

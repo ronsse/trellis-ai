@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Rules and pointers for any coding agent working in this repository. `CLAUDE.md` is a one-line stub that imports this file; edit this one.
 
 > **Picking up implementation work?** Read [`docs/design/implementation-roadmap.md`](docs/design/implementation-roadmap.md) first — it's the live, single-page hand-off doc with the state of the project and the recommended execution order across all open ADR phases.
 
@@ -202,4 +202,4 @@ time, and the dependency-ordered queue. Decisions taken and pending live in
 
 ## Editing this file
 
-Every agent loads this file on every call, so each line has a standing cost. Keep it to rules and pointers: one line per rule, naming the test or module that enforces it. Reasoning, measurements and incident history go in [`docs/design/claude-md-rationale.md`](docs/design/claude-md-rationale.md), an ADR or the decision ledger, with at most one linking line here. `tests/unit/test_claude_md_budget.py` fails above the byte budget; make room before raising it.
+Every agent loads this file on every call, so each line has a standing cost. Keep it to rules and pointers: one line per rule, naming the test or module that enforces it. Reasoning, measurements and incident history go in [`docs/design/claude-md-rationale.md`](docs/design/claude-md-rationale.md), an ADR or the decision ledger, with at most one linking line here. `tests/unit/test_agents_md_budget.py` fails above the byte budget; make room before raising it.

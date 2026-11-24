@@ -54,7 +54,7 @@ candidates by ``item_id`` so the union pays no double-counting cost.
    is #375. Until one exists, ``build_strategies`` leaves
    ``graph_seed_extractor=None`` on purpose.
 
-No fallback paths (greenfield writer contract — see CLAUDE.md):
+No fallback paths (greenfield writer contract — see AGENTS.md):
 
 * Missing ``embedding_fn`` raises at construction.
 * Empty top-K returns ``[]``; the caller composes with other seed
@@ -155,7 +155,7 @@ class SemanticSeedExtractor:
 
     Raises:
         ValueError: If ``embedding_fn`` is ``None`` (greenfield writer
-            contract — silent fallbacks are forbidden, see CLAUDE.md).
+            contract — silent fallbacks are forbidden, see AGENTS.md).
     """
 
     def __init__(
@@ -170,7 +170,7 @@ class SemanticSeedExtractor:
             msg = (
                 "SemanticSeedExtractor requires an embedding_fn — "
                 "silent fallbacks are forbidden under the greenfield "
-                "writer contract (CLAUDE.md). Pass the same callable "
+                "writer contract (AGENTS.md). Pass the same callable "
                 "you would pass to SemanticSearch."
             )
             raise ValueError(msg)
