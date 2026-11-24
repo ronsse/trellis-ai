@@ -10,8 +10,9 @@ command (``trellis_cli.analyze_intent_families``) or the REST route module
 (``trellis_api.routes.analyze``), and may not name the ``intent_families`` config
 key as a string, which is how a dynamic import or a read of
 ``registry.retrieval_config`` would reach it. The relabel itself may import
-whatever it needs from them. Only the module's own CLI command and REST route
-may import the module; tests are outside ``src``.
+whatever it needs from them. Only the module's own CLI command and REST route,
+and the read-only unanswered-intents report (``--group-by family``), may import
+the module; tests are outside ``src``.
 
 A static pin has a limit: a module name built at run time, such as a string joined
 with ``+``, is beyond any static pin and no test here would see it.
@@ -41,12 +42,16 @@ _FORBIDDEN_TARGETS = (
 _CONFIG_KEY = "intent_families"
 _DYNAMIC_IMPORT_NAMES = frozenset({"import_module", "__import__"})
 
-#: The module itself, its CLI command and its REST route.
+#: The module itself, its CLI command and its REST route, plus the read-only
+#: ``analyze unanswered-intents`` report, whose ``--group-by family`` groups by
+#: the rule set and reaches no serving or learning code.
 _ALLOWED = frozenset(
     {
         "trellis/learning/intent_families.py",
         "trellis_cli/analyze_intent_families.py",
         "trellis_api/routes/analyze.py",
+        "trellis/analyze/unanswered_intents.py",
+        "trellis_cli/analyze.py",
     }
 )
 

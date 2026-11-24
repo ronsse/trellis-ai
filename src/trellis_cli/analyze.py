@@ -2368,6 +2368,15 @@ def unanswered_intents(
         "--redact-intents",
         help="Replace each intent with a short stable digest.",
     ),
+    group_by: str = typer.Option(
+        "intent",
+        "--group-by",
+        help=(
+            "Grouping key: intent (normalised request text, the default), "
+            "domain (the pack's recorded domain) or family (the deterministic "
+            "intent-family rules, as in analyze intent-families)."
+        ),
+    ),
     no_meta_trace: bool = typer.Option(
         False,
         "--no-meta-trace",
@@ -2378,14 +2387,36 @@ def unanswered_intents(
 
     Joins each PACK_ASSEMBLED to the FEEDBACK_RECORDED rows naming it (both
     feedback families), takes the latest verdict, and groups packs by their
-    intent text normalised for case, whitespace and punctuation. A pack is
+    intent text normalised for case, whitespace and punctuation, or with
+    ``--group-by`` by the pack's domain or its deterministic intent family
+    (each such group also counts its distinct intents). A pack is
     unanswered when graded below SUCCESS_RATING_THRESHOLD; ungraded packs are
-    not. Held-out packs are dropped and counted. Read-only.
+    not. Held-out packs are dropped and counted. Read-only. An unknown
+    ``--group-by`` exits EXIT_VALIDATION on every ``--format``.
     """
     from trellis.analyze.unanswered_intents import (  # noqa: PLC0415
+        GROUP_BY_CHOICES,
+        GROUP_BY_FAMILY,
+        GROUP_BY_INTENT,
         summarize_unanswered_intents,
     )
+    from trellis.learning.intent_families import load_rule_set  # noqa: PLC0415
 
+    if group_by not in GROUP_BY_CHOICES:
+        message = f"--group-by must be one of {', '.join(GROUP_BY_CHOICES)}"
+        if output_format == "json":
+            emit_json({"status": "error", "message": message})
+        else:
+            console.print(f"[red]{escape(message)}[/red]", soft_wrap=True)
+        raise typer.Exit(code=EXIT_VALIDATION)
+
+    # The same loader `analyze intent-families` uses; read only when needed,
+    # so a malformed block cannot change the other modes.
+    rule_set = (
+        load_rule_set(_get_registry().retrieval_config)
+        if group_by == GROUP_BY_FAMILY
+        else None
+    )
     event_log = get_event_log()
     with wrap_cli_meta_analysis(
         agent_suffix="analyze",
@@ -2400,6 +2431,8 @@ def unanswered_intents(
             top=top,
             examples=examples,
             redact_intents=redact_intents,
+            group_by=group_by,
+            rule_set=rule_set,
         )
         if _meta_record.enabled and report.totals.unanswered > 0:
             _meta_record.produced_finding(
@@ -2412,7 +2445,8 @@ def unanswered_intents(
         return
 
     totals = report.totals
-    console.print(f"[bold]Unanswered Intents[/bold] (last {days} days)")
+    grouped = "" if group_by == GROUP_BY_INTENT else f", grouped by {group_by}"
+    console.print(f"[bold]Unanswered Intents[/bold] (last {days} days{grouped})")
     if report.scan.truncated:
         console.print(f"  [yellow]window[/yellow] {escape(report.scan.note or '')}")
     console.print(
@@ -2438,6 +2472,8 @@ def unanswered_intents(
             f"    domains {escape(', '.join(group.domains) or '(none)')}; "
             f"examples {escape(', '.join(group.example_pack_ids))}"
         )
+        if group.distinct_intents is not None:
+            console.print(f"    {group.distinct_intents} distinct intent(s)")
     lim = report.limits
     console.print()
     console.print(
