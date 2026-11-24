@@ -4438,7 +4438,8 @@ changes no serving.
 
 ```bash
 trellis analyze unanswered-intents [--days N] [--limit N] [--top N] [--min-unanswered N] \
-    [--examples N] [--redact-intents] [--format text|json] [--no-meta-trace]
+    [--examples N] [--redact-intents] [--group-by intent|domain|family] \
+    [--format text|json] [--no-meta-trace]
 ```
 
 | Option | Default | Description |
@@ -4448,7 +4449,8 @@ trellis analyze unanswered-intents [--days N] [--limit N] [--top N] [--min-unans
 | `--top` | `20` | Most groups listed; the rest are counted in `limits.groups_beyond_top` |
 | `--min-unanswered` | `2` | Hide groups with fewer unanswered packs; counted in `limits.groups_hidden_below_min` |
 | `--examples` | `3` | Most recent unanswered pack ids listed per group |
-| `--redact-intents` | off | Replace each group key and label with `intent:<12 hex>`, a SHA-256 digest of the key |
+| `--redact-intents` | off | Replace each intent key and label with `intent:<12 hex>`, a SHA-256 digest of the key; a domain or family key is left as is |
+| `--group-by` | `intent` | Grouping key: `intent`, `domain` or `family` (see below); any other value exits 2 on every `--format` |
 | `--no-meta-trace` | off | Skip the meta-trace; the run then writes nothing |
 
 Each `PACK_ASSEMBLED` (held-out packs and their feedback dropped and counted)
@@ -4471,12 +4473,28 @@ item was named unhelpful) and `unanswered_not_named_unhelpful`, mean rating
 of the deciding rows, first and last seen, domains, intent families and
 example pack ids. Groups sort by unanswered count, then recency.
 
+Because agents rarely word a request the same way twice, intent grouping can
+leave almost every group with one pack. `--group-by domain` keys on the
+pack's recorded `domain` (a pack with none groups under `(no domain)`, counted
+and never dropped); `--group-by family` keys on the intent family the
+deterministic rule set assigns to the intent text, loaded exactly as
+`trellis analyze intent-families` loads it (the shipped rules, or
+`retrieval.intent_families` in `config.yaml`, where a malformed block is a
+`ConfigError`); a pack with no intent takes the fallback family. The payload's
+legacy `intent_family` field is never the key. In both modes the label is the
+key itself, since a domain or family name is not user content, so no intent
+text is printed, and each group adds `distinct_intents`, the number of
+distinct normalised intents in it, so a reader can tell one need asked often
+from many needs sharing a bucket. The report adds `group_by`. With the default
+`--group-by intent` neither key appears, and the output is unchanged.
+
 The label is the latest raw intent, cut to 80 characters. It is the asker's
 own text, so share output only with `--redact-intents`; a digest of a short,
 guessable intent can still be confirmed by hashing a guess.
 
 JSON keys: `window_days`, `since`, `min_unanswered`, `top`, `redacted`,
-`groups`, `totals`, `limits`, `scan`.
+`groups`, `totals`, `limits`, `scan`, plus `group_by` when it is `domain` or
+`family`.
 
 ### `trellis analyze pack-judge`
 

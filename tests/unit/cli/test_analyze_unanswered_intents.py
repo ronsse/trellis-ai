@@ -11,6 +11,7 @@ comparison. Every intent below is invented.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from typer.testing import CliRunner
 
 from tests.cli_output import plain
 from trellis.analyze.unanswered_intents import (
+    NO_DOMAIN_KEY,
     NO_INTENT_KEY,
     intent_key,
     summarize_unanswered_intents,
@@ -26,6 +28,7 @@ from trellis.analyze.unanswered_intents import (
 from trellis.core.pack_holdout import HOLDOUT_KEY
 from trellis.feedback.models import SUCCESS_RATING_THRESHOLD, PackFeedback
 from trellis.feedback.recording import record_feedback
+from trellis.learning.intent_families import classify_intent_family
 from trellis.mutate import build_curate_executor
 from trellis.mutate.commands import Command, CommandStatus, Operation
 from trellis.stores.base.event_log import EventType
@@ -304,6 +307,117 @@ class TestReport:
         assert labels == {g.label for g in again.groups}
 
 
+# Two wordings of one bugfix need and one review need, all in one domain.
+FIX_A = "fix the flaky frobnicator test"
+FIX_B = "repair a crash in the teapot loader"
+REVIEW_A = "review the widget gasket change"
+FAMILY_CONFIG = """\
+retrieval:
+  intent_families:
+    fallback: misc
+    rules:
+      - id: x.teapot
+        family: teapots
+        keywords: [teapot]
+"""
+
+
+def _seed_families(registry: StoreRegistry, tmp_path: Path) -> None:
+    for pack_id, intent, domain in (
+        ("g1", FIX_A, "testing"),
+        ("g2", FIX_B, "testing"),
+        ("g3", REVIEW_A, "testing"),
+        ("g4", REVIEW_A, None),
+        ("g5", None, None),
+    ):
+        _pack(registry, pack_id, intent, ["doc-g"], domain=domain)
+        _grade(registry, tmp_path, pack_id, 0.1)
+
+
+class TestGroupBy:
+    def test_default_dump_has_no_new_keys(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        _seed(registry, tmp_path)
+        moment = datetime.now(tz=UTC)
+        default = _report(registry, min_unanswered=1, now=moment).model_dump()
+        assert "group_by" not in default
+        for group in default["groups"]:
+            assert "distinct_intents" not in group
+        explicit = _report(registry, min_unanswered=1, group_by="intent", now=moment)
+        assert explicit.model_dump() == default
+
+    def test_domain_merges_differently_worded_requests(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        _seed_families(registry, tmp_path)
+        report = _report(registry, group_by="domain", min_unanswered=1)
+        testing = _groups(report)["testing"]
+        assert (testing.packs, testing.unanswered) == (3, 3)
+        assert testing.label == "testing"
+        assert testing.distinct_intents == 3
+        dumped = report.model_dump()
+        assert dumped["group_by"] == "domain"
+
+    def test_no_domain_bucket_counted_never_dropped(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        _seed_families(registry, tmp_path)
+        report = _report(registry, group_by="domain", min_unanswered=1)
+        bucket = _groups(report)[NO_DOMAIN_KEY]
+        assert (bucket.packs, bucket.unanswered, bucket.label) == (
+            2,
+            2,
+            NO_DOMAIN_KEY,
+        )
+        # One review request and one pack with no intent text.
+        assert bucket.distinct_intents == 2
+        assert report.totals.packs == 5
+
+    def test_family_groups_by_rule_set_not_payload_field(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        _seed_families(registry, tmp_path)
+        fix = classify_intent_family(FIX_A).family
+        review = classify_intent_family(REVIEW_A).family
+        assert classify_intent_family(FIX_B).family == fix != review
+        report = _report(registry, group_by="family", min_unanswered=1)
+        groups = _groups(report)
+        assert (groups[fix].packs, groups[fix].distinct_intents) == (2, 2)
+        assert (groups[review].packs, groups[review].distinct_intents) == (2, 1)
+        assert "general_context" not in groups
+        assert groups[fix].label == fix
+
+    def test_labels_carry_no_intent_text(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        _seed_families(registry, tmp_path)
+        for mode in ("domain", "family"):
+            for redact in (False, True):
+                report = _report(
+                    registry, group_by=mode, min_unanswered=1, redact_intents=redact
+                )
+                dumped = report.model_dump_json().casefold()
+                for word in ("frobnicator", "teapot", "gasket"):
+                    assert word not in dumped, (mode, redact)
+                assert {g.key for g in report.groups} == {
+                    g.label for g in report.groups
+                }
+
+    def test_redaction_leaves_domain_key(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        _seed_families(registry, tmp_path)
+        report = _report(
+            registry, group_by="domain", min_unanswered=1, redact_intents=True
+        )
+        assert "testing" in _groups(report)
+
+    def test_unknown_group_by_is_refused(self, registry: StoreRegistry) -> None:
+        with pytest.raises(ValueError, match="group_by"):
+            _report(registry, group_by="session")
+
+
 class TestCli:
     def test_json_shape(self, registry: StoreRegistry, tmp_path: Path) -> None:
         _seed(registry, tmp_path)
@@ -394,3 +508,88 @@ class TestCli:
             )
             assert result.exit_code == 0, result.output
         assert _footprint() == before
+
+    def test_group_by_domain_json(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        _seed_families(registry, tmp_path)
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "unanswered-intents",
+                "--group-by",
+                "domain",
+                "--min-unanswered",
+                "1",
+                "--format",
+                "json",
+                "--no-meta-trace",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout.strip())
+        assert data["group_by"] == "domain"
+        groups = {g["key"]: g for g in data["groups"]}
+        assert set(groups) == {"testing", NO_DOMAIN_KEY}
+        assert groups["testing"]["distinct_intents"] == 3
+
+    def test_group_by_family_reads_configured_rules(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        _seed_families(registry, tmp_path)
+        (tmp_path / "config").mkdir(exist_ok=True)
+        (tmp_path / "config" / "config.yaml").write_text(
+            FAMILY_CONFIG, encoding="utf-8"
+        )
+        _reset_registry()
+        for fmt in ("text", "json"):
+            result = runner.invoke(
+                app,
+                [
+                    "analyze",
+                    "unanswered-intents",
+                    "--group-by",
+                    "family",
+                    "--min-unanswered",
+                    "1",
+                    "--format",
+                    fmt,
+                    "--no-meta-trace",
+                ],
+            )
+            assert result.exit_code == 0, result.output
+            out = plain(result.stdout)
+            assert "frobnicator" not in out.casefold()
+            assert "gasket" not in out.casefold()
+            if fmt == "json":
+                data = json.loads(out.strip())
+                keys = {g["key"]: g["packs"] for g in data["groups"]}
+                # Only the configured rule matched; the shipped bugfix and
+                # review rules were replaced, not consulted.
+                assert keys == {"misc": 4, "teapots": 1}
+                assert data["totals"]["packs"] == 5
+            else:
+                assert "grouped by family" in out
+                assert "distinct intent(s)" in out
+
+    @pytest.mark.parametrize("fmt", ["text", "json"])
+    def test_invalid_group_by_exits_2(
+        self, registry: StoreRegistry, tmp_path: Path, fmt: str
+    ) -> None:
+        _seed(registry, tmp_path)
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "unanswered-intents",
+                "--group-by",
+                "session",
+                "--format",
+                fmt,
+                "--no-meta-trace",
+            ],
+        )
+        assert result.exit_code == 2, result.output
+        if fmt == "json":
+            assert json.loads(result.stdout.strip())["status"] == "error"

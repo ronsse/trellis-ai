@@ -25,22 +25,43 @@ scan order) decides, because a later grade is the grader's revised view and
 taking one row keeps each pack counted once. Packs with more than one verdict
 row, and those whose rows disagree, are counted in ``limits``.
 
-**Grouping key.** :func:`intent_key`: the pack's ``intent`` text, case-folded,
-punctuation replaced by spaces and whitespace collapsed. It merges spellings
-of one request (case, spacing, punctuation) and nothing more: two paraphrases
-of the same need are two groups, and no embedding or model is consulted.
-``intent_family`` is not part of the key: it is a keyword bucket that
-defaults to ``general_context`` and has been found empty in practice (see
-:func:`~trellis.feedback.attribution.lookup_pack_scope`), so it would merge
-unrelated requests. ``domain`` is reported per group, not keyed on. A pack
-with no usable intent text lands under :data:`NO_INTENT_KEY`, counted and
-never dropped.
+**Grouping key.** Chosen by ``group_by``; no embedding or model is consulted
+in any mode.
+
+* ``intent`` (the default): :func:`intent_key`, the pack's ``intent`` text
+  case-folded, punctuation replaced by spaces and whitespace collapsed. It
+  merges spellings of one request (case, spacing, punctuation) and nothing
+  more: two paraphrases of the same need are two groups, so on a corpus where
+  agents never word a request twice almost every group holds one pack. A pack
+  with no usable intent text lands under :data:`NO_INTENT_KEY`, counted and
+  never dropped.
+* ``domain``: the payload's ``domain`` as the pack recorded it (stripped). A
+  pack with none lands under :data:`NO_DOMAIN_KEY`, counted and never dropped.
+* ``family``: the intent family the deterministic rule set of
+  :mod:`trellis.learning.intent_families` assigns to the pack's ``intent``
+  text (the shipped rules, or a deployment's ``retrieval.intent_families``
+  block, passed in as ``rule_set``). A pack with no intent text takes the rule
+  set's fallback family, as any unmatched intent does.
+
+The payload's legacy ``intent_family`` field is never a key: it is a keyword
+bucket that defaults to ``general_context`` and has been found empty in
+practice (see :func:`~trellis.feedback.attribution.lookup_pack_scope`), so it
+would merge unrelated requests. In ``intent`` mode ``domain`` is reported per
+group, not keyed on. In ``domain`` and ``family`` mode each group also carries
+``distinct_intents``, the number of distinct :func:`intent_key` values in it
+(the no-intent key counting as one), so a reader sees whether a bucket is one
+need asked many times or many needs; in ``intent`` mode that field, and the
+report's ``group_by``, are absent from a dump, so the default output is what
+it was before the option existed.
 
 **Intent text is user content.** A group's label is the most recent raw
 intent of the group, whitespace-collapsed and cut with
 :func:`~trellis.retrieve.excerpts.truncate_excerpt` to
 :data:`LABEL_MAX_CHARS`; ``redact_intents`` replaces both key and label by a
-short stable digest of the key so the counts can be shared.
+short stable digest of the key so the counts can be shared. In ``domain``
+and ``family`` mode the label is the key itself: a domain or a family name is
+a configured vocabulary term, not user content, so ``redact_intents`` leaves
+both as they are and no intent text is printed in those modes.
 """
 
 from __future__ import annotations
@@ -52,7 +73,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from pydantic import Field
+from pydantic import Field, model_serializer
 
 from trellis.core.base import TrellisModel
 from trellis.core.pack_holdout import drop_holdout, is_holdout
@@ -63,6 +84,7 @@ from trellis.feedback.pack_rows import (
     iter_feedback_rows,
     served_rows_from_payload,
 )
+from trellis.learning.intent_families import default_rule_set
 from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.stores.base.event_log import (
     DEFAULT_SCAN_LIMIT,
@@ -76,12 +98,25 @@ from trellis.stores.base.event_log import (
 if TYPE_CHECKING:
     from collections.abc import Container, Iterable
 
+    from trellis.learning.intent_families import RuleSet
     from trellis.stores.base.event_log import Event, EventLog
 
 logger = structlog.get_logger(__name__)
 
 #: The key (and label) of packs whose intent text is absent or blank.
 NO_INTENT_KEY = "(no intent)"
+
+#: The key (and label) of packs whose payload names no domain (``group_by="domain"``).
+NO_DOMAIN_KEY = "(no domain)"
+
+#: Group by normalised intent text (the default).
+GROUP_BY_INTENT = "intent"
+#: Group by the pack's recorded ``domain``.
+GROUP_BY_DOMAIN = "domain"
+#: Group by the deterministic intent family of the pack's intent text.
+GROUP_BY_FAMILY = "family"
+#: Every accepted ``group_by`` value, default first.
+GROUP_BY_CHOICES: tuple[str, ...] = (GROUP_BY_INTENT, GROUP_BY_DOMAIN, GROUP_BY_FAMILY)
 
 #: Longest group label printed, in characters.
 LABEL_MAX_CHARS = 80
@@ -91,11 +126,27 @@ DIGEST_CHARS = 12
 
 _NON_WORD = re.compile(r"[\W_]+", re.UNICODE)
 
-_LIMIT_STATEMENTS: tuple[str, ...] = (
-    (
+#: The first limit statement, per ``group_by``: what the key merges and misses.
+_KEY_STATEMENTS: dict[str, str] = {
+    GROUP_BY_INTENT: (
         "The grouping key is the intent text case-folded with punctuation and "
         "whitespace collapsed; paraphrases of one request are separate groups."
     ),
+    GROUP_BY_DOMAIN: (
+        "The grouping key is the domain the pack recorded; one domain can hold "
+        "many unrelated needs (see distinct_intents), and a pack with no domain "
+        "is grouped under (no domain)."
+    ),
+    GROUP_BY_FAMILY: (
+        "The grouping key is the intent family the deterministic keyword rule "
+        "set assigns to the intent text; first matching rule wins, an unmatched "
+        "or missing intent takes the fallback family, and one family can hold "
+        "many unrelated needs (see distinct_intents)."
+    ),
+}
+
+_LIMIT_STATEMENTS: tuple[str, ...] = (
+    _KEY_STATEMENTS[GROUP_BY_INTENT],
     (
         "Ungraded packs are not unanswered: no feedback with a verdict named "
         "them, which says nothing about whether they helped."
@@ -136,6 +187,16 @@ class IntentGroup(TrellisModel):
     domains: list[str] = Field(default_factory=list)
     intent_families: list[str] = Field(default_factory=list)
     example_pack_ids: list[str] = Field(default_factory=list)
+    #: Distinct intent keys in the group; set only in ``domain`` and ``family``
+    #: mode and absent from a dump otherwise.
+    distinct_intents: int | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_intent_mode_fields(self, handler: Any) -> dict[str, Any]:
+        dumped: dict[str, Any] = handler(self)
+        if self.distinct_intents is None:
+            dumped.pop("distinct_intents", None)
+        return dumped
 
 
 class UnansweredTotals(TrellisModel):
@@ -180,6 +241,16 @@ class UnansweredIntentsReport(TrellisModel):
     totals: UnansweredTotals = Field(default_factory=UnansweredTotals)
     limits: UnansweredLimits = Field(default_factory=UnansweredLimits)
     scan: ScanCoverage = Field(default_factory=ScanCoverage)
+    #: The grouping key; absent from a dump when it is the default ``intent``,
+    #: so the default payload is unchanged.
+    group_by: str = GROUP_BY_INTENT
+
+    @model_serializer(mode="wrap")
+    def _omit_default_group_by(self, handler: Any) -> dict[str, Any]:
+        dumped: dict[str, Any] = handler(self)
+        if self.group_by == GROUP_BY_INTENT:
+            dumped.pop("group_by", None)
+        return dumped
 
 
 def intent_key(intent: object) -> str:
@@ -242,6 +313,7 @@ class _Pack:
     at: datetime
     key: str
     label: str
+    intent: str
     domain: str | None
     family: str | None
     served: frozenset[str]
@@ -258,6 +330,8 @@ def summarize_unanswered_intents(
     top: int = 20,
     examples: int = 3,
     redact_intents: bool = False,
+    group_by: str = GROUP_BY_INTENT,
+    rule_set: RuleSet | None = None,
     now: datetime | None = None,
 ) -> UnansweredIntentsReport:
     """Group graded packs by request and count the unanswered ones.
@@ -271,12 +345,23 @@ def summarize_unanswered_intents(
         top: Most groups listed; the rest are counted in
             ``limits.groups_beyond_top``.
         examples: Most unanswered pack ids listed per group.
-        redact_intents: Replace each key and label by a digest.
+        redact_intents: Replace each intent key and label by a digest; a
+            domain or family key is not user content and is left as it is.
+        group_by: One of :data:`GROUP_BY_CHOICES`; see the module docstring.
+        rule_set: The intent-family rules for ``group_by="family"`` (load a
+            deployment's with :func:`~trellis.learning.intent_families.load_rule_set`).
+            Default: the shipped rules. Ignored in the other modes.
         now: Window end, for tests. Default: the current time.
 
     Returns:
         An :class:`UnansweredIntentsReport`. Reads only.
+
+    Raises:
+        ValueError: ``group_by`` is not one of :data:`GROUP_BY_CHOICES`.
     """
+    if group_by not in GROUP_BY_CHOICES:
+        msg = f"group_by must be one of {', '.join(GROUP_BY_CHOICES)}, not {group_by!r}"
+        raise ValueError(msg)
     moment = now if now is not None else datetime.now(tz=UTC)
     since, until = resolve_scan_window(days, now=moment)
     pack_scan = scan_events(
@@ -294,6 +379,7 @@ def summarize_unanswered_intents(
         limit=limit,
     )
     limits = UnansweredLimits()
+    limits.statements[0] = _KEY_STATEMENTS[group_by]
     limits.holdout_packs_dropped = sum(
         1 for event in pack_scan.events if is_holdout(event.payload)
     )
@@ -301,9 +387,15 @@ def summarize_unanswered_intents(
     limits.holdout_feedback_dropped = len(feedback_scan.events) - len(feedback_events)
     limits.feedback_events = len(feedback_events)
 
-    packs = _read_packs(pack_events, limits)
+    packs = _read_packs(pack_events, limits, group_by, rule_set)
     _attach_feedback(packs, feedback_events, limits)
-    groups = _group(packs.values(), examples, redact_intents, limits)
+    groups = _group(
+        packs.values(),
+        examples,
+        redact_intents and group_by == GROUP_BY_INTENT,
+        limits,
+        by_intent=group_by == GROUP_BY_INTENT,
+    )
 
     totals = UnansweredTotals(groups=len(groups))
     for group in groups:
@@ -331,17 +423,25 @@ def summarize_unanswered_intents(
         totals=totals,
         limits=limits,
         scan=merge_coverage(pack_scan.coverage, feedback_scan.coverage),
+        group_by=group_by,
     )
     logger.debug(
         "unanswered_intents_summarized",
         window_days=days,
+        group_by=group_by,
         groups=totals.groups,
         unanswered=totals.unanswered,
     )
     return report
 
 
-def _read_packs(events: Iterable[Event], limits: UnansweredLimits) -> dict[str, _Pack]:
+def _read_packs(
+    events: Iterable[Event],
+    limits: UnansweredLimits,
+    group_by: str,
+    rule_set: RuleSet | None,
+) -> dict[str, _Pack]:
+    rules = rule_set or default_rule_set()
     packs: dict[str, _Pack] = {}
     for event in events:
         pack_id = event.entity_id
@@ -349,12 +449,19 @@ def _read_packs(events: Iterable[Event], limits: UnansweredLimits) -> dict[str, 
             continue
         payload = event.payload or {}
         raw_intent = payload.get("intent")
-        key = intent_key(raw_intent)
-        if key == NO_INTENT_KEY:
+        intent = intent_key(raw_intent)
+        if intent == NO_INTENT_KEY:
             limits.packs_without_intent += 1
             label = NO_INTENT_KEY
         else:
             label = " ".join(str(raw_intent).split())
+        domain = _clean(payload.get("domain"))
+        key = intent
+        if group_by == GROUP_BY_DOMAIN:
+            key = label = domain or NO_DOMAIN_KEY
+        elif group_by == GROUP_BY_FAMILY:
+            text = raw_intent if isinstance(raw_intent, str) else None
+            key = label = rules.classify(text).family
         served = frozenset(
             row.item_id
             for row in served_rows_from_payload(
@@ -367,7 +474,8 @@ def _read_packs(events: Iterable[Event], limits: UnansweredLimits) -> dict[str, 
             at=_as_utc(event.occurred_at),
             key=key,
             label=label,
-            domain=_clean(payload.get("domain")),
+            intent=intent,
+            domain=domain,
             family=_clean(payload.get("intent_family")),
             served=served,
         )
@@ -402,9 +510,12 @@ def _group(
     examples: int,
     redact: bool,
     limits: UnansweredLimits,
+    *,
+    by_intent: bool,
 ) -> list[IntentGroup]:
     groups: dict[str, IntentGroup] = {}
     rating_sums: dict[str, float] = {}
+    intents: dict[str, set[str]] = {}
     for pack in sorted(packs, key=lambda p: p.at):
         group = groups.get(pack.key)
         if group is None:
@@ -416,6 +527,10 @@ def _group(
             group.label = truncate_excerpt(pack.label, LABEL_MAX_CHARS)
         group.last_seen = pack.at.isoformat()
         group.packs += 1
+        if not by_intent:
+            seen = intents.setdefault(pack.key, set())
+            seen.add(pack.intent)
+            group.distinct_intents = len(seen)
         if pack.domain and pack.domain not in group.domains:
             group.domains = sorted([*group.domains, pack.domain])
         if pack.family and pack.family not in group.intent_families:
@@ -476,7 +591,12 @@ def _as_utc(moment: datetime) -> datetime:
 
 
 __all__ = [
+    "GROUP_BY_CHOICES",
+    "GROUP_BY_DOMAIN",
+    "GROUP_BY_FAMILY",
+    "GROUP_BY_INTENT",
     "LABEL_MAX_CHARS",
+    "NO_DOMAIN_KEY",
     "NO_INTENT_KEY",
     "IntentGroup",
     "UnansweredIntentsReport",
