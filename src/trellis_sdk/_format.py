@@ -50,7 +50,7 @@ def format_pack_as_markdown(
     exceeded and appends a ``[N more items omitted]`` marker. A pack with
     a ``pack_id`` always ends with the feedback footer, as core's does;
     ``empty_text`` is the line shown in place of items when there are none.
-    ``nearby`` is the pack JSON's ``metadata["nearby"]`` block: its
+    ``nearby`` is the pack JSON's ``nearby`` block (:func:`nearby_of`): its
     server-rendered ``markdown`` is printed after the items, outside the
     budget, exactly as the core formatter prints it.
     """
@@ -147,7 +147,7 @@ def format_sectioned_pack_as_markdown(
     ``axes`` block — or ``""`` when none applies. Same header placement
     as ``trellis.retrieve.formatters.format_sectioned_pack_as_markdown``:
     above the withholding note, not charged against the token budget.
-    ``nearby`` (``metadata["nearby"]``) prints its server-rendered text
+    ``nearby`` (the response's ``nearby`` block) prints its server-rendered text
     after the sections.
     """
     lines = [f"# Context for: {intent}"]
@@ -184,7 +184,16 @@ def format_sectioned_pack_as_markdown(
 
 
 def nearby_of(pack: Mapping[str, Any]) -> Mapping[str, Any] | None:
-    """A pack JSON's ``metadata["nearby"]`` block, or ``None``."""
+    """A pack JSON's ``nearby`` block, or ``None``.
+
+    The REST pack responses carry it at the top-level ``nearby`` key (``None``
+    when the pack has no section). A pack-shaped mapping that still holds the
+    server's ``metadata`` (an in-process ``Pack.model_dump()``) carries it at
+    ``metadata["nearby"]``, read only when the top-level key is absent.
+    """
+    if "nearby" in pack:
+        top = pack.get("nearby")
+        return top if isinstance(top, Mapping) else None
     metadata = pack.get("metadata")
     block = metadata.get("nearby") if isinstance(metadata, Mapping) else None
     return block if isinstance(block, Mapping) else None

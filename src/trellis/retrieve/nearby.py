@@ -29,8 +29,10 @@ block without ``markdown`` (:func:`nearby_event_block`). Every formatter, the
 core ones (:mod:`trellis.retrieve.formatters`) and the SDK's
 (``trellis_sdk._format``), prints that string through
 :func:`trellis_wire.nearby.nearby_markdown`, after the items and before the
-advisories, so no surface re-derives it. The REST pack responses carry no
-``metadata``, so an SDK caller over REST gets no section today. The section is
+advisories, so no surface re-derives it. The REST pack responses carry the
+block as a top-level ``nearby`` field (:class:`trellis_wire.dtos.NearbyResponse`,
+``null`` when absent), which the SDK reads, and ``trellis retrieve pack``
+prints it in both formats. The section is
 not charged to ``max_tokens`` (the advisories' doctrine); its own size is
 capped at :data:`MAX_SECTION_TOKENS`, a guarantee because labels, titles and
 listed ids are each length-capped and the first group is trimmed to fit.
@@ -50,10 +52,10 @@ showed. A ``PACK_ITEMS_FETCHED`` naming the pack and one of those ids joins
 to the pack as a nearby fetch: the feedback prior counts it as fetch evidence
 (:func:`trellis.retrieve.feedback_prior.build_ledger`) and ``analyze value``
 reports it apart from served fetches (``fetch_joined_nearby``).
-``PACK_ASSEMBLED.nearby`` lists the ids whenever the block was built, even
-for a pack whose caller's surface does not render the section (the REST pack
-responses carry no ``metadata``), so a joined fetch does not prove the agent
-saw the section.
+``PACK_ASSEMBLED.nearby`` lists the ids whenever the block was built, and
+every pack surface now returns it, but a caller may ignore a field or not
+print it (a REST client reading only ``items``), so a joined fetch does not
+prove the agent saw the section.
 """
 
 from __future__ import annotations
