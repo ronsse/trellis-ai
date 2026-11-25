@@ -311,6 +311,83 @@ class TestByDuplication:
         assert rows[DUP_SINGLETON].created == 0
         assert rows[DUP_UNCHECKED].created == 4
 
+    def test_no_vector_store_reports_nothing_over_the_bound(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        seed_captures(registry, tmp_path)
+        block = summarize_memory_yield(
+            registry.knowledge.document_store,
+            registry.operational.event_log,
+            capture_breakdown=True,
+            capture_max_docs=2,
+        ).capture_breakdown
+        assert block is not None
+        dup = block.duplication
+        assert (dup.population, dup.probed, dup.over_bound) == (6, 0, 0)
+
+    def test_a_failed_probe_is_unchecked_not_singleton(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        seed_captures(registry, tmp_path)
+        # c-legacy-sub (a lone vector, else a singleton) and c-sub-2 (paired
+        # with c-sub-1) have their own probe raise.
+        failing = _FailingQueries(
+            registry.knowledge.vector_store,
+            fail_on=([0.0, 0.0, 1.0], [0.99, 0.01, 0.0]),
+        )
+        block = summarize_memory_yield(
+            registry.knowledge.document_store,
+            registry.operational.event_log,
+            capture_breakdown=True,
+            vector_store=failing,
+        ).capture_breakdown
+        assert block is not None
+        rows = {row.group: row.created for row in block.by_duplication}
+        # c-sub-2 is still a near_duplicate: c-sub-1's probe found the pair.
+        assert rows == {DUP_NEAR_DUPLICATE: 4, DUP_SINGLETON: 0, DUP_UNCHECKED: 2}
+        dup = block.duplication
+        assert (dup.embedded, dup.neighbor_queries_failed) == (5, 2)
+        assert any(
+            "neighbor_queries_failed" in s and "unchecked" in s for s in block.limits
+        )
+
+    def test_limits_name_both_reasons_a_singleton_may_miss_a_partner(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        seed_captures(registry, tmp_path)
+        statement = next(s for s in _block(registry).limits if "singletons" in s)
+        assert "top-k" in statement
+        assert "beyond max_docs" in statement
+        assert any(
+            "archived, superseded and noise" in s for s in _block(registry).limits
+        )
+
+
+class _FailingQueries:
+    """A vector store whose ``query`` raises for the probe vectors named."""
+
+    def __init__(self, inner: Any, *, fail_on: tuple[list[float], ...]) -> None:
+        self._inner = inner
+        self._fail = [_unit(v) for v in fail_on]
+
+    def get(self, item_id: str) -> Any:
+        return self._inner.get(item_id)
+
+    def query(self, vector: list[float], **kwargs: Any) -> Any:
+        probe = _unit(vector)
+        if any(
+            sum(a * b for a, b in zip(probe, f, strict=True)) > 0.999999
+            for f in self._fail
+        ):
+            msg = "invented query failure"
+            raise RuntimeError(msg)
+        return self._inner.query(vector, **kwargs)
+
+
+def _unit(vector: list[float]) -> list[float]:
+    norm = sum(x * x for x in vector) ** 0.5
+    return [x / norm for x in vector]
+
 
 class TestCross:
     def test_cells(self, registry: StoreRegistry, tmp_path: Path) -> None:

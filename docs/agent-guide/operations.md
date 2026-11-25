@@ -4430,14 +4430,24 @@ is not in it). It carries the per-path counts split two ways, plus the 3x3
   worker's `metadata.subagent`; a document without it falls back to whether
   `metadata.session_id` begins `agent-` (the sub-agent transcript name);
   `session_kind_basis` counts which field decided. Document text is never read.
-- `by_duplication`: `near_duplicate`, `singleton`, `unchecked`. The predicate is
-  `trellis analyze near-duplicates`' (`embedding_close_pairs`: stored-embedding
-  cosine at or above `--capture-threshold`, one `get` plus one top-20 `query`
-  per document), restricted to the capture documents in the window, so a
-  neighbour from another path never makes a capture a duplicate. The newest
-  `--capture-max-docs` are probed; the rest, and documents without a usable
-  embedding, are `unchecked`, and `duplication` reports `probed`,
-  `over_bound`, `no_embedding` and `probes_saturated`. Counts are a lower bound.
+- `by_duplication`: `near_duplicate`, `singleton`, `unchecked`.
+  `embedding_close_pairs` shares the pair predicate (`_candidate_pairs`:
+  stored-embedding cosine at or above `--capture-threshold`, one top-20 `query`
+  per document) with `trellis analyze near-duplicates`, but loads vectors in
+  its own loop (one `get` per id, no archived/superseded/noise filter), so
+  unlike near-duplicates the population includes archived, superseded and
+  noise documents. It is restricted to the capture documents in the window, so
+  a neighbour from another path never makes a capture a duplicate. The newest
+  `--capture-max-docs` (at least 1) are probed. `unchecked` means the partners
+  are unknown: no vector store, no usable embedding, the document's own
+  neighbour query raised (`neighbor_queries_failed`), or beyond the bound. A
+  document whose query raised is still `near_duplicate` when another
+  document's probe paired it. `duplication` reports `probed`, `over_bound`
+  (both 0 without a vector store), `no_embedding`, `neighbor_queries_failed`
+  and `probes_saturated`. Counts are a lower bound: a `singleton` may have a
+  missed partner because each probe is top-k, or because the partner is older
+  than the newest `--capture-max-docs`. `--capture-threshold` must be finite
+  with 0 < t <= 1; a bad value or bound exits 2 in either format.
   `duplication` also counts pairs and connected-component clusters whose
   members share one `metadata.session_id` (`same_session`), name several
   (`cross_session`), or include a member with none (`unknown_session`).

@@ -339,8 +339,14 @@ def _candidate_pairs(
     floor: float,
     neighbors: int,
     report: NearDuplicatesReport,
+    probed: set[str] | None = None,
 ) -> dict[tuple[str, str], float]:
-    """Unordered pairs inside the population with cosine >= ``floor``."""
+    """Unordered pairs inside the population with cosine >= ``floor``.
+
+    When *probed* is given, each id whose neighbour query returned is added
+    to it, so a caller can tell a document without a partner from one whose
+    own probe raised.
+    """
     by_id = {doc.doc_id: doc for doc in docs}
     pairs: dict[tuple[str, str], float] = {}
     for doc in docs:
@@ -351,6 +357,8 @@ def _candidate_pairs(
             logger.warning("near_duplicates_neighbor_query_failed")
             report.neighbor_queries_failed += 1
             continue
+        if probed is not None:
+            probed.add(doc.doc_id)
         _tally_probe(doc, hits, by_id, floor=floor, neighbors=neighbors, report=report)
         for hit in hits:
             other_id = hit.get("item_id")
@@ -405,6 +413,10 @@ class ClosePairs:
 
     pairs: dict[tuple[str, str], float]
     embedded: frozenset[str]
+    #: Embedded ids whose own neighbour query returned (or the lone embedded
+    #: id, which has no embedded partner to find). An embedded id missing
+    #: here had its probe raise, so its partners are unknown.
+    probed: frozenset[str]
     counts: ClosePairCounts
 
 
@@ -422,8 +434,10 @@ def embedding_close_pairs(
     ``query(top_k=neighbors)``; neighbours outside *doc_ids* are discarded and
     the cosine is recomputed from the two fetched vectors. Pairs are unordered
     ``(min, max)`` keys; ``embedded`` names the ids that had a usable vector
-    and so could be paired. Every count is a lower bound, as in the full
-    report. Reads only.
+    and so could be paired, and ``probed`` the embedded ids whose own query
+    returned (an id whose query raised can still appear in a pair found from
+    the other side). Every count is a lower bound, as in the full report.
+    Reads only.
     """
     counts = ClosePairCounts(requested=len(doc_ids))
     scratch = NearDuplicatesReport(
@@ -454,19 +468,30 @@ def embedding_close_pairs(
             continue
         docs.append(_Doc(doc_id, "", "", unit))
     counts.embedded = len(docs)
+    probed: set[str] = set()
     pairs = (
         _candidate_pairs(
-            docs, vector_store, floor=threshold, neighbors=neighbors, report=scratch
+            docs,
+            vector_store,
+            floor=threshold,
+            neighbors=neighbors,
+            report=scratch,
+            probed=probed,
         )
         if len(docs) >= 2  # noqa: PLR2004
         else {}
     )
+    if len(docs) < 2:  # noqa: PLR2004
+        # A lone embedded id has no embedded partner to find, so it is
+        # decided without a query.
+        probed.update(doc.doc_id for doc in docs)
     counts.neighbor_queries_failed = scratch.neighbor_queries_failed
     counts.dimension_mismatches = scratch.dimension_mismatches
     counts.probes_saturated = scratch.probes_saturated
     return ClosePairs(
         pairs=pairs,
         embedded=frozenset(doc.doc_id for doc in docs),
+        probed=frozenset(probed),
         counts=counts,
     )
 

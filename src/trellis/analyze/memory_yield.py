@@ -208,13 +208,22 @@ _CAPTURE_LIMIT_STATEMENTS: tuple[str, ...] = (
     (
         "Duplication is the near-duplicates embedding predicate, restricted to "
         "session-capture documents in the window: a document is a near_duplicate "
-        "when some pair with another one reaches the cosine threshold. Each probe "
-        "is a bounded top-k query, so near_duplicate is a lower bound and some "
-        "singletons may have a missed partner."
+        "when some pair with another one reaches the cosine threshold. "
+        "near_duplicate is a lower bound and some singletons may have a missed "
+        "partner, for two reasons: each probe is a bounded top-k query, and a "
+        "partner beyond max_docs (an older capture document) is never a "
+        "candidate."
     ),
     (
-        "unchecked means the document was not paired: no vector store, no usable "
-        "embedding, or beyond max_docs (the newest max_docs are probed)."
+        "unchecked means the document's partners are unknown: no vector store, "
+        "no usable embedding, its own neighbour query raised "
+        "(neighbor_queries_failed), or beyond max_docs (the newest max_docs are "
+        "probed). A document whose query raised is still a near_duplicate when "
+        "another document's probe found it."
+    ),
+    (
+        "Unlike trellis analyze near-duplicates, the population includes "
+        "archived, superseded and noise documents."
     ),
 )
 
@@ -367,12 +376,15 @@ class CaptureDuplication(TrellisModel):
     population: int = 0
     #: Of those, the newest ``max_docs`` handed to the predicate.
     probed: int = 0
-    #: Documents left out by ``max_docs`` (counted as ``unchecked``).
+    #: Documents left out by ``max_docs`` (counted as ``unchecked``). Zero
+    #: without a vector store, where nothing is probed at all.
     over_bound: int = 0
     no_vector_store: bool = False
     embedded: int = 0
     no_embedding: int = 0
     embedding_unusable: int = 0
+    #: Probe queries that raised; those documents are ``unchecked`` unless
+    #: another document's probe paired them.
     neighbor_queries_failed: int = 0
     dimension_mismatches: int = 0
     probes_saturated: int = 0
@@ -935,15 +947,19 @@ def _capture_breakdown(
         reverse=True,
     )
     probed = newest[: max(max_docs, 0)]
-    dup.over_bound = len(docs) - len(probed)
     pairs: dict[tuple[str, str], float] = {}
     checked: set[str] = set()
     if vector_store is not None:
+        # Without a vector store nothing is probed, so no document is "over"
+        # the bound either: all of them are unchecked for that one reason.
         dup.probed = len(probed)
+        dup.over_bound = len(docs) - len(probed)
         found = embedding_close_pairs(
             probed, vector_store, threshold=threshold, neighbors=neighbors
         )
-        pairs, checked, counts = found.pairs, set(found.embedded), found.counts
+        # ``probed``, not ``embedded``: a document whose own neighbour query
+        # raised has unknown partners and must not read as a singleton.
+        pairs, checked, counts = found.pairs, set(found.probed), found.counts
         dup.embedded = counts.embedded
         dup.no_embedding = counts.no_embedding
         dup.embedding_unusable = counts.embedding_unusable

@@ -455,6 +455,35 @@ class TestCliCaptureBreakdown:
         )
         assert text.exit_code == machine.exit_code == 0
 
+    @pytest.mark.parametrize(
+        ("option", "value"),
+        [
+            ("--capture-threshold", "0"),
+            ("--capture-threshold", "-0.5"),
+            ("--capture-threshold", "1.5"),
+            ("--capture-threshold", "nan"),
+            ("--capture-threshold", "inf"),
+            ("--capture-max-docs", "0"),
+            ("--capture-max-docs", "-3"),
+        ],
+    )
+    def test_a_bad_capture_option_is_a_usage_error_in_both_formats(
+        self, registry: StoreRegistry, tmp_path: Path, option: str, value: str
+    ) -> None:
+        seed_captures(registry, tmp_path)
+        base = ["analyze", "memory-yield", "--no-meta-trace", CAPTURE_FLAG]
+        text = runner.invoke(app, [*base, option, value])
+        machine = runner.invoke(app, [*base, "--format", "json", option, value])
+        assert text.exit_code == machine.exit_code == 2, (text.output, machine.output)
+        assert option in plain(text.output)
+
+    def test_text_reports_failed_probes(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        seed_captures(registry, tmp_path)
+        rendered = plain(_invoke(CAPTURE_FLAG).stdout)
+        assert "0 failed probe(s)" in rendered
+
     def test_run_writes_nothing(self, registry: StoreRegistry, tmp_path: Path) -> None:
         seed_captures(registry, tmp_path)
 

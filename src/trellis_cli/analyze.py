@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
@@ -2589,6 +2590,7 @@ def memory_yield(
     """
     from trellis.analyze.memory_yield import summarize_memory_yield  # noqa: PLC0415
 
+    _check_capture_options(capture_threshold, capture_max_docs)
     document_store = get_document_store()
     event_log = get_event_log()
     trace_store = get_trace_store()
@@ -2653,6 +2655,16 @@ def memory_yield(
         _print_capture_breakdown(report.capture_breakdown)
 
 
+def _check_capture_options(threshold: float, max_docs: int) -> None:
+    """Reject a capture threshold or bound the predicate cannot use, as usage."""
+    if not (math.isfinite(threshold) and 0.0 < threshold <= 1.0):
+        msg = f"must be finite, greater than 0 and at most 1, got {threshold}"
+        raise typer.BadParameter(msg, param_hint="--capture-threshold")
+    if max_docs < 1:
+        msg = f"must be at least 1, got {max_docs}"
+        raise typer.BadParameter(msg, param_hint="--capture-max-docs")
+
+
 def _print_capture_breakdown(block: CaptureBreakdown) -> None:
     """The memory-yield capture block: counts and fixed labels only."""
     console.print()
@@ -2689,7 +2701,8 @@ def _print_capture_breakdown(block: CaptureBreakdown) -> None:
         f">= {dup.threshold:g}, top-{dup.neighbors} probes; {dup.probed} of "
         f"{dup.population} probed ({dup.over_bound} over --capture-max-docs "
         f"{dup.max_docs}), {dup.embedded} embedded, {dup.no_embedding} without "
-        f"an embedding, {dup.probes_saturated} saturated probe(s); {dup.pairs} "
+        f"an embedding, {dup.neighbor_queries_failed} failed probe(s), "
+        f"{dup.probes_saturated} saturated probe(s); {dup.pairs} "
         f"pair(s) ({dup.pairs_same_session} same session, "
         f"{dup.pairs_cross_session} cross session, {dup.pairs_unknown_session} "
         f"unknown); {dup.clusters} cluster(s), largest {dup.largest_cluster}: "
