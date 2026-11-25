@@ -5029,10 +5029,11 @@ The block (`groups[]` with `label`, `count`, `estimated_tokens`, `titles`,
 records the same block without `markdown`. The server renders the text once;
 the core formatters (MCP, CLI) and the SDK formatters (`trellis_sdk._format`,
 used by `TrellisClient`, `AsyncTrellisClient`, the hooks and the skills) all
-print that `markdown` string, reading it from a pack JSON's
-`metadata["nearby"]`. The REST pack responses (`POST /packs`,
-`POST /packs/sectioned`) carry no `metadata`, so an SDK caller over REST does
-not see the section yet, although the event records the ids as listed. The
+print that `markdown` string. The REST pack responses (`POST /packs`,
+`POST /packs/sectioned`) carry the block as a top-level `nearby` field (the
+same keys, `null` when the pack has none), which is where the SDK reads it;
+`trellis retrieve pack --format json` emits the same `nearby` key and the text
+mode prints the section after the items. The
 section is not charged to `max_tokens`, like the advisories. A
 `PACK_ITEMS_FETCHED` naming the pack and a listed id joins as fetch evidence for
 `feedback_prior_mode` (verdicts still join only to served items), and

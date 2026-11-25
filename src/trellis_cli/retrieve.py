@@ -16,6 +16,7 @@ from trellis.retrieve.builder_factory import (
     format_embedder_failed_note,
 )
 from trellis.retrieve.file_context import MATCH_FILES_TOUCHED, build_file_context
+from trellis.retrieve.nearby import NEARBY_KEY
 from trellis.retrieve.precedents import list_precedents as _list_precedents
 from trellis.retrieve.withholding import (
     format_withholding_note,
@@ -38,6 +39,7 @@ from trellis_cli.stores import (
     get_graph_store,
     get_trace_store,
 )
+from trellis_wire.nearby import nearby_markdown
 
 retrieve_app = typer.Typer(no_args_is_help=True)
 console = build_console()
@@ -157,6 +159,9 @@ def pack(
     # re-serialising a parsed copy, so the two surfaces cannot disagree.
     withholding_payload = pack_result.metadata.get("withholding")
     withholding = withholding_from_payload(withholding_payload)
+    # The nearby section (trellis.retrieve.nearby), verbatim, or None: the
+    # same block and the same null as ``POST /api/v1/packs``'s ``nearby``.
+    nearby_block = pack_result.metadata.get(NEARBY_KEY)
 
     if output_format == "json":
         payload = json.dumps(
@@ -187,6 +192,7 @@ def pack(
                 # ``retrieval_report.rejected_items``.
                 "withholding": withholding_payload,
                 "axes": axes,
+                "nearby": nearby_block,
             }
         )
         emit_machine_text(payload)
@@ -224,6 +230,18 @@ def pack(
                 markup=False,
                 emoji=False,
                 highlight=False,
+            )
+        # After the items, as every pack formatter places it. The text holds
+        # ids, ``[...]`` and ``*`` that Rich would read as markup or emoji,
+        # and its ``get_items`` line must not be wrapped mid-call.
+        nearby_text = nearby_markdown(nearby_block)
+        if nearby_text:
+            console.print(
+                f"\n{nearby_text}",
+                markup=False,
+                emoji=False,
+                highlight=False,
+                soft_wrap=True,
             )
 
 
