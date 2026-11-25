@@ -36,7 +36,7 @@ from trellis.retrieve.public_rank import (
 from trellis.retrieve.reference import served_text
 from trellis.retrieve.sensitivity import item_readable, public_metadata
 from trellis.retrieve.strategies import RECENCY_CLOCK_METADATA_KEY
-from trellis.schemas.pack import PackItem
+from trellis.schemas.pack import NATIVE_SCORE_KEY_PREFIX, PackItem
 
 if TYPE_CHECKING:
     from trellis.schemas.classification import Sensitivity
@@ -133,6 +133,9 @@ def project_for_public(item: PackItem) -> PackItem:
         k: v
         for k, v in item.score_breakdown.items()
         if k not in _PRIVATE_BREAKDOWN_KEYS
+        # A native strategy score is the raw store score, private for the
+        # same reason as ``original_score``.
+        and not k.startswith(NATIVE_SCORE_KEY_PREFIX)
     }
     return item.model_copy(
         update={

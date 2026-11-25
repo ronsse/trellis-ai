@@ -44,6 +44,7 @@ from trellis.retrieve.pack_builder import (
     SemanticDedupConfig,
     _filter_legacy_advisories_enabled,
 )
+from trellis.retrieve.relevance_cutoff import resolve_relevance_cutoff_config
 from trellis.retrieve.rerankers import build_reranker
 from trellis.retrieve.strategies import (
     GRAPH_STRATEGY_NAME,
@@ -253,6 +254,9 @@ def build_pack_builder(
         # trellis.retrieve.authority_rank), resolved once with settings like
         # the class prior above.
         authority_rank_config=resolve_authority_rank_config(settings=settings),
+        # Default-off collect-seam relevance cutoff (see
+        # trellis.retrieve.relevance_cutoff), resolved once with settings.
+        relevance_cutoff_config=resolve_relevance_cutoff_config(settings=settings),
         # Default-off feedback prior (trellis.retrieve.feedback_prior), same
         # resolution; its EventLog-backed evidence provider is built only
         # when the mode is not off, so an off build reads nothing.
