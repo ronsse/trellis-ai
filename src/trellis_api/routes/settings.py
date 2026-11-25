@@ -287,6 +287,14 @@ def _effective_values(
         settings=settings_values
     ).mode
 
+    from trellis.retrieve.feedback_prior import (  # noqa: PLC0415
+        resolve_feedback_prior_config,
+    )
+
+    effective["feedback_prior_mode"] = resolve_feedback_prior_config(
+        settings=settings_values
+    ).mode
+
     from trellis.retrieve.builder_factory import (  # noqa: PLC0415
         resolve_pack_provenance_line,
     )
