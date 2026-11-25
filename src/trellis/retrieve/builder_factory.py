@@ -39,6 +39,7 @@ from trellis.retrieve.feedback_prior import (
     resolve_feedback_prior_config,
     shared_evidence_provider,
 )
+from trellis.retrieve.nearby import resolve_nearby_mode
 from trellis.retrieve.pack_builder import (
     PackBuilder,
     SemanticDedupConfig,
@@ -257,6 +258,9 @@ def build_pack_builder(
         # Default-off collect-seam relevance cutoff (see
         # trellis.retrieve.relevance_cutoff), resolved once with settings.
         relevance_cutoff_config=resolve_relevance_cutoff_config(settings=settings),
+        # Default-off "nearby" section over the cutoff's cut items (see
+        # trellis.retrieve.nearby); renders only when the cutoff is on too.
+        nearby_mode=resolve_nearby_mode(settings=settings),
         # Default-off feedback prior (trellis.retrieve.feedback_prior), same
         # resolution; its EventLog-backed evidence provider is built only
         # when the mode is not off, so an off build reads nothing.

@@ -122,6 +122,7 @@ class TestCatalogMembership:
                 "relevance_cutoff_mode",
                 "authority_rank_mode",
                 "feedback_prior_mode",
+                "nearby_section",
                 "pack_provenance_line",
                 "graph_max_subgraph_depth",
                 "noise_demotion_min_attributed_packs",
@@ -137,8 +138,8 @@ class TestCatalogMembership:
             | _PACK_BUDGET_KNOB_NAMES
         )
 
-    def test_fiftyone_entries_total(self) -> None:
-        assert len(SETTINGS_REGISTRY) == 51
+    def test_fiftytwo_entries_total(self) -> None:
+        assert len(SETTINGS_REGISTRY) == 52
 
     def test_class_prior_mode_enum_has_no_demote_option(self) -> None:
         """A dropped mode must not linger in the registry as an allowed

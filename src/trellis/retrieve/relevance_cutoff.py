@@ -56,12 +56,18 @@ larger of those configured. The ratio floor applies only when the best
 score is finite and ``> 0``: at or below zero, ``ratio * best`` sits *above*
 ``best`` and would cut every semantic-only item, the best included, so the
 ratio is skipped and the block records ``ratio_skipped: "non_positive_best"``
-(or ``"no_semantic_score"`` when no candidate has one). ``best`` is taken
+(or ``"no_semantic_score"`` when no candidate has one). The ratio floor is
+therefore discontinuous at ``best = 0``: skipped at exactly zero, applied in
+full for any positive ``best``, however small. ``best`` is taken
 over finite scores only, and an item with no finite semantic score is never
 cut. Keyword and graph have no floor because their
 native scores are not comparable similarities (above). An item is cut only
 when every strategy that returned it is an axis with a configured floor and it
-fails that floor, so an item keyword or graph also returned is kept. The gate
+fails that floor, so an item keyword or graph also returned is kept. A
+strategy counts as having returned an item when a copy carries its native key
+*or* names it as ``strategy_source`` / ``metadata["source_strategy"]``, so an
+item another axis returned with a non-finite score (no native key recorded)
+is still kept. The gate
 never leaves fewer than :data:`MIN_KEEP` distinct candidates: it restores the
 best-scoring cut items first.
 
@@ -86,9 +92,10 @@ its outcome or any item id.
 public-only build is uncut under every mode and its event carries no
 ``relevance_cutoff`` block (``tests/unit/retrieve/test_relevance_cutoff.py``).
 
-The cut items are kept for a later "nearby" section: ``on`` mode leaves
+The cut items are kept for the "nearby" section: ``on`` mode leaves
 ``Pack.metadata["relevance_cutoff"]["cut_items"]`` (id, title, tokens, native
-semantic score) on the pack it serves, which nothing renders yet.
+semantic score, item type, domain, source system) on the pack it serves,
+which :mod:`trellis.retrieve.nearby` renders when its own flag is on.
 """
 
 from __future__ import annotations
@@ -333,13 +340,32 @@ def holdout_telemetry(block: dict[str, Any] | None) -> dict[str, Any] | None:
 def cut_item_row(
     item: PackItem, tokens: int, title_of: Callable[[PackItem], str | None]
 ) -> dict[str, Any]:
-    """The per-cut-item record a later "nearby" section would read."""
+    """The per-cut-item record :mod:`trellis.retrieve.nearby` groups.
+
+    ``domain`` is ``content_tags.domain`` (a list, possibly empty) and
+    ``source_system`` the item's own, so grouping never re-reads a store.
+    """
+    meta = item.metadata or {}
+    tags = meta.get("content_tags")
+    domain = tags.get("domain") if isinstance(tags, dict) else None
+    if isinstance(domain, str):
+        domain = [domain]
+    source = meta.get("source_system")
     return {
         "item_id": item.item_id,
         "title": title_of(item),
         "estimated_tokens": tokens,
         "native_semantic": item.score_breakdown.get(native_score_key(SEMANTIC_AXIS)),
+        "item_type": item.item_type,
+        "domain": [d for d in domain or [] if isinstance(d, str) and d],
+        "source_system": source if isinstance(source, str) and source else None,
     }
+
+
+def _declared_axis(item: PackItem) -> str | None:
+    """The strategy ``item`` names as its source, or ``None``."""
+    declared = item.strategy_source or (item.metadata or {}).get("source_strategy")
+    return declared if isinstance(declared, str) and declared else None
 
 
 def _default_title(item: PackItem) -> str | None:
@@ -349,6 +375,32 @@ def _default_title(item: PackItem) -> str | None:
         if isinstance(value, str) and value:
             return value
     return None
+
+
+def _returned_by(
+    items: list[PackItem],
+) -> tuple[dict[str, dict[str, float]], dict[str, set[str]], list[str]]:
+    """Per id: its native scores, the axes that returned it, first-seen order.
+
+    The axes are the native keys plus each copy's declared source, so a copy
+    whose score was non-finite (no native key recorded) still counts.
+    """
+    natives: dict[str, dict[str, float]] = {}
+    axes: dict[str, set[str]] = {}
+    order: list[str] = []
+    prefix_len = len(NATIVE_SCORE_PREFIX)
+    for item in items:
+        if item.item_id not in natives:
+            natives[item.item_id] = {}
+            axes[item.item_id] = set()
+            order.append(item.item_id)
+        scores = native_scores_of(item)
+        natives[item.item_id].update(scores)
+        axes[item.item_id].update(k[prefix_len:] for k in scores)
+        declared = _declared_axis(item)
+        if declared is not None:
+            axes[item.item_id].add(declared)
+    return natives, axes, order
 
 
 def apply_relevance_cutoff(  # noqa: PLR0912
@@ -378,13 +430,7 @@ def apply_relevance_cutoff(  # noqa: PLR0912
 
     # Every native key any copy of an id carries: the strategies that
     # returned it. Dedup has not run, so copies are grouped here.
-    natives: dict[str, dict[str, float]] = {}
-    order: list[str] = []
-    for item in items:
-        if item.item_id not in natives:
-            natives[item.item_id] = {}
-            order.append(item.item_id)
-        natives[item.item_id].update(native_scores_of(item))
+    natives, axes, order = _returned_by(items)
 
     sem_scores = [n[sem_key] for n in natives.values() if sem_key in n]
     best = max(sem_scores) if sem_scores else None
@@ -396,7 +442,11 @@ def apply_relevance_cutoff(  # noqa: PLR0912
             keys = natives[item_id]
             # Cut only when the semantic axis alone returned it: any other
             # axis has no floor, so an item it also returned is kept.
-            if keys and set(keys) == {sem_key} and keys[sem_key] < threshold:
+            if (
+                sem_key in keys
+                and axes[item_id] == {SEMANTIC_AXIS}
+                and keys[sem_key] < threshold
+            ):
                 failing.append(item_id)
 
     # min_keep: restore the best-scoring cut ids until MIN_KEEP survive.

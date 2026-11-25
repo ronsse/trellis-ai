@@ -905,6 +905,31 @@ _SPECS: tuple[SettingSpec, ...] = (
         enum=("off", "shadow", "on"),
     ),
     SettingSpec(
+        name="nearby_section",
+        label="Nearby section",
+        type="str",
+        default="off",
+        description=(
+            "Adds a short 'Nearby' section after a pack's items listing what "
+            "the relevance cutoff withheld, grouped by domain, source or "
+            "type, with the ids and one get_items call to open a group. Has "
+            "an effect only while relevance_cutoff_mode is 'on' and cut "
+            "something; 'off' (the default) changes nothing."
+        ),
+        # See trellis.retrieve.nearby for the grouping, caps and exclusions.
+        surfaces=("mcp", "api", "cli"),
+        restart_required=False,
+        risk="low",
+        risk_note=(
+            "Adds at most ~200 tokens to a pack the cutoff trimmed; it names "
+            "withheld ids only to callers who could have been served them."
+        ),
+        group="retrieval",
+        settings_live=True,
+        env_var="TRELLIS_NEARBY_SECTION",
+        enum=("off", "on"),
+    ),
+    SettingSpec(
         name="pack_provenance_line",
         label="Pack provenance line",
         type="str",

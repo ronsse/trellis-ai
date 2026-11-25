@@ -94,6 +94,12 @@ from trellis.retrieve.lifecycle import (
     partition_demoted,
     partition_superseded,
 )
+from trellis.retrieve.nearby import (
+    NEARBY_KEY,
+    NearbyMode,
+    build_nearby,
+    resolve_nearby_mode,
+)
 from trellis.retrieve.noise import (
     NOISE_REJECTION_REASON,
     partition_by_signal_quality,
@@ -870,6 +876,7 @@ class PackBuilder:
         relevance_cutoff_config: RelevanceCutoffConfig | None = None,
         feedback_prior_config: FeedbackPriorConfig | None = None,
         feedback_evidence: FeedbackEvidenceProvider | None = None,
+        nearby_mode: NearbyMode | None = None,
     ) -> None:
         if not 0.0 <= holdout_rate <= 1.0:
             msg = f"holdout_rate must be in [0.0, 1.0]; got {holdout_rate!r}"
@@ -962,6 +969,10 @@ class PackBuilder:
         #: Collect-seam relevance cutoff (:mod:`trellis.retrieve.relevance_cutoff`),
         #: or ``None`` for a live env-only read. Off by default.
         self._relevance_cutoff_config = relevance_cutoff_config
+        #: "Nearby" section over the cutoff's cut items
+        #: (:mod:`trellis.retrieve.nearby`), or ``None`` for a live env-only
+        #: read. Off by default.
+        self._nearby_mode = nearby_mode
         #: Post-rerank feedback prior (:mod:`trellis.retrieve.feedback_prior`)
         #: and its evidence source; ``None`` config defers to an env-only
         #: read, a ``None`` provider reports ``evidence_unavailable`` when
@@ -1005,6 +1016,24 @@ class PackBuilder:
         if self._relevance_cutoff_config is not None:
             return self._relevance_cutoff_config
         return resolve_relevance_cutoff_config()
+
+    def _attach_nearby(self, pack: Pack | SectionedPack) -> dict[str, Any] | None:
+        """Add the ``nearby`` block to ``pack.metadata``; return it, or ``None``.
+
+        Renders only when the flag is on and the cutoff (mode ``on``) left
+        cut items on the pack; otherwise the pack is untouched.
+        """
+        mode = (
+            self._nearby_mode
+            if self._nearby_mode is not None
+            else resolve_nearby_mode()
+        )
+        cutoff_meta = pack.metadata.get("relevance_cutoff")
+        rows = cutoff_meta.get("cut_items") if isinstance(cutoff_meta, dict) else None
+        block = build_nearby(rows, mode=mode, pack_id=pack.pack_id)
+        if block is not None:
+            pack.metadata[NEARBY_KEY] = block
+        return block
 
     def _apply_relevance_cutoff_pool(
         self, items: list[PackItem]
@@ -1628,6 +1657,11 @@ class PackBuilder:
             telemetry["relevance_cutoff"] = cutoff.telemetry
         if feedback_prior_block is not None:
             telemetry["feedback_prior"] = feedback_prior_block
+        # Present only when the section rendered; a held-out pack's metadata
+        # and telemetry are replaced below, so it carries neither.
+        nearby_block = self._attach_nearby(pack)
+        if nearby_block is not None:
+            telemetry["nearby"] = nearby_block
         # The pack-effect holdout (:mod:`trellis.core.pack_holdout`), drawn
         # once the pack id exists and the would-be pack is known. A withheld
         # caller receives an ordinary empty pack: blind, so nothing in the
@@ -2147,6 +2181,11 @@ class PackBuilder:
             telemetry["relevance_cutoff"] = cutoff.telemetry
         if feedback_prior_block is not None:
             telemetry["feedback_prior"] = feedback_prior_block
+        # Present only when the section rendered; a held-out pack's metadata
+        # and telemetry are replaced below, so it carries neither.
+        nearby_block = self._attach_nearby(sectioned_pack)
+        if nearby_block is not None:
+            telemetry["nearby"] = nearby_block
         # The pack-effect holdout, drawn as in :meth:`build`: the whole
         # sectioned pack is withheld or none of it.
         withheld_from: SectionedPack | None = None
@@ -2789,6 +2828,7 @@ class PackBuilder:
         authority_rank: dict[str, Any] | None = None,
         relevance_cutoff: dict[str, Any] | None = None,
         feedback_prior: dict[str, Any] | None = None,
+        nearby: dict[str, Any] | None = None,
         withheld_from: SectionedPack | None = None,
         retrieval_phase: str | None = None,
         refresh: bool = False,
@@ -2945,6 +2985,8 @@ class PackBuilder:
                     else {}
                 ),
                 **({"feedback_prior": feedback_prior} if feedback_prior else {}),
+                # Only when the nearby section rendered (trellis.retrieve.nearby).
+                **({NEARBY_KEY: nearby} if nearby else {}),
                 **holdout,
                 VARIANTS_KEY: active_variants(
                     holdout_rate=self._holdout_rate,
@@ -3052,6 +3094,7 @@ class PackBuilder:
         authority_rank: dict[str, Any] | None = None,
         relevance_cutoff: dict[str, Any] | None = None,
         feedback_prior: dict[str, Any] | None = None,
+        nearby: dict[str, Any] | None = None,
         withheld_from: Pack | None = None,
         retrieval_phase: str | None = None,
         refresh: bool = False,
@@ -3327,6 +3370,8 @@ class PackBuilder:
                     else {}
                 ),
                 **({"feedback_prior": feedback_prior} if feedback_prior else {}),
+                # Only when the nearby section rendered (trellis.retrieve.nearby).
+                **({NEARBY_KEY: nearby} if nearby else {}),
                 **holdout,
                 VARIANTS_KEY: active_variants(
                     holdout_rate=self._holdout_rate,
