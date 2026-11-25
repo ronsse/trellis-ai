@@ -401,3 +401,358 @@ def test_the_cli_exits_one_on_a_refused_output_dir(
     )
     assert code == judge_eval.EXIT_CONFIG
     assert "git work tree" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Fix round: redaction, resume, denominators, egress modes
+# ---------------------------------------------------------------------------
+
+# Obviously fake, assembled so no scanner flags this file.
+_FAKE_KEY = "AKIA" + "IOSFODNN7EXAMPLE"
+
+
+def _pack_records(session_id: str, pack_id: str) -> list[dict[str, Any]]:
+    return [
+        *_plain(session_id),
+        assistant_tools(("mcp__trellis__get_context", "u-1")),
+        pack_result_turn("u-1", mcp_envelope(pack_markdown(pack_id))),
+    ]
+
+
+@pytest.mark.parametrize("field", ["signal", "memory_type"])
+def test_a_secret_in_any_model_field_nulls_every_model_string(
+    tmp_path: Path, field: str
+) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "s1.jsonl", _plain("sess-1"))
+    leaky = good_candidate(**{field: f"note {_FAKE_KEY} here"})
+    client = UsageClient([candidates_json(leaky)])
+    run_eval(
+        transcripts, [_arm()], out, client_factory=_factory(client), local_of=_remote
+    )
+    (row,) = _rows(out / judge_eval.CANDIDATES_FILE)
+    assert row["redacted"] is True
+    for key in ("title", "memory", "evidence", "memory_type", "signal"):
+        assert row[key] is None, key
+    for produced in out.iterdir():
+        assert "IOSFODNN7EXAMPLE" not in produced.read_text()
+
+
+def test_candidate_rows_of_a_crashed_attempt_are_not_counted_after_a_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "s1.jsonl", _plain("sess-1"))
+    real_append = judge_eval._append_jsonl
+
+    def crash_on_call_row(path: Path, rows: Any) -> None:
+        if path.name == judge_eval.CALLS_FILE:
+            msg = "simulated crash before the call row"
+            raise RuntimeError(msg)
+        real_append(path, rows)
+
+    monkeypatch.setattr(judge_eval, "_append_jsonl", crash_on_call_row)
+    three = [
+        good_candidate(title=f"Distinct lesson number {i} about deploys")
+        for i in range(3)
+    ]
+    first = UsageClient([candidates_json(*three)])
+    with pytest.raises(RuntimeError):
+        run_eval(
+            transcripts, [_arm()], out, client_factory=_factory(first), local_of=_remote
+        )
+    assert len(_rows(out / judge_eval.CANDIDATES_FILE)) == 3
+
+    monkeypatch.setattr(judge_eval, "_append_jsonl", real_append)
+    second = UsageClient([candidates_json(good_candidate(evidence=_QUOTE))])
+    report = run_eval(
+        transcripts, [_arm()], out, client_factory=_factory(second), local_of=_remote
+    )
+    assert report["arms"]["a"]["candidates_proposed"] == 1
+
+
+def test_a_torn_tail_line_does_not_swallow_the_next_row(tmp_path: Path) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "s1.jsonl", _plain("sess-1"))
+    out.mkdir()
+    (out / judge_eval.CALLS_FILE).write_text('{"transcript_id": "torn', "utf-8")
+    client = UsageClient([candidates_json(good_candidate(evidence=_QUOTE))])
+    report = run_eval(
+        transcripts, [_arm()], out, client_factory=_factory(client), local_of=_remote
+    )
+    assert report["arms"]["a"]["transcripts"] == 1
+    assert report["arms"]["a"]["candidates_proposed"] == 1
+
+
+def _gold_for(*transcript_ids: str) -> dict[str, list[GoldMemory]]:
+    return {
+        tid: [GoldMemory(transcript_id=tid, text="x", evidence=_QUOTE)]
+        for tid in transcript_ids
+    }
+
+
+def test_gold_denominators_exclude_transcripts_the_judge_never_answered(
+    tmp_path: Path,
+) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "s1.jsonl", _plain("sess-1"))
+    write_transcript(transcripts / "s2.jsonl", _pack_records("sess-2", PACK_IDS[0]))
+    client = UsageClient([candidates_json(good_candidate(evidence=_QUOTE))])
+    report = run_eval(
+        transcripts,
+        [_arm("remote"), _arm("onhost", local=True)],
+        out,
+        gold=_gold_for("s1.jsonl", "s2.jsonl"),
+        client_factory=_factory(client),
+        local_of=lambda arm: arm.local,
+    )
+    remote = report["arms"]["remote"]["gold"]
+    assert remote["recall"] == 1.0
+    assert remote["gold_rows"] == 1
+    assert remote["transcripts_not_judged_by_outcome"] == {"egress_withheld": 1}
+    assert remote["gold_rows_excluded_not_judged"] == 1
+    assert report["arms"]["onhost"]["gold"]["gold_rows"] == 2
+    inter = report["intersection"]
+    assert inter["transcripts"] == 1
+    assert inter["arms"]["remote"]["recall"] == 1.0
+    assert inter["arms"]["onhost"]["gold_rows"] == 1
+
+
+def test_trivial_evidence_is_too_short_not_grounded_and_matches_no_gold(
+    tmp_path: Path,
+) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "s1.jsonl", _plain("sess-1"))
+    trivial = good_candidate(
+        title="Pager rota lives in the wiki",
+        memory="The pager rota is kept in the team wiki under on-call.",
+        evidence="boot",
+    )
+    client = UsageClient([candidates_json(trivial)])
+    report = run_eval(
+        transcripts,
+        [_arm()],
+        out,
+        gold=_gold_for("s1.jsonl"),
+        client_factory=_factory(client),
+        local_of=_remote,
+    )
+    (row,) = _rows(out / judge_eval.CANDIDATES_FILE)
+    assert row["evidence_check"] == judge_eval.EVIDENCE_TOO_SHORT
+    assert row["evidence_grounded"] is None
+    assert row["evidence_in_window"] is None
+    assert report["arms"]["a"]["evidence_too_short"] == 1
+    assert report["arms"]["a"]["gold"]["matched"] == 0
+
+
+def test_ephemeral_projects_are_skipped_on_the_record_unless_included(
+    tmp_path: Path,
+) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "-tmp-tmpa1b2c3" / "s.jsonl", _plain("sess-e"))
+    client = UsageClient([candidates_json(good_candidate(evidence=_QUOTE))])
+    kwargs: dict[str, Any] = {"client_factory": _factory(client), "local_of": _remote}
+    report = run_eval(transcripts, [_arm()], out, **kwargs)
+    assert client.calls == []
+    assert report["arms"]["a"]["outcomes"] == {judge_eval.OUTCOME_SKIPPED_EPHEMERAL: 1}
+    run_eval(transcripts, [_arm()], tmp_path / "out2", include_ephemeral=True, **kwargs)
+    assert len(client.calls) == 1
+
+
+def test_resuming_with_a_changed_arm_config_is_refused_naming_the_arm(
+    tmp_path: Path,
+) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "s1.jsonl", _plain("sess-1"))
+    client = UsageClient([candidates_json(good_candidate(evidence=_QUOTE))])
+    kwargs: dict[str, Any] = {"client_factory": _factory(client), "local_of": _remote}
+    run_eval(transcripts, [_arm()], out, **kwargs)
+    (call,) = _rows(out / judge_eval.CALLS_FILE)
+    assert call["arm_fingerprint"] == judge_eval.arm_fingerprint(_arm())
+    assert "FAKE_JUDGE_KEY" not in json.dumps(call)
+    run_eval(transcripts, [_arm(api_key_env="OTHER_KEY")], out, **kwargs)
+    with pytest.raises(EvalConfigError, match=r"'a'.*new arm name"):
+        run_eval(transcripts, [_arm(salient_chars=600)], out, **kwargs)
+
+
+def _label_stores(tmp_path: Path, *, labelled: bool) -> Any:
+    from tests.unit.workers.session_capture.test_capture import _registry
+    from trellis.stores.base.event_log import EventType
+
+    stores = _registry(tmp_path)
+    metadata = (
+        {"data_classification": {"sensitivity": "confidential"}} if labelled else {}
+    )
+    stores.knowledge.document_store.put("doc-served", "body", metadata)
+    stores.operational.event_log.emit(
+        EventType.PACK_ASSEMBLED,
+        source="test",
+        entity_id=PACK_IDS[0],
+        entity_type="pack",
+        payload={"injected_item_ids": ["doc-served"]},
+    )
+    return stores
+
+
+@pytest.mark.parametrize(
+    ("labelled", "outcome", "reason"),
+    [
+        (False, "candidates", None),
+        (True, "egress_withheld", "label_withheld"),
+    ],
+)
+def test_the_labels_rule_reads_what_the_packs_served(
+    tmp_path: Path, labelled: bool, outcome: str, reason: str | None
+) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "p.jsonl", _pack_records("sess-p", PACK_IDS[0]))
+    stores = _label_stores(tmp_path, labelled=labelled)
+    client = UsageClient([candidates_json(good_candidate(evidence=_QUOTE))])
+    run_eval(
+        transcripts,
+        [_arm("remote")],
+        out,
+        client_factory=_factory(client),
+        local_of=_remote,
+        stores=stores,
+    )
+    (call,) = _rows(out / judge_eval.CALLS_FILE)
+    assert call["egress_rule"] == judge_eval.EGRESS_RULE_LABELS
+    assert call["outcome"] == outcome
+    assert call["egress_reason"] == reason
+    assert len(client.calls) == (0 if labelled else 1)
+
+
+def test_the_labels_rule_fails_closed_on_a_read_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "p.jsonl", _pack_records("sess-p", PACK_IDS[0]))
+    stores = _label_stores(tmp_path, labelled=False)
+
+    def down(*_args: Any, **_kwargs: Any) -> Any:
+        msg = "log down"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(stores.operational.event_log, "get_events", down)
+    client = UsageClient([candidates_json(good_candidate())])
+    run_eval(
+        transcripts,
+        [_arm("remote")],
+        out,
+        client_factory=_factory(client),
+        local_of=_remote,
+        stores=stores,
+    )
+    (call,) = _rows(out / judge_eval.CALLS_FILE)
+    assert call["outcome"] == judge_eval.OUTCOME_EGRESS_WITHHELD
+    assert call["egress_reason"] == judge_eval.EGRESS_REASON_UNREADABLE
+    assert client.calls == []
+
+
+def test_the_strict_rule_is_the_default_and_says_so(tmp_path: Path) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "p.jsonl", _pack_records("sess-p", PACK_IDS[0]))
+    run_eval(
+        transcripts,
+        [_arm("remote")],
+        out,
+        client_factory=_factory(UsageClient(["[]"])),
+        local_of=_remote,
+    )
+    (call,) = _rows(out / judge_eval.CALLS_FILE)
+    assert call["egress_rule"] == judge_eval.EGRESS_RULE_STRICT
+    assert call["egress_reason"] == judge_eval.EGRESS_REASON_PACK_NAMED
+
+
+def _cli(tmp_path: Path, transcripts: Path, out: Path, *extra: str) -> int:
+    arms_file = tmp_path / "arms.json"
+    arms_file.write_text(json.dumps({"arms": [_arm().model_dump()]}))
+    return worker_main(
+        [
+            "eval-judge",
+            "--transcripts",
+            str(transcripts),
+            "--arms",
+            str(arms_file),
+            "--output",
+            str(out),
+            *extra,
+        ]
+    )
+
+
+def test_the_cli_egress_labels_flag_opens_stores_and_closes_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "p.jsonl", _pack_records("sess-p", PACK_IDS[0]))
+    stores = _label_stores(tmp_path, labelled=True)
+    monkeypatch.setattr(judge_eval, "open_label_stores", lambda: stores)
+    monkeypatch.setattr(judge_eval, "build_arm_client", lambda _arm: UsageClient([]))
+    assert _cli(tmp_path, transcripts, out, "--egress-labels") == 0
+    (call,) = _rows(out / judge_eval.CALLS_FILE)
+    assert call["egress_reason"] == judge_eval.EGRESS_REASON_LABEL
+    stores.close.assert_called_once()
+
+
+def test_the_cli_exits_one_on_unusable_inputs_without_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from trellis.errors import BackendNotInstalledError
+
+    transcripts, out = _dirs(tmp_path)
+    assert _cli(tmp_path, tmp_path / "missing", out) == judge_eval.EXIT_CONFIG
+    assert "does not exist" in capsys.readouterr().err
+
+    write_transcript(transcripts / "s1.jsonl", _plain("sess-1"))
+
+    def no_backend(_arm: JudgeArm) -> Any:
+        raise BackendNotInstalledError(backend_name="openai", extra="llm-openai")
+
+    monkeypatch.setattr(judge_eval, "build_arm_client", no_backend)
+    assert _cli(tmp_path, transcripts, out) == judge_eval.EXIT_CONFIG
+    err = capsys.readouterr().err
+    assert err.count("\n") == 1
+    assert "llm-openai" in err
+
+    def no_stores() -> Any:
+        msg = "stores could not be opened"
+        raise EvalConfigError(msg)
+
+    monkeypatch.setattr(judge_eval, "open_label_stores", no_stores)
+    assert _cli(tmp_path, transcripts, out, "--egress-labels") == 1
+
+
+def test_outputs_are_owner_only(tmp_path: Path) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "s1.jsonl", _plain("sess-1"))
+    client = UsageClient([candidates_json(good_candidate(evidence=_QUOTE))])
+    run_eval(
+        transcripts,
+        [_arm()],
+        out,
+        gold=_gold_for("s1.jsonl"),
+        client_factory=_factory(client),
+        local_of=_remote,
+    )
+    assert out.stat().st_mode & 0o777 == 0o700
+    produced = list(out.iterdir())
+    assert len(produced) == 5
+    for path in produced:
+        assert path.stat().st_mode & 0o777 == 0o600, path.name
+
+
+def test_mean_latency_covers_completed_calls_only(tmp_path: Path) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "s1.jsonl", _plain("sess-1"))
+    report = run_eval(
+        transcripts,
+        [_arm("broken")],
+        out,
+        client_factory=_factory(BrokenLLMClient()),
+        local_of=_remote,
+    )
+    summary = report["arms"]["broken"]
+    assert summary["mean_latency_s"] is None
+    assert summary["failed_calls_mean_latency_s"] is not None

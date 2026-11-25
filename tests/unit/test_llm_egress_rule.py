@@ -144,8 +144,9 @@ _CAPTURE_DISTILL = Entry(
     "_capture_session",
     via="_session_egress_verdict",
 )
-# The offline judge eval opens no store, so ``_eval_egress_permits`` treats a
-# transcript that named any pack as served ``restricted`` content.
+# The offline judge eval: by default it opens no store, and ``_eval_egress_permits``
+# treats a transcript that named any pack as served ``restricted`` content; with
+# ``--egress-labels`` the same helper defers to the sweep's ``_session_egress_verdict``.
 _EVAL_DISTILL = Entry(
     "trellis_workers/session_capture/judge_eval.py",
     "judge_transcript",
