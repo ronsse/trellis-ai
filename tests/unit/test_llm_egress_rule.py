@@ -188,7 +188,13 @@ _GATED: dict[tuple[str, str], tuple[Entry, ...]] = {
 }
 
 #: Inner senders that do not send a stored, labelled document, each with why.
-_EXEMPT: dict[tuple[str, str], str] = {}
+_EXEMPT: dict[tuple[str, str], str] = {
+    ("trellis_workers/session_capture/judge_eval.py", "generate"): (
+        "_ContentProbe.generate relays, unchanged, the messages distill_session "
+        "built; it chooses no content and is handed only to distill_session in "
+        "judge_transcript, after _eval_egress_permits (the _EVAL_DISTILL entry)"
+    ),
+}
 
 #: Functions that reach an inner sender; a call to one must sit in a roster entry.
 _SINK_NAMES = frozenset(

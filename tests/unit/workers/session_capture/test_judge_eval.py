@@ -917,3 +917,129 @@ def test_an_egress_read_failure_logs_the_class_name_only(
     )
     assert reason == judge_eval.EGRESS_REASON_UNREADABLE
     assert seen == [{"arm": "remote", "error": "RuntimeError"}]
+
+
+class LoopBoundClient:
+    """Like a pooled HTTP client: bound to the loop of its first call.
+
+    A second call under a different (the first one closed) event loop raises
+    what an ``AsyncOpenAI`` client's reused connection raises.
+    """
+
+    def __init__(self) -> None:
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    async def generate(self, **_kwargs: Any) -> LLMResponse:
+        loop = asyncio.get_running_loop()
+        if self._loop is not None and self._loop is not loop:
+            msg = "Event loop is closed"
+            raise RuntimeError(msg)
+        self._loop = loop
+        return LLMResponse(content="[]")
+
+
+def test_each_call_gets_a_fresh_client_so_a_loop_bound_one_never_fails(
+    tmp_path: Path,
+) -> None:
+    transcripts, out = _dirs(tmp_path)
+    for n in range(3):
+        write_transcript(transcripts / f"s{n}.jsonl", _plain(f"sess-{n}"))
+    built: list[LoopBoundClient] = []
+
+    def factory(_arm: JudgeArm) -> LoopBoundClient:
+        built.append(LoopBoundClient())
+        return built[-1]
+
+    report = run_eval(
+        transcripts, [_arm()], out, client_factory=factory, local_of=_remote
+    )
+    calls = _rows(out / judge_eval.CALLS_FILE)
+    assert [c["outcome"] for c in calls] == ["empty"] * 3
+    assert report["arms"]["a"]["failures"] == 0
+    assert len(built) == 3
+
+
+def test_a_missing_key_still_exits_before_any_call(tmp_path: Path) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "s1.jsonl", _plain("sess-1"))
+    with pytest.raises(EvalConfigError, match="FAKE_JUDGE_KEY"):
+        run_eval(
+            transcripts, [_arm()], out, client_factory=lambda _a: None, local_of=_remote
+        )
+    assert not (out / judge_eval.CALLS_FILE).exists()
+
+
+class CapClient(UsageClient):
+    def __init__(self, responses: list[str]) -> None:
+        super().__init__(responses)
+        self.caps: list[int] = []
+
+    async def generate(self, *, messages: list[Any], **kwargs: Any) -> LLMResponse:
+        self.caps.append(kwargs["max_tokens"])
+        return await super().generate(messages=messages)
+
+
+def test_the_arm_max_tokens_reaches_the_call_and_the_fingerprint(
+    tmp_path: Path,
+) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "s1.jsonl", _plain("sess-1"))
+    client = CapClient(["[]"])
+    run_eval(
+        transcripts,
+        [_arm("default"), _arm("roomy", max_tokens=6000, context_tokens=16000)],
+        out,
+        client_factory=_factory(client),
+        local_of=_remote,
+    )
+    assert client.caps == [1200, 6000]
+    # An arm that leaves max_tokens at its default keeps the fingerprint it had
+    # before the field existed, so an older output directory still resumes.
+    import hashlib
+
+    old_fields = {
+        "model": "fake-model",
+        "base_url": "http://127.0.0.1:9/v1",
+        "local": False,
+        "salient_chars": judge_eval.distill.DEFAULT_MAX_SALIENT_CHARS,
+        "context_tokens": judge_eval.distill.DEFAULT_JUDGE_CONTEXT_TOKENS,
+        "prompt_variant": "default",
+    }
+    old = hashlib.sha256(json.dumps(old_fields, sort_keys=True).encode()).hexdigest()
+    assert judge_eval.arm_fingerprint(_arm()) == old[:16]
+    assert judge_eval.arm_fingerprint(_arm(max_tokens=6000)) != old[:16]
+    with pytest.raises(EvalConfigError, match="max_tokens"):
+        run_eval(
+            transcripts,
+            [_arm("default", max_tokens=3000)],
+            out,
+            client_factory=_factory(client),
+            local_of=_remote,
+        )
+
+
+def test_max_tokens_must_be_a_positive_int() -> None:
+    with pytest.raises(ValueError, match="max_tokens"):
+        _arm(max_tokens=0)
+
+
+def test_an_empty_reply_is_named_not_just_malformed(tmp_path: Path) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "s1.jsonl", _plain("sess-1"))
+    clients = {"blank": UsageClient(["  \n "]), "garbled": UsageClient(["not json"])}
+    report = run_eval(
+        transcripts,
+        [_arm("blank"), _arm("garbled")],
+        out,
+        client_factory=lambda arm: clients[arm.name],
+        local_of=_remote,
+    )
+    calls = {c["arm"]: c for c in _rows(out / judge_eval.CALLS_FILE)}
+    assert calls["blank"]["outcome"] == "malformed"
+    assert calls["blank"]["empty_content"] is True
+    assert calls["blank"]["parse_error"] == judge_eval.PARSE_ERROR_EMPTY_CONTENT
+    assert calls["garbled"]["outcome"] == "malformed"
+    assert calls["garbled"]["empty_content"] is False
+    assert calls["garbled"]["parse_error"] != judge_eval.PARSE_ERROR_EMPTY_CONTENT
+    assert report["arms"]["blank"]["empty_content_replies"] == 1
+    assert report["arms"]["garbled"]["empty_content_replies"] == 0

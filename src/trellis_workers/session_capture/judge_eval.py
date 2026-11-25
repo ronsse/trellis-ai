@@ -87,6 +87,7 @@ from trellis_workers.session_capture.transcripts import (
 
 if TYPE_CHECKING:
     from trellis.llm import LLMClient
+    from trellis.llm.types import LLMResponse, Message
     from trellis.schemas.classification import Sensitivity
     from trellis_workers.session_capture.models import SessionDigest
 
@@ -151,6 +152,16 @@ _FINGERPRINT_FIELDS = (
     "prompt_variant",
 )
 
+#: Arm fields fingerprinted only when they differ from their default, so an
+#: output directory recorded before the field existed still resumes.
+_FINGERPRINT_FIELDS_IF_SET = {"max_tokens": distill.DEFAULT_COMPLETION_TOKENS}
+
+#: ``parse_error`` of a call whose reply had no content (empty or whitespace).
+#: Production parses such a reply as ``malformed`` like any other; the eval
+#: names it, because a reasoning model that spends the whole completion cap
+#: thinking returns exactly this, and that is a cap problem, not a bad reply.
+PARSE_ERROR_EMPTY_CONTENT = "empty_content: the reply had no content"
+
 #: The label assumed for what a transcript's packs served, which this command
 #: cannot read without a store: the strictest, so nothing unread is sent off
 #: a route that is not local.
@@ -176,6 +187,10 @@ class JudgeArm(TrellisModel):
     salient_chars: int = Field(default=distill.DEFAULT_MAX_SALIENT_CHARS, gt=0)
     context_tokens: int = Field(default=distill.DEFAULT_JUDGE_CONTEXT_TOKENS, gt=0)
     prompt_variant: str = distill.DEFAULT_PROMPT_VARIANT
+    #: The judge call's completion cap, also reserved out of ``context_tokens``
+    #: by the window pre-flight. A reasoning model may need more than the
+    #: sweep's default to finish thinking and still answer.
+    max_tokens: int = Field(default=distill.DEFAULT_COMPLETION_TOKENS, gt=0)
     #: The operator's declaration that this endpoint keeps data on the host,
     #: exactly as ``llm.local`` in ``config.yaml``; never inferred.
     local: bool = False
@@ -321,6 +336,9 @@ def quote_in(quote: str, text: str) -> bool | None:
 def arm_fingerprint(arm: JudgeArm) -> str:
     """A digest of the arm fields a call depends on, never its key's variable."""
     fields = {name: getattr(arm, name) for name in _FINGERPRINT_FIELDS}
+    for name, default in _FINGERPRINT_FIELDS_IF_SET.items():
+        if getattr(arm, name) != default:
+            fields[name] = getattr(arm, name)
     blob = json.dumps(fields, sort_keys=True).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:16]
 
@@ -436,6 +454,35 @@ def _labels_withholding_reason(
     return EGRESS_REASON_UNREADABLE
 
 
+class _ContentProbe:
+    """Delegates to the arm's client and notes whether a reply had no content.
+
+    Eval only: production's parse is untouched; this only lets a call row tell
+    an empty reply from a malformed one.
+    """
+
+    def __init__(self, client: LLMClient) -> None:
+        self._client = client
+        self.empty_content: bool | None = None
+
+    async def generate(
+        self,
+        *,
+        messages: list[Message],
+        temperature: float = 0.3,
+        max_tokens: int = 500,
+        model: str | None = None,
+    ) -> LLMResponse:
+        response = await self._client.generate(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            model=model,
+        )
+        self.empty_content = not response.content.strip()
+        return response
+
+
 def _eval_field_scan(candidate: Any) -> list[str]:
     """Secret classes in the model-authored fields the production scan omits.
 
@@ -481,19 +528,25 @@ def judge_transcript(
         return call, []
 
     system_prompt = distill.PROMPT_VARIANTS[arm.prompt_variant]
+    probe = None if client is None else _ContentProbe(client)
     started = time.perf_counter()
     result = distill.distill_session(
-        client,
+        probe,
         digest,
         timeout=timeout,
         salient_chars=arm.salient_chars,
         context_tokens=arm.context_tokens,
         system_prompt=system_prompt,
+        max_tokens=arm.max_tokens,
     )
     elapsed = time.perf_counter() - started
     call["outcome"] = result.outcome.value
     call["unavailable_reason"] = result.unavailable_reason
     call["parse_error"] = result.parse_error
+    if probe is not None and probe.empty_content is not None:
+        call["empty_content"] = probe.empty_content
+        if probe.empty_content and result.outcome is distill.DistillOutcome.MALFORMED:
+            call["parse_error"] = PARSE_ERROR_EMPTY_CONTENT
     if result.unavailable_reason != "prompt_too_large":
         call["latency_s"] = round(elapsed, 4)
     if result.usage is not None:
@@ -565,6 +618,7 @@ def _call_row(transcript_id: str, arm: JudgeArm) -> dict[str, Any]:
         "outcome": None,
         "unavailable_reason": None,
         "parse_error": None,
+        "empty_content": None,
         "egress_rule": None,
         "include_ephemeral": None,
         "egress_reason": None,
@@ -673,8 +727,9 @@ def _refuse_changed_arms(
         names = ", ".join(repr(name) for name in changed)
         msg = (
             f"arm {names} was recorded in this output directory with a different "
-            "config (model, base_url, local, salient_chars, context_tokens or "
-            "prompt_variant); use a new arm name or a new output directory"
+            "config (model, base_url, local, salient_chars, context_tokens, "
+            "prompt_variant or max_tokens); use a new arm name or a new output "
+            "directory"
         )
         raise EvalConfigError(msg)
 
@@ -759,7 +814,6 @@ def run_eval(
     paths = discover_sessions(transcripts_dir)
     if max_transcripts is not None:
         paths = paths[:max_transcripts]
-    clients: dict[str, LLMClient | None] = {}
     locality = {arm.name: is_local(arm) for arm in arms}
 
     for path in paths:
@@ -777,13 +831,18 @@ def run_eval(
             continue
         digest = parse_session(path)
         for arm in pending:
-            if arm.name not in clients and not digest.is_empty:
-                clients[arm.name] = _build_client(build, arm)
+            # A fresh client per call, never one reused across calls:
+            # distill_session runs each call under its own asyncio.run, which
+            # closes its loop, and a pooled connection a client kept from the
+            # previous call is bound to that closed loop, so every second call
+            # would fail as model_error. The first build of an arm is also its
+            # validation: a missing key exits 1 before that arm is ever called.
+            client = None if digest.is_empty else _build_client(build, arm)
             call, rows = judge_transcript(
                 digest,
                 transcript_id,
                 arm,
-                clients.get(arm.name),
+                client,
                 local=locality[arm.name],
                 timeout=timeout,
                 stores=stores,
@@ -907,6 +966,9 @@ def _summarise_arm(
             1 for c in calls if c.get("unavailable_reason") == "model_error"
         ),
         "timeouts": sum(1 for c in calls if c.get("unavailable_reason") == "timeout"),
+        # Replies with no content: a reasoning model out of completion cap
+        # reads as malformed otherwise (see PARSE_ERROR_EMPTY_CONTENT).
+        "empty_content_replies": sum(1 for c in calls if c.get("empty_content")),
         "candidates_proposed": proposed,
         "candidates_accepted": len(accepted),
         "rejected_by_gate": dict(sorted(rejected.items())),
