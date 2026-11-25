@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+from trellis.llm.types import LLMResponse
 from trellis_workers.session_capture import distill
 from trellis_workers.session_capture.models import (
     ROLE_ASSISTANT,
@@ -231,6 +234,50 @@ def test_distill_model_down_is_unavailable() -> None:
     result = distill.distill_session(BrokenLLMClient(), _digest())
     assert result.outcome is distill.DistillOutcome.UNAVAILABLE
     assert result.unavailable_reason == "model_error"
+
+
+def test_distill_model_error_logs_the_exception_class_never_its_message() -> None:
+    from structlog.testing import capture_logs
+
+    class _Leaky:
+        async def generate(self, **_kwargs: Any) -> Any:
+            msg = "prompt text the provider echoed back"
+            raise ValueError(msg)
+
+    with capture_logs() as logs:
+        result = distill.distill_session(_Leaky(), _digest())
+    assert result.unavailable_reason == "model_error"
+    (entry,) = [e for e in logs if e["event"] == "distill_model_error"]
+    assert entry["error"] == "ValueError"
+    assert "echoed" not in repr(entry)
+
+
+class _CapRecorder:
+    def __init__(self) -> None:
+        self.max_tokens: list[int] = []
+
+    async def generate(self, *, max_tokens: int, **_kwargs: Any) -> LLMResponse:
+        self.max_tokens.append(max_tokens)
+        return LLMResponse(content="[]")
+
+
+def test_distill_max_tokens_defaults_to_the_sweep_cap_and_is_overridable() -> None:
+    client = _CapRecorder()
+    distill.distill_session(client, _digest())
+    distill.distill_session(client, _digest(), max_tokens=4000, context_tokens=9000)
+    assert client.max_tokens == [1200, 4000]
+    assert distill.DEFAULT_COMPLETION_TOKENS == 1200
+
+
+def test_distill_max_tokens_is_the_window_preflight_reserve() -> None:
+    client = _CapRecorder()
+    fits = distill.distill_session(client, _digest(), context_tokens=20000)
+    too_large = distill.distill_session(
+        client, _digest(), context_tokens=20000, max_tokens=20000
+    )
+    assert fits.outcome is distill.DistillOutcome.EMPTY
+    assert too_large.unavailable_reason == "prompt_too_large"
+    assert client.max_tokens == [1200]
 
 
 def test_distill_success_returns_candidates() -> None:

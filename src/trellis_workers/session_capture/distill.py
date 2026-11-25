@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -127,7 +127,8 @@ DEFAULT_JUDGE_CONTEXT_TOKENS = 4096
 #: Completion budget reserved out of the window (the ``max_tokens`` the judge
 #: is called with). Prompt + completion must both fit, or the server drops
 #: prompt tokens to make room.
-_COMPLETION_RESERVE_TOKENS = 1200
+DEFAULT_COMPLETION_TOKENS = 1200
+_COMPLETION_RESERVE_TOKENS = DEFAULT_COMPLETION_TOKENS
 
 #: Operator override for :data:`_MAX_SALIENT_CHARS`, for a deployment whose
 #: judge endpoint has a larger window than the default assumes.
@@ -193,6 +194,10 @@ class DistillResult:
     #: Token usage the endpoint reported for the call, when it reported any.
     #: Read by the offline judge eval only; the sweep ignores it.
     usage: TokenUsage | None = None
+    #: Whether the reply had no content (empty or whitespace); ``None`` when no
+    #: reply was parsed. Read by the offline judge eval only, and left out of
+    #: equality so the outcome alone decides whether two results match.
+    content_empty: bool | None = field(default=None, compare=False)
 
 
 _SYSTEM_PROMPT = (
@@ -459,17 +464,21 @@ def distill_session(
     salient_chars: int | None = None,
     context_tokens: int | None = None,
     system_prompt: str | None = None,
+    max_tokens: int | None = None,
 ) -> DistillResult:
     """Distil candidate memories from a session into a concrete outcome.
 
     The autonomous sweep never writes raw or guessed content when the judge is
     down — the opposite of #263's reconcile fail-open.
 
-    The sweep passes none of ``salient_chars``, ``context_tokens`` or
-    ``system_prompt``; each ``None`` resolves exactly as before they existed
-    (env-honouring cap, env-declared window, production prompt). The offline
-    judge eval sets them per arm.
+    The sweep passes none of ``salient_chars``, ``context_tokens``,
+    ``system_prompt`` or ``max_tokens``; each ``None`` resolves exactly as
+    before they existed (env-honouring cap, env-declared window, production
+    prompt, a :data:`DEFAULT_COMPLETION_TOKENS` completion cap). The offline
+    judge eval sets them per arm. ``max_tokens`` is both the call's completion
+    cap and the completion reserve of the window pre-flight.
     """
+    completion_tokens = DEFAULT_COMPLETION_TOKENS if max_tokens is None else max_tokens
     if client is None:
         logger.info("distill_skipped_no_client", session_id=digest.session_id)
         return DistillResult(
@@ -480,7 +489,10 @@ def distill_session(
         digest, salient_chars=salient_chars, system_prompt=system_prompt
     )
     if _prompt_exceeds_window(
-        messages, session_id=digest.session_id, context_tokens=context_tokens
+        messages,
+        session_id=digest.session_id,
+        context_tokens=context_tokens,
+        completion_reserve_tokens=completion_tokens,
     ):
         return DistillResult(
             outcome=DistillOutcome.UNAVAILABLE,
@@ -489,7 +501,9 @@ def distill_session(
     try:
         response = asyncio.run(
             asyncio.wait_for(
-                client.generate(messages=messages, temperature=0.0, max_tokens=1200),
+                client.generate(
+                    messages=messages, temperature=0.0, max_tokens=completion_tokens
+                ),
                 timeout=timeout,
             )
         )
@@ -499,14 +513,21 @@ def distill_session(
             outcome=DistillOutcome.UNAVAILABLE,
             unavailable_reason="timeout",
         )
-    except Exception:
-        logger.warning("distill_model_error", session_id=digest.session_id)
+    except Exception as exc:
+        # The class name only: a provider's message can quote the prompt.
+        logger.warning(
+            "distill_model_error",
+            session_id=digest.session_id,
+            error=type(exc).__name__,
+        )
         return DistillResult(
             outcome=DistillOutcome.UNAVAILABLE,
             unavailable_reason="model_error",
         )
     return replace(
-        parse_candidates(response.content, digest.session_id), usage=response.usage
+        parse_candidates(response.content, digest.session_id),
+        usage=response.usage,
+        content_empty=not response.content.strip(),
     )
 
 
@@ -515,12 +536,14 @@ def _prompt_exceeds_window(
     *,
     session_id: str,
     context_tokens: int | None = None,
+    completion_reserve_tokens: int = _COMPLETION_RESERVE_TOKENS,
 ) -> bool:
     """Whether the prompt cannot fit the judge's declared context window.
 
     ``context_tokens`` overrides the declared window for one call (the
     offline judge eval's per-arm window); ``None`` reads
     :func:`judge_context_tokens` as the sweep always has.
+    ``completion_reserve_tokens`` is the call's completion cap.
 
     A prompt over the window is not an error anywhere in the stack: Ollama
     truncates it server-side, returns 200, and hermes3:8b answers from the
@@ -545,13 +568,13 @@ def _prompt_exceeds_window(
     """
     window = judge_context_tokens() if context_tokens is None else context_tokens
     estimated = sum(len(m.content) for m in messages) // _CHARS_PER_TOKEN
-    if estimated + _COMPLETION_RESERVE_TOKENS <= window:
+    if estimated + completion_reserve_tokens <= window:
         return False
     logger.warning(
         "distill_prompt_exceeds_window",
         session_id=session_id,
         prompt_tokens_estimated=estimated,
-        completion_reserve_tokens=_COMPLETION_RESERVE_TOKENS,
+        completion_reserve_tokens=completion_reserve_tokens,
         judge_context_tokens=window,
         remedy=(
             "prompt does not fit the judge context window; raise the window "
