@@ -39,14 +39,21 @@ listed ids are each length-capped and the first group is trimmed to fit.
 section. A held-out pack's metadata and telemetry are replaced wholesale, so
 it carries neither the section nor any listed id, and a served pack with no
 items drops the block while the holdout is live
-(``PackBuilder._blind_advisories_for_empty_pack``) so it cannot be told apart
-from a held-out one.
+(``PackBuilder._blind_advisories_for_empty_pack``), so its nearby block
+cannot be told apart from a held-out pack's. Only the nearby block: the rest
+of a gate-emptied response can still differ (its Withheld note, for one).
+An item the cutoff kept on feedback evidence
+(``relevance_cutoff_evidence_exempt``) is not cut, so it is never listed.
 
 **Joining a later fetch.** ``listed_item_ids`` names every id the section
 showed. A ``PACK_ITEMS_FETCHED`` naming the pack and one of those ids joins
 to the pack as a nearby fetch: the feedback prior counts it as fetch evidence
 (:func:`trellis.retrieve.feedback_prior.build_ledger`) and ``analyze value``
 reports it apart from served fetches (``fetch_joined_nearby``).
+``PACK_ASSEMBLED.nearby`` lists the ids whenever the block was built, even
+for a pack whose caller's surface does not render the section (the REST pack
+responses carry no ``metadata``), so a joined fetch does not prove the agent
+saw the section.
 """
 
 from __future__ import annotations
@@ -112,14 +119,21 @@ def resolve_nearby_mode(settings: dict[str, Any] | None = None) -> NearbyMode:
     return "off"
 
 
+#: Markdown characters removed from a label or title: a backtick would break
+#: the id spans that follow, ``*`` and ``_`` would open emphasis inside the
+#: bold label, ``[``/``]`` would form a link and ``<``/``>`` an HTML tag or
+#: autolink.
+_MARKDOWN_STRIP = str.maketrans("", "", "`*_[]<>")
+
+
 def _clean(text: str) -> str:
-    """``text`` on one line of single spaces, with every backtick removed.
+    """``text`` on one line of single spaces, markdown specials removed.
 
     A label or title is shown inside markdown next to inline code spans; a
-    newline would start a new block (``## heading``) and a backtick would
-    break the id spans that follow.
+    newline would start a new block (``## heading``), and the characters in
+    :data:`_MARKDOWN_STRIP` would open emphasis, a link, a tag or end a span.
     """
-    return " ".join(text.replace("`", "").split())
+    return " ".join(text.translate(_MARKDOWN_STRIP).split())
 
 
 def _first_str(value: Any) -> str | None:

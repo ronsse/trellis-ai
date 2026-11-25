@@ -82,6 +82,7 @@ from trellis.retrieve.excerpts import (
 from trellis.retrieve.feedback_prior import (
     FeedbackEvidenceProvider,
     FeedbackPriorConfig,
+    MemoizedEvidence,
     feedback_prior_step,
     resolve_feedback_prior_config,
 )
@@ -1019,15 +1020,20 @@ class PackBuilder:
         return resolve_relevance_cutoff_config()
 
     def _attach_nearby(
-        self, pack: Pack | SectionedPack, *, unservable: dict[str, str]
+        self,
+        pack: Pack | SectionedPack,
+        *,
+        unservable: Callable[[], dict[str, str]],
     ) -> dict[str, Any] | None:
         """Add the ``nearby`` block to ``pack.metadata``; return its event copy.
 
         Renders only when the flag is on and the cutoff (mode ``on``) left
-        cut items on the pack that it could have served (``unservable`` from
-        :meth:`_nearby_unservable` names the rest); otherwise the pack is
-        untouched and this returns ``None``. The returned
-        ``PACK_ASSEMBLED`` copy leaves out the rendered ``markdown``.
+        cut items on the pack that it could have served (``unservable``,
+        :meth:`_nearby_unservable` bound to this build, names the rest; it
+        is called only when the section is on and something was cut);
+        otherwise the pack is untouched and this returns ``None``. The
+        returned ``PACK_ASSEMBLED`` copy leaves out the rendered
+        ``markdown``.
         """
         mode = (
             self._nearby_mode
@@ -1036,8 +1042,10 @@ class PackBuilder:
         )
         cutoff_meta = pack.metadata.get("relevance_cutoff")
         rows = cutoff_meta.get("cut_items") if isinstance(cutoff_meta, dict) else None
+        if mode != "on" or not rows:
+            return None
         block = build_nearby(
-            rows, mode=mode, pack_id=pack.pack_id, unservable=unservable
+            rows, mode=mode, pack_id=pack.pack_id, unservable=unservable()
         )
         if block is None:
             return None
@@ -1071,14 +1079,20 @@ class PackBuilder:
         return out
 
     def _apply_relevance_cutoff_pool(
-        self, items: list[PackItem]
+        self, items: list[PackItem], evidence: MemoizedEvidence
     ) -> RelevanceCutoffResult:
-        """The relevance cutoff over the merged pool, priced by excerpt tokens."""
+        """The relevance cutoff over the merged pool, priced by excerpt tokens.
+
+        ``evidence`` is this build's one ledger read, shared with
+        :meth:`_apply_feedback_prior`; the cutoff reads it only when its
+        evidence exemption is on and some item failed the floor.
+        """
         return apply_relevance_cutoff(
             items,
             config=self._effective_relevance_cutoff_config(),
             price=lambda item: self._token_counter.count(item.excerpt),
             title_of=lambda item: _item_attribution(item).get("title"),
+            evidence=evidence.evidence,
         )
 
     def _effective_authority_rank_config(self) -> AuthorityRankConfig:
@@ -1088,11 +1102,12 @@ class PackBuilder:
         return resolve_authority_rank_config()
 
     def _apply_feedback_prior(
-        self, items: list[PackItem]
+        self, items: list[PackItem], evidence: MemoizedEvidence
     ) -> tuple[list[PackItem], dict[str, Any] | None]:
         """The feedback-prior step; ``(items, None)`` itself when off. Never raises."""
         config = self._feedback_prior_config or resolve_feedback_prior_config()
-        return feedback_prior_step(items, config, self._feedback_evidence)
+        provider = evidence if self._feedback_evidence is not None else None
+        return feedback_prior_step(items, config, provider)
 
     @property
     def holdout_rate(self) -> float:
@@ -1475,7 +1490,10 @@ class PackBuilder:
 
         # Relevance cutoff (default off), after every other collect-seam gate
         # and before dedup, so each copy is judged with all its axes known.
-        cutoff = self._apply_relevance_cutoff_pool(all_items)
+        # One ledger read per build, shared by the cutoff's evidence
+        # exemption and the feedback prior; neither reads it when off.
+        build_evidence = MemoizedEvidence(self._feedback_evidence)
+        cutoff = self._apply_relevance_cutoff_pool(all_items, build_evidence)
         all_items = cutoff.kept
         rejected.extend(cutoff.rejected)
 
@@ -1547,7 +1565,9 @@ class PackBuilder:
         authority_block = authority_rank_telemetry(authority_config, deduped)
         # Feedback prior (off by default): same seam, same reason. Off
         # returns ``deduped`` itself and no block.
-        deduped, feedback_prior_block = self._apply_feedback_prior(deduped)
+        deduped, feedback_prior_block = self._apply_feedback_prior(
+            deduped, build_evidence
+        )
 
         # Content floor: demote (or, when configured, drop) items whose
         # excerpt carries no substance — the logic lives in
@@ -1697,7 +1717,7 @@ class PackBuilder:
         # and telemetry are replaced below, so it carries neither.
         nearby_block = self._attach_nearby(
             pack,
-            unservable=self._nearby_unservable(
+            unservable=lambda: self._nearby_unservable(
                 cutoff.cut,
                 include_structural=include_structural,
                 include_meta=include_meta,
@@ -1964,7 +1984,10 @@ class PackBuilder:
         rejected.extend(class_prior_rejected)
 
         # 1c. Relevance cutoff (default off) — see build().
-        cutoff = self._apply_relevance_cutoff_pool(all_items)
+        # One ledger read per build, shared by the cutoff's evidence
+        # exemption and the feedback prior; neither reads it when off.
+        build_evidence = MemoizedEvidence(self._feedback_evidence)
+        cutoff = self._apply_relevance_cutoff_pool(all_items, build_evidence)
         all_items = cutoff.kept
         rejected.extend(cutoff.rejected)
 
@@ -2032,7 +2055,9 @@ class PackBuilder:
         authority_block = authority_rank_telemetry(authority_config, deduped)
         # Feedback prior (off by default): same seam, same reason. Off
         # returns ``deduped`` itself and no block.
-        deduped, feedback_prior_block = self._apply_feedback_prior(deduped)
+        deduped, feedback_prior_block = self._apply_feedback_prior(
+            deduped, build_evidence
+        )
 
         # 3c. Content floor over the shared pool — mirrors build(). The floor
         # runs before items are assigned to sections, so a dropped item has
@@ -2232,7 +2257,7 @@ class PackBuilder:
         # and telemetry are replaced below, so it carries neither.
         nearby_block = self._attach_nearby(
             sectioned_pack,
-            unservable=self._nearby_unservable(
+            unservable=lambda: self._nearby_unservable(
                 cutoff.cut,
                 include_structural=include_structural,
                 include_meta=include_meta,

@@ -843,6 +843,34 @@ _SPECS: tuple[SettingSpec, ...] = (
         enum=("off", "shadow", "on"),
     ),
     SettingSpec(
+        name="relevance_cutoff_evidence_exempt",
+        label="Relevance cutoff evidence exemption",
+        type="str",
+        default="off",
+        description=(
+            "With relevance_cutoff_mode 'on' or 'shadow', keeps an item the "
+            "cutoff would withhold when the feedback evidence the feedback "
+            "prior reads (90 days of helpful grades and fetches against "
+            "unhelpful grades) is net positive, whatever feedback_prior_mode "
+            "is. 'off' (the default) changes nothing. Not measured yet: "
+            "price it with `trellis analyze replay --relevance-cutoff "
+            "--evidence-exempt` first."
+        ),
+        # See trellis.retrieve.relevance_cutoff (evidence_exempts) for the rule.
+        surfaces=("mcp", "api", "cli"),
+        restart_required=False,
+        risk="caution",
+        risk_note=(
+            "Any caller that can record feedback or fetch items can bring a "
+            "weak item back past the cutoff, and an item kept this way is "
+            "graded and fetched more often, so the exemption feeds itself."
+        ),
+        group="retrieval",
+        settings_live=True,
+        env_var="TRELLIS_RELEVANCE_CUTOFF_EVIDENCE_EXEMPT",
+        enum=("off", "on"),
+    ),
+    SettingSpec(
         name="authority_rank_mode",
         label="Authority ranking boost",
         type="str",

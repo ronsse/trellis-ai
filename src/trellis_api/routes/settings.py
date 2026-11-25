@@ -283,9 +283,9 @@ def _effective_values(
         resolve_relevance_cutoff_config,
     )
 
-    effective["relevance_cutoff_mode"] = resolve_relevance_cutoff_config(
-        settings=settings_values
-    ).mode
+    cutoff_config = resolve_relevance_cutoff_config(settings=settings_values)
+    effective["relevance_cutoff_mode"] = cutoff_config.mode
+    effective["relevance_cutoff_evidence_exempt"] = cutoff_config.evidence_exempt
 
     from trellis.retrieve.feedback_prior import (  # noqa: PLC0415
         resolve_feedback_prior_config,

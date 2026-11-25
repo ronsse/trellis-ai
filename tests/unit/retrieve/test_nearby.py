@@ -419,9 +419,15 @@ class TestEmptyPackIsBlind:
         assert not second.items
         return second, _pack_payload(log, second.pack_id)
 
-    def test_flat_served_empty_matches_held_out(
+    def test_flat_served_empty_lists_nothing_like_held_out(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Only the nearby block is indistinguishable, not the whole response.
+
+        On the real surface a gate-emptied pack still shows its Withheld
+        note, which a held-out pack does not; this checks the nearby part
+        alone: no block, no Nearby text, no listed id.
+        """
         served, served_payload = self._served_empty(tmp_path, monkeypatch)
         monkeypatch.setattr(
             "trellis.retrieve.pack_builder.is_held_out", lambda *_a, **_k: True
@@ -435,12 +441,9 @@ class TestEmptyPackIsBlind:
             assert "nearby" not in pack.metadata
             assert "nearby" not in payload
             assert "listed_item_ids" not in json.dumps(payload)
-        served_text = _markdown(served, nearby=served.metadata.get("nearby"))
-        held_text = _markdown(held, nearby=held.metadata.get("nearby"))
-        assert served_text.replace(served.pack_id, "P") == held_text.replace(
-            held.pack_id, "P"
-        )
-        assert "Nearby" not in served_text
+            text = _markdown(pack, nearby=pack.metadata.get("nearby"))
+            assert "Nearby" not in text
+            assert not any(i in text for i in WEAK_IDS)
 
     def test_sectioned_served_empty_has_no_section(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -558,6 +561,17 @@ class TestLabelsAndCap:
         assert sum(1 for line in lines if line.startswith("- ")) == 1
         assert '"ti tle"' in block["markdown"]
 
+    def test_markdown_specials_are_neutralised(self) -> None:
+        row = _row("a", domain=["**bold** _u_ <b>"], title="see [x](http://e)")
+        assert group_label(row) == "domain: bold u b"
+        block = build_nearby([row], mode="on", pack_id="P")
+        assert block is not None
+        (line,) = [ln for ln in block["markdown"].splitlines() if ln.startswith("- ")]
+        assert line.startswith("- **domain: bold u b**: 1 item")
+        assert '"see x(http://e)"' in line
+        assert not any(ch in line.replace("**domain", "") for ch in "[]<>_")
+        assert block["groups"][0]["titles"] == ["see x(http://e)"]
+
     def test_backtick_id_is_left_out(self) -> None:
         block = build_nearby(
             [_row("ok", domain=["d"]), _row("bad`id", domain=["d`x"])],
@@ -617,3 +631,19 @@ class TestFormatterParity:
         }
         assert nearby_of({}) is None
         assert sdk_format_pack([], "q", nearby=None) == sdk_format_pack([], "q")
+
+
+def test_off_never_computes_the_unservable_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*_a: Any, **_k: Any) -> dict[str, str]:
+        msg = "_nearby_unservable ran with nearby off"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(PackBuilder, "_nearby_unservable", _boom)
+    pack = _builder(nearby="off").build("q", clearance="restricted")
+    assert "nearby" not in pack.metadata
+    pack = _builder(nearby="off").build_sectioned(
+        intent="q", sections=[SectionRequest(name="all")], clearance="restricted"
+    )
+    assert "nearby" not in pack.metadata

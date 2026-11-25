@@ -464,6 +464,32 @@ class EventLogFeedbackEvidence(FeedbackEvidenceProvider):
         return EvidenceResult(state=STATE_APPLIED, table=ledger.table())
 
 
+class MemoizedEvidence(FeedbackEvidenceProvider):
+    """``provider``'s :meth:`evidence`, read at most once.
+
+    One per pack build, so the feedback prior and the relevance cutoff's
+    evidence exemption share a single read of the ledger. Never constructed
+    reading anything: the first :meth:`evidence` call does the read, so a
+    build that needs no evidence reads none. A ``None`` provider reports
+    ``evidence_unavailable``.
+    """
+
+    def __init__(self, provider: FeedbackEvidenceProvider | None) -> None:
+        self._provider = provider
+        self._result: EvidenceResult | None = None
+        self.reads = 0
+
+    def evidence(self) -> EvidenceResult:
+        if self._result is None:
+            self.reads += 1
+            self._result = (
+                EvidenceResult(state=STATE_UNAVAILABLE)
+                if self._provider is None
+                else self._provider.evidence()
+            )
+        return self._result
+
+
 _SHARED: dict[int, EventLogFeedbackEvidence] = {}
 _SHARED_LOCK = threading.Lock()
 _SHARED_MAX = 16
@@ -598,6 +624,7 @@ __all__ = [
     "FeedbackPriorConfig",
     "FeedbackPriorMode",
     "ItemEvidence",
+    "MemoizedEvidence",
     "apply_feedback_prior",
     "build_ledger",
     "demotion_allowed",

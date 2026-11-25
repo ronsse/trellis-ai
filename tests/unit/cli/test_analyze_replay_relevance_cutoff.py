@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
-from trellis.stores.base.event_log import EventType
+from trellis.stores.base.event_log import Event, EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.main import app
 from trellis_cli.stores import _reset_registry
@@ -263,3 +264,119 @@ def test_kept_by_min_keep_counts_servings_only(stores: StoreRegistry) -> None:
     # m1 and m2 are servings.
     assert data["kept_by_min_keep"] == 2
     assert data["cut_servings"] == 0
+
+
+def _append_pack(
+    registry: StoreRegistry,
+    pack_id: str,
+    at: datetime,
+    rows: list[tuple[str, float]],
+    *,
+    helpful: list[str],
+) -> None:
+    log = registry.operational.event_log
+    log.append(
+        Event(
+            event_type=EventType.PACK_ASSEMBLED,
+            source="test",
+            entity_id=pack_id,
+            entity_type="pack",
+            occurred_at=at,
+            payload={
+                "pack_id": pack_id,
+                "injected_items": [
+                    {
+                        "item_id": item_id,
+                        "item_type": "document",
+                        "rank": rank,
+                        "estimated_tokens": 10,
+                        "strategy_source": "semantic",
+                        "score_breakdown": {
+                            "relevance_score": 0.5,
+                            "native_semantic": score,
+                        },
+                    }
+                    for rank, (item_id, score) in enumerate(rows, 1)
+                ],
+                "rejected_items": [],
+            },
+        )
+    )
+    log.append(
+        Event(
+            event_type=EventType.FEEDBACK_RECORDED,
+            source="mcp",
+            entity_id=pack_id,
+            occurred_at=at + timedelta(minutes=1),
+            payload={
+                "pack_id": pack_id,
+                "helpful_item_ids": helpful,
+                "unhelpful_item_ids": [],
+                "rating": 0.9,
+                "success": True,
+            },
+        )
+    )
+
+
+def test_evidence_exempt_uses_only_earlier_evidence(seeded: StoreRegistry) -> None:
+    now = datetime.now(tz=UTC)
+    # Before pack_new: s5 graded helpful elsewhere, so s5 is exempt.
+    _append_pack(
+        seeded, "pack_before", now - timedelta(days=1), [("s5", 0.9)], helpful=["s5"]
+    )
+    # After pack_new: s4 graded helpful, which pack_new must not see.
+    _append_pack(
+        seeded, "pack_after", now + timedelta(hours=1), [("s4", 0.9)], helpful=["s4"]
+    )
+    code, out = _invoke(
+        "--relevance-cutoff",
+        "--semantic-min",
+        "0.5",
+        "--evidence-exempt",
+        "--format",
+        "json",
+    )
+    assert code == 0, out
+    data = json.loads(out.strip())
+    # The cut is reported without the exemption, as before.
+    assert data["cut_servings"] == 3
+    assert data["evidence_exempt"] is True
+    assert data["evidence_state"] == "applied"
+    # s5 only: s7's helpful grade is pack_new's own, s4's is later.
+    assert data["exempt_restored_servings"] == 1
+    assert data["exempt_restored_unjudged"] == 1
+    assert data["exempt_restored_tokens"] == 20
+    assert (data["exempt_restored_helpful"], data["exempt_restored_unhelpful"]) == (
+        0,
+        0,
+    )
+    assert data["exempt_newly_cut_servings"] == 0
+    assert any("as of its own assembly" in note for note in data["notes"])
+
+
+def test_evidence_exempt_off_reports_not_requested(seeded: StoreRegistry) -> None:
+    code, out = _invoke(
+        "--relevance-cutoff", "--semantic-min", "0.5", "--format", "json"
+    )
+    assert code == 0, out
+    data = json.loads(out.strip())
+    assert data["evidence_exempt"] is False
+    assert data["evidence_state"] == "not_requested"
+    assert data["exempt_restored_servings"] == 0
+
+
+def test_evidence_exempt_text_output(seeded: StoreRegistry) -> None:
+    code, out = _invoke(
+        "--relevance-cutoff", "--semantic-min", "0.5", "--evidence-exempt"
+    )
+    assert code == 0, out
+    assert "exempt restored:" in plain(out)
+
+
+@pytest.mark.parametrize("fmt", ["text", "json"])
+def test_evidence_exempt_needs_relevance_cutoff(
+    seeded: StoreRegistry, fmt: str
+) -> None:
+    code, _ = _invoke("--evidence-exempt", "--format", fmt)
+    assert code == 2

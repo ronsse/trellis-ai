@@ -4918,6 +4918,35 @@ positive best. An item another strategy returned counts as returned by it even
 when that strategy's score was non-finite (no native key), by its declared
 `source_strategy` / `strategy_source`.
 
+*The evidence exemption.* `relevance_cutoff_evidence_exempt`
+(`TRELLIS_RELEVANCE_CUTOFF_EVIDENCE_EXEMPT`, settings key of the same name) is
+`off` (default) or `on`, resolved env > settings > `off`; an unrecognised value
+warns and resolves to `off`. With the cutoff in `shadow` or `on`, an item the
+floor fails is kept when the feedback prior's evidence ledger (the same reader
+as `feedback_prior_mode`, whatever that mode is: helpful citations plus
+weighted fetches against unhelpful ones, 90 days, held-out packs dropped)
+holds net positive evidence for it: positive evidence above unhelpful and at
+least one helpful citation or fetch (`evidence_exempts` in
+`trellis.retrieve.relevance_cutoff`). The ledger is read at most once per pack
+build, shared with the prior, and only when something failed the floor. The
+order is: the floor picks the failing ids, exempted ids are then kept and count
+toward `min_keep` first, and `min_keep` restores the best of the rest. An
+exempted item is not in `cut_items`, not recorded as `below_relevance_cutoff`
+and never listed in the nearby section. The `PACK_ASSEMBLED.relevance_cutoff`
+block gains `evidence_exempt` (`state`, `count`, `item_ids`, and per id the
+`helpful` / `unhelpful` / `fetched` counts); in `shadow` it names what `on`
+would exempt, and `cut_items` is then what `on` would still cut. A failed or
+capped evidence read exempts nothing and says so in `state`. A held-out pack
+keeps only the configuration, gaining `evidence_exempt_mode: "on"`. Public-only
+packs are never gated, so the setting changes nothing there. Off adds no key and
+reads no evidence. `trellis analyze replay --relevance-cutoff --evidence-exempt`
+prices it: each pack is judged only on evidence recorded before its own
+assembly, within 90 days and excluding its own grades and fetches, and the
+report adds `exempt_restored_servings` (split helpful / unhelpful / unjudged by
+that pack's own verdict, with tokens) and `exempt_newly_cut_servings` (a
+serving the `min_keep` order now cuts). A truncated evidence read is reported
+in `evidence_state` and leaves those counts at zero.
+
 *The nearby section.* `nearby_section` (`TRELLIS_NEARBY_SECTION`, settings key
 `nearby_section`) is `off` (default) or `on`; an unrecognised value warns and
 resolves to `off`. It renders only when the cutoff ran in `on` and cut
@@ -4931,7 +4960,7 @@ is an id containing a backtick or a non-printable character or longer than 128
 characters; the block counts these per reason in `not_listed`
 (`structural_filter`, `meta_activity_filter`, `session_dedup`,
 `unlistable_id`). The cutoff's own `cut_items` and `rejected_items` are
-unchanged. Labels and titles are put on one line, stripped of backticks and cut
+unchanged. Labels and titles are put on one line, stripped of backticks and of `* _ [ ] < >`, and cut
 to 60 characters. At most 5 groups and 5 ids per group are listed, and the
 whole section stays within 200 estimated tokens: when the first group alone is
 over, its trailing ids (then its titles) are dropped until it fits, keeping at
