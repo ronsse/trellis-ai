@@ -20,6 +20,10 @@ config.
 transcripts modified at or after that instant and rewrites only the pack joins
 that differ, to back-fill joins written before a payload key existed. It builds
 no judge, distils nothing, writes no memory and leaves the watermark alone.
+
+``eval-judge`` is a third, offline run: it compares judge configurations on a
+directory of transcripts and writes rows to a directory outside any git work
+tree, opening no store. See :mod:`~trellis_workers.session_capture.judge_eval`.
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ from trellis.errors import TrellisError
 from trellis.logging import configure_stderr_logging
 from trellis.stores.registry import StoreRegistry
 from trellis.stores.settings_store import load_settings_values
+from trellis_workers.session_capture.judge_eval import eval_main
 from trellis_workers.session_capture.sweep import (
     CaptureJudgeUnavailableError,
     judge_unavailable_sessions,
@@ -104,6 +109,15 @@ def _run_rejoin(since: datetime, registry: StoreRegistry, *, dry_run: bool) -> i
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Dispatch ``eval-judge`` to the offline eval, anything else to the sweep."""
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["eval-judge"]:
+        configure_stderr_logging()
+        return eval_main(argv[1:])
+    return _sweep_main(argv)
+
+
+def _sweep_main(argv: list[str]) -> int:
     """Run one capture sweep, or a ``--rejoin-since`` back-fill; return an exit code."""
     parser = argparse.ArgumentParser(prog="trellis-session-capture")
     parser.add_argument(

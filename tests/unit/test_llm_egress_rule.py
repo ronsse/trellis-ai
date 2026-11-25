@@ -144,6 +144,13 @@ _CAPTURE_DISTILL = Entry(
     "_capture_session",
     via="_session_egress_verdict",
 )
+# The offline judge eval opens no store, so ``_eval_egress_permits`` treats a
+# transcript that named any pack as served ``restricted`` content.
+_EVAL_DISTILL = Entry(
+    "trellis_workers/session_capture/judge_eval.py",
+    "judge_transcript",
+    via="_eval_egress_permits",
+)
 
 # The local precedent senders ask ``_egress_skip``, which asks the predicate of
 # each stored document a trace or candidate names, before ``_ask_local`` sends anything.
@@ -169,6 +176,7 @@ _GATED: dict[tuple[str, str], tuple[Entry, ...]] = {
     ),
     ("trellis_workers/session_capture/distill.py", "distill_session"): (
         _CAPTURE_DISTILL,
+        _EVAL_DISTILL,
     ),
     ("trellis_workers/learning/miner.py", "_ask_llm"): (_MINER_MINE,),
     ("trellis/learning/pack_judge.py", "_ask_judge"): (_PACK_JUDGE,),
@@ -220,13 +228,14 @@ _CONSTRUCT_ONLY: dict[tuple[str, str], str] = {
 _SENDER_FLOOR = 6
 #: Hand-read: two extraction sites, enrich batch, shadow item, three reconcile
 #: (the write path, the capture pass, the re-judge sweep), the miner's plan, the
-#: capture distillation, the pack judge.
-_ENTRY_FLOOR = 10
+#: capture distillation, the offline judge eval, the pack judge.
+_ENTRY_FLOOR = 11
 #: Hand-read: judge_reconcile x3, run_memory_extraction x2, EnrichmentService x2,
 #: build_llm_facet_classifier x1, LLMExtractor x1, LLMFacetClassifier x1,
-#: distill_session x1, ``_ask_llm`` x1 (in ``PrecedentMiner.mine``),
+#: distill_session x2 (the sweep, the offline judge eval),
+#: ``_ask_llm`` x1 (in ``PrecedentMiner.mine``),
 #: ``_ask_judge`` x1 (in ``judge_window``).
-_SINK_CALL_FLOOR = 13
+_SINK_CALL_FLOOR = 14
 #: Hand-read: ``trellis worker mine-precedents`` builds the only ``PrecedentMiner``.
 _MINER_CONSTRUCTION_FLOOR = 1
 

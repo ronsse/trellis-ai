@@ -6193,6 +6193,48 @@ coverage after the rejoin, and raise `trellis analyze holdout --limit` if it was
 
 ---
 
+### `trellis-session-capture eval-judge`
+
+An offline comparison of judge configurations ("arms") on the same transcripts. Each transcript is parsed with the sweep's own `parse_session`, judged with `distill_session` (same prompt builder, same context-window pre-flight, same parser) and passed through the sweep's own candidate gates (`gate_candidate`: secret scan, injection guard, worthiness). It stops there: no `MutationExecutor`, no document, event, vector or watermark write, and no store is opened.
+
+```bash
+trellis-session-capture eval-judge \
+  --transcripts /path/to/transcripts \
+  --arms arms.yaml \
+  --output /scratch/judge-eval-1 \
+  [--gold gold.jsonl] [--max-transcripts 50] [--timeout 60]
+```
+
+The arm file (YAML or JSON) is `{"arms": [...]}`; unknown keys are refused:
+
+```yaml
+arms:
+  - name: small-8k            # file-name safe; used in summary-<name>.json
+    model: some-model
+    base_url: http://127.0.0.1:11434/v1   # OpenAI-compatible endpoint
+    api_key_env: JUDGE_KEY    # the NAME of the variable; the key is never in the file
+    salient_chars: 8000       # default 8000, the sweep's default
+    context_tokens: 4096      # default 4096, the sweep's default
+    prompt_variant: default   # only "default" (the production prompt) exists today
+    local: false              # same meaning as llm.local in config.yaml
+```
+
+The key is read from the named environment variable by the registry's own client builder and is never logged or written. An endpoint that needs no key still needs the variable set to some value; an unset one exits `1` naming the variable. The output directory is refused (exit `1`) when it is inside a git work tree, because the rows hold distilled memory text from private transcripts.
+
+**Differences from the sweep, on purpose.** Every non-empty transcript is judged (the sweep's clean-session sampling would compare arms on different inputs). The sweep's egress check reads the labels of the documents a session's packs served; with no store, a transcript that named any pack is treated as served `restricted` content and is withheld from an arm whose route is not `local: true` (`outcome: egress_withheld`, nothing sent).
+
+**Output.** `calls.jsonl` holds one row per transcript and arm (outcome, `unavailable_reason`, latency, prompt and completion tokens when the endpoint reported them). `candidates.jsonl` holds one row per proposed candidate: its fields, the deciding `gate` (`accepted`, `secret_scan`, `injection`, `worthiness`) and `worthiness` outcome, `evidence_grounded`, `evidence_in_window` and `within_arm_duplicate`. A candidate the secret scan blocked keeps only its matched class labels; its title, memory and evidence are written as `null`. `summary-<arm>.json` holds the per-arm totals, and the same JSON is printed on stdout. A rerun skips every (transcript, arm) pair already in `calls.jsonl`, failures included; delete a row to retry it. A failed or timed-out call is recorded and the run continues.
+
+**What the metrics mean, and what they do not.**
+
+- `grounded_rate`: the share of candidates whose `evidence` string appears verbatim, whitespace-normalised, in the parsed conversation. It detects fabricated evidence. **Grounded is not the same as useful**: a grounded memory can be trivial, and a good memory whose evidence is paraphrased reads as ungrounded. Empty evidence counts as not grounded.
+- `evidence_in_window_rate`: the share whose evidence appears in the elided window the judge was actually shown. Grounded but not in the window means the quote came from text the judge never saw. That is worth reading, not proof of a defect.
+- `duplicate_rate`: the share of candidates whose normalised title and memory exactly repeat an earlier candidate for the same transcript and arm. It does not catch paraphrases or duplicates across transcripts.
+- `candidates_accepted`, `rejected_by_gate`: what the production gates would have let through. The gates are deterministic floors, not a quality grade.
+- `failures`, `timeouts`, `mean_latency_s`, `prompt_tokens`, `completion_tokens`: cost and reliability. Latency covers calls actually sent; token totals cover only the calls in `calls_reporting_usage`.
+
+**Gold.** `--gold` takes JSONL rows `{"transcript_id": ..., "text": ..., "evidence": ...}` (`evidence` optional). `transcript_id` is the transcript's path relative to `--transcripts`, as written in the rows. Accepted candidates are matched one-to-one and greedily to gold rows of the same transcript: an evidence-quote containment (either way, normalised) counts as a match, else normalised token Jaccard of title plus memory against the gold text at or above 0.5. `precision` is matched over accepted, `recall` is matched over gold rows. Misses go to `unmatched-candidates-<arm>.jsonl` and `unmatched-gold-<arm>.jsonl` for a human to read. No model grades anything. A low precision can mean the gold set is incomplete rather than that the judge is wrong.
+
 ## API Authentication
 
 The REST API authenticates with scoped API keys (roadmap item E.5, issue #191).

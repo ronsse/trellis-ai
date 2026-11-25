@@ -27,8 +27,10 @@ from __future__ import annotations
 
 import asyncio
 import os
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from enum import StrEnum
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -51,9 +53,8 @@ from trellis.schemas.memory_op import (
 from trellis_workers.session_capture.models import CandidateMemory, SessionDigest
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from trellis.llm import LLMClient
+    from trellis.llm.types import TokenUsage
     from trellis.stores.base.event_log import EventLog
 
 logger = structlog.get_logger(__name__)
@@ -79,7 +80,8 @@ DEFAULT_DISTILL_MODEL = "hermes3:8b"
 #: :data:`ENV_JUDGE_CONTEXT_TOKENS`, and rely on
 #: :func:`_prompt_exceeds_window` to refuse the case where it was not raised
 #: enough.
-_MAX_SALIENT_CHARS = 8000
+DEFAULT_MAX_SALIENT_CHARS = 8000
+_MAX_SALIENT_CHARS = DEFAULT_MAX_SALIENT_CHARS
 
 #: Cap on the rendered tool-use rollup, in characters.
 #:
@@ -188,6 +190,9 @@ class DistillResult:
     candidates: tuple[CandidateMemory, ...] = ()
     parse_error: str | None = None
     unavailable_reason: str | None = None
+    #: Token usage the endpoint reported for the call, when it reported any.
+    #: Read by the offline judge eval only; the sweep ignores it.
+    usage: TokenUsage | None = None
 
 
 _SYSTEM_PROMPT = (
@@ -217,6 +222,17 @@ _SYSTEM_PROMPT = (
     '"memory_type": "semantic"|"procedural", "signal": "failure"|"correction"|'
     '"success", "evidence": str, "non_derivable": bool, "durable": bool, '
     '"actionable": bool, "confidence": 0.0-1.0}.'
+)
+
+#: Name of the production system prompt among :data:`PROMPT_VARIANTS`.
+DEFAULT_PROMPT_VARIANT = "default"
+
+#: System prompts an offline judge eval may select by name. The sweep always
+#: uses :data:`DEFAULT_PROMPT_VARIANT`; a candidate prompt is added here, under
+#: a new name, so an eval arm can compare it against production on the same
+#: transcripts before anything changes what the sweep sends.
+PROMPT_VARIANTS: Mapping[str, str] = MappingProxyType(
+    {DEFAULT_PROMPT_VARIANT: _SYSTEM_PROMPT}
 )
 
 
@@ -296,8 +312,19 @@ def render_tool_summary(digest: SessionDigest, *, max_chars: int | None = None) 
     return rendered[:budget] if len(rendered) > budget else rendered
 
 
-def build_distill_messages(digest: SessionDigest) -> list[Message]:
+def build_distill_messages(
+    digest: SessionDigest,
+    *,
+    salient_chars: int | None = None,
+    system_prompt: str | None = None,
+) -> list[Message]:
     """Build the distillation prompt from the secret-free digest only.
+
+    ``salient_chars`` and ``system_prompt`` exist for the offline judge eval
+    (:mod:`~trellis_workers.session_capture.judge_eval`). Left ``None``, as
+    the sweep leaves them, the cap is :func:`max_salient_chars` (operator
+    override included) and the prompt is the production one, byte for byte
+    (``tests/unit/workers/session_capture/test_distill_parity.py``).
 
     An oversize session is capped at :data:`_MAX_SALIENT_CHARS`, and the
     cut is marked with an explicit ``<elided … />`` tag (size + reason,
@@ -339,7 +366,8 @@ def build_distill_messages(digest: SessionDigest) -> list[Message]:
     only by re-measuring a figure this docstring already asserted.
     """
     tool_line = _TOOL_LINE_LABEL + render_tool_summary(digest)
-    salient_budget = max(0, max_salient_chars() - len(tool_line))
+    cap = max_salient_chars() if salient_chars is None else salient_chars
+    salient_budget = max(0, cap - len(tool_line))
     salient = elide_text(digest.salient_text, salient_budget)
     signals = f"has_error={digest.has_error} has_correction={digest.has_correction}"
     user = (
@@ -349,7 +377,10 @@ def build_distill_messages(digest: SessionDigest) -> list[Message]:
         "Return the JSON array of qualifying memories."
     )
     return [
-        Message(role="system", content=_SYSTEM_PROMPT),
+        Message(
+            role="system",
+            content=_SYSTEM_PROMPT if system_prompt is None else system_prompt,
+        ),
         Message(role="user", content=user),
     ]
 
@@ -425,11 +456,19 @@ def distill_session(
     digest: SessionDigest,
     *,
     timeout: float = DEFAULT_TIMEOUT_S,
+    salient_chars: int | None = None,
+    context_tokens: int | None = None,
+    system_prompt: str | None = None,
 ) -> DistillResult:
     """Distil candidate memories from a session into a concrete outcome.
 
     The autonomous sweep never writes raw or guessed content when the judge is
     down — the opposite of #263's reconcile fail-open.
+
+    The sweep passes none of ``salient_chars``, ``context_tokens`` or
+    ``system_prompt``; each ``None`` resolves exactly as before they existed
+    (env-honouring cap, env-declared window, production prompt). The offline
+    judge eval sets them per arm.
     """
     if client is None:
         logger.info("distill_skipped_no_client", session_id=digest.session_id)
@@ -437,8 +476,12 @@ def distill_session(
             outcome=DistillOutcome.UNAVAILABLE,
             unavailable_reason="no_client",
         )
-    messages = build_distill_messages(digest)
-    if _prompt_exceeds_window(messages, session_id=digest.session_id):
+    messages = build_distill_messages(
+        digest, salient_chars=salient_chars, system_prompt=system_prompt
+    )
+    if _prompt_exceeds_window(
+        messages, session_id=digest.session_id, context_tokens=context_tokens
+    ):
         return DistillResult(
             outcome=DistillOutcome.UNAVAILABLE,
             unavailable_reason="prompt_too_large",
@@ -462,15 +505,22 @@ def distill_session(
             outcome=DistillOutcome.UNAVAILABLE,
             unavailable_reason="model_error",
         )
-    return parse_candidates(response.content, digest.session_id)
+    return replace(
+        parse_candidates(response.content, digest.session_id), usage=response.usage
+    )
 
 
 def _prompt_exceeds_window(
     messages: list[Message],
     *,
     session_id: str,
+    context_tokens: int | None = None,
 ) -> bool:
     """Whether the prompt cannot fit the judge's declared context window.
+
+    ``context_tokens`` overrides the declared window for one call (the
+    offline judge eval's per-arm window); ``None`` reads
+    :func:`judge_context_tokens` as the sweep always has.
 
     A prompt over the window is not an error anywhere in the stack: Ollama
     truncates it server-side, returns 200, and hermes3:8b answers from the
@@ -493,7 +543,7 @@ def _prompt_exceeds_window(
     guards; the ``TRELLIS_CAPTURE_MAX_SALIENT_CHARS`` default sits well
     inside the default window.
     """
-    window = judge_context_tokens()
+    window = judge_context_tokens() if context_tokens is None else context_tokens
     estimated = sum(len(m.content) for m in messages) // _CHARS_PER_TOKEN
     if estimated + _COMPLETION_RESERVE_TOKENS <= window:
         return False
