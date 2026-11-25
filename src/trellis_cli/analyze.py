@@ -1261,7 +1261,7 @@ def _print_implicit_block(implicit: Any) -> None:
 
 
 @analyze_app.command("replay")
-def replay(  # noqa: PLR0912, PLR0915 - one flag per arm, dispatched here
+def replay(  # noqa: PLR0911, PLR0912, PLR0915 - one flag per arm, dispatched here
     days: int = typer.Option(30, help="Days of history to replay"),
     excerpt_max_chars: int | None = typer.Option(
         None,
@@ -1339,6 +1339,16 @@ def replay(  # noqa: PLR0912, PLR0915 - one flag per arm, dispatched here
             "packs re-ordered, body/pointer moves and how cited items moved."
         ),
     ),
+    feedback_prior: bool = typer.Option(
+        False,
+        "--feedback-prior",
+        help=(
+            "Re-rank each pack as feedback_prior_mode=on would, from feedback "
+            "and fetches recorded before that pack (never its own), and re-run "
+            "the walk and graduated disclosure: reports evidence coverage, "
+            "moves, body/served changes for cited items and the token effect."
+        ),
+    ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
     no_meta_trace: bool = typer.Option(
         False,
@@ -1394,9 +1404,16 @@ def replay(  # noqa: PLR0912, PLR0915 - one flag per arm, dispatched here
     ``trellis.retrieve.pack_replay.replay_authority_rank``. Unserved
     candidates are not re-scored. It combines with no other option.
 
+    ``--feedback-prior`` re-ranks every recorded candidate by the
+    default-off feedback prior, using for each pack only evidence recorded
+    before it was assembled and never its own grades; see
+    ``trellis.retrieve.pack_replay.replay_feedback_prior``. It combines with
+    no other option.
+
     Examples::
 
         trellis analyze replay --authority-rank
+        trellis analyze replay --feedback-prior
         trellis analyze replay --body-items 12
         trellis analyze replay --excerpt-max-chars 300
         trellis analyze replay --excerpt-max-chars 300 --no-refill
@@ -1406,6 +1423,38 @@ def replay(  # noqa: PLR0912, PLR0915 - one flag per arm, dispatched here
         trellis analyze replay --entity-requires-description
         trellis analyze replay --min-distinct-words 5 --class-prior
     """
+    if feedback_prior:
+        conflicts = [
+            flag
+            for flag, given in (
+                ("--authority-rank", authority_rank),
+                ("--class-prior", class_prior),
+                ("--graph-selection", graph_selection is not None),
+                ("--excerpt-max-chars", excerpt_max_chars is not None),
+                ("--body-items", body_items is not None),
+                ("--max-items", max_items is not None),
+                ("--no-refill", no_refill),
+                ("--entity-requires-description", entity_requires_description),
+                ("--min-distinct-words", min_distinct_words is not None),
+            )
+            if given
+        ]
+        if conflicts:
+            prior_refusal = (
+                "--feedback-prior cannot be combined with "
+                f"{escape(', '.join(conflicts))}"
+            )
+            # The exit sits below the format branch
+            # (``tests/unit/test_format_exit_parity_rule.py``).
+            if output_format == "json":
+                emit_json({"status": "error", "message": prior_refusal})
+            else:
+                console.print(f"[red]{prior_refusal}[/red]", soft_wrap=True)
+            raise typer.Exit(code=2)
+        _replay_feedback_prior_command(
+            days=days, output_format=output_format, no_meta_trace=no_meta_trace
+        )
+        return
     if authority_rank:
         conflicts = [
             flag
@@ -1808,6 +1857,74 @@ def _replay_authority_rank_command(
         print(json.dumps(report.model_dump()))
         return
     _render_authority_rank_replay(report)
+
+
+def _replay_feedback_prior_command(
+    *, days: int, output_format: str, no_meta_trace: bool
+) -> None:
+    """The ``--feedback-prior`` arm of ``analyze replay``."""
+    from trellis.retrieve.pack_replay import (  # noqa: PLC0415
+        replay_feedback_prior,
+    )
+
+    event_log = get_event_log()
+    with wrap_cli_meta_analysis(
+        agent_suffix="analyze",
+        analyzer_name="cli.analyze.replay-feedback-prior",
+        disabled=no_meta_trace,
+    ) as _meta_record:
+        report = replay_feedback_prior(event_log, days=days)
+        if _meta_record.enabled and report.attributed_packs > 0:
+            _meta_record.produced_finding(
+                f"pack-replay-feedback-prior-report-d{days}",
+                finding_type="FeedbackPriorReplayReport",
+            )
+    if output_format == "json":
+        print(json.dumps(report.model_dump()))
+        return
+    _render_feedback_prior_replay(report)
+
+
+def _render_feedback_prior_replay(report: Any) -> None:
+    """Render a FeedbackPriorReplayReport."""
+    console.print(
+        f"[bold]Feedback-Prior Replay[/bold] (last {report.window_days} days, "
+        f"n={report.attributed_packs} attributed packs, evidence window "
+        f"{report.evidence_window_days} days)"
+    )
+    console.print(
+        f"  replayed: {report.replayed_packs}   "
+        f"not re-runnable: {report.unmodelled_packs}"
+    )
+    console.print(
+        f"  coverage:            {report.servings_with_evidence}/{report.servings} "
+        f"servings, {report.packs_with_evidence} pack(s); "
+        f"{report.candidates_with_evidence} unserved candidate(s)"
+    )
+    console.print(
+        f"  packs re-ordered:    {report.packs_order_changed}   "
+        f"servings up/down: {report.servings_moved_up}/{report.servings_moved_down}"
+    )
+    console.print(
+        f"  helpful body +/-:    {report.helpful_gained_body}/"
+        f"{report.helpful_lost_body}   dropped: {report.helpful_dropped}"
+    )
+    console.print(
+        f"  unhelpful body +/-:  {report.unhelpful_gained_body}/"
+        f"{report.unhelpful_lost_body}   dropped: {report.unhelpful_dropped}"
+    )
+    console.print(
+        f"  unjudged dropped:    {report.unjudged_dropped}   "
+        f"newly served: {report.newly_served} [dim](never judged)[/dim]"
+    )
+    console.print(
+        f"  tokens:              {report.tokens_before:,} -> "
+        f"{report.tokens_after:,} ({report.token_delta:+,})"
+    )
+    if report.notes:
+        console.print()
+        for note in report.notes:
+            console.print(f"  [dim]{escape(note)}[/dim]")
 
 
 def _render_authority_rank_replay(report: Any) -> None:

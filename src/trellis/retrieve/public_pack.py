@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from trellis.retrieve.authority_rank import AUTHORITY_BOOST_KEY
 from trellis.retrieve.excerpts import truncate_excerpt
+from trellis.retrieve.feedback_prior import EVIDENCE_KEYS as FEEDBACK_PRIOR_KEYS
 from trellis.retrieve.parent_verdicts import ParentVerdictCache
 from trellis.retrieve.public_rank import (
     PUBLIC_ROW_CEILING,
@@ -109,7 +110,7 @@ def public_search_page(
 
 #: ``score_breakdown`` keys a public-only caller never receives.
 _PRIVATE_BREAKDOWN_KEYS: frozenset[str] = frozenset(
-    {"original_score", AUTHORITY_BOOST_KEY}
+    {"original_score", AUTHORITY_BOOST_KEY} | FEEDBACK_PRIOR_KEYS
 )
 
 
@@ -122,6 +123,7 @@ def project_for_public(item: PackItem) -> PackItem:
     raw strategy score (a keyword score is a function of corpus statistics);
     the fused rank-based score stays. ``score_breakdown["authority_boost"]``
     is dropped too: its value names which authority signal an item carries.
+    So are the feedback-prior keys: they count how other callers graded it.
     """
     source = item.strategy_source or (item.metadata or {}).get("source_strategy")
     breakdown = {

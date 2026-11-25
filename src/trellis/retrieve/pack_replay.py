@@ -94,9 +94,17 @@ from trellis.retrieve.excerpts import (
     count_substance_words,
     truncate_excerpt,
 )
+from trellis.retrieve.feedback_prior import (
+    FEEDBACK_PRIOR_KEY,
+    FeedbackPriorConfig,
+    ItemEvidence,
+    build_ledger,
+    factor_for,
+)
 from trellis.retrieve.pack_value import MIN_ATTRIBUTED_PACKS, collect_pack_verdicts
 from trellis.retrieve.strategies import GRAPH_STRATEGY_NAME
 from trellis.schemas.document_metadata import document_form_of
+from trellis.stores.base.event_log import EventType, scan_events
 from trellis.stores.base.trace import as_utc
 
 if TYPE_CHECKING:
@@ -2714,12 +2722,390 @@ def replay_authority_rank(
     return report
 
 
+class FeedbackPriorReplayReport(TrellisModel):
+    """What the default-off feedback prior would have reordered.
+
+    Same population and unit as :class:`AuthorityRankReplayReport`: flat,
+    attributed, non-holdout packs, counted per ``(pack_id, item_id)``.
+    Unlike that arm, every candidate in the pool is re-scored, served or
+    not, because the prior keys on ``item_id`` alone.
+
+    **No leakage.** Each pack's evidence table is cut from a ledger of
+    verdicts and fetches recorded strictly before that pack's own
+    ``PACK_ASSEMBLED`` and inside the prior's window before it, and it never
+    includes the pack's own grades or fetches. Scoring a prior on the grades
+    that built it would be circular.
+    """
+
+    window_days: int
+    #: The prior's own look-back, before each replayed pack.
+    evidence_window_days: int
+    attributed_packs: int = 0
+    replayed_packs: int = 0
+    unmodelled_packs: int = 0
+    unmodelled_reasons: dict[str, int] = Field(default_factory=dict)
+    #: Coverage: servings whose item had evidence at its pack's time.
+    servings: int = 0
+    servings_with_evidence: int = 0
+    #: Replayed packs with at least one served item carrying evidence.
+    packs_with_evidence: int = 0
+    #: Unserved candidates with evidence (they can be lifted in).
+    candidates_with_evidence: int = 0
+    packs_order_changed: int = 0
+    #: Servings whose position in the re-sorted pool rose / fell.
+    servings_moved_up: int = 0
+    servings_moved_down: int = 0
+    #: Served set and body set, split by the pack's verdict.
+    helpful_gained_body: int = 0
+    helpful_lost_body: int = 0
+    helpful_dropped: int = 0
+    unhelpful_gained_body: int = 0
+    unhelpful_lost_body: int = 0
+    unhelpful_dropped: int = 0
+    unjudged_dropped: int = 0
+    #: Candidates the re-run admits that were never served, so never judged.
+    newly_served: int = 0
+    #: Estimated served tokens (bodies at their walk charge, pointers at
+    #: their label cost) before and after, summed over replayed packs.
+    tokens_before: int = 0
+    tokens_after: int = 0
+    token_delta: int = 0
+    notes: list[str] = Field(default_factory=list)
+
+
+_FEEDBACK_PRIOR_UNMODELLED = {
+    **_AUTHORITY_UNMODELLED,
+    "already_adjusted": (
+        "were built with the feedback prior or the authority boost on"
+    ),
+}
+
+
+@dataclass
+class _FeedbackPriorTally:
+    replayed: int = 0
+    unmodelled_reasons: dict[str, int] = field(default_factory=dict)
+    counts: dict[str, int] = field(default_factory=dict)
+
+    def unmodelled(self, reason: str) -> None:
+        self.unmodelled_reasons[reason] = self.unmodelled_reasons.get(reason, 0) + 1
+
+    def add(self, key: str, n: int = 1) -> None:
+        self.counts[key] = self.counts.get(key, 0) + n
+
+
+def _adjusted_on_build(
+    payload: Mapping[str, Any], rows: list[Mapping[str, Any]]
+) -> bool:
+    block = payload.get("feedback_prior")
+    if isinstance(block, Mapping) and block.get("mode") == "on":
+        return True
+    if isinstance(payload.get("authority_rank"), Mapping):
+        return True
+    for row in rows:
+        breakdown = row.get("score_breakdown")
+        if isinstance(breakdown, Mapping) and (
+            FEEDBACK_PRIOR_KEY in breakdown or AUTHORITY_BOOST_KEY in breakdown
+        ):
+            return True
+    return False
+
+
+def _state_tokens(candidate: _Candidate, state: int) -> int:
+    if state == _BODY:
+        return candidate.walk_tokens
+    if state == _POINTER:
+        if candidate.served_as_pointer:
+            return candidate.served_tokens
+        return _tokens_from_chars(_pointer_chars(candidate.title))
+    return 0
+
+
+def _replay_feedback_prior_pack(  # noqa: PLR0911, PLR0912, PLR0915 - one guard per refusal
+    payload: Mapping[str, Any],
+    rows: list[Mapping[str, Any]],
+    verdicts: tuple[set[str], set[str]],
+    table: Mapping[str, ItemEvidence],
+    config: FeedbackPriorConfig,
+    tally: _FeedbackPriorTally,
+) -> None:
+    if _is_index_pack(payload):
+        tally.unmodelled("index_pack")
+        return
+    if _adjusted_on_build(payload, rows):
+        tally.unmodelled("already_adjusted")
+        return
+    rejected_rows = [
+        r for r in (payload.get("rejected_items") or []) if isinstance(r, Mapping)
+    ]
+    plan = _plan_refill(payload, rejected_rows, set(), verdicts)
+    if isinstance(plan, str):
+        tally.unmodelled(plan)
+        return
+    row_by_id = {r["item_id"]: r for r in rows if isinstance(r.get("item_id"), str)}
+    rejected_score = {
+        r["item_id"]: r.get("relevance_score")
+        for r in rejected_rows
+        if isinstance(r.get("item_id"), str)
+        and r.get("reason") in ("token_budget", "max_items")
+    }
+    pool = [*plan.candidates, *plan.cut]
+    base: dict[str, float] = {}
+    for candidate in pool:
+        row = row_by_id.get(candidate.item_id) if candidate.included else None
+        if row is not None:
+            score = _served_base_score(row)
+            if score is None:
+                tally.unmodelled("no_rrf_score")
+                return
+        else:
+            raw = rejected_score.get(candidate.item_id)
+            if not isinstance(raw, int | float) or not math.isfinite(raw):
+                tally.unmodelled("candidate_unscored")
+                return
+            score = float(raw)
+        base[candidate.item_id] = score
+
+    recorded = [c.item_id for c in pool]
+    if sorted(recorded, key=lambda i: -base[i]) != recorded:
+        tally.unmodelled("order_not_reproduced")
+        return
+    body_items = _body_items(payload)
+    old_admitted = {c.item_id for c in plan.candidates if c.included}
+    pointers = _served_pointer_ids(payload)
+    old_order_admitted = [i for i in recorded if i in old_admitted]
+    exempt = {
+        item_id
+        for position, item_id in enumerate(old_order_admitted)
+        if body_items is not None and position >= body_items and item_id not in pointers
+    }
+    old_states = _states(recorded, old_admitted, body_items, exempt)
+    if {i for i, s in old_states.items() if s == _POINTER} != set(pointers):
+        tally.unmodelled("pointers_not_reproduced")
+        return
+
+    tally.replayed += 1
+    # Serving's rule: a score not above 0 is never scaled.
+    factor = {
+        i: factor_for(table.get(i), config) if base[i] > 0 else 1.0 for i in recorded
+    }
+    with_evidence = {i for i in recorded if i in table and not table[i].empty}
+    served_with = with_evidence & old_admitted
+    tally.add("servings", len(old_admitted))
+    tally.add("servings_with_evidence", len(served_with))
+    tally.add("candidates_with_evidence", len(with_evidence - old_admitted))
+    if served_with:
+        tally.add("packs_with_evidence")
+
+    by_id = {c.item_id: c for c in pool}
+    new_order = sorted(recorded, key=lambda i: -(base[i] * factor[i]))
+    old_pos = {i: n for n, i in enumerate(recorded)}
+    new_pos = {i: n for n, i in enumerate(new_order)}
+    for item_id in old_admitted:
+        if new_pos[item_id] < old_pos[item_id]:
+            tally.add("servings_moved_up")
+        elif new_pos[item_id] > old_pos[item_id]:
+            tally.add("servings_moved_down")
+    new_admitted = _walk([by_id[i] for i in new_order], plan.budget, plan.max_items)
+    new_states = _states(new_order, new_admitted, body_items, exempt)
+    if [i for i in new_order if i in new_admitted] != old_order_admitted:
+        tally.add("order_changed")
+    tally.add("newly_served", len(new_admitted - old_admitted))
+    tally.add(
+        "tokens_before", sum(_state_tokens(by_id[i], s) for i, s in old_states.items())
+    )
+    tally.add(
+        "tokens_after", sum(_state_tokens(by_id[i], s) for i, s in new_states.items())
+    )
+    for item_id, old in old_states.items():
+        new = new_states.get(item_id, _DROPPED)
+        if new == old:
+            continue
+        verdict = by_id[item_id].verdict
+        if new == _DROPPED:
+            tally.add(f"{verdict}_dropped")
+        if old == _BODY:
+            if verdict != "unjudged":
+                tally.add(f"{verdict}_lost_body")
+        elif new == _BODY and verdict != "unjudged":
+            tally.add(f"{verdict}_gained_body")
+
+
+def _feedback_prior_notes(
+    *,
+    attributed_packs: int,
+    tally: _FeedbackPriorTally,
+    config: FeedbackPriorConfig,
+    truncated: bool,
+) -> list[str]:
+    notes = [
+        (
+            "Counterfactual over the SAME packs and the SAME citations, with "
+            f"strength={config.strength}, k={config.k}, "
+            f"fetch_weight={config.fetch_weight} and a "
+            f"{config.window_days}-day evidence window. Each pack is scored "
+            "only on verdicts and fetches recorded strictly before it was "
+            "assembled, never on its own; the outcome counts use its own "
+            "grades, so the prior is never judged on the evidence that built it."
+        ),
+        (
+            "Every candidate in the recorded pool is re-scored, served or not; "
+            "a candidate the original walk never reached is not in the pool."
+        ),
+        (
+            f"{tally.counts.get('newly_served', 0)} newly served candidate(s) "
+            "were never shown, so nobody judged them; they are counted, not scored."
+        ),
+        (
+            "Tokens are estimates: a body at its recorded walk charge, a "
+            "pointer at its recorded cost or, if newly made, its label cost."
+        ),
+    ]
+    if truncated:
+        notes.append(
+            "The evidence scan hit its cap, so the oldest evidence is missing "
+            "and coverage is understated."
+        )
+    if attributed_packs < MIN_ATTRIBUTED_PACKS:
+        notes.append(
+            f"{attributed_packs} attributed pack(s) is below the "
+            f"{MIN_ATTRIBUTED_PACKS}-pack minimum every other ratio in "
+            "`analyze value` is held to; read these counts as raw tallies."
+        )
+    for reason, count in sorted(tally.unmodelled_reasons.items()):
+        notes.append(
+            f"{count} pack(s) {_FEEDBACK_PRIOR_UNMODELLED.get(reason, reason)}; "
+            "they are not re-run and count as unmodelled."
+        )
+    return notes
+
+
+def replay_feedback_prior(
+    event_log: EventLog,
+    *,
+    days: int = 30,
+    limit: int = _DEFAULT_EVENT_LIMIT,
+    config: FeedbackPriorConfig | None = None,
+) -> FeedbackPriorReplayReport:
+    """Price turning ``feedback_prior_mode`` on over recorded flat packs.
+
+    Args:
+        event_log: Operational log holding ``PACK_ASSEMBLED``,
+            ``FEEDBACK_RECORDED`` and ``PACK_ITEMS_FETCHED``. Read only;
+            holdout packs and the feedback naming them are dropped by the join.
+        days: Look-back window of replayed packs.
+        limit: Per-event-type scan limit.
+        config: Prior to price; defaults to ``mode="on"`` with the code
+            defaults. Its ``window_days`` reaches back before ``days``.
+
+    Returns:
+        A :class:`FeedbackPriorReplayReport`; its ``notes`` say what this
+        arm cannot measure.
+    """
+    config = config or FeedbackPriorConfig(mode="on")
+    now = datetime.now(tz=UTC)
+    since = now - timedelta(days=days)
+    evidence_since = since - timedelta(days=config.window_days)
+    feedback_events, pack_events, _, coverage = join_pack_events_with_coverage(
+        event_log, since=evidence_since, limit=limit
+    )
+    fetch_scan = scan_events(
+        event_log,
+        event_type=EventType.PACK_ITEMS_FETCHED,
+        since=evidence_since,
+        limit=limit,
+    )
+    ledger = build_ledger(pack_events, feedback_events, fetch_scan.events)
+    flat_packs = {
+        pack_id: event.payload or {}
+        for pack_id, event in pack_events.items()
+        if as_utc(event.occurred_at) >= since
+        and has_served_rows(event.payload or {})
+        and not is_sectioned_payload(event.payload or {})
+    }
+    verdicts = collect_pack_verdicts(feedback_events, flat_packs)
+    helpful_by_pack = verdicts["helpful"]
+    unhelpful_by_pack = verdicts["unhelpful"]
+    attributed = sorted(set(helpful_by_pack) | set(unhelpful_by_pack))
+
+    tally = _FeedbackPriorTally()
+    for pack_id in attributed:
+        payload = flat_packs[pack_id]
+        assembled = as_utc(pack_events[pack_id].occurred_at)
+        table = ledger.table(
+            before=assembled,
+            since=assembled - timedelta(days=config.window_days),
+            exclude_pack=pack_id,
+        )
+        rows = [
+            served.row
+            for served in served_rows_from_payload(
+                pack_id, payload, include_sectioned=False, include_holdout=True
+            )
+            if served.item_id is not None
+        ]
+        _replay_feedback_prior_pack(
+            payload,
+            rows,
+            (
+                helpful_by_pack.get(pack_id, set()),
+                unhelpful_by_pack.get(pack_id, set()),
+            ),
+            table,
+            config,
+            tally,
+        )
+
+    c = tally.counts
+    truncated = bool(coverage.truncated or fetch_scan.coverage.truncated)
+    report = FeedbackPriorReplayReport(
+        window_days=days,
+        evidence_window_days=config.window_days,
+        attributed_packs=len(attributed),
+        replayed_packs=tally.replayed,
+        unmodelled_packs=sum(tally.unmodelled_reasons.values()),
+        unmodelled_reasons=dict(sorted(tally.unmodelled_reasons.items())),
+        servings=c.get("servings", 0),
+        servings_with_evidence=c.get("servings_with_evidence", 0),
+        packs_with_evidence=c.get("packs_with_evidence", 0),
+        candidates_with_evidence=c.get("candidates_with_evidence", 0),
+        packs_order_changed=c.get("order_changed", 0),
+        servings_moved_up=c.get("servings_moved_up", 0),
+        servings_moved_down=c.get("servings_moved_down", 0),
+        helpful_gained_body=c.get("helpful_gained_body", 0),
+        helpful_lost_body=c.get("helpful_lost_body", 0),
+        helpful_dropped=c.get("helpful_dropped", 0),
+        unhelpful_gained_body=c.get("unhelpful_gained_body", 0),
+        unhelpful_lost_body=c.get("unhelpful_lost_body", 0),
+        unhelpful_dropped=c.get("unhelpful_dropped", 0),
+        unjudged_dropped=c.get("unjudged_dropped", 0),
+        newly_served=c.get("newly_served", 0),
+        tokens_before=c.get("tokens_before", 0),
+        tokens_after=c.get("tokens_after", 0),
+        token_delta=c.get("tokens_after", 0) - c.get("tokens_before", 0),
+        notes=_feedback_prior_notes(
+            attributed_packs=len(attributed),
+            tally=tally,
+            config=config,
+            truncated=truncated,
+        ),
+    )
+    logger.debug(
+        "pack_value_feedback_prior_replayed",
+        window_days=days,
+        attributed_packs=report.attributed_packs,
+        replayed_packs=report.replayed_packs,
+    )
+    return report
+
+
 __all__ = [
     "EXCERPT_MAX_CHARS",
     "AuthorityRankReplayReport",
     "SUBSTANCE_BASIS_AS_SERVED",
     "SUBSTANCE_BASIS_CURRENT_STATE",
     "ClassPriorReplayReport",
+    "FeedbackPriorReplayReport",
     "GraphSelectionReplayReport",
     "ReplayArm",
     "ReplayPolicy",
@@ -2728,6 +3114,7 @@ __all__ = [
     "SubstanceTally",
     "replay_authority_rank",
     "replay_class_prior",
+    "replay_feedback_prior",
     "replay_graph_selection",
     "replay_pack_value",
     "replay_substance",
