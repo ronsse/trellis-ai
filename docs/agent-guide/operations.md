@@ -4378,7 +4378,8 @@ never served. It decides nothing; a path with many writes and few helpful
 servings is where trimming would pay.
 
 ```bash
-trellis analyze memory-yield [--days N] [--limit N] [--format text|json] [--no-meta-trace]
+trellis analyze memory-yield [--days N] [--limit N] [--format text|json] [--no-meta-trace] \
+    [--capture-breakdown [--capture-threshold F] [--capture-max-docs N]]
 ```
 
 | Option | Default | Description |
@@ -4386,6 +4387,9 @@ trellis analyze memory-yield [--days N] [--limit N] [--format text|json] [--no-m
 | `--days` | `30` | Window for document creation and for every event scan |
 | `--limit` | `5000` | Max events scanned per event type; truncation is reported in `scan` |
 | `--no-meta-trace` | off | Skip the meta-trace; the run then writes nothing |
+| `--capture-breakdown` | off | Add the `capture_breakdown` block (below); off, the output is unchanged and the key is absent |
+| `--capture-threshold` | `0.90` | Cosine floor of the breakdown's near-duplicate predicate |
+| `--capture-max-docs` | `5000` | Most session-capture documents probed for duplication, newest first |
 
 The universe is document-store parent rows whose `created_at` is in the window;
 a `<parent>#chunk-N` serving is credited to its parent. The path is the
@@ -4415,6 +4419,41 @@ entity nodes are not credited to traces. The block is not added to `totals`:
 already owns, and only the rest leave `limits.unattributed_servings`. A trace
 recorded before the window is out of scope even when its summary was written
 inside it.
+
+The opt-in `capture_breakdown` block is a second view of the
+`worker:session-capture` row (its `totals` equal that row; a capture whose
+creation event fell outside the scan sits under `source_system:claude-code` and
+is not in it). It carries the per-path counts split two ways, plus the 3x3
+`cross` (created, served, servings, helpful/unhelpful servings and grades):
+
+- `by_session_kind`: `subagent`, `top_level`, `unknown`. Read from the capture
+  worker's `metadata.subagent`; a document without it falls back to whether
+  `metadata.session_id` begins `agent-` (the sub-agent transcript name);
+  `session_kind_basis` counts which field decided. Document text is never read.
+- `by_duplication`: `near_duplicate`, `singleton`, `unchecked`.
+  `embedding_close_pairs` shares the pair predicate (`_candidate_pairs`:
+  stored-embedding cosine at or above `--capture-threshold`, one top-20 `query`
+  per document) with `trellis analyze near-duplicates`, but loads vectors in
+  its own loop (one `get` per id, no archived/superseded/noise filter), so
+  unlike near-duplicates the population includes archived, superseded and
+  noise documents. It is restricted to the capture documents in the window, so
+  a neighbour from another path never makes a capture a duplicate. The newest
+  `--capture-max-docs` (at least 1) are probed. `unchecked` means the partners
+  are unknown: no vector store, no usable embedding, the document's own
+  neighbour query raised (`neighbor_queries_failed`), or beyond the bound. A
+  document whose query raised is still `near_duplicate` when another
+  document's probe paired it. `duplication` reports `probed`, `over_bound`
+  (both 0 without a vector store), `no_embedding`, `neighbor_queries_failed`
+  and `probes_saturated`. Counts are a lower bound: a `singleton` may have a
+  missed partner because each probe is top-k, or because the partner is older
+  than the newest `--capture-max-docs`. `--capture-threshold` must be finite
+  with 0 < t <= 1; a bad value or bound exits 2 in either format.
+  `duplication` also counts pairs and connected-component clusters whose
+  members share one `metadata.session_id` (`same_session`), name several
+  (`cross_session`), or include a member with none (`unknown_session`).
+
+The block reads the vector store (`get` and `query` only) and emits counts and
+fixed labels, never ids, titles or session ids.
 
 ### `trellis analyze pack-scenario`
 

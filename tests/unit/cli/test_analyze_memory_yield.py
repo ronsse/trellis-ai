@@ -18,10 +18,18 @@ import pytest
 from typer.testing import CliRunner
 
 from tests.cli_output import plain
+from tests.unit.analyze.test_memory_yield_capture import seed_captures
 from trellis.analyze.memory_yield import (
     BASIS_EVENT,
     BASIS_NONE,
     BASIS_SOURCE_SYSTEM,
+    DUP_NEAR_DUPLICATE,
+    DUP_SINGLETON,
+    DUP_UNCHECKED,
+    KIND_SUBAGENT,
+    KIND_TOP_LEVEL,
+    KIND_UNKNOWN,
+    SESSION_CAPTURE_PATH,
     UNKNOWN_PATH,
     classify_creation_path,
     summarize_memory_yield,
@@ -360,3 +368,134 @@ class TestCliTraces:
             app, ["analyze", "memory-yield", "--format", "json", "--no-meta-trace"]
         )
         assert text.exit_code == machine.exit_code == 0
+
+
+CAPTURE_FLAG = "--capture-breakdown"
+
+
+def _invoke(*extra: str) -> Any:
+    result = runner.invoke(app, ["analyze", "memory-yield", "--no-meta-trace", *extra])
+    assert result.exit_code == 0, result.output
+    return result
+
+
+class TestCliCaptureBreakdown:
+    def test_flag_off_output_is_unchanged(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        seed_captures(registry, tmp_path)
+        off = json.loads(_invoke("--format", "json").stdout.strip())
+        on = json.loads(_invoke("--format", "json", CAPTURE_FLAG).stdout.strip())
+        old_keys = {"window_days", "since", "paths", "totals", "limits", "scan"}
+        assert set(off) == old_keys | {"traces"}
+        assert set(on) == set(off) | {"capture_breakdown"}
+        # The window end is "now" per run; every other block is identical.
+        for key in set(off) - {"since", "scan"}:
+            assert on[key] == off[key], key
+        off_text = plain(_invoke().stdout)
+        on_text = plain(_invoke(CAPTURE_FLAG).stdout)
+        assert "Session-capture breakdown" not in off_text
+        assert on_text.startswith(off_text)
+
+    def test_json_carries_the_block(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        seed_captures(registry, tmp_path)
+        data = json.loads(_invoke("--format", "json", CAPTURE_FLAG).stdout.strip())
+        block = data["capture_breakdown"]
+        assert block["path"] == SESSION_CAPTURE_PATH
+        assert block["totals"]["created"] == 6
+        kinds = {row["group"]: row["created"] for row in block["by_session_kind"]}
+        assert kinds == {KIND_SUBAGENT: 3, KIND_TOP_LEVEL: 2, KIND_UNKNOWN: 1}
+        dups = {row["group"]: row["created"] for row in block["by_duplication"]}
+        assert dups == {DUP_NEAR_DUPLICATE: 4, DUP_SINGLETON: 1, DUP_UNCHECKED: 1}
+        assert block["duplication"]["clusters"] == 2
+        assert len(block["cross"]) == 9
+
+    def test_bound_flag_reaches_the_predicate(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        seed_captures(registry, tmp_path)
+        data = json.loads(
+            _invoke(
+                "--format", "json", CAPTURE_FLAG, "--capture-max-docs", "2"
+            ).stdout.strip()
+        )
+        dup = data["capture_breakdown"]["duplication"]
+        assert (dup["max_docs"], dup["probed"], dup["over_bound"]) == (2, 2, 4)
+
+    def test_text_prints_counts_not_ids_or_sessions(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        seed_captures(registry, tmp_path)
+        rendered = plain(_invoke(CAPTURE_FLAG).stdout)
+        assert "Session-capture breakdown" in rendered
+        assert f"{KIND_SUBAGENT}: created 3, served 2" in rendered
+        assert f"{KIND_SUBAGENT} x {DUP_NEAR_DUPLICATE}: created 2" in rendered
+        for leaked in ("c-sub-", "c-top-", "agent-a", "invented capture"):
+            assert leaked not in rendered
+
+    def test_exit_code_does_not_depend_on_format(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        seed_captures(registry, tmp_path)
+        text = runner.invoke(
+            app, ["analyze", "memory-yield", "--no-meta-trace", CAPTURE_FLAG]
+        )
+        machine = runner.invoke(
+            app,
+            [
+                "analyze",
+                "memory-yield",
+                "--no-meta-trace",
+                "--format",
+                "json",
+                CAPTURE_FLAG,
+            ],
+        )
+        assert text.exit_code == machine.exit_code == 0
+
+    @pytest.mark.parametrize(
+        ("option", "value"),
+        [
+            ("--capture-threshold", "0"),
+            ("--capture-threshold", "-0.5"),
+            ("--capture-threshold", "1.5"),
+            ("--capture-threshold", "nan"),
+            ("--capture-threshold", "inf"),
+            ("--capture-max-docs", "0"),
+            ("--capture-max-docs", "-3"),
+        ],
+    )
+    def test_a_bad_capture_option_is_a_usage_error_in_both_formats(
+        self, registry: StoreRegistry, tmp_path: Path, option: str, value: str
+    ) -> None:
+        seed_captures(registry, tmp_path)
+        base = ["analyze", "memory-yield", "--no-meta-trace", CAPTURE_FLAG]
+        text = runner.invoke(app, [*base, option, value])
+        machine = runner.invoke(app, [*base, "--format", "json", option, value])
+        assert text.exit_code == machine.exit_code == 2, (text.output, machine.output)
+        assert option in plain(text.output)
+
+    def test_text_reports_failed_probes(
+        self, registry: StoreRegistry, tmp_path: Path
+    ) -> None:
+        seed_captures(registry, tmp_path)
+        rendered = plain(_invoke(CAPTURE_FLAG).stdout)
+        assert "0 failed probe(s)" in rendered
+
+    def test_run_writes_nothing(self, registry: StoreRegistry, tmp_path: Path) -> None:
+        seed_captures(registry, tmp_path)
+
+        def _footprint() -> tuple[int, int, int]:
+            return (
+                len(registry.operational.event_log.get_events(limit=100_000)),
+                registry.knowledge.document_store.count(),
+                registry.knowledge.vector_store.count(),
+            )
+
+        before = _footprint()
+        _reset_registry()
+        for fmt in ("text", "json"):
+            _invoke("--format", fmt, CAPTURE_FLAG)
+        assert _footprint() == before
