@@ -1252,6 +1252,11 @@ def _fetch_row(event: Event) -> _Fetch:
     return _Fetch(pack_id=pack_id or event.entity_id or None, served_item_ids=served)
 
 
+#: Public name for the one ``PACK_ITEMS_FETCHED`` reader, shared with
+#: :mod:`trellis.retrieve.feedback_prior`.
+fetch_row = _fetch_row
+
+
 def _count_re_retrieved(pack_events: Iterable[Event]) -> tuple[int, int, int]:
     """``(re_retrieved, with_session, without_session)`` over served packs.
 
@@ -1618,6 +1623,7 @@ def _build_notes(
 
 
 __all__ = [
+    "fetch_row",
     "GRAPH_SELECTION_NOT_GRAPH",
     "GRAPH_SELECTION_UNSTAMPED",
     "MIN_ATTRIBUTED_PACKS",

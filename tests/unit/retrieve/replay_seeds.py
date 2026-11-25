@@ -328,3 +328,41 @@ def seed_authority_rank(log: Any) -> str:
         },
     )
     return pack.pack_id
+
+
+def seed_feedback_prior(log: Any) -> tuple[str, str]:
+    """Two real default-built flat packs over one pool, each graded.
+
+    Both cite ``s2`` helpful and ``k1`` unhelpful. Only the second pack has
+    evidence recorded before it (the first pack's grades), so a replay that
+    honours "strictly before, never its own" re-orders the second pack alone.
+    Returns ``(first_pack_id, second_pack_id)``.
+    """
+    from trellis.retrieve.disclosure import DisclosureConfig
+    from trellis.retrieve.excerpts import ContentFloorConfig
+    from trellis.retrieve.pack_builder import PackBuilder
+    from trellis.retrieve.rerankers.rrf import RRFReranker
+
+    ids: list[str] = []
+    for _ in range(2):
+        pack = PackBuilder(
+            strategies=authority_rank_strategies(),
+            reranker=RRFReranker(),
+            content_floor=ContentFloorConfig(mode="off"),
+            disclosure=DisclosureConfig(mode="graduated", body_items=1),
+            event_log=log,
+        ).build("q", clearance="restricted")
+        log.emit(
+            EventType.FEEDBACK_RECORDED,
+            source="mcp",
+            entity_id=pack.pack_id,
+            payload={
+                "pack_id": pack.pack_id,
+                "helpful_item_ids": ["s2"],
+                "unhelpful_item_ids": ["k1"],
+                "rating": 0.5,
+                "success": True,
+            },
+        )
+        ids.append(pack.pack_id)
+    return ids[0], ids[1]

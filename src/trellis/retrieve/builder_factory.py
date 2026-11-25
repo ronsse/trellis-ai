@@ -35,6 +35,10 @@ from trellis.ops import ParameterRegistry
 from trellis.retrieve.authority_rank import resolve_authority_rank_config
 from trellis.retrieve.class_prior import resolve_class_prior_config
 from trellis.retrieve.disclosure import DisclosureConfig
+from trellis.retrieve.feedback_prior import (
+    resolve_feedback_prior_config,
+    shared_evidence_provider,
+)
 from trellis.retrieve.pack_builder import (
     PackBuilder,
     SemanticDedupConfig,
@@ -198,6 +202,7 @@ def build_pack_builder(
     # no caller here needs its own try/except around this read.
     settings = load_settings_values(registry.stores_dir)
     excerpt_max_chars = resolve_excerpt_max_chars(settings)
+    feedback_prior_config = resolve_feedback_prior_config(settings=settings)
     strategies_result = build_strategies(
         registry,
         parameter_registry=param_registry,
@@ -248,6 +253,15 @@ def build_pack_builder(
         # trellis.retrieve.authority_rank), resolved once with settings like
         # the class prior above.
         authority_rank_config=resolve_authority_rank_config(settings=settings),
+        # Default-off feedback prior (trellis.retrieve.feedback_prior), same
+        # resolution; its EventLog-backed evidence provider is built only
+        # when the mode is not off, so an off build reads nothing.
+        feedback_prior_config=feedback_prior_config,
+        feedback_evidence=(
+            shared_evidence_provider(registry.operational.event_log)
+            if feedback_prior_config.mode != "off"
+            else None
+        ),
         # Lets the collect seam resolve a chunk's parent so an
         # archived/noise verdict recorded against the parent reaches its
         # chunks (trellis.retrieve.parent_verdicts). Every surface that

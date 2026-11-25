@@ -79,6 +79,12 @@ from trellis.retrieve.excerpts import (
     ContentFloorConfig,
     apply_content_floor,
 )
+from trellis.retrieve.feedback_prior import (
+    FeedbackEvidenceProvider,
+    FeedbackPriorConfig,
+    feedback_prior_step,
+    resolve_feedback_prior_config,
+)
 from trellis.retrieve.formatters import format_index_line
 from trellis.retrieve.lifecycle import (
     ARCHIVED_REJECTION_REASON,
@@ -848,6 +854,8 @@ class PackBuilder:
         graph_store: GraphStore | None = None,
         *,
         authority_rank_config: AuthorityRankConfig | None = None,
+        feedback_prior_config: FeedbackPriorConfig | None = None,
+        feedback_evidence: FeedbackEvidenceProvider | None = None,
     ) -> None:
         if not 0.0 <= holdout_rate <= 1.0:
             msg = f"holdout_rate must be in [0.0, 1.0]; got {holdout_rate!r}"
@@ -937,6 +945,12 @@ class PackBuilder:
         #: :meth:`_effective_authority_rank_config`, the same shape as
         #: ``class_prior_config`` above. Off by default.
         self._authority_rank_config = authority_rank_config
+        #: Post-rerank feedback prior (:mod:`trellis.retrieve.feedback_prior`)
+        #: and its evidence source; ``None`` config defers to an env-only
+        #: read, a ``None`` provider reports ``evidence_unavailable`` when
+        #: the mode is not off. Off by default.
+        self._feedback_prior_config = feedback_prior_config
+        self._feedback_evidence = feedback_evidence
         #: Resolves a chunk's parent document at the collect seam so an
         #: archived or noise verdict recorded against the parent reaches
         #: its chunks (see :mod:`trellis.retrieve.parent_verdicts`).
@@ -974,6 +988,13 @@ class PackBuilder:
         if self._authority_rank_config is not None:
             return self._authority_rank_config
         return resolve_authority_rank_config()
+
+    def _apply_feedback_prior(
+        self, items: list[PackItem]
+    ) -> tuple[list[PackItem], dict[str, Any] | None]:
+        """The feedback-prior step; ``(items, None)`` itself when off. Never raises."""
+        config = self._feedback_prior_config or resolve_feedback_prior_config()
+        return feedback_prior_step(items, config, self._feedback_evidence)
 
     @property
     def holdout_rate(self) -> float:
@@ -1416,6 +1437,9 @@ class PackBuilder:
         authority_config = self._effective_authority_rank_config()
         deduped = apply_authority_rank(deduped, authority_config)
         authority_block = authority_rank_telemetry(authority_config, deduped)
+        # Feedback prior (off by default): same seam, same reason. Off
+        # returns ``deduped`` itself and no block.
+        deduped, feedback_prior_block = self._apply_feedback_prior(deduped)
 
         # Content floor: demote (or, when configured, drop) items whose
         # excerpt carries no substance — the logic lives in
@@ -1554,6 +1578,8 @@ class PackBuilder:
         # unchanged. A held-out pack's telemetry is replaced below.
         if authority_block is not None:
             telemetry["authority_rank"] = authority_block
+        if feedback_prior_block is not None:
+            telemetry["feedback_prior"] = feedback_prior_block
         # The pack-effect holdout (:mod:`trellis.core.pack_holdout`), drawn
         # once the pack id exists and the would-be pack is known. A withheld
         # caller receives an ordinary empty pack: blind, so nothing in the
@@ -1866,6 +1892,9 @@ class PackBuilder:
         authority_config = self._effective_authority_rank_config()
         deduped = apply_authority_rank(deduped, authority_config)
         authority_block = authority_rank_telemetry(authority_config, deduped)
+        # Feedback prior (off by default): same seam, same reason. Off
+        # returns ``deduped`` itself and no block.
+        deduped, feedback_prior_block = self._apply_feedback_prior(deduped)
 
         # 3c. Content floor over the shared pool — mirrors build(). The floor
         # runs before items are assigned to sections, so a dropped item has
@@ -2054,6 +2083,8 @@ class PackBuilder:
         }
         if authority_block is not None:
             telemetry["authority_rank"] = authority_block
+        if feedback_prior_block is not None:
+            telemetry["feedback_prior"] = feedback_prior_block
         # The pack-effect holdout, drawn as in :meth:`build`: the whole
         # sectioned pack is withheld or none of it.
         withheld_from: SectionedPack | None = None
@@ -2278,6 +2309,10 @@ class PackBuilder:
         strategy_failures: list[StrategyFailure],
     ) -> list[PackItem]:
         """Rerank, apply the content floor, and cut each item to what is served.
+
+        The feedback prior is deliberately absent here, in every mode: its
+        evidence is how non-public callers graded items, and the served order
+        alone would disclose it (see :mod:`trellis.retrieve.feedback_prior`).
 
         Projection comes last so the allowlist is applied to the item the
         reranker returned (it adds ``original_score`` to the breakdown), and
@@ -2674,6 +2709,7 @@ class PackBuilder:
         advisories_filtered_legacy: int | None = None,
         class_prior: dict[str, Any],
         authority_rank: dict[str, Any] | None = None,
+        feedback_prior: dict[str, Any] | None = None,
         withheld_from: SectionedPack | None = None,
         retrieval_phase: str | None = None,
         refresh: bool = False,
@@ -2823,6 +2859,7 @@ class PackBuilder:
                 "parent_verdict_degraded": parent_verdict_degraded,
                 # Only when the boost was on: an off build adds no key.
                 **({"authority_rank": authority_rank} if authority_rank else {}),
+                **({"feedback_prior": feedback_prior} if feedback_prior else {}),
                 **holdout,
                 VARIANTS_KEY: active_variants(
                     holdout_rate=self._holdout_rate,
@@ -2928,6 +2965,7 @@ class PackBuilder:
         advisories_filtered_legacy: int | None = None,
         class_prior: dict[str, Any],
         authority_rank: dict[str, Any] | None = None,
+        feedback_prior: dict[str, Any] | None = None,
         withheld_from: Pack | None = None,
         retrieval_phase: str | None = None,
         refresh: bool = False,
@@ -3190,6 +3228,7 @@ class PackBuilder:
                 "parent_verdict_degraded": parent_verdict_degraded,
                 # Only when the boost was on: an off build adds no key.
                 **({"authority_rank": authority_rank} if authority_rank else {}),
+                **({"feedback_prior": feedback_prior} if feedback_prior else {}),
                 **holdout,
                 VARIANTS_KEY: active_variants(
                     holdout_rate=self._holdout_rate,

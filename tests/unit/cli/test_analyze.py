@@ -540,6 +540,42 @@ class TestReplay:
         assert result.exit_code == 2
         assert "--class-prior" in plain(result.stdout)
 
+    def test_feedback_prior_flag_replays_only_with_earlier_evidence(
+        self, temp_stores: StoreRegistry
+    ) -> None:
+        from tests.unit.retrieve.replay_seeds import seed_feedback_prior
+
+        seed_feedback_prior(temp_stores.operational.event_log)
+        result = runner.invoke(
+            app, ["analyze", "replay", "--feedback-prior", "--format", "json"]
+        )
+        assert result.exit_code == 0, result.stdout
+        data = json.loads(result.stdout.strip())
+        assert data["replayed_packs"] == 2
+        assert data["packs_with_evidence"] == 1
+        assert data["packs_order_changed"] == 1
+        assert data["helpful_gained_body"] == 1
+
+        text = runner.invoke(app, ["analyze", "replay", "--feedback-prior"])
+        assert text.exit_code == 0
+        rendered = plain(text.stdout)
+        assert "Feedback-Prior Replay" in rendered
+        assert "packs re-ordered:    1" in rendered
+
+    @pytest.mark.parametrize("fmt", ["text", "json"])
+    @pytest.mark.parametrize(
+        "other", [["--authority-rank"], ["--class-prior"], ["--no-refill"]]
+    )
+    def test_feedback_prior_refuses_another_arm_with_exit_two(
+        self, fmt: str, other: list[str]
+    ) -> None:
+        result = runner.invoke(
+            app,
+            ["analyze", "replay", "--feedback-prior", *other, "--format", fmt],
+        )
+        assert result.exit_code == 2
+        assert other[0] in plain(result.stdout)
+
     @staticmethod
     def _seed_chunk_serving(registry: StoreRegistry) -> None:
         """One pack serving a chunk whose own row records no form, over a

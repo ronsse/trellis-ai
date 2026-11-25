@@ -843,6 +843,38 @@ _SPECS: tuple[SettingSpec, ...] = (
         enum=("off", "on"),
     ),
     SettingSpec(
+        name="feedback_prior_mode",
+        label="Feedback ranking prior",
+        type="str",
+        default="off",
+        description=(
+            "Scales, after rank fusion, each item's score by the feedback "
+            "it has drawn over 90 days: packs that graded it helpful or "
+            "fetched its body raise it, packs that graded it unhelpful "
+            "lower it, within 0.5x to 1.5x. An item with no evidence is "
+            "untouched and only unhelpful grades can lower one. 'shadow' "
+            "records the would-be factor without changing any score; 'off' "
+            "(the default) changes nothing. Not measured yet: price it with "
+            "`trellis analyze replay --feedback-prior` before turning it on."
+        ),
+        # See trellis.retrieve.feedback_prior for the formula and evidence.
+        surfaces=("mcp", "api", "cli"),
+        restart_required=False,
+        risk="caution",
+        risk_note=(
+            "'on' reorders every pack by how earlier packs were graded, which "
+            "changes which items are served as bodies and which as pointers, "
+            "and feeds back on itself: an item ranked higher is graded more "
+            "often. Any caller that can record feedback can move an item. "
+            "With the flag on, a held-out pack's withheld_from rows record "
+            "the adjusted would-be pack."
+        ),
+        group="retrieval",
+        settings_live=True,
+        env_var="TRELLIS_FEEDBACK_PRIOR_MODE",
+        enum=("off", "shadow", "on"),
+    ),
+    SettingSpec(
         name="pack_provenance_line",
         label="Pack provenance line",
         type="str",
