@@ -756,3 +756,164 @@ def test_mean_latency_covers_completed_calls_only(tmp_path: Path) -> None:
     summary = report["arms"]["broken"]
     assert summary["mean_latency_s"] is None
     assert summary["failed_calls_mean_latency_s"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Second fix round: labels mode fails closed, modes, resume settings
+# ---------------------------------------------------------------------------
+
+
+def test_the_labels_rule_withholds_a_pack_the_event_log_does_not_know(
+    tmp_path: Path,
+) -> None:
+    from tests.unit.workers.session_capture.test_capture import _registry
+
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "p.jsonl", _pack_records("sess-p", PACK_IDS[0]))
+    stores = _registry(tmp_path)  # empty: not the deployment that served it
+    client = UsageClient([candidates_json(good_candidate(evidence=_QUOTE))])
+    run_eval(
+        transcripts,
+        [_arm("remote"), _arm("onhost", local=True)],
+        out,
+        client_factory=_factory(client),
+        local_of=lambda arm: arm.local,
+        stores=stores,
+    )
+    calls = _rows(out / judge_eval.CALLS_FILE)
+    assert {c["egress_reason"] for c in calls} == {
+        judge_eval.EGRESS_REASON_PACK_UNRECORDED
+    }
+    assert {c["outcome"] for c in calls} == {judge_eval.OUTCOME_EGRESS_WITHHELD}
+    assert client.calls == []
+
+
+def test_the_labels_rule_withholds_a_transcript_with_an_unparsed_pack_line(
+    tmp_path: Path,
+) -> None:
+    transcripts, _ = _dirs(tmp_path)
+    write_transcript(transcripts / "p.jsonl", _pack_records("sess-p", PACK_IDS[0]))
+    stores = _label_stores(tmp_path, labelled=False)
+    digest = judge_eval.parse_session(transcripts / "p.jsonl")
+    assert (
+        judge_eval._eval_egress_permits(
+            digest, _arm("remote"), local=False, stores=stores
+        )
+        is None
+    )
+    digest.pack_ids_unparsed = 1
+    assert (
+        judge_eval._eval_egress_permits(
+            digest, _arm("remote"), local=False, stores=stores
+        )
+        == judge_eval.EGRESS_REASON_PACK_UNPARSED
+    )
+
+
+def test_label_stores_refuse_a_config_dir_with_no_config_yaml_creating_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_dir = tmp_path / "cfg"
+    monkeypatch.setenv("TRELLIS_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "data"))
+    with pytest.raises(EvalConfigError, match=r"no config\.yaml"):
+        judge_eval.open_label_stores()
+    assert sorted(p.name for p in tmp_path.iterdir()) == []
+
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text("{}\n")
+    stores = judge_eval.open_label_stores()
+    stores.close()
+
+
+def test_an_existing_output_dir_and_files_are_tightened(tmp_path: Path) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "s1.jsonl", _plain("sess-1"))
+    out.mkdir(mode=0o755)
+    out.chmod(0o755)
+    loose = out / judge_eval.CANDIDATES_FILE
+    loose.write_text("")
+    loose.chmod(0o644)
+    client = UsageClient([candidates_json(good_candidate(evidence=_QUOTE))])
+    run_eval(
+        transcripts, [_arm()], out, client_factory=_factory(client), local_of=_remote
+    )
+    assert out.stat().st_mode & 0o777 == 0o700
+    assert loose.stat().st_mode & 0o777 == 0o600
+
+
+def test_a_dangling_link_at_output_is_a_one_line_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    transcripts, _ = _dirs(tmp_path)
+    write_transcript(transcripts / "s1.jsonl", _plain("sess-1"))
+    link = tmp_path / "out-link"
+    link.symlink_to(tmp_path / "nowhere")
+    assert _cli(tmp_path, transcripts, link) == judge_eval.EXIT_CONFIG
+    err = capsys.readouterr().err
+    assert err.count("\n") == 1
+    assert "not a directory" in err
+
+
+@pytest.mark.parametrize("setting", ["egress_rule", "include_ephemeral"])
+def test_resuming_under_a_different_run_setting_is_refused_naming_it(
+    tmp_path: Path, setting: str
+) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "p.jsonl", _pack_records("sess-p", PACK_IDS[0]))
+    client = UsageClient([candidates_json(good_candidate(evidence=_QUOTE))])
+    kwargs: dict[str, Any] = {"client_factory": _factory(client), "local_of": _remote}
+    run_eval(transcripts, [_arm()], out, **kwargs)
+    (call,) = _rows(out / judge_eval.CALLS_FILE)
+    assert call["egress_rule"] == judge_eval.EGRESS_RULE_STRICT
+    assert call["include_ephemeral"] is False
+    run_eval(transcripts, [_arm()], out, **kwargs)  # same settings resume
+    changed: dict[str, Any] = (
+        {"stores": _label_stores(tmp_path, labelled=False)}
+        if setting == "egress_rule"
+        else {"include_ephemeral": True}
+    )
+    with pytest.raises(EvalConfigError, match=setting):
+        run_eval(transcripts, [_arm()], out, **kwargs, **changed)
+
+
+def test_an_empty_intersection_says_why(tmp_path: Path) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "p.jsonl", _pack_records("sess-p", PACK_IDS[0]))
+    client = UsageClient([candidates_json(good_candidate(evidence=_QUOTE))])
+    report = run_eval(
+        transcripts,
+        [_arm("remote"), _arm("onhost", local=True)],
+        out,
+        gold=_gold_for("p.jsonl"),
+        client_factory=_factory(client),
+        local_of=lambda arm: arm.local,
+    )
+    inter = report["intersection"]
+    assert inter["transcripts"] == 0
+    assert "remote" in inter["reason"]
+    assert "onhost" not in inter["reason"]
+
+
+def test_an_egress_read_failure_logs_the_class_name_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        judge_eval.logger, "warning", lambda event, **kw: seen.append(kw)
+    )
+    transcripts, _ = _dirs(tmp_path)
+    write_transcript(transcripts / "p.jsonl", _pack_records("sess-p", PACK_IDS[0]))
+    stores = _label_stores(tmp_path, labelled=False)
+
+    def down(*_args: Any, **_kwargs: Any) -> Any:
+        msg = "stored secret text"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(stores.operational.event_log, "get_events", down)
+    digest = judge_eval.parse_session(transcripts / "p.jsonl")
+    reason = judge_eval._eval_egress_permits(
+        digest, _arm("remote"), local=False, stores=stores
+    )
+    assert reason == judge_eval.EGRESS_REASON_UNREADABLE
+    assert seen == [{"arm": "remote", "error": "RuntimeError"}]

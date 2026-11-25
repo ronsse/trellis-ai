@@ -29,7 +29,10 @@ a transcript that names any pack is treated as having been served
 ``--egress-labels`` (the ``labels`` rule) the sweep's own check,
 :func:`~trellis_workers.session_capture.capture._session_egress_verdict`, reads
 the labels of the documents each pack served, through a registry opened for
-reads only.
+reads only. That rule is stricter than the sweep's: a named pack the opened
+event log has no ``PACK_ASSEMBLED`` event for, or a pack line that did not
+parse, withholds the transcript, because the opened stores may not be the ones
+that served it.
 
 The sweep's skip of transcripts from throwaway project directories
 (:func:`~trellis_workers.session_capture.transcripts.is_ephemeral_project`)
@@ -67,6 +70,7 @@ from trellis.core.path_presence import path_is_present
 from trellis.errors import BackendNotInstalledError
 from trellis.llm.egress import EgressGate, EgressVerdict, may_reach_route
 from trellis.llm.routing import LLMConsumer, LLMRoutingError
+from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
 from trellis_workers.session_capture import distill
 from trellis_workers.session_capture.capture import (
@@ -131,6 +135,11 @@ EGRESS_RULE_LABELS = "labels"
 EGRESS_REASON_PACK_NAMED = "pack_named"
 EGRESS_REASON_LABEL = "label_withheld"
 EGRESS_REASON_UNREADABLE = "unreadable"
+#: ``labels`` rule only: a named pack has no ``PACK_ASSEMBLED`` event in the
+#: opened event log, or a pack line did not parse. Stricter than the sweep,
+#: which skips such a pack.
+EGRESS_REASON_PACK_UNRECORDED = "pack_unrecorded"
+EGRESS_REASON_PACK_UNPARSED = "pack_unparsed"
 
 #: The arm fields that decide what a call asks and of whom; the key never is.
 _FINGERPRINT_FIELDS = (
@@ -386,18 +395,39 @@ def _eval_egress_permits(
 def _labels_withholding_reason(
     digest: SessionDigest, arm: JudgeArm, stores: StoreRegistry
 ) -> str | None:
-    """The ``labels`` rule: the sweep's own check, failing closed."""
+    """The ``labels`` rule: the sweep's own check, failing closed.
+
+    Stricter than the sweep in two places. The sweep skips a named pack whose
+    ``PACK_ASSEMBLED`` event the log does not hold, and does not look at pack
+    lines that did not parse; either then reads as permission. Here the
+    opened stores may not be the deployment that served the transcript's
+    packs (an unconfigured registry opens empty stores), so a pack the log
+    does not know withholds the transcript (``pack_unrecorded``), as does any
+    unparsed pack line (``pack_unparsed``), on every arm.
+    """
+    if digest.pack_ids_unparsed:
+        return EGRESS_REASON_PACK_UNPARSED
     try:
+        event_log = stores.operational.event_log
+        for pack_id in digest.pack_ids:
+            recorded = event_log.get_events(
+                event_type=EventType.PACK_ASSEMBLED, entity_id=pack_id, limit=1
+            )
+            if not recorded:
+                return EGRESS_REASON_PACK_UNRECORDED
         gate = EgressGate.for_route(
             _arm_registry(arm),
             LLMConsumer.SESSION_CAPTURE,
             stores.knowledge.document_store,
         )
         verdict = _session_egress_verdict(stores, digest, gate).verdict
-    except Exception:
+    except Exception as exc:
         # GRACEFUL-DEGRADATION: fail closed, as the sweep does. A store that
         # could not even be opened is no permission to send the transcript.
-        logger.warning("judge_eval_egress_read_failed", arm=arm.name, exc_info=True)
+        # The class name only: a store message can quote stored content.
+        logger.warning(
+            "judge_eval_egress_read_failed", arm=arm.name, error=type(exc).__name__
+        )
         return EGRESS_REASON_UNREADABLE
     if verdict is EgressVerdict.PERMITTED:
         return None
@@ -536,6 +566,7 @@ def _call_row(transcript_id: str, arm: JudgeArm) -> dict[str, Any]:
         "unavailable_reason": None,
         "parse_error": None,
         "egress_rule": None,
+        "include_ephemeral": None,
         "egress_reason": None,
         "latency_s": None,
         "prompt_tokens": None,
@@ -569,8 +600,10 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _open_private(path: Path, flags: int) -> int:
-    """``os.open``, creating *path* 0600; an existing file keeps its mode."""
-    return os.open(path, flags | os.O_CREAT, 0o600)
+    """``os.open``, creating *path* 0600 and tightening an existing file to it."""
+    fd = os.open(path, flags | os.O_CREAT, 0o600)
+    os.fchmod(fd, 0o600)
+    return fd
 
 
 def _write_private(path: Path, text: str) -> None:
@@ -646,6 +679,26 @@ def _refuse_changed_arms(
         raise EvalConfigError(msg)
 
 
+def _refuse_changed_settings(
+    recorded: Iterable[Mapping[str, Any]], settings: Mapping[str, Any]
+) -> None:
+    """Refuse to resume onto call rows made under different run settings.
+
+    A row that does not record a setting (written before it was recorded)
+    neither matches nor conflicts.
+    """
+    for name, current in settings.items():
+        seen = {row.get(name) for row in recorded if row.get(name) is not None}
+        if seen - {current}:
+            prior = ", ".join(sorted(repr(value) for value in seen))
+            msg = (
+                f"run setting {name!r} is {current!r}, but this output directory "
+                f"holds rows recorded with {prior}; use the same setting or a new "
+                "output directory"
+            )
+            raise EvalConfigError(msg)
+
+
 def run_eval(
     transcripts_dir: Path,
     arms: list[JudgeArm],
@@ -670,7 +723,10 @@ def run_eval(
     Raises:
         EvalConfigError: the transcript directory is missing, the output
             directory is inside a git work tree, an arm's client cannot be
-            built, or a recorded call was made with a different arm config.
+            built, a recorded call was made with a different arm config, or
+            recorded calls were made under a different egress rule or
+            include-ephemeral setting. Also when *out_dir* is present but is
+            not a directory (a file, or a dangling link).
     """
     build = build_arm_client if client_factory is None else client_factory
     is_local = arm_route_is_local if local_of is None else local_of
@@ -683,13 +739,21 @@ def run_eval(
             "and transcripts and distilled memories are private data"
         )
         raise EvalConfigError(msg)
-    if not out_dir.exists():
-        out_dir.mkdir(parents=True)
-        out_dir.chmod(0o700)
+    if not path_is_present(out_dir):
+        out_dir.mkdir(parents=True, mode=0o700)
+    elif not out_dir.is_dir():
+        msg = f"output path {out_dir} is not a directory (or is a dangling link)"
+        raise EvalConfigError(msg)
+    out_dir.chmod(0o700)
     calls_path = out_dir / CALLS_FILE
     candidates_path = out_dir / CANDIDATES_FILE
     recorded = _read_jsonl(calls_path)
     _refuse_changed_arms(recorded, arms)
+    settings: dict[str, Any] = {
+        "egress_rule": EGRESS_RULE_STRICT if stores is None else EGRESS_RULE_LABELS,
+        "include_ephemeral": include_ephemeral,
+    }
+    _refuse_changed_settings(recorded, settings)
     done = {_key(row) for row in recorded}
 
     paths = discover_sessions(transcripts_dir)
@@ -707,6 +771,7 @@ def run_eval(
             # The sweep skips these unread; so does the eval, on the record.
             for arm in pending:
                 call = _call_row(transcript_id, arm)
+                call.update(settings)
                 call["outcome"] = OUTCOME_SKIPPED_EPHEMERAL
                 _append_jsonl(calls_path, [call])
             continue
@@ -723,6 +788,7 @@ def run_eval(
                 timeout=timeout,
                 stores=stores,
             )
+            call.update(settings)
             # Candidates first: the call row is what marks the pair done, and
             # its attempt_id is what makes these rows count.
             _append_jsonl(candidates_path, rows)
@@ -951,10 +1017,13 @@ def _intersection_block(
 ) -> dict[str, Any]:
     """Precision and recall per arm over the transcripts every arm completed."""
     shared: set[str] | None = None
+    idle: list[str] = []
     for arm in arms:
         done = {
             str(c["transcript_id"]) for c in calls_by_arm[arm.name] if _completed(c)
         }
+        if not done:
+            idle.append(arm.name)
         shared = done if shared is None else shared & done
     common = shared or set()
     per_arm: dict[str, Any] = {}
@@ -968,7 +1037,14 @@ def _intersection_block(
             "precision": _rate(matched, accepted_total),
             "recall": _rate(matched, gold_total),
         }
-    return {"transcripts": len(common), "arms": per_arm}
+    block: dict[str, Any] = {"transcripts": len(common), "arms": per_arm}
+    if not common:
+        block["reason"] = (
+            "arms with zero completed transcripts: " + ", ".join(idle)
+            if idle
+            else "no transcript was completed by every arm"
+        )
+    return block
 
 
 def write_summaries(
@@ -1017,8 +1093,9 @@ def write_summaries(
 
 #: Exit codes: 0 ran; 1 an unusable arm/gold file, transcripts or output
 #: directory, an arm with no client (missing key, extra or route), an arm whose
-#: config changed since its recorded rows, or label stores that would not open
-#: (argparse itself exits 2 on bad arguments).
+#: config or run settings changed since its recorded rows, or (with
+#: ``--egress-labels``) a config directory with no ``config.yaml`` or stores
+#: that would not open (argparse itself exits 2 on bad arguments).
 EXIT_OK = 0
 EXIT_CONFIG = 1
 
@@ -1042,12 +1119,25 @@ def _positive_float(value: str) -> float:
 def open_label_stores() -> StoreRegistry:
     """The configured stores, for the ``labels`` egress rule's reads only.
 
-    Resolved as the sweep resolves them (``StoreRegistry.from_config_dir()``).
-    The eval only reads: pack events from the event log and served rows from
-    the document store. It holds no executor and emits nothing.
+    Resolved as the sweep resolves them (``StoreRegistry.from_config_dir()``),
+    except that a config directory with no ``config.yaml`` is refused before
+    anything is opened or created: the registry would otherwise open empty
+    default stores, which know none of the transcripts' packs. The eval only
+    reads: pack events from the event log and served rows from the document
+    store. It holds no executor and emits nothing.
     """
+    config_dir = Path(
+        os.environ.get("TRELLIS_CONFIG_DIR", str(Path.home() / ".trellis"))
+    )
+    if not path_is_present(config_dir / "config.yaml"):
+        msg = (
+            f"--egress-labels: no config.yaml in {config_dir}; the stores that "
+            "served these transcripts' packs are not configured here "
+            "(set TRELLIS_CONFIG_DIR)"
+        )
+        raise EvalConfigError(msg)
     try:
-        return StoreRegistry.from_config_dir()
+        return StoreRegistry.from_config_dir(config_dir)
     except Exception as exc:
         msg = f"--egress-labels: the configured stores could not be opened: {exc}"
         raise EvalConfigError(msg) from exc
