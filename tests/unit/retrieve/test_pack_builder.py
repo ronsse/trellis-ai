@@ -361,7 +361,12 @@ class TestBuildDomainScopeGraphAxis:
         assert [item.rank for item in pack.items] == [1, 2]
         assert [item.included for item in pack.items] == [True, True]
         assert pack.items[0].selection_reason == "selected_by_relevance"
-        assert pack.items[0].score_breakdown == {"relevance_score": 0.9}
+        # The collect seam adds the strategy's native score beside the
+        # no-reranker default key (trellis.retrieve.relevance_cutoff).
+        assert pack.items[0].score_breakdown == {
+            "relevance_score": 0.9,
+            "native_kw": 0.9,
+        }
         assert pack.items[0].estimated_tokens == 11
         assert pack.items[1].estimated_tokens == 6
 

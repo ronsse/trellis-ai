@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from trellis.retrieve.relevance_cutoff import native_scores_of
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.schemas.outcome import MMR_RERANKER_COMPONENT_ID
 from trellis.schemas.pack import PackItem
@@ -154,6 +155,9 @@ class MMRReranker(Reranker):
                             "mmr_score": mmr_scores.get(item_id, 0.0),
                             "original_score": item.relevance_score,
                             "mmr_rank": rank_0 + 1,
+                            # Carried through untouched; see
+                            # trellis.retrieve.relevance_cutoff.
+                            **native_scores_of(item),
                         },
                     }
                 )

@@ -108,6 +108,16 @@ from trellis.retrieve.public_pack import (
     readable_stored_copy,
 )
 from trellis.retrieve.public_rank import PublicRead, public_read_slot
+from trellis.retrieve.relevance_cutoff import (
+    RelevanceCutoffConfig,
+    RelevanceCutoffResult,
+    apply_relevance_cutoff,
+    merge_native_scores,
+    native_scores_of,
+    pack_metadata_for,
+    resolve_relevance_cutoff_config,
+    stamp_native_scores,
+)
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.sensitivity import (
     SENSITIVITY_REJECTION_REASON,
@@ -848,6 +858,7 @@ class PackBuilder:
         graph_store: GraphStore | None = None,
         *,
         authority_rank_config: AuthorityRankConfig | None = None,
+        relevance_cutoff_config: RelevanceCutoffConfig | None = None,
     ) -> None:
         if not 0.0 <= holdout_rate <= 1.0:
             msg = f"holdout_rate must be in [0.0, 1.0]; got {holdout_rate!r}"
@@ -937,6 +948,9 @@ class PackBuilder:
         #: :meth:`_effective_authority_rank_config`, the same shape as
         #: ``class_prior_config`` above. Off by default.
         self._authority_rank_config = authority_rank_config
+        #: Collect-seam relevance cutoff (:mod:`trellis.retrieve.relevance_cutoff`),
+        #: or ``None`` for a live env-only read. Off by default.
+        self._relevance_cutoff_config = relevance_cutoff_config
         #: Resolves a chunk's parent document at the collect seam so an
         #: archived or noise verdict recorded against the parent reaches
         #: its chunks (see :mod:`trellis.retrieve.parent_verdicts`).
@@ -968,6 +982,23 @@ class PackBuilder:
         if self._class_prior_config is not None:
             return self._class_prior_config
         return resolve_class_prior_config()
+
+    def _effective_relevance_cutoff_config(self) -> RelevanceCutoffConfig:
+        """``self._relevance_cutoff_config``, or a fresh env-only resolve."""
+        if self._relevance_cutoff_config is not None:
+            return self._relevance_cutoff_config
+        return resolve_relevance_cutoff_config()
+
+    def _apply_relevance_cutoff_pool(
+        self, items: list[PackItem]
+    ) -> RelevanceCutoffResult:
+        """The relevance cutoff over the merged pool, priced by excerpt tokens."""
+        return apply_relevance_cutoff(
+            items,
+            config=self._effective_relevance_cutoff_config(),
+            price=lambda item: self._token_counter.count(item.excerpt),
+            title_of=lambda item: _item_attribution(item).get("title"),
+        )
 
     def _effective_authority_rank_config(self) -> AuthorityRankConfig:
         """``self._authority_rank_config``, or a fresh env-only resolve."""
@@ -1259,6 +1290,9 @@ class PackBuilder:
                 items = self._stamp_collecting_strategy(
                     items, strategy.name, config=class_prior_config
                 )
+                # Native per-strategy score, carried through fusion as
+                # telemetry (trellis.retrieve.relevance_cutoff).
+                items = stamp_native_scores(items, strategy.name)
                 candidates_found += len(items)
                 all_items.extend(items)
                 strategies_used.append(strategy.name)
@@ -1350,6 +1384,12 @@ class PackBuilder:
             )
         )
         rejected.extend(class_prior_rejected)
+
+        # Relevance cutoff (default off), after every other collect-seam gate
+        # and before dedup, so each copy is judged with all its axes known.
+        cutoff = self._apply_relevance_cutoff_pool(all_items)
+        all_items = cutoff.kept
+        rejected.extend(cutoff.rejected)
 
         # Deduplicate by item_id (keep highest relevance_score)
         deduped, dedup_rejected = self._deduplicate_tracked(all_items)
@@ -1535,6 +1575,8 @@ class PackBuilder:
                 **concealed_ids_metadata(
                     rejected, candidates, clearance, parent_verdict_cache
                 ),
+                # Empty unless the cutoff is on and cut something.
+                **pack_metadata_for(cutoff),
             },
         )
 
@@ -1554,6 +1596,9 @@ class PackBuilder:
         # unchanged. A held-out pack's telemetry is replaced below.
         if authority_block is not None:
             telemetry["authority_rank"] = authority_block
+        # Present only when the cutoff is not off.
+        if cutoff.telemetry is not None:
+            telemetry["relevance_cutoff"] = cutoff.telemetry
         # The pack-effect holdout (:mod:`trellis.core.pack_holdout`), drawn
         # once the pack id exists and the would-be pack is known. A withheld
         # caller receives an ordinary empty pack: blind, so nothing in the
@@ -1567,6 +1612,9 @@ class PackBuilder:
                 class_prior_config=class_prior_config,
                 parent_verdict_degraded=parent_verdict_cache.degraded,
             )
+            # The gate ran before the draw, as the class prior did.
+            if cutoff.telemetry is not None:
+                telemetry["relevance_cutoff"] = cutoff.telemetry
 
         # R1 (#844): applied to the *served* pack only, after the holdout
         # draw above — ``withheld_from`` already captured the true would-be
@@ -1734,6 +1782,9 @@ class PackBuilder:
                 items = self._stamp_collecting_strategy(
                     items, strategy.name, config=class_prior_config
                 )
+                # Native per-strategy score, carried through fusion as
+                # telemetry (trellis.retrieve.relevance_cutoff).
+                items = stamp_native_scores(items, strategy.name)
                 candidates_found += len(items)
                 all_items.extend(items)
                 strategies_used.append(strategy.name)
@@ -1804,6 +1855,11 @@ class PackBuilder:
             )
         )
         rejected.extend(class_prior_rejected)
+
+        # 1c. Relevance cutoff (default off) — see build().
+        cutoff = self._apply_relevance_cutoff_pool(all_items)
+        all_items = cutoff.kept
+        rejected.extend(cutoff.rejected)
 
         # 2. Deduplicate
         deduped = self._deduplicate(all_items)
@@ -2038,6 +2094,8 @@ class PackBuilder:
                 **concealed_ids_metadata(
                     rejected, candidates, clearance, parent_verdict_cache
                 ),
+                # Empty unless the cutoff is on and cut something.
+                **pack_metadata_for(cutoff),
             },
         )
 
@@ -2054,6 +2112,9 @@ class PackBuilder:
         }
         if authority_block is not None:
             telemetry["authority_rank"] = authority_block
+        # Present only when the cutoff is not off.
+        if cutoff.telemetry is not None:
+            telemetry["relevance_cutoff"] = cutoff.telemetry
         # The pack-effect holdout, drawn as in :meth:`build`: the whole
         # sectioned pack is withheld or none of it.
         withheld_from: SectionedPack | None = None
@@ -2064,6 +2125,9 @@ class PackBuilder:
                 class_prior_config=class_prior_config,
                 parent_verdict_degraded=parent_verdict_cache.degraded,
             )
+            # The gate ran before the draw, as the class prior did.
+            if cutoff.telemetry is not None:
+                telemetry["relevance_cutoff"] = cutoff.telemetry
 
         # R1 (#844): see the matching comment in :meth:`build` — applied
         # after the holdout draw, so ``withheld_from`` keeps the true
@@ -2674,6 +2738,7 @@ class PackBuilder:
         advisories_filtered_legacy: int | None = None,
         class_prior: dict[str, Any],
         authority_rank: dict[str, Any] | None = None,
+        relevance_cutoff: dict[str, Any] | None = None,
         withheld_from: SectionedPack | None = None,
         retrieval_phase: str | None = None,
         refresh: bool = False,
@@ -2823,6 +2888,12 @@ class PackBuilder:
                 "parent_verdict_degraded": parent_verdict_degraded,
                 # Only when the boost was on: an off build adds no key.
                 **({"authority_rank": authority_rank} if authority_rank else {}),
+                # Only when the cutoff is not off: an off build adds no key.
+                **(
+                    {"relevance_cutoff": relevance_cutoff}
+                    if relevance_cutoff is not None
+                    else {}
+                ),
                 **holdout,
                 VARIANTS_KEY: active_variants(
                     holdout_rate=self._holdout_rate,
@@ -2928,6 +2999,7 @@ class PackBuilder:
         advisories_filtered_legacy: int | None = None,
         class_prior: dict[str, Any],
         authority_rank: dict[str, Any] | None = None,
+        relevance_cutoff: dict[str, Any] | None = None,
         withheld_from: Pack | None = None,
         retrieval_phase: str | None = None,
         refresh: bool = False,
@@ -3134,6 +3206,12 @@ class PackBuilder:
                         "reason": r.reason,
                         "strategy_source": r.strategy_source,
                         "estimated_tokens": r.estimated_tokens,
+                        # Only when the candidate carried native scores.
+                        **(
+                            {"native_scores": r.native_scores}
+                            if r.native_scores is not None
+                            else {}
+                        ),
                     }
                     for r in report.rejected_items
                 ],
@@ -3190,6 +3268,12 @@ class PackBuilder:
                 "parent_verdict_degraded": parent_verdict_degraded,
                 # Only when the boost was on: an off build adds no key.
                 **({"authority_rank": authority_rank} if authority_rank else {}),
+                # Only when the cutoff is not off: an off build adds no key.
+                **(
+                    {"relevance_cutoff": relevance_cutoff}
+                    if relevance_cutoff is not None
+                    else {}
+                ),
                 **holdout,
                 VARIANTS_KEY: active_variants(
                     holdout_rate=self._holdout_rate,
@@ -4250,8 +4334,12 @@ class PackBuilder:
         seen: dict[str, PackItem] = {}
         for item in items:
             existing = seen.get(item.item_id)
-            if existing is None or item.relevance_score > existing.relevance_score:
+            if existing is None:
                 seen[item.item_id] = item
+            elif item.relevance_score > existing.relevance_score:
+                seen[item.item_id] = merge_native_scores(item, existing)
+            else:
+                seen[item.item_id] = merge_native_scores(existing, item)
         return list(seen.values())
 
     @staticmethod
@@ -4329,10 +4417,12 @@ class PackBuilder:
                 # score and axis, and it is the loser's fields that say what
                 # was dropped.
                 rejected.append(RejectedItem.from_pack_item(existing, "dedup"))
-                seen[item.item_id] = item
+                # The winner carries every axis's native score.
+                seen[item.item_id] = merge_native_scores(item, existing)
             else:
                 # The new one is the loser
                 rejected.append(RejectedItem.from_pack_item(item, "dedup"))
+                seen[item.item_id] = merge_native_scores(existing, item)
         return list(seen.values()), rejected
 
     def _effective_token_budget(self, max_tokens: int) -> int:
@@ -4601,8 +4691,16 @@ class PackBuilder:
                 "included": True,
                 "rank": index,
                 "selection_reason": item.selection_reason or "selected_by_relevance",
-                "score_breakdown": item.score_breakdown
-                or {"relevance_score": item.relevance_score},
+                # Native scores alone do not count as a breakdown, so a pack
+                # built without a reranker keeps its ``relevance_score`` key.
+                "score_breakdown": (
+                    item.score_breakdown
+                    if len(item.score_breakdown) > len(native_scores_of(item))
+                    else {
+                        "relevance_score": item.relevance_score,
+                        **item.score_breakdown,
+                    }
+                ),
                 "estimated_tokens": item.estimated_tokens or estimated_tokens,
             }
             # Promote strategy_source from metadata if not already set

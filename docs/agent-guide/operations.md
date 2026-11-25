@@ -4845,6 +4845,51 @@ trellis analyze replay --entity-requires-description [--class-prior] [--days N] 
 trellis analyze replay --min-distinct-words N [--entity-requires-description] [--class-prior]
 ```
 
+**Relevance cutoff (`--relevance-cutoff`).** Prices the default-off collect-seam
+gate in `trellis.retrieve.relevance_cutoff`:
+
+```bash
+trellis analyze replay --relevance-cutoff [--semantic-min F] [--semantic-ratio R] [--days N] [--format text|json]
+```
+
+*Native scores.* Each candidate's `score_breakdown` carries `native_<strategy>`,
+the score its strategy produced before fusion: for `semantic` the vector store's
+similarity (higher is closer; its range depends on the backend), for `keyword`
+the absolute BM25-style rank (a corpus statistic), and for any other strategy its
+`relevance_score` at the collect seam. Dedup merges every copy's keys onto the
+winner, and RRF and MMR keep them beside their own keys, so an item two
+strategies returned carries both. They reach `PACK_ASSEMBLED.injected_items[]`
+inside `score_breakdown` and each `rejected_items[]` row as `native_scores`. They
+are telemetry: nothing reads them to score, order or render, and the public path
+drops them.
+
+*The gate.* `relevance_cutoff_mode` (`TRELLIS_RELEVANCE_CUTOFF_MODE`, settings
+key `relevance_cutoff_mode`) is `off` (default), `shadow` or `on`; an
+unrecognised value warns and resolves to `off`. Floors are env-only and have no
+default: `TRELLIS_RELEVANCE_CUTOFF_SEMANTIC_MIN` (absolute) and
+`TRELLIS_RELEVANCE_CUTOFF_SEMANTIC_RATIO` (0-1, a fraction of the pool's best
+`native_semantic`); with both set the higher floor wins, and with neither the
+block reads `status: "unconfigured"` and nothing is cut. An item is cut only when
+every strategy that returned it is a configured axis (today only `semantic`) and
+it is below the floor; at least three candidates always survive (`min_keep`).
+The gate runs after noise, archived, supersession and the class prior, on flat
+and sectioned packs. `on` records each cut as `below_relevance_cutoff` (with
+`estimated_tokens`), counted by the pack's withheld line, and lists the cut items
+in `pack.metadata["relevance_cutoff"]["cut_items"]` so a later section can offer
+them as nearby. `shadow` cuts nothing. Both add a `relevance_cutoff` block to
+`PACK_ASSEMBLED` (`cut_count`, `cut_tokens`, `threshold`, `best_semantic`,
+`kept_by_min_keep`); `off` adds no key. A held-out pack stays blind, as with the
+class prior; its event keeps the block.
+
+*The replay.* Floors come from the flags, else the env vars. Per served
+`(pack_id, item_id)` the report counts `helpful_removed`, `unhelpful_removed`
+and `unjudged_removed` with their tokens and `tokens_removed`. Each pack's pool
+is its served rows plus the rejected rows that carry `native_scores`, so a ratio
+floor can sit lower than live. A pack with no native score on any row predates
+them and counts as `unpriced_servings`. Refill is not modelled: tokens are gross.
+It combines with no other arm, and `--semantic-*` without `--relevance-cutoff`
+is refused (exit `2` under every `--format`).
+
 **Substance arms.** Two removal-only arms price withholding title-only stubs:
 
 | Option | Withholds a served item when |

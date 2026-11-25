@@ -278,6 +278,15 @@ def _effective_values(
         settings=settings_values
     ).mode
 
+    # Same never-raises posture: a bad mode or threshold warns and degrades.
+    from trellis.retrieve.relevance_cutoff import (  # noqa: PLC0415
+        resolve_relevance_cutoff_config,
+    )
+
+    effective["relevance_cutoff_mode"] = resolve_relevance_cutoff_config(
+        settings=settings_values
+    ).mode
+
     from trellis.retrieve.builder_factory import (  # noqa: PLC0415
         resolve_pack_provenance_line,
     )

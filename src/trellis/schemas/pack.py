@@ -46,6 +46,11 @@ class PackBudget(VersionedModel):
     max_tokens: int = 8000
 
 
+#: ``score_breakdown`` key prefix for a candidate's native per-strategy score
+#: (see :mod:`trellis.retrieve.relevance_cutoff`, which re-exports it).
+NATIVE_SCORE_KEY_PREFIX = "native_"
+
+
 class RejectedItem(VersionedModel):
     """An item that was considered but excluded from the pack."""
 
@@ -55,8 +60,9 @@ class RejectedItem(VersionedModel):
     reason: str  # dedup, structural_filter, max_items, token_budget, content_floor
     strategy_source: str | None = None
     #: Tokens the budget walk charges (or would have charged) this item, set
-    #: only on the two reasons that are budget cuts: ``max_items`` and
-    #: ``token_budget``. A ``max_items`` row never reaches the walk, so
+    #: only on the budget cuts (``max_items`` and ``token_budget``) and on
+    #: ``below_relevance_cutoff``, where it is the excerpt's tokens. A
+    #: ``max_items`` row never reaches the walk, so
     #: ``budget_trace`` lists it nowhere and this is the only record of its
     #: cost; ``trellis analyze replay`` needs it to re-spend freed budget on
     #: it. Priced as the walk would have charged it, which is the excerpt's
@@ -66,6 +72,12 @@ class RejectedItem(VersionedModel):
     #: priced" -- every other reason, and any event written before the field
     #: existed -- never zero.
     estimated_tokens: int | None = None
+    #: The candidate's native per-strategy scores (``native_<strategy>`` ->
+    #: score), copied from its ``score_breakdown`` so a counterfactual over
+    #: rejected candidates can read them (:mod:`trellis.retrieve.relevance_cutoff`).
+    #: ``None`` when the item carried none, and on any event written before
+    #: the field existed.
+    native_scores: dict[str, float] | None = None
 
     @classmethod
     def from_pack_item(
@@ -113,6 +125,11 @@ class RejectedItem(VersionedModel):
         until an item is selected, and in index mode the walk charges
         something else.
         """
+        native = {
+            k: v
+            for k, v in item.score_breakdown.items()
+            if k.startswith(NATIVE_SCORE_KEY_PREFIX)
+        }
         return cls(
             item_id=item.item_id,
             item_type=item.item_type,
@@ -120,6 +137,7 @@ class RejectedItem(VersionedModel):
             reason=reason,
             strategy_source=strategy_source or item.strategy_source,
             estimated_tokens=estimated_tokens,
+            native_scores=native or None,
         )
 
 

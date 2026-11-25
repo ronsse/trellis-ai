@@ -1261,7 +1261,7 @@ def _print_implicit_block(implicit: Any) -> None:
 
 
 @analyze_app.command("replay")
-def replay(  # noqa: PLR0912, PLR0915 - one flag per arm, dispatched here
+def replay(  # noqa: PLR0911, PLR0912, PLR0915 - one flag per arm, dispatched here
     days: int = typer.Option(30, help="Days of history to replay"),
     excerpt_max_chars: int | None = typer.Option(
         None,
@@ -1339,6 +1339,30 @@ def replay(  # noqa: PLR0912, PLR0915 - one flag per arm, dispatched here
             "packs re-ordered, body/pointer moves and how cited items moved."
         ),
     ),
+    relevance_cutoff: bool = typer.Option(
+        False,
+        "--relevance-cutoff",
+        help=(
+            "Replay trellis.retrieve.relevance_cutoff: per served item, the "
+            "helpful, unhelpful and unjudged servings and tokens the cut "
+            "would remove. Thresholds come from --semantic-min / "
+            "--semantic-ratio, else the TRELLIS_RELEVANCE_CUTOFF_SEMANTIC_* "
+            "env vars. Packs without native scores count as unpriced."
+        ),
+    ),
+    semantic_min: float | None = typer.Option(
+        None,
+        "--semantic-min",
+        help="With --relevance-cutoff: absolute native semantic floor.",
+    ),
+    semantic_ratio: float | None = typer.Option(
+        None,
+        "--semantic-ratio",
+        help=(
+            "With --relevance-cutoff: floor as a fraction (0-1) of the "
+            "pack's best native semantic score."
+        ),
+    ),
     output_format: str = typer.Option("text", "--format", help="Output format"),
     no_meta_trace: bool = typer.Option(
         False,
@@ -1406,6 +1430,54 @@ def replay(  # noqa: PLR0912, PLR0915 - one flag per arm, dispatched here
         trellis analyze replay --entity-requires-description
         trellis analyze replay --min-distinct-words 5 --class-prior
     """
+    if relevance_cutoff or semantic_min is not None or semantic_ratio is not None:
+        cutoff_conflicts = [
+            flag
+            for flag, given in (
+                ("--authority-rank", authority_rank),
+                ("--class-prior", class_prior),
+                ("--graph-selection", graph_selection is not None),
+                ("--excerpt-max-chars", excerpt_max_chars is not None),
+                ("--body-items", body_items is not None),
+                ("--max-items", max_items is not None),
+                ("--no-refill", no_refill),
+                ("--entity-requires-description", entity_requires_description),
+                ("--min-distinct-words", min_distinct_words is not None),
+            )
+            if given
+        ]
+        cutoff_refusal = _relevance_cutoff_refusal(
+            relevance_cutoff=relevance_cutoff, conflicts=cutoff_conflicts
+        )
+        cutoff_config = None
+        if cutoff_refusal is None:
+            try:
+                cutoff_config = _relevance_cutoff_replay_config(
+                    semantic_min=semantic_min, semantic_ratio=semantic_ratio
+                )
+            except ValueError as exc:
+                cutoff_refusal = escape(str(exc))
+        # The exit sits below the format branch
+        # (``tests/unit/test_format_exit_parity_rule.py``).
+        if cutoff_refusal is not None or cutoff_config is None:
+            message = cutoff_refusal or "invalid relevance cutoff"
+            if output_format == "json":
+                emit_json({"status": "error", "message": message})
+            else:
+                console.print(f"[red]{message}[/red]", soft_wrap=True)
+            raise typer.Exit(code=2)
+        from trellis.retrieve.relevance_cutoff_replay import (  # noqa: PLC0415
+            replay_relevance_cutoff,
+        )
+
+        cutoff_report = replay_relevance_cutoff(
+            get_event_log(), config=cutoff_config, days=days
+        )
+        if output_format == "json":
+            print(json.dumps(cutoff_report.model_dump()))
+            return
+        _render_relevance_cutoff_replay(cutoff_report)
+        return
     if authority_rank:
         conflicts = [
             flag
@@ -1948,6 +2020,76 @@ def _render_replay(report: Any) -> None:
         console.print()
         for note in report.notes:
             console.print(f"  [dim]{note}[/dim]")
+
+
+def _relevance_cutoff_refusal(
+    *, relevance_cutoff: bool, conflicts: list[str]
+) -> str | None:
+    """Why ``--relevance-cutoff`` cannot run as invoked, or ``None``."""
+    if not relevance_cutoff:
+        return "--semantic-min and --semantic-ratio need --relevance-cutoff"
+    if conflicts:
+        return (
+            f"--relevance-cutoff cannot be combined with {escape(', '.join(conflicts))}"
+        )
+    return None
+
+
+def _relevance_cutoff_replay_config(
+    *, semantic_min: float | None, semantic_ratio: float | None
+) -> Any:
+    """The cutoff config to replay: flags over env, mode as resolved.
+
+    Raises ``ValueError`` for an out-of-range ratio.
+    """
+    from trellis.retrieve.relevance_cutoff import (  # noqa: PLC0415
+        RelevanceCutoffConfig,
+        resolve_relevance_cutoff_config,
+    )
+
+    settings_values = load_settings_values(_get_registry().stores_dir)
+    resolved = resolve_relevance_cutoff_config(settings=settings_values)
+    return RelevanceCutoffConfig(
+        mode=resolved.mode,
+        semantic_min=semantic_min
+        if semantic_min is not None
+        else resolved.semantic_min,
+        semantic_ratio=(
+            semantic_ratio if semantic_ratio is not None else resolved.semantic_ratio
+        ),
+    )
+
+
+def _render_relevance_cutoff_replay(report: Any) -> None:
+    """Render a RelevanceCutoffReplayReport."""
+    console.print(
+        f"[bold]Relevance-Cutoff Replay[/bold] (last {report.window_days} days, "
+        f"n={report.attributed_packs} attributed packs)"
+    )
+    console.print(f"  config: [cyan]{escape(report.applied_config)}[/cyan]")
+    console.print(f"  status: {escape(report.status)}")
+    console.print()
+    console.print(f"  priced servings:    {report.priced_servings}")
+    console.print(f"  unpriced servings:  {report.unpriced_servings}")
+    console.print(f"  cut servings:       {report.cut_servings}")
+    console.print(
+        f"  helpful removed:    {report.helpful_removed} "
+        f"({report.helpful_tokens_removed:,} tokens)"
+    )
+    console.print(
+        f"  unhelpful removed:  {report.unhelpful_removed} "
+        f"({report.unhelpful_tokens_removed:,} tokens)"
+    )
+    console.print(
+        f"  unjudged removed:   {report.unjudged_removed} "
+        f"({report.unjudged_tokens_removed:,} tokens)"
+    )
+    console.print(f"  tokens removed:     {report.tokens_removed:,}")
+    console.print(f"  kept by min_keep:   {report.kept_by_min_keep}")
+    if report.notes:
+        console.print()
+        for note in report.notes:
+            console.print(f"  [dim]{escape(note)}[/dim]")
 
 
 def _render_class_prior_replay(report: Any) -> None:

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from trellis.retrieve.relevance_cutoff import native_scores_of
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.schemas.outcome import RRF_RERANKER_COMPONENT_ID
 from trellis.schemas.pack import PackItem
@@ -98,6 +99,9 @@ class RRFReranker(Reranker):
             fused_score = rrf_scores.get(item.item_id, 0.0)
             breakdown = rrf_components.get(item.item_id, {})
             breakdown["rrf_total"] = fused_score
+            # Native per-strategy scores ride through fusion untouched
+            # (trellis.retrieve.relevance_cutoff); nothing here reads them.
+            breakdown.update(native_scores_of(item))
             breakdown["original_score"] = item.relevance_score
             result.append(
                 item.model_copy(

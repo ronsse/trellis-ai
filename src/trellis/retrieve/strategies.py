@@ -1713,6 +1713,9 @@ class KeywordSearch(SearchStrategy):
                         limit=self._excerpt_max_chars,
                     ),
                     relevance_score=score,
+                    # The store's own rank, before importance and recency
+                    # (trellis.retrieve.relevance_cutoff).
+                    score_breakdown={f"native_{self.name}": float(base_score)},
                     metadata={
                         **pack_metadata(metadata),
                         # Both stamped after the splat, for the #433 reason:
@@ -1926,6 +1929,9 @@ class SemanticSearch(SearchStrategy):
                     item_type="vector",
                     excerpt=excerpt,
                     relevance_score=score,
+                    # The store's cosine similarity, before importance and
+                    # recency (trellis.retrieve.relevance_cutoff).
+                    score_breakdown={f"native_{self.name}": float(base_score)},
                     metadata={
                         **metadata,
                         # After the splat, same reason as the keyword axis —

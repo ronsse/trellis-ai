@@ -813,6 +813,36 @@ _SPECS: tuple[SettingSpec, ...] = (
         enum=("off", "withhold"),
     ),
     SettingSpec(
+        name="relevance_cutoff_mode",
+        label="Relevance cutoff",
+        type="str",
+        default="off",
+        description=(
+            "Withholds a candidate only the semantic axis returned when its "
+            "native similarity is below the floor set by "
+            "TRELLIS_RELEVANCE_CUTOFF_SEMANTIC_MIN and/or "
+            "TRELLIS_RELEVANCE_CUTOFF_SEMANTIC_RATIO (env-only; neither "
+            "has a default, and with neither set this does nothing). "
+            "'off' (the default) changes nothing. 'shadow' cuts nothing and "
+            "records what 'on' would cut. 'on' withholds under "
+            "below_relevance_cutoff, never below three candidates. Not "
+            "measured yet: price it with `trellis analyze replay "
+            "--relevance-cutoff` first."
+        ),
+        # See trellis.retrieve.relevance_cutoff for the gate itself.
+        surfaces=("mcp", "api", "cli"),
+        restart_required=False,
+        risk="caution",
+        risk_note=(
+            "'on' removes weak semantic-only candidates from every pack "
+            "before an operator sees them."
+        ),
+        group="retrieval",
+        settings_live=True,
+        env_var="TRELLIS_RELEVANCE_CUTOFF_MODE",
+        enum=("off", "shadow", "on"),
+    ),
+    SettingSpec(
         name="authority_rank_mode",
         label="Authority ranking boost",
         type="str",
