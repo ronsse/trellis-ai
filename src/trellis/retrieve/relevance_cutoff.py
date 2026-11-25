@@ -27,10 +27,15 @@ What the native score is, per built-in strategy:
   importance weighting and recency decay. **Higher is more similar.** It is a
   cosine *similarity*, not a distance, but its range depends on the backend:
   SQLite and pgvector return ``cos(q, v)`` in ``[-1, 1]`` (pgvector as
-  ``1 - (embedding <=> q)``), ArcadeDB returns ``1 - cosine distance`` (the
-  same value), and Neo4j's vector index returns its normalised cosine score
-  ``(1 + cos) / 2`` in ``[0, 1]``. An absolute floor is therefore not portable
-  across backends; the ratio floor is less sensitive to that.
+  ``1 - (embedding <=> q)``), ArcadeDB with cosine similarity returns
+  ``1 - cosine distance`` (the same value), ArcadeDB with any other
+  similarity function returns ``-distance``, which is always ``<= 0``, and
+  Neo4j's vector index returns its normalised cosine score ``(1 + cos) / 2``
+  in ``[0, 1]``. An absolute floor is therefore not portable across
+  backends; the ratio floor is less sensitive to that, but it is only
+  meaningful when the best score is positive (below).
+  A non-finite store score (NaN, inf) is never recorded: the key is omitted
+  (:func:`native_breakdown`), because Postgres JSONB rejects NaN.
 * ``native_keyword`` — the document store's full-text rank as the strategy
   reads it (``abs(rank)``, a BM25-style score), before importance and recency.
   Higher is better, but it is a function of corpus statistics and query
@@ -47,7 +52,13 @@ on the flat and sectioned paths, over the merged pool before dedup. Floors
 exist for the **semantic axis only**: ``semantic_min`` (absolute floor on
 ``native_semantic``) and ``semantic_ratio`` (fraction of the best
 ``native_semantic`` among this build's candidates); the effective floor is the
-larger of those configured. Keyword and graph have no floor because their
+larger of those configured. The ratio floor applies only when the best
+score is finite and ``> 0``: at or below zero, ``ratio * best`` sits *above*
+``best`` and would cut every semantic-only item, the best included, so the
+ratio is skipped and the block records ``ratio_skipped: "non_positive_best"``
+(or ``"no_semantic_score"`` when no candidate has one). ``best`` is taken
+over finite scores only, and an item with no finite semantic score is never
+cut. Keyword and graph have no floor because their
 native scores are not comparable similarities (above). An item is cut only
 when every strategy that returned it is an axis with a configured floor and it
 fails that floor, so an item keyword or graph also returned is kept. The gate
@@ -66,7 +77,14 @@ Modes (``TRELLIS_RELEVANCE_CUTOFF_MODE`` > settings ``relevance_cutoff_mode``
 
 ``on`` or ``shadow`` with neither threshold set is a no-op whose block reads
 ``status: "unconfigured"``. A held-out pack stays blind, as with the class
-prior: the gate runs before the draw and only its block rides the row.
+prior: the gate runs before the draw, and the held-out row carries only the
+gate's configuration (:func:`holdout_telemetry`: mode and thresholds), never
+its outcome or any item id.
+
+**Public-only packs are not gated.** ``PackBuilder._build_public`` and
+``_collect_public_pool`` do not call :func:`apply_relevance_cutoff`, so a
+public-only build is uncut under every mode and its event carries no
+``relevance_cutoff`` block (``tests/unit/retrieve/test_relevance_cutoff.py``).
 
 The cut items are kept for a later "nearby" section: ``on`` mode leaves
 ``Pack.metadata["relevance_cutoff"]["cut_items"]`` (id, title, tokens, native
@@ -109,12 +127,26 @@ def native_score_key(strategy_name: str) -> str:
     return f"{NATIVE_SCORE_PREFIX}{strategy_name}"
 
 
+def native_breakdown(strategy_name: str, value: float) -> dict[str, float]:
+    """``{native_<strategy_name>: value}``, or ``{}`` when ``value`` is not finite.
+
+    A non-finite score is omitted rather than written: Postgres JSONB rejects
+    NaN, and an item without a finite native score is never cut.
+    """
+    score = float(value)
+    if not math.isfinite(score):
+        return {}
+    return {native_score_key(strategy_name): score}
+
+
 def native_scores_of(item: PackItem) -> dict[str, float]:
-    """``item``'s ``native_*`` breakdown keys, verbatim (key -> score)."""
+    """``item``'s finite ``native_*`` breakdown keys (key -> score)."""
     return {
         k: v
         for k, v in item.score_breakdown.items()
         if k.startswith(NATIVE_SCORE_PREFIX)
+        and isinstance(v, int | float)
+        and math.isfinite(v)
     }
 
 
@@ -129,17 +161,13 @@ def stamp_native_scores(items: list[PackItem], strategy_name: str) -> list[PackI
     key = native_score_key(strategy_name)
     out: list[PackItem] = []
     for item in items:
-        if key in item.score_breakdown:
+        stamp = native_breakdown(strategy_name, item.relevance_score)
+        if key in item.score_breakdown or not stamp:
             out.append(item)
             continue
         out.append(
             item.model_copy(
-                update={
-                    "score_breakdown": {
-                        **item.score_breakdown,
-                        key: float(item.relevance_score),
-                    }
-                }
+                update={"score_breakdown": {**item.score_breakdown, **stamp}}
             )
         )
     return out
@@ -171,6 +199,11 @@ class RelevanceCutoffConfig:
         if self.mode not in _VALID_MODES:
             msg = f"mode must be one of {sorted(_VALID_MODES)}; got {self.mode!r}"
             raise ValueError(msg)
+        for name in ("semantic_min", "semantic_ratio"):
+            value = getattr(self, name)
+            if value is not None and not math.isfinite(value):
+                msg = f"{name} must be a finite number; got {value!r}"
+                raise ValueError(msg)
         if self.semantic_ratio is not None and not 0.0 <= self.semantic_ratio <= 1.0:
             msg = f"semantic_ratio must be in [0, 1]; got {self.semantic_ratio!r}"
             raise ValueError(msg)
@@ -253,22 +286,48 @@ class RelevanceCutoffResult:
     ``on`` cut something); ``rejected`` holds one row per cut copy (``on``
     only); ``cut`` is one item per cut id, served (shadow) or not (on);
     ``telemetry`` is the ``PACK_ASSEMBLED.relevance_cutoff`` block, ``None``
-    when off.
+    when off; ``restored`` is the ids the floor failed that ``min_keep``
+    kept.
     """
 
     kept: list[PackItem]
     rejected: list[RejectedItem] = field(default_factory=list)
     cut: list[PackItem] = field(default_factory=list)
     telemetry: dict[str, Any] | None = None
+    restored: list[str] = field(default_factory=list)
 
 
-def _floor(config: RelevanceCutoffConfig, best: float | None) -> float | None:
+def _floor(
+    config: RelevanceCutoffConfig, best: float | None
+) -> tuple[float | None, str | None]:
+    """The effective floor, and why the ratio floor was skipped (or ``None``).
+
+    The ratio floor needs a finite, positive ``best``: at or below zero,
+    ``ratio * best >= best`` and every semantic-only item would be cut.
+    """
     floors: list[float] = []
+    skipped: str | None = None
     if config.semantic_min is not None:
         floors.append(config.semantic_min)
-    if config.semantic_ratio is not None and best is not None:
-        floors.append(config.semantic_ratio * best)
-    return max(floors) if floors else None
+    if config.semantic_ratio is not None:
+        if best is None:
+            skipped = "no_semantic_score"
+        elif not math.isfinite(best) or best <= 0:
+            skipped = "non_positive_best"
+        else:
+            floors.append(config.semantic_ratio * best)
+    return (max(floors) if floors else None), skipped
+
+
+def holdout_telemetry(block: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The block a held-out pack's row carries: configuration only.
+
+    Mode and thresholds, as ``class_prior`` records for a held-out pack; no
+    outcome (candidates, counts, threshold reached) and no item id or title.
+    """
+    if block is None:
+        return None
+    return {k: block[k] for k in ("mode", "semantic_min", "semantic_ratio")}
 
 
 def cut_item_row(
@@ -329,7 +388,7 @@ def apply_relevance_cutoff(  # noqa: PLR0912
 
     sem_scores = [n[sem_key] for n in natives.values() if sem_key in n]
     best = max(sem_scores) if sem_scores else None
-    threshold = _floor(config, best)
+    threshold, ratio_skipped = _floor(config, best)
 
     failing: list[str] = []
     if threshold is not None:
@@ -357,6 +416,8 @@ def apply_relevance_cutoff(  # noqa: PLR0912
     cut = [first_copy[i] for i in cut_ids]
     tokens = {i: price(first_copy[i]) for i in cut_ids}
 
+    if ratio_skipped is not None:
+        block["ratio_skipped"] = ratio_skipped
     block.update(
         {
             "status": "applied",
@@ -370,7 +431,9 @@ def apply_relevance_cutoff(  # noqa: PLR0912
         }
     )
     if config.mode == "shadow" or not cut_ids:
-        return RelevanceCutoffResult(kept=items, cut=cut, telemetry=block)
+        return RelevanceCutoffResult(
+            kept=items, cut=cut, telemetry=block, restored=restored
+        )
 
     kept: list[PackItem] = []
     rejected: list[RejectedItem] = []
@@ -386,7 +449,9 @@ def apply_relevance_cutoff(  # noqa: PLR0912
             )
         else:
             kept.append(item)
-    return RelevanceCutoffResult(kept=kept, rejected=rejected, cut=cut, telemetry=block)
+    return RelevanceCutoffResult(
+        kept=kept, rejected=rejected, cut=cut, telemetry=block, restored=restored
+    )
 
 
 def pack_metadata_for(result: RelevanceCutoffResult) -> dict[str, Any]:
@@ -415,7 +480,9 @@ __all__ = [
     "RelevanceCutoffResult",
     "apply_relevance_cutoff",
     "cut_item_row",
+    "holdout_telemetry",
     "merge_native_scores",
+    "native_breakdown",
     "native_score_key",
     "native_scores_of",
     "pack_metadata_for",

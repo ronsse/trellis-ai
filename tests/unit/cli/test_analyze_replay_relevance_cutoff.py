@@ -41,6 +41,7 @@ def _emit_pack(
     *,
     helpful: list[str],
     unhelpful: list[str],
+    rejected: list[dict[str, object]] | None = None,
 ) -> None:
     log = registry.operational.event_log
     log.emit(
@@ -61,6 +62,7 @@ def _emit_pack(
                 }
                 for rank, (item_id, natives, tokens) in enumerate(rows, 1)
             ],
+            "rejected_items": rejected or [],
         },
     )
     log.emit(
@@ -165,4 +167,99 @@ def test_refusals_exit_the_same_under_both_formats(
     bad_ratio, _ = _invoke(
         "--relevance-cutoff", "--semantic-ratio", "1.5", "--format", fmt
     )
-    assert (combined, orphan, bad_ratio) == (2, 2, 2)
+    nan_min, _ = _invoke("--relevance-cutoff", "--semantic-min", "nan", "--format", fmt)
+    nan_ratio, _ = _invoke(
+        "--relevance-cutoff", "--semantic-ratio", "nan", "--format", fmt
+    )
+    assert (combined, orphan, bad_ratio, nan_min, nan_ratio) == (2, 2, 2, 2, 2)
+
+
+@pytest.fixture
+def stores(_temp_stores: StoreRegistry) -> StoreRegistry:
+    """The bare registry, for tests that emit their own packs."""
+    return _temp_stores
+
+
+def _ratio_pack(registry: StoreRegistry, rejected: list[dict[str, object]]) -> None:
+    _emit_pack(
+        registry,
+        "pack_ratio",
+        [
+            ("r1", {"native_semantic": 0.5}, 10),
+            ("r2", {"native_semantic": 0.45}, 10),
+            ("r3", {"native_semantic": 0.4}, 10),
+            ("r4", {"native_semantic": 0.35}, 10),
+        ],
+        helpful=["r1"],
+        unhelpful=[],
+        rejected=rejected,
+    )
+
+
+def _rejected(item_id: str, reason: str, score: float) -> dict[str, object]:
+    return {
+        "item_id": item_id,
+        "item_type": "document",
+        "relevance_score": score,
+        "reason": reason,
+        "native_scores": {"native_semantic": score},
+    }
+
+
+def test_pre_cutoff_rejection_does_not_raise_the_floor(stores: StoreRegistry) -> None:
+    """A noise-rejected row never reached the live gate: its score is not best."""
+    _ratio_pack(stores, [_rejected("n1", "noise", 0.99)])
+    code, out = _invoke(
+        "--relevance-cutoff", "--semantic-ratio", "0.8", "--format", "json"
+    )
+    assert code == 0, out
+    data = json.loads(out.strip())
+    # Best is 0.5, floor 0.4: only r4 fails. With n1 admitted the floor
+    # would be 0.792 and every served row would fail.
+    assert data["cut_servings"] == 1
+    assert data["excluded_unknown_reason"] == 0
+
+
+def test_post_cutoff_rejection_joins_the_pool(stores: StoreRegistry) -> None:
+    _ratio_pack(stores, [_rejected("t1", "token_budget", 0.99)])
+    code, out = _invoke(
+        "--relevance-cutoff", "--semantic-ratio", "0.8", "--format", "json"
+    )
+    assert code == 0, out
+    data = json.loads(out.strip())
+    # Floor 0.792: t1 passes and all four served rows fail, so min_keep
+    # restores the best two failing ids (r1, r2) and r3, r4 are cut.
+    assert data["cut_servings"] == 2
+    assert data["kept_by_min_keep"] == 2
+
+
+def test_unknown_reason_is_excluded_and_counted(stores: StoreRegistry) -> None:
+    _ratio_pack(stores, [_rejected("u1", "some_future_gate", 0.99)])
+    code, out = _invoke(
+        "--relevance-cutoff", "--semantic-ratio", "0.8", "--format", "json"
+    )
+    assert code == 0, out
+    data = json.loads(out.strip())
+    assert data["cut_servings"] == 1
+    assert data["excluded_unknown_reason"] == 1
+
+
+def test_kept_by_min_keep_counts_servings_only(stores: StoreRegistry) -> None:
+    """A restored rejected row is not a serving, so it is not counted."""
+    _emit_pack(
+        stores,
+        "pack_mk",
+        [("m1", {"native_semantic": 0.1}, 10), ("m2", {"native_semantic": 0.09}, 10)],
+        helpful=["m1"],
+        unhelpful=[],
+        rejected=[_rejected("x1", "token_budget", 0.2)],
+    )
+    code, out = _invoke(
+        "--relevance-cutoff", "--semantic-min", "0.5", "--format", "json"
+    )
+    assert code == 0, out
+    data = json.loads(out.strip())
+    # Three candidates, all failing; min_keep restores all three, but only
+    # m1 and m2 are servings.
+    assert data["kept_by_min_keep"] == 2
+    assert data["cut_servings"] == 0

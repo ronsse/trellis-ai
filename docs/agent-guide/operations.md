@@ -4856,7 +4856,8 @@ trellis analyze replay --relevance-cutoff [--semantic-min F] [--semantic-ratio R
 the score its strategy produced before fusion: for `semantic` the vector store's
 similarity (higher is closer; its range depends on the backend), for `keyword`
 the absolute BM25-style rank (a corpus statistic), and for any other strategy its
-`relevance_score` at the collect seam. Dedup merges every copy's keys onto the
+`relevance_score` at the collect seam. A non-finite score (NaN, inf) is never
+recorded; the key is omitted. Dedup merges every copy's keys onto the
 winner, and RRF and MMR keep them beside their own keys, so an item two
 strategies returned carries both. They reach `PACK_ASSEMBLED.injected_items[]`
 inside `score_breakdown` and each `rejected_items[]` row as `native_scores`. They
@@ -4869,23 +4870,35 @@ unrecognised value warns and resolves to `off`. Floors are env-only and have no
 default: `TRELLIS_RELEVANCE_CUTOFF_SEMANTIC_MIN` (absolute) and
 `TRELLIS_RELEVANCE_CUTOFF_SEMANTIC_RATIO` (0-1, a fraction of the pool's best
 `native_semantic`); with both set the higher floor wins, and with neither the
-block reads `status: "unconfigured"` and nothing is cut. An item is cut only when
+block reads `status: "unconfigured"` and nothing is cut. The ratio floor applies
+only when the best finite `native_semantic` is above zero (ArcadeDB with a
+non-cosine similarity returns `-distance`, always `<= 0`); otherwise it is
+skipped and the block reads `ratio_skipped: "non_positive_best"` (or
+`"no_semantic_score"`). An item with no finite semantic score is never cut. An item is cut only when
 every strategy that returned it is a configured axis (today only `semantic`) and
 it is below the floor; at least three candidates always survive (`min_keep`).
 The gate runs after noise, archived, supersession and the class prior, on flat
-and sectioned packs. `on` records each cut as `below_relevance_cutoff` (with
+and sectioned packs. It does not run on public-only packs (`_build_public`):
+they are uncut under every mode and their event has no `relevance_cutoff` block. `on` records each cut as `below_relevance_cutoff` (with
 `estimated_tokens`), counted by the pack's withheld line, and lists the cut items
 in `pack.metadata["relevance_cutoff"]["cut_items"]` so a later section can offer
 them as nearby. `shadow` cuts nothing. Both add a `relevance_cutoff` block to
 `PACK_ASSEMBLED` (`cut_count`, `cut_tokens`, `threshold`, `best_semantic`,
 `kept_by_min_keep`); `off` adds no key. A held-out pack stays blind, as with the
-class prior; its event keeps the block.
+class prior; its event keeps only the configuration (`mode`, `semantic_min`,
+`semantic_ratio`), never the outcome or an item id.
 
 *The replay.* Floors come from the flags, else the env vars. Per served
 `(pack_id, item_id)` the report counts `helpful_removed`, `unhelpful_removed`
 and `unjudged_removed` with their tokens and `tokens_removed`. Each pack's pool
-is its served rows plus the rejected rows that carry `native_scores`, so a ratio
-floor can sit lower than live. A pack with no native score on any row predates
+is its served rows plus the rejected rows that carry `native_scores` and whose
+reason arises at or after the cutoff stage (`POOL_REJECTION_REASONS`: the cutoff,
+dedup, semantic dedup, structural and meta-activity filters, session dedup,
+content floor, `max_items`, `token_budget`). Rows removed earlier (noise,
+lifecycle, sensitivity, class prior) never reached the live gate and are left
+out; an unknown reason is left out and counted as `excluded_unknown_reason`.
+A rejected row without native scores cannot join, so a ratio floor can sit lower
+than live. `kept_by_min_keep` counts served items `min_keep` restored. A pack with no native score on any row predates
 them and counts as `unpriced_servings`. Refill is not modelled: tokens are gross.
 It combines with no other arm, and `--semantic-*` without `--relevance-cutoff`
 is refused (exit `2` under every `--format`).

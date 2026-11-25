@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Any
 
@@ -129,6 +130,9 @@ class RejectedItem(VersionedModel):
             k: v
             for k, v in item.score_breakdown.items()
             if k.startswith(NATIVE_SCORE_KEY_PREFIX)
+            # Never a non-finite score: Postgres JSONB rejects NaN.
+            and isinstance(v, int | float)
+            and math.isfinite(v)
         }
         return cls(
             item_id=item.item_id,

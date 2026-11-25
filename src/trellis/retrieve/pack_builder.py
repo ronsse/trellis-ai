@@ -118,6 +118,9 @@ from trellis.retrieve.relevance_cutoff import (
     resolve_relevance_cutoff_config,
     stamp_native_scores,
 )
+from trellis.retrieve.relevance_cutoff import (
+    holdout_telemetry as relevance_cutoff_holdout_telemetry,
+)
 from trellis.retrieve.rerankers.base import Reranker
 from trellis.retrieve.sensitivity import (
     SENSITIVITY_REJECTION_REASON,
@@ -1611,10 +1614,8 @@ class PackBuilder:
                 index_mode=index_mode,
                 class_prior_config=class_prior_config,
                 parent_verdict_degraded=parent_verdict_cache.degraded,
+                relevance_cutoff_block=cutoff.telemetry,
             )
-            # The gate ran before the draw, as the class prior did.
-            if cutoff.telemetry is not None:
-                telemetry["relevance_cutoff"] = cutoff.telemetry
 
         # R1 (#844): applied to the *served* pack only, after the holdout
         # draw above — ``withheld_from`` already captured the true would-be
@@ -2124,10 +2125,8 @@ class PackBuilder:
             telemetry = self._withheld_sectioned_telemetry(
                 class_prior_config=class_prior_config,
                 parent_verdict_degraded=parent_verdict_cache.degraded,
+                relevance_cutoff_block=cutoff.telemetry,
             )
-            # The gate ran before the draw, as the class prior did.
-            if cutoff.telemetry is not None:
-                telemetry["relevance_cutoff"] = cutoff.telemetry
 
         # R1 (#844): see the matching comment in :meth:`build` — applied
         # after the holdout draw, so ``withheld_from`` keeps the true
@@ -2669,6 +2668,7 @@ class PackBuilder:
         index_mode: bool,
         class_prior_config: ClassPriorConfig,
         parent_verdict_degraded: bool,
+        relevance_cutoff_block: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Telemetry blocks for the empty pack a withheld caller received.
 
@@ -2699,13 +2699,26 @@ class PackBuilder:
             "advisories_filtered_legacy": 0,
             "class_prior": class_prior_telemetry(class_prior_config),
             "parent_verdict_degraded": parent_verdict_degraded,
+            **self._withheld_cutoff_block(relevance_cutoff_block),
         }
+
+    @staticmethod
+    def _withheld_cutoff_block(block: dict[str, Any] | None) -> dict[str, Any]:
+        """The relevance-cutoff key a held-out row carries: config only.
+
+        Like ``class_prior``: the gate ran before the draw, so its mode and
+        thresholds are recorded, but never its outcome or an item id (the
+        would-be pack rides the ``holdout_*`` keys). Absent when off.
+        """
+        config_only = relevance_cutoff_holdout_telemetry(block)
+        return {} if config_only is None else {"relevance_cutoff": config_only}
 
     def _withheld_sectioned_telemetry(
         self,
         *,
         class_prior_config: ClassPriorConfig,
         parent_verdict_degraded: bool,
+        relevance_cutoff_block: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """The sectioned counterpart of :meth:`_withheld_flat_telemetry`."""
         return {
@@ -2720,6 +2733,7 @@ class PackBuilder:
             "advisories_filtered_legacy": 0,
             "class_prior": class_prior_telemetry(class_prior_config),
             "parent_verdict_degraded": parent_verdict_degraded,
+            **self._withheld_cutoff_block(relevance_cutoff_block),
         }
 
     def _emit_sectioned_telemetry(

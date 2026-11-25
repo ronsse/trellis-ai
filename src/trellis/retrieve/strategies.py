@@ -29,6 +29,7 @@ from trellis.retrieve.public_rank import (
     public_keyword_rows,
 )
 from trellis.retrieve.reference import pack_metadata, served_text
+from trellis.retrieve.relevance_cutoff import native_breakdown
 from trellis.schemas.enums import EdgeKind
 from trellis.schemas.extraction import (
     EXTRACTION_STATUS_PROPERTY,
@@ -1715,7 +1716,7 @@ class KeywordSearch(SearchStrategy):
                     relevance_score=score,
                     # The store's own rank, before importance and recency
                     # (trellis.retrieve.relevance_cutoff).
-                    score_breakdown={f"native_{self.name}": float(base_score)},
+                    score_breakdown=native_breakdown(self.name, base_score),
                     metadata={
                         **pack_metadata(metadata),
                         # Both stamped after the splat, for the #433 reason:
@@ -1931,7 +1932,7 @@ class SemanticSearch(SearchStrategy):
                     relevance_score=score,
                     # The store's cosine similarity, before importance and
                     # recency (trellis.retrieve.relevance_cutoff).
-                    score_breakdown={f"native_{self.name}": float(base_score)},
+                    score_breakdown=native_breakdown(self.name, base_score),
                     metadata={
                         **metadata,
                         # After the splat, same reason as the keyword axis —
