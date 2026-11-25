@@ -97,26 +97,71 @@ def test_fixture_repo_starts_clean(pins: ModuleType, repo: Path) -> None:
     assert pins.check(repo) == []
 
 
-def test_catches_a_stale_precommit_ruff_rev(pins: ModuleType, repo: Path) -> None:
-    """The exact drift on main: Dependabot bumps [dev], `rev:` stays put."""
-    config = repo / ".pre-commit-config.yaml"
-    config.write_text(
-        config.read_text().replace("rev: v", "rev: v9.9.9-", 1), encoding="utf-8"
+#: The remote ruff repo this config used before #1268/#1300 made its ``rev:``
+#: a second pin that Dependabot never bumps. Reintroducing it must fail.
+REMOTE_RUFF = """
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.6
+    hooks:
+      - id: ruff-format
+"""
+
+REMOTE_MYPY = """
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v2.4.1
+    hooks:
+      - id: mypy
+"""
+
+
+def _append_repo(config: Path, block: str) -> None:
+    config.write_text(config.read_text() + block, encoding="utf-8")
+
+
+def test_catches_a_reintroduced_remote_ruff_repo(pins: ModuleType, repo: Path) -> None:
+    """The drift shape of #649/#1268/#1300: a hook repo carrying its own rev.
+
+    Its version here *equals* the pyproject pin on purpose. An equal rev is
+    still a second copy that Dependabot's pip ecosystem does not edit, so the
+    next ruff bump would fail the gate again; agreement today is not the
+    property being guarded.
+    """
+    _append_repo(repo / ".pre-commit-config.yaml", REMOTE_RUFF)
+    problems = pins.check(repo)
+    assert len(problems) == 1, problems
+    assert "ruff" in problems[0]
+    assert "ruff-pre-commit" in problems[0]
+    assert "repo: local" in problems[0]
+
+
+def test_catches_a_reintroduced_remote_mypy_repo(pins: ModuleType, repo: Path) -> None:
+    _append_repo(repo / ".pre-commit-config.yaml", REMOTE_MYPY)
+    problems = pins.check(repo)
+    assert len(problems) == 1, problems
+    assert "mypy" in problems[0]
+    assert "mirrors-mypy" in problems[0]
+
+
+def test_catches_a_remote_repo_by_hook_id_under_another_url(
+    pins: ModuleType, repo: Path
+) -> None:
+    """A fork or renamed mirror is still a second pin; the hook id gives it away."""
+    _append_repo(
+        repo / ".pre-commit-config.yaml",
+        "\n  - repo: https://example.invalid/linters\n    rev: v1.0.0\n"
+        "    hooks:\n      - id: ruff\n",
     )
     problems = pins.check(repo)
-    assert len(problems) == 1
-    assert "ruff" in problems[0]
-    assert "pyproject.toml is authoritative" in problems[0]
+    assert len(problems) == 1, problems
+    assert "example.invalid" in problems[0]
 
 
-def test_catches_a_stale_precommit_mypy_rev(pins: ModuleType, repo: Path) -> None:
-    config = repo / ".pre-commit-config.yaml"
-    text = config.read_text()
-    mypy_rev = text.split("mirrors-mypy")[1].split("rev:")[1].split("\n")[0].strip()
-    config.write_text(text.replace(f"rev: {mypy_rev}", "rev: v0.0.1"), encoding="utf-8")
-    problems = pins.check(repo)
-    assert len(problems) == 1
-    assert "mypy" in problems[0]
+def test_an_unrelated_remote_repo_is_not_flagged(pins: ModuleType, repo: Path) -> None:
+    """pre-commit-hooks carries a rev of its own and pins no tool in TOOLS."""
+    assert (
+        "pre-commit/pre-commit-hooks" in (repo / ".pre-commit-config.yaml").read_text()
+    )
+    assert pins.check(repo) == []
 
 
 def test_catches_a_workflow_that_restates_the_pin(pins: ModuleType, repo: Path) -> None:
@@ -165,15 +210,14 @@ def test_reports_every_divergence_not_just_the_first(
 ) -> None:
     """One run should name the whole edit, not send you round the loop."""
     config = repo / ".pre-commit-config.yaml"
-    config.write_text(
-        config.read_text().replace("rev: v", "rev: v9.9.9-"), encoding="utf-8"
-    )
+    _append_repo(config, REMOTE_RUFF)
+    _append_repo(config, REMOTE_MYPY)
     workflow = repo / ".github" / "workflows" / "lint.yml"
     workflow.write_text(
         workflow.read_text() + '\n      - run: pip install "ruff==0.1.0"\n',
         encoding="utf-8",
     )
-    assert len(pins.check(repo)) == 3  # ruff rev, mypy rev, hardcoded pin
+    assert len(pins.check(repo)) == 3  # remote ruff, remote mypy, hardcoded pin
 
 
 # ---------------------------------------------------------------------------
@@ -195,19 +239,34 @@ def test_rejects_a_range_instead_of_an_exact_pin(pins: ModuleType, repo: Path) -
         pins.check(repo)
 
 
-def test_missing_precommit_entry_is_reported_not_skipped(
+def test_a_dropped_local_hook_is_reported_not_skipped(
     pins: ModuleType, repo: Path
 ) -> None:
+    """Removing the remote repo must not be satisfiable by removing the hook."""
     config = repo / ".pre-commit-config.yaml"
+    text = config.read_text()
+    assert "entry: mypy src/" in text
+    config.write_text(text.replace("entry: mypy src/", "entry: true"), encoding="utf-8")
+    problems = pins.check(repo)
+    assert len(problems) == 1, problems
+    assert "no 'repo: local' hook runs mypy" in problems[0]
+
+
+def test_a_local_hook_that_installs_its_own_tool_is_reported(
+    pins: ModuleType, repo: Path
+) -> None:
+    """`language: python` builds an env from additional_dependencies: a pin."""
+    config = repo / ".pre-commit-config.yaml"
+    text = config.read_text()
+    hook_line = "        language: system"
+    assert text.count(hook_line) >= 3
     config.write_text(
-        config.read_text().replace(
-            "https://github.com/astral-sh/ruff-pre-commit", "https://example.invalid"
-        ),
-        encoding="utf-8",
+        text.replace(hook_line, "        language: python", 1), encoding="utf-8"
     )
     problems = pins.check(repo)
-    assert len(problems) == 1
-    assert "no 'rev:' found for ruff" in problems[0]
+    assert len(problems) == 1, problems
+    assert "language: python" in problems[0]
+    assert "ruff" in problems[0]
 
 
 def test_main_exits_zero_on_the_real_repo(pins: ModuleType) -> None:
