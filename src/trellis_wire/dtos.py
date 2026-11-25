@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from trellis_wire.base import WireModel, WireRequestModel
 from trellis_wire.enums import BatchStrategy, NodeRole
@@ -185,6 +185,43 @@ class AxisReportResponse(WireModel):
     embedder_setting: str | None = None
 
 
+class NearbyGroupResponse(WireModel):
+    """One group of the nearby section: cut items sharing a label."""
+
+    # Server-rendered strings pass through byte for byte.
+    model_config = ConfigDict(str_strip_whitespace=False)
+
+    label: str
+    count: int
+    estimated_tokens: int
+    titles: list[str]
+    item_ids: list[str]
+    ids_left_out: int
+
+
+class NearbyResponse(WireModel):
+    """The pack's "Nearby" section: what the relevance cutoff removed.
+
+    Verbatim ``Pack.metadata["nearby"]`` (:mod:`trellis.retrieve.nearby`).
+    ``markdown`` is the server-rendered section text every formatter prints
+    (:func:`trellis_wire.nearby.nearby_markdown`); ``listed_item_ids`` names
+    each id it shows, the ids ``PACK_ASSEMBLED.nearby`` records.
+    """
+
+    # Server-rendered strings pass through byte for byte.
+    model_config = ConfigDict(str_strip_whitespace=False)
+
+    groups: list[NearbyGroupResponse]
+    item_count: int
+    estimated_tokens: int
+    listed_item_ids: list[str]
+    groups_left_out: int
+    items_left_out: int
+    not_listed: dict[str, int]
+    section_tokens: int
+    markdown: str
+
+
 class PackResponse(WireModel):
     """Response containing an assembled context pack."""
 
@@ -205,6 +242,10 @@ class PackResponse(WireModel):
     #: ``trellis retrieve pack --format json`` also prints. ``None`` means a
     #: server that predates this field.
     axes: AxisReportResponse | None = None
+    #: The nearby section (``TRELLIS_NEARBY_SECTION``), or ``None`` when the
+    #: pack has none: the setting is off, the relevance cutoff cut nothing
+    #: listable, or the pack is public-only or held out.
+    nearby: NearbyResponse | None = None
 
 
 class SectionedPackRequest(WireRequestModel):
@@ -245,6 +286,9 @@ class SectionedPackResponse(WireModel):
     #: predates this field. The server refuses ``sections=[]`` (422), so
     #: every 200 has a section to read the "ran" axes off.
     axes: AxisReportResponse | None = None
+    #: Same as :attr:`PackResponse.nearby`: one section per pack, not per
+    #: requested section.
+    nearby: NearbyResponse | None = None
 
 
 # -- Curate --

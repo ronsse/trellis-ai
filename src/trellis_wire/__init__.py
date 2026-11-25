@@ -48,6 +48,8 @@ from trellis_wire.dtos import (
     HealthResponse,
     IngestResponse,
     LinkRequest,
+    NearbyGroupResponse,
+    NearbyResponse,
     PackFeedbackRequest,
     PackFeedbackResponse,
     PackRequest,
@@ -95,6 +97,8 @@ __all__ = [
     "WithholdingResponse",
     "ClassPriorWithheldDetail",
     "AxisReportResponse",
+    "NearbyGroupResponse",
+    "NearbyResponse",
     # Curate
     "PromoteRequest",
     "LinkRequest",

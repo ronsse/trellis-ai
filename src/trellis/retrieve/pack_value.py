@@ -444,9 +444,9 @@ class ImplicitSignals(TrellisModel):
     #: but listed in its ``nearby`` section (:mod:`trellis.retrieve.nearby`).
     #: Joined, so not in :attr:`fetch_unjoined`, and not in
     #: :attr:`fetched_items` either: no served row, so no tokens to charge.
-    #: The event lists the ids even for a pack whose caller's surface does
-    #: not render the section (REST pack responses carry no ``metadata``),
-    #: so a joined fetch does not prove the agent saw the section.
+    #: Every pack surface returns the section, but a caller may not print it
+    #: (a REST client reading only ``items``), so a joined fetch does not
+    #: prove the agent saw the section.
     fetch_joined_nearby: int = 0
     fetch_suppressed: bool = False
     fetch_suppressed_reason: str = ""

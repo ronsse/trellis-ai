@@ -2383,6 +2383,99 @@ components:
       - metric
       title: MetricsTimeseriesResponse
       type: object
+    NearbyGroupResponse:
+      additionalProperties: false
+      description: 'One group of the nearby section: cut items sharing a label.'
+      properties:
+        count:
+          title: Count
+          type: integer
+        estimated_tokens:
+          title: Estimated Tokens
+          type: integer
+        ids_left_out:
+          title: Ids Left Out
+          type: integer
+        item_ids:
+          items:
+            type: string
+          title: Item Ids
+          type: array
+        label:
+          title: Label
+          type: string
+        titles:
+          items:
+            type: string
+          title: Titles
+          type: array
+      required:
+      - label
+      - count
+      - estimated_tokens
+      - titles
+      - item_ids
+      - ids_left_out
+      title: NearbyGroupResponse
+      type: object
+    NearbyResponse:
+      additionalProperties: false
+      description: 'The pack''s "Nearby" section: what the relevance cutoff removed.
+
+
+        Verbatim ``Pack.metadata["nearby"]`` (:mod:`trellis.retrieve.nearby`).
+
+        ``markdown`` is the server-rendered section text every formatter prints
+
+        (:func:`trellis_wire.nearby.nearby_markdown`); ``listed_item_ids`` names
+
+        each id it shows, the ids ``PACK_ASSEMBLED.nearby`` records.'
+      properties:
+        estimated_tokens:
+          title: Estimated Tokens
+          type: integer
+        groups:
+          items:
+            $ref: '#/components/schemas/NearbyGroupResponse'
+          title: Groups
+          type: array
+        groups_left_out:
+          title: Groups Left Out
+          type: integer
+        item_count:
+          title: Item Count
+          type: integer
+        items_left_out:
+          title: Items Left Out
+          type: integer
+        listed_item_ids:
+          items:
+            type: string
+          title: Listed Item Ids
+          type: array
+        markdown:
+          title: Markdown
+          type: string
+        not_listed:
+          additionalProperties:
+            type: integer
+          title: Not Listed
+          type: object
+        section_tokens:
+          title: Section Tokens
+          type: integer
+      required:
+      - groups
+      - item_count
+      - estimated_tokens
+      - listed_item_ids
+      - groups_left_out
+      - items_left_out
+      - not_listed
+      - section_tokens
+      - markdown
+      title: NearbyResponse
+      type: object
     NodeRole:
       description: 'Graph node role.
 
@@ -2581,6 +2674,10 @@ components:
             type: object
           title: Items
           type: array
+        nearby:
+          anyOf:
+          - $ref: '#/components/schemas/NearbyResponse'
+          - type: 'null'
         pack_id:
           title: Pack Id
           type: string
@@ -3266,6 +3363,10 @@ components:
         intent:
           title: Intent
           type: string
+        nearby:
+          anyOf:
+          - $ref: '#/components/schemas/NearbyResponse'
+          - type: 'null'
         pack_id:
           title: Pack Id
           type: string

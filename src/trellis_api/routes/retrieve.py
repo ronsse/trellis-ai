@@ -14,6 +14,7 @@ from trellis.core.error_sanitize import describe_validation_error
 from trellis.core.knobs import resolve_rest_pack_max_items, resolve_rest_pack_max_tokens
 from trellis.core.precedent_document import is_promoted_precedent_document
 from trellis.retrieve.builder_factory import build_pack_builder, describe_axes
+from trellis.retrieve.nearby import NEARBY_KEY
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.precedents import (
     PrecedentClearance,
@@ -46,6 +47,7 @@ from trellis_api.routes._principal import (
 from trellis_wire.dtos import (
     AxisReportResponse,
     DefaultValidationError,
+    NearbyResponse,
     PackRequest,
     PackResponse,
     SectionedPackRequest,
@@ -216,6 +218,20 @@ def search(
     }
 
 
+def _nearby_response(metadata: dict[str, Any]) -> NearbyResponse | None:
+    """``metadata["nearby"]`` as the response's ``nearby``, else ``None``.
+
+    The builder attaches no block to a public-only or held-out pack, nor when
+    the section is off or the relevance cutoff cut nothing listable
+    (:mod:`trellis.retrieve.nearby`), so the route only copies what it got.
+    Its ids were cut after the clearance gate, so the caller may read them.
+    """
+    block = metadata.get(NEARBY_KEY)
+    if not isinstance(block, dict):
+        return None
+    return NearbyResponse.model_validate(block)
+
+
 @router.post("/packs", response_model=PackResponse, responses=PUBLIC_READ_BUSY_RESPONSE)
 def assemble_pack(
     req: PackRequest,
@@ -294,6 +310,7 @@ def assemble_pack(
             else None
         ),
         axes=AxisReportResponse(**axes),
+        nearby=_nearby_response(pack.metadata),
     )
 
 
@@ -399,6 +416,7 @@ def assemble_sectioned_pack(
             else None
         ),
         axes=axes,
+        nearby=_nearby_response(pack.metadata),
     )
 
 
