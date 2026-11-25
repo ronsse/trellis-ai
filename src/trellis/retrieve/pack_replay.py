@@ -2755,7 +2755,15 @@ class FeedbackPriorReplayReport(TrellisModel):
     #: Servings whose position in the re-sorted pool rose / fell.
     servings_moved_up: int = 0
     servings_moved_down: int = 0
-    #: Served set and body set, split by the pack's verdict.
+    #: Servings (per ``(pack_id, item_id)``) whose factor is below / above
+    #: ``1.0``: the demote-to-promote ratio to read before enabling the flag.
+    servings_demoted: int = 0
+    servings_promoted: int = 0
+    #: Served set and body set, split by the pack's verdict. Disjoint, as in
+    #: :class:`AuthorityRankReplayReport`: ``<verdict>_lost_body`` counts a
+    #: body that became a pointer, ``<verdict>_dropped`` a serving the re-run
+    #: no longer admits at all (from a body or a pointer); a dropped body is
+    #: in ``_dropped`` only.
     helpful_gained_body: int = 0
     helpful_lost_body: int = 0
     helpful_dropped: int = 0
@@ -2906,6 +2914,10 @@ def _replay_feedback_prior_pack(  # noqa: PLR0911, PLR0912, PLR0915 - one guard 
             tally.add("servings_moved_up")
         elif new_pos[item_id] > old_pos[item_id]:
             tally.add("servings_moved_down")
+        if factor[item_id] < 1.0:
+            tally.add("servings_demoted")
+        elif factor[item_id] > 1.0:
+            tally.add("servings_promoted")
     new_admitted = _walk([by_id[i] for i in new_order], plan.budget, plan.max_items)
     new_states = _states(new_order, new_admitted, body_items, exempt)
     if [i for i in new_order if i in new_admitted] != old_order_admitted:
@@ -2924,7 +2936,7 @@ def _replay_feedback_prior_pack(  # noqa: PLR0911, PLR0912, PLR0915 - one guard 
         verdict = by_id[item_id].verdict
         if new == _DROPPED:
             tally.add(f"{verdict}_dropped")
-        if old == _BODY:
+        elif old == _BODY:
             if verdict != "unjudged":
                 tally.add(f"{verdict}_lost_body")
         elif new == _BODY and verdict != "unjudged":
@@ -3072,6 +3084,8 @@ def replay_feedback_prior(
         packs_order_changed=c.get("order_changed", 0),
         servings_moved_up=c.get("servings_moved_up", 0),
         servings_moved_down=c.get("servings_moved_down", 0),
+        servings_demoted=c.get("servings_demoted", 0),
+        servings_promoted=c.get("servings_promoted", 0),
         helpful_gained_body=c.get("helpful_gained_body", 0),
         helpful_lost_body=c.get("helpful_lost_body", 0),
         helpful_dropped=c.get("helpful_dropped", 0),

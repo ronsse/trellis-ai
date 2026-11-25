@@ -8,6 +8,7 @@ a score.
 
 from __future__ import annotations
 
+import itertools
 import json
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -326,20 +327,31 @@ class TestOnAfterFusion:
             *_two_axis_pool()[0].search.return_value,  # type: ignore[attr-defined]
             *_two_axis_pool()[1].search.return_value,  # type: ignore[attr-defined]
         ]
-        on = _builder(ON)._rerank_and_project_public("q", list(pool), [])
-        off = _builder(OFF)._rerank_and_project_public("q", list(pool), [])
+        on, _ = _builder(ON)._rerank_and_project_public("q", list(pool), [])
+        off, _ = _builder(OFF)._rerank_and_project_public("q", list(pool), [])
         by_id_on = {i.item_id: i for i in on}
         by_id_off = {i.item_id: i for i in off}
         assert by_id_on["s2"].relevance_score > by_id_on["s1"].relevance_score
         assert by_id_off["s2"].relevance_score < by_id_off["s1"].relevance_score
         # Applied exactly once on this path too.
         assert by_id_on["s2"].relevance_score == pytest.approx(
-            by_id_on["s2"].score_breakdown["rrf_total"] * 1.15, rel=1e-9
+            by_id_off["s2"].relevance_score * 1.15, rel=1e-9
         )
         # The public projection strips the multiplier with ``original_score``.
         for item in [*on, *off]:
             assert AUTHORITY_BOOST_KEY not in item.score_breakdown
             assert "original_score" not in item.score_breakdown
+        # ...and the boosted item's ``rrf_*`` keys, or ``relevance_score /
+        # rrf_total`` would name the multiplier. Unboosted items keep them.
+        s2 = by_id_on["s2"]
+        assert not any(k.startswith("rrf_") for k in s2.score_breakdown)
+        for a, b in itertools.product(
+            [s2.relevance_score, *s2.score_breakdown.values()], repeat=2
+        ):
+            if b:
+                assert a / b != pytest.approx(1.15, rel=1e-6)
+        assert "rrf_total" in by_id_on["s1"].score_breakdown
+        assert all("rrf_total" in i.score_breakdown for i in off)
 
     def test_project_for_public_strips_the_boost_key(self) -> None:
         from trellis.retrieve.public_pack import project_for_public

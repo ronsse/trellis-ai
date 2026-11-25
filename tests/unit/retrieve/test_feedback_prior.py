@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import itertools
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -24,6 +25,7 @@ from tests.unit.retrieve.replay_seeds import (
     authority_rank_strategies,
     seed_feedback_prior,
 )
+from trellis.classify.demotion_gate import MIN_UNHELPFUL_CITATIONS
 from trellis.retrieve.builder_factory import build_pack_builder
 from trellis.retrieve.excerpts import ContentFloorConfig
 from trellis.retrieve.feedback_prior import (
@@ -113,13 +115,20 @@ class TestFactor:
             factor = factor_for(ItemEvidence(helpful=h, unhelpful=u, fetched=f), ON)
             assert 1.0 - ON.strength < factor < 1.0 + ON.strength or factor == 1.0
 
-    def test_demotion_needs_unhelpful_evidence(self) -> None:
-        """A factor below 1 never arises from helpful or fetch evidence alone."""
+    def test_demotion_needs_the_demotion_gates_evidence(self) -> None:
+        """A factor below 1 needs ``unhelpful >= 2`` and ``unhelpful > pos``
+        (the per-item rule of :mod:`trellis.classify.demotion_gate`)."""
         for h, u, f in itertools.product(range(6), range(6), range(6)):
             factor = factor_for(ItemEvidence(helpful=h, unhelpful=u, fetched=f), ON)
             if factor < 1.0:
-                assert u > 0
+                assert u >= MIN_UNHELPFUL_CITATIONS
+                assert u > h + ON.fetch_weight * f
         assert factor_for(ItemEvidence(helpful=0, unhelpful=0, fetched=4), ON) > 1.0
+        # One unhelpful grade never demotes: exactly 1.0, not merely close.
+        assert factor_for(ItemEvidence(helpful=0, unhelpful=1, fetched=0), ON) == 1.0
+        assert factor_for(ItemEvidence(helpful=0, unhelpful=2, fetched=0), ON) < 1.0
+        assert factor_for(ItemEvidence(helpful=1, unhelpful=2, fetched=0), ON) < 1.0
+        assert factor_for(ItemEvidence(helpful=1, unhelpful=1, fetched=1), ON) > 1.0
 
     def test_formula(self) -> None:
         evidence = ItemEvidence(helpful=2, unhelpful=1, fetched=1)
@@ -229,10 +238,127 @@ class TestApply:
         assert out.score_breakdown["feedback_prior_helpful"] == 3.0
         assert out.relevance_score == pytest.approx(1.3)
 
+    @pytest.mark.parametrize("config", [ON, SHADOW])
+    def test_one_unhelpful_grade_leaves_the_item_untouched(
+        self, config: FeedbackPriorConfig
+    ) -> None:
+        one = {"a": ItemEvidence(helpful=0, unhelpful=1, fetched=0)}
+        items = [_item("a", 1.0)]
+        [out] = apply_feedback_prior(items, config, one)
+        assert out is items[0]
+        assert not EVIDENCE_KEYS & set(out.score_breakdown)
+
+    def test_two_unhelpful_grades_demote(self) -> None:
+        two = {"a": ItemEvidence(helpful=0, unhelpful=2, fetched=0)}
+        [out] = apply_feedback_prior([_item("a", 1.0)], ON, two)
+        assert out.score_breakdown[FEEDBACK_PRIOR_KEY] < 1.0
+        assert out.relevance_score < 1.0
+
     def test_public_projection_strips_every_prior_key(self) -> None:
         [out] = apply_feedback_prior([_item("s2", 1.0)], ON, LIFT_S2)
         public = project_for_public(out)
         assert not EVIDENCE_KEYS & set(public.score_breakdown)
+
+
+def _fused_pool() -> list[PackItem]:
+    strategies = authority_rank_strategies()
+    return [
+        *strategies[0].search.return_value,  # type: ignore[attr-defined]
+        *strategies[1].search.return_value,  # type: ignore[attr-defined]
+    ]
+
+
+def _legacy_projection(item: PackItem) -> dict[str, object]:
+    """``project_for_public`` as it stood before the multiplier-aware cut."""
+    private = {"original_score", "authority_boost"} | EVIDENCE_KEYS
+    return (
+        project_for_public(item)
+        .model_copy(
+            update={
+                "score_breakdown": {
+                    k: v for k, v in item.score_breakdown.items() if k not in private
+                }
+            }
+        )
+        .model_dump(mode="json")
+    )
+
+
+class TestPublicProjection:
+    def test_on_no_public_arithmetic_recovers_the_factor(self) -> None:
+        public = _builder(ON, _Fixed(LIFT_S2))._rerank_and_project_public(
+            "q", _fused_pool(), []
+        )[0]
+        [s2] = [i for i in public if i.item_id == "s2"]
+        factor = 1.3
+        assert not any(k.startswith("rrf_") for k in s2.score_breakdown)
+        values = [s2.relevance_score, *s2.score_breakdown.values()]
+        for a, b in itertools.product(values, values):
+            if b:
+                assert a / b != pytest.approx(factor, rel=1e-6)
+        # An item the prior did not touch keeps its fused breakdown.
+        others = [i for i in public if i.item_id != "s2"]
+        assert others
+        assert all("rrf_total" in i.score_breakdown for i in others)
+
+    def test_shadow_keeps_the_rrf_keys(self) -> None:
+        public = _builder(SHADOW, _Fixed(LIFT_S2))._rerank_and_project_public(
+            "q", _fused_pool(), []
+        )[0]
+        assert all("rrf_total" in i.score_breakdown for i in public)
+
+    def test_off_projection_is_unchanged(self) -> None:
+        reranked = RRFReranker().rerank("q", _fused_pool())
+        assert reranked
+        for item in reranked:
+            assert project_for_public(item).model_dump(
+                mode="json"
+            ) == _legacy_projection(item)
+            assert "rrf_total" in project_for_public(item).score_breakdown
+
+
+def _public_event(
+    tmp_path: Path, config: FeedbackPriorConfig, provider: FeedbackEvidenceProvider
+) -> dict[str, object]:
+    log = SQLiteEventLog(tmp_path / f"{config.mode}.db")
+    try:
+        builder = _builder(config, provider, event_log=log)
+        pool = _fused_pool()
+        builder._collect_public_pool = (  # type: ignore[method-assign]
+            lambda *_a, **_k: (list(pool), len(pool), ["keyword"], [])
+        )
+        builder.build("q", clearance="public")
+        [event] = log.get_events(event_type=EventType.PUBLIC_PACK_SERVED, limit=5)
+    finally:
+        log.close()
+    return dict(event.payload)
+
+
+class TestPublicServedEvent:
+    def test_off_event_has_no_block(self, tmp_path: Path) -> None:
+        payload = _public_event(tmp_path, OFF, _Fixed(LIFT_S2))
+        assert set(payload) == {"pack_id", "served_item_ids", "count", "key_id"}
+
+    def test_on_event_records_the_reorder(self, tmp_path: Path) -> None:
+        payload = _public_event(tmp_path, ON, _Fixed(LIFT_S2))
+        block = payload["feedback_prior"]
+        assert isinstance(block, dict)
+        assert block["state"] == STATE_APPLIED
+        assert block["promoted_count"] == 1
+        assert payload["served_item_ids"][0] == "s2"  # type: ignore[index]
+
+    @pytest.mark.parametrize(
+        ("provider", "state"),
+        [
+            (_Raises(), STATE_ERROR),
+            (_Fixed({}, state=STATE_TRUNCATED), STATE_TRUNCATED),
+        ],
+    )
+    def test_degraded_states_are_recorded(
+        self, tmp_path: Path, provider: FeedbackEvidenceProvider, state: str
+    ) -> None:
+        payload = _public_event(tmp_path, ON, provider)
+        assert payload["feedback_prior"]["state"] == state  # type: ignore[index]
 
 
 class TestServing:
@@ -264,6 +390,48 @@ class TestServing:
         assert "feedback_prior" not in default
         assert default == payload(OFF, "off")
         # Off never reads evidence.
+        assert provider.calls == 0
+
+    def test_default_build_equals_a_builder_with_no_prior_wired(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Items, order and event payload match a ``PackBuilder`` built
+        without ``feedback_prior_config`` or ``feedback_evidence`` at all."""
+        monkeypatch.delenv(FEEDBACK_PRIOR_MODE_ENV, raising=False)
+
+        def payload(make: Callable[[SQLiteEventLog], PackBuilder], name: str) -> str:
+            log = SQLiteEventLog(tmp_path / f"{name}.db")
+            try:
+                pack = make(log).build("q", clearance="restricted")
+                [event] = log.get_events(limit=5)
+                body = dict(event.payload)
+                for key in ("duration_ms", "pack_id"):
+                    body.pop(key, None)
+                return json.dumps(
+                    {
+                        "payload": body,
+                        "order": [i.item_id for i in pack.items],
+                        "items": [i.model_dump() for i in pack.items],
+                    },
+                    sort_keys=True,
+                    default=str,
+                ).replace(pack.pack_id, "<pack>")
+            finally:
+                log.close()
+
+        def unwired(log: SQLiteEventLog) -> PackBuilder:
+            return PackBuilder(
+                strategies=authority_rank_strategies(),
+                reranker=RRFReranker(),
+                content_floor=ContentFloorConfig(mode="off"),
+                event_log=log,
+            )
+
+        provider = _Fixed(LIFT_S2)
+        bare = payload(unwired, "bare")
+        assert "feedback_prior" not in bare
+        default = payload(lambda log: _builder(None, provider, event_log=log), "dflt")
+        assert default == bare
         assert provider.calls == 0
 
     def test_shadow_changes_no_score_or_order(self, tmp_path: Path) -> None:
@@ -322,7 +490,7 @@ class TestServing:
             *authority_rank_strategies()[0].search.return_value,  # type: ignore[attr-defined]
             *authority_rank_strategies()[1].search.return_value,  # type: ignore[attr-defined]
         ]
-        public = _builder(ON, _Fixed(LIFT_S2))._rerank_and_project_public(
+        public, _block = _builder(ON, _Fixed(LIFT_S2))._rerank_and_project_public(
             "q", list(pool), []
         )
         by_id = {i.item_id: i for i in public}
@@ -448,6 +616,10 @@ class TestReplay:
         assert report.servings == 8
         assert report.servings_with_evidence == 2
         assert report.servings_moved_up == 1
+        # s2 (one helpful grade) is promoted; k1 (one unhelpful grade) is
+        # below the demotion floor, so it is not demoted.
+        assert report.servings_promoted == 1
+        assert report.servings_demoted == 0
         assert report.helpful_gained_body == 1
         assert report.newly_served == 0
         assert report.token_delta == report.tokens_after - report.tokens_before

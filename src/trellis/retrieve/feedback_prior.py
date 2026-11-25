@@ -23,10 +23,13 @@ change reviewed with its replay, the posture
 :mod:`trellis.retrieve.authority_rank` takes.
 
 **Demotion needs evidence of unhelpfulness.** An item with no evidence gets
-exactly ``1.0`` and is returned untouched, and a factor below ``1.0`` is only
-reachable when ``unhelpful > 0`` (the numerator is ``pos - unhelpful``, and
-``pos >= 0``) -- the project rule in :mod:`trellis.classify.demotion_gate`.
-An item whose score is not above ``0`` is never scaled.
+exactly ``1.0`` and is returned untouched. A factor below ``1.0`` additionally
+needs the demotion gate's per-item evidence rule
+(:mod:`trellis.classify.demotion_gate`): ``unhelpful`` at least
+:data:`~trellis.classify.demotion_gate.MIN_UNHELPFUL_CITATIONS` and above
+``pos``. Short of that, a would-be demotion is exactly ``1.0`` and the item
+is returned untouched; one unhelpful grade never demotes. Promotion has no
+such floor. An item whose score is not above ``0`` is never scaled.
 
 **Why after the reranker.** The RRF reranker rebuilds every score from
 within-axis rank, so a multiplier applied at the collect seam is discarded
@@ -64,6 +67,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 
+from trellis.classify.demotion_gate import MIN_UNHELPFUL_CITATIONS
 from trellis.schemas.pack import PackItem
 
 if TYPE_CHECKING:
@@ -187,13 +191,40 @@ class ItemEvidence:
         return not (self.helpful or self.unhelpful or self.fetched)
 
 
+def demotion_allowed(evidence: ItemEvidence, config: FeedbackPriorConfig) -> bool:
+    """The demotion gate's per-item rule: enough unhelpful, and more than ``pos``.
+
+    Mirrors :mod:`trellis.classify.demotion_gate` (its default
+    :data:`~trellis.classify.demotion_gate.MIN_UNHELPFUL_CITATIONS`, not the
+    env-tunable resolve: the prior's weights are code constants).
+    """
+    pos = evidence.helpful + config.fetch_weight * evidence.fetched
+    return evidence.unhelpful >= MIN_UNHELPFUL_CITATIONS and evidence.unhelpful > pos
+
+
 def factor_for(evidence: ItemEvidence | None, config: FeedbackPriorConfig) -> float:
-    """The multiplier for one item; exactly ``1.0`` with no evidence."""
-    if evidence is None or evidence.empty:
+    """The multiplier for one item; exactly ``1.0`` with no evidence.
+
+    Also exactly ``1.0`` when the raw factor is below ``1.0`` but
+    :func:`demotion_allowed` refuses: demotion needs evidence of
+    unhelpfulness that clears the demotion gate's floor.
+    """
+    if evidence is None or evidence.empty or demotion_refused(evidence, config):
         return 1.0
+    return _raw_factor(evidence, config)
+
+
+def _raw_factor(evidence: ItemEvidence, config: FeedbackPriorConfig) -> float:
     pos = evidence.helpful + config.fetch_weight * evidence.fetched
     neg = evidence.unhelpful
     return 1.0 + config.strength * (pos - neg) / (pos + neg + config.k)
+
+
+def demotion_refused(evidence: ItemEvidence, config: FeedbackPriorConfig) -> bool:
+    """The raw factor would demote but :func:`demotion_allowed` refuses."""
+    return _raw_factor(evidence, config) < 1.0 and not demotion_allowed(
+        evidence, config
+    )
 
 
 _HELPFUL, _UNHELPFUL, _FETCHED = "helpful", "unhelpful", "fetched"
@@ -444,6 +475,10 @@ def apply_feedback_prior(
         if evidence is None or evidence.empty or not item.relevance_score > 0:
             out.append(item)
             continue
+        if demotion_refused(evidence, config):
+            # A demotion the floor refused: untouched, not annotated.
+            out.append(item)
+            continue
         factor = factor_for(evidence, config)
         breakdown = dict(item.score_breakdown)
         breakdown[HELPFUL_KEY] = float(evidence.helpful)
@@ -536,6 +571,8 @@ __all__ = [
     "ItemEvidence",
     "apply_feedback_prior",
     "build_ledger",
+    "demotion_allowed",
+    "demotion_refused",
     "factor_for",
     "feedback_prior_step",
     "resolve_feedback_prior_config",

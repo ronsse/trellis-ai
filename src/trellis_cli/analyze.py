@@ -1906,6 +1906,10 @@ def _render_feedback_prior_replay(report: Any) -> None:
         f"servings up/down: {report.servings_moved_up}/{report.servings_moved_down}"
     )
     console.print(
+        f"  servings demoted/promoted: {report.servings_demoted}/"
+        f"{report.servings_promoted}"
+    )
+    console.print(
         f"  helpful body +/-:    {report.helpful_gained_body}/"
         f"{report.helpful_lost_body}   dropped: {report.helpful_dropped}"
     )
