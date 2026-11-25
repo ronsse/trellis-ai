@@ -254,111 +254,101 @@ class TestApply:
         assert out.score_breakdown[FEEDBACK_PRIOR_KEY] < 1.0
         assert out.relevance_score < 1.0
 
+    @pytest.mark.parametrize("config", [ON, SHADOW])
+    def test_a_factor_of_exactly_one_is_untouched(
+        self, config: FeedbackPriorConfig
+    ) -> None:
+        """Balanced evidence (``pos == unhelpful``) gives exactly ``1.0``: the
+        same object, no keys, and not counted in ``adjusted_count``."""
+        even = {"a": ItemEvidence(helpful=1, unhelpful=1, fetched=0)}
+        assert factor_for(even["a"], config) == 1.0
+        items = [_item("a", 1.0)]
+        [out] = apply_feedback_prior(items, config, even)
+        assert out is items[0]
+        assert not EVIDENCE_KEYS & set(out.score_breakdown)
+        _items, block = feedback_prior_step(items, config, _Fixed(even))
+        assert block is not None
+        assert block["adjusted_count"] == 0
+
     def test_public_projection_strips_every_prior_key(self) -> None:
+        """Defence in depth: the public path never runs the prior, but a
+        projected item that somehow carried its keys loses all five."""
         [out] = apply_feedback_prior([_item("s2", 1.0)], ON, LIFT_S2)
         public = project_for_public(out)
         assert not EVIDENCE_KEYS & set(public.score_breakdown)
 
 
-def _fused_pool() -> list[PackItem]:
+def _public_build(
+    tmp_path: Path,
+    config: FeedbackPriorConfig,
+    provider: FeedbackEvidenceProvider,
+    *,
+    sectioned: bool,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    """A public-only build's served items (in order) and its event payload."""
     strategies = authority_rank_strategies()
-    return [
+    pool = [
         *strategies[0].search.return_value,  # type: ignore[attr-defined]
         *strategies[1].search.return_value,  # type: ignore[attr-defined]
     ]
-
-
-def _legacy_projection(item: PackItem) -> dict[str, object]:
-    """``project_for_public`` as it stood before the multiplier-aware cut."""
-    private = {"original_score", "authority_boost"} | EVIDENCE_KEYS
-    return (
-        project_for_public(item)
-        .model_copy(
-            update={
-                "score_breakdown": {
-                    k: v for k, v in item.score_breakdown.items() if k not in private
-                }
-            }
-        )
-        .model_dump(mode="json")
-    )
-
-
-class TestPublicProjection:
-    def test_on_no_public_arithmetic_recovers_the_factor(self) -> None:
-        public = _builder(ON, _Fixed(LIFT_S2))._rerank_and_project_public(
-            "q", _fused_pool(), []
-        )[0]
-        [s2] = [i for i in public if i.item_id == "s2"]
-        factor = 1.3
-        assert not any(k.startswith("rrf_") for k in s2.score_breakdown)
-        values = [s2.relevance_score, *s2.score_breakdown.values()]
-        for a, b in itertools.product(values, values):
-            if b:
-                assert a / b != pytest.approx(factor, rel=1e-6)
-        # An item the prior did not touch keeps its fused breakdown.
-        others = [i for i in public if i.item_id != "s2"]
-        assert others
-        assert all("rrf_total" in i.score_breakdown for i in others)
-
-    def test_shadow_keeps_the_rrf_keys(self) -> None:
-        public = _builder(SHADOW, _Fixed(LIFT_S2))._rerank_and_project_public(
-            "q", _fused_pool(), []
-        )[0]
-        assert all("rrf_total" in i.score_breakdown for i in public)
-
-    def test_off_projection_is_unchanged(self) -> None:
-        reranked = RRFReranker().rerank("q", _fused_pool())
-        assert reranked
-        for item in reranked:
-            assert project_for_public(item).model_dump(
-                mode="json"
-            ) == _legacy_projection(item)
-            assert "rrf_total" in project_for_public(item).score_breakdown
-
-
-def _public_event(
-    tmp_path: Path, config: FeedbackPriorConfig, provider: FeedbackEvidenceProvider
-) -> dict[str, object]:
-    log = SQLiteEventLog(tmp_path / f"{config.mode}.db")
+    log = SQLiteEventLog(tmp_path / f"{config.mode}-{sectioned}.db")
     try:
         builder = _builder(config, provider, event_log=log)
-        pool = _fused_pool()
         builder._collect_public_pool = (  # type: ignore[method-assign]
-            lambda *_a, **_k: (list(pool), len(pool), ["keyword"], [])
+            lambda *_a, **_k: (
+                [i.model_copy() for i in pool],
+                len(pool),
+                ["keyword"],
+                [],
+            )
         )
-        builder.build("q", clearance="public")
+        if sectioned:
+            pack = builder.build_sectioned("q", sections=SECTIONS, clearance="public")
+            items = [i for section in pack.sections for i in section.items]
+        else:
+            items = list(builder.build("q", clearance="public").items)
         [event] = log.get_events(event_type=EventType.PUBLIC_PACK_SERVED, limit=5)
     finally:
         log.close()
-    return dict(event.payload)
+    payload = dict(event.payload)
+    payload.pop("pack_id", None)
+    return [i.model_dump(mode="json") for i in items], payload
 
 
-class TestPublicServedEvent:
-    def test_off_event_has_no_block(self, tmp_path: Path) -> None:
-        payload = _public_event(tmp_path, OFF, _Fixed(LIFT_S2))
-        assert set(payload) == {"pack_id", "served_item_ids", "count", "key_id"}
+class TestPublicOnlyIsNeverAdjusted:
+    """The served order of a public-only pack would disclose how non-public
+    callers graded an item, so the prior does not run on that path at all."""
 
-    def test_on_event_records_the_reorder(self, tmp_path: Path) -> None:
-        payload = _public_event(tmp_path, ON, _Fixed(LIFT_S2))
-        block = payload["feedback_prior"]
-        assert isinstance(block, dict)
-        assert block["state"] == STATE_APPLIED
-        assert block["promoted_count"] == 1
-        assert payload["served_item_ids"][0] == "s2"  # type: ignore[index]
-
-    @pytest.mark.parametrize(
-        ("provider", "state"),
-        [
-            (_Raises(), STATE_ERROR),
-            (_Fixed({}, state=STATE_TRUNCATED), STATE_TRUNCATED),
-        ],
-    )
-    def test_degraded_states_are_recorded(
-        self, tmp_path: Path, provider: FeedbackEvidenceProvider, state: str
+    @pytest.mark.parametrize("sectioned", [False, True])
+    def test_on_with_strong_evidence_equals_off(
+        self, tmp_path: Path, sectioned: bool
     ) -> None:
-        payload = _public_event(tmp_path, ON, provider)
-        assert payload["feedback_prior"]["state"] == state  # type: ignore[index]
+        provider = _Fixed(LIFT_S2)
+        on_items, on_payload = _public_build(
+            tmp_path, ON, provider, sectioned=sectioned
+        )
+        off_items, off_payload = _public_build(
+            tmp_path, OFF, _Fixed(LIFT_S2), sectioned=sectioned
+        )
+        assert on_items
+        # Same items, order, scores and breakdown keys; pack ids differ.
+        for row in (*on_items, *off_items):
+            row.pop("pack_id", None)
+        assert on_items == off_items
+        assert [i["item_id"] for i in on_items] == [i["item_id"] for i in off_items]
+        assert [sorted(i["score_breakdown"]) for i in on_items] == [  # type: ignore[call-overload]
+            sorted(i["score_breakdown"])
+            for i in off_items  # type: ignore[call-overload]
+        ]
+        assert on_payload == off_payload
+        assert set(on_payload) == {"served_item_ids", "count", "key_id"}
+        # The evidence is never read on the public path.
+        assert provider.calls == 0
+
+    def test_a_raising_provider_is_never_called(self, tmp_path: Path) -> None:
+        items, payload = _public_build(tmp_path, ON, _Raises(), sectioned=False)
+        assert items
+        assert "feedback_prior" not in payload
 
 
 class TestServing:
@@ -475,7 +465,7 @@ class TestServing:
         rows = {r["item_id"]: r for r in event.payload["injected_items"]}
         assert rows["s2"]["score_breakdown"]["feedback_prior_helpful"] == 3.0
 
-    def test_sectioned_and_public_paths_are_adjusted(self, tmp_path: Path) -> None:
+    def test_sectioned_path_is_adjusted(self, tmp_path: Path) -> None:
         log = SQLiteEventLog(tmp_path / "e.db")
         try:
             on = _builder(ON, _Fixed(LIFT_S2), event_log=log).build_sectioned(
@@ -486,15 +476,6 @@ class TestServing:
             log.close()
         assert on.sections[0].items[0].item_id == "s2"
         assert event.payload["feedback_prior"]["mode"] == "on"
-        pool = [
-            *authority_rank_strategies()[0].search.return_value,  # type: ignore[attr-defined]
-            *authority_rank_strategies()[1].search.return_value,  # type: ignore[attr-defined]
-        ]
-        public, _block = _builder(ON, _Fixed(LIFT_S2))._rerank_and_project_public(
-            "q", list(pool), []
-        )
-        by_id = {i.item_id: i for i in public}
-        assert by_id["s2"].relevance_score > by_id["s1"].relevance_score
 
     def test_sectioned_off_event_has_no_block(self, tmp_path: Path) -> None:
         log = SQLiteEventLog(tmp_path / "e.db")

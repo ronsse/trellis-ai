@@ -23,19 +23,31 @@ change reviewed with its replay, the posture
 :mod:`trellis.retrieve.authority_rank` takes.
 
 **Demotion needs evidence of unhelpfulness.** An item with no evidence gets
-exactly ``1.0`` and is returned untouched. A factor below ``1.0`` additionally
-needs the demotion gate's per-item evidence rule
-(:mod:`trellis.classify.demotion_gate`): ``unhelpful`` at least
+exactly ``1.0`` and is returned untouched, as is any item whose factor comes
+out exactly ``1.0`` (``pos == unhelpful``): no keys, not counted as adjusted.
+A factor below ``1.0`` additionally needs :func:`demotion_allowed`:
+``unhelpful`` at least
 :data:`~trellis.classify.demotion_gate.MIN_UNHELPFUL_CITATIONS` and above
-``pos``. Short of that, a would-be demotion is exactly ``1.0`` and the item
-is returned untouched; one unhelpful grade never demotes. Promotion has no
-such floor. An item whose score is not above ``0`` is never scaled.
+``pos``. That is stricter than the demotion gate
+(:mod:`trellis.classify.demotion_gate`), not a mirror of it: ``pos`` adds
+weighted fetches to helpful citations, and the floor is the code constant,
+not the gate's env-tunable threshold. Short of it, a would-be demotion is
+exactly ``1.0`` and the item is returned untouched; one unhelpful grade
+never demotes. Promotion has no such floor. An item whose score is not above
+``0`` is never scaled.
 
 **Why after the reranker.** The RRF reranker rebuilds every score from
 within-axis rank, so a multiplier applied at the collect seam is discarded
 by fusion. This runs at the post-rerank seam beside
-:func:`~trellis.retrieve.authority_rank.apply_authority_rank`, on all three
-:class:`~trellis.retrieve.pack_builder.PackBuilder` paths.
+:func:`~trellis.retrieve.authority_rank.apply_authority_rank`, on the flat
+and sectioned :class:`~trellis.retrieve.pack_builder.PackBuilder` paths.
+
+**Never on a public-only pack.** The public-only path does not call this
+step at all: no evidence read, no scaling, no reorder, no keys, and
+``PUBLIC_PACK_SERVED`` carries no ``feedback_prior`` block. The evidence is
+how non-public callers graded and fetched items, and a public-only caller
+must not learn it; hiding the breakdown keys is not enough, since the served
+order alone would disclose it.
 
 **Modes.** ``off`` (default) returns the very list it was given and adds no
 key to any item or event. ``shadow`` records the would-be factor under
@@ -192,11 +204,14 @@ class ItemEvidence:
 
 
 def demotion_allowed(evidence: ItemEvidence, config: FeedbackPriorConfig) -> bool:
-    """The demotion gate's per-item rule: enough unhelpful, and more than ``pos``.
+    """Enough unhelpful citations, and more of them than ``pos``.
 
-    Mirrors :mod:`trellis.classify.demotion_gate` (its default
-    :data:`~trellis.classify.demotion_gate.MIN_UNHELPFUL_CITATIONS`, not the
-    env-tunable resolve: the prior's weights are code constants).
+    Stricter than :mod:`trellis.classify.demotion_gate`, not a mirror of it:
+    ``unhelpful`` is compared against ``pos`` (helpful citations plus
+    ``fetch_weight`` times fetches), so a fetched item resists demotion where
+    the gate would not, and the floor is the code constant
+    :data:`~trellis.classify.demotion_gate.MIN_UNHELPFUL_CITATIONS`, never the
+    gate's env-tunable threshold (the prior's weights are code constants).
     """
     pos = evidence.helpful + config.fetch_weight * evidence.fetched
     return evidence.unhelpful >= MIN_UNHELPFUL_CITATIONS and evidence.unhelpful > pos
@@ -207,7 +222,7 @@ def factor_for(evidence: ItemEvidence | None, config: FeedbackPriorConfig) -> fl
 
     Also exactly ``1.0`` when the raw factor is below ``1.0`` but
     :func:`demotion_allowed` refuses: demotion needs evidence of
-    unhelpfulness that clears the demotion gate's floor.
+    unhelpfulness, by a rule stricter than the demotion gate's.
     """
     if evidence is None or evidence.empty or demotion_refused(evidence, config):
         return 1.0
@@ -465,7 +480,8 @@ def apply_feedback_prior(
     """Scale (``on``) or annotate (``shadow``) items with evidence.
 
     Order is preserved; callers sort afterwards. ``items`` itself when off.
-    Only an item with evidence and a score above ``0`` is copied.
+    Only an item with evidence, a score above ``0`` and a factor other than
+    exactly ``1.0`` is copied; every other item is the same object.
     """
     if config.mode == "off":
         return items
@@ -480,6 +496,10 @@ def apply_feedback_prior(
             out.append(item)
             continue
         factor = factor_for(evidence, config)
+        if factor == 1.0:
+            # Balanced evidence (pos == unhelpful): nothing to apply.
+            out.append(item)
+            continue
         breakdown = dict(item.score_breakdown)
         breakdown[HELPFUL_KEY] = float(evidence.helpful)
         breakdown[UNHELPFUL_KEY] = float(evidence.unhelpful)

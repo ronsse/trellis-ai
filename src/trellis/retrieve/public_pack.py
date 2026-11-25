@@ -26,7 +26,6 @@ from typing import TYPE_CHECKING, Any
 from trellis.retrieve.authority_rank import AUTHORITY_BOOST_KEY
 from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.retrieve.feedback_prior import EVIDENCE_KEYS as FEEDBACK_PRIOR_KEYS
-from trellis.retrieve.feedback_prior import FEEDBACK_PRIOR_KEY
 from trellis.retrieve.parent_verdicts import ParentVerdictCache
 from trellis.retrieve.public_rank import (
     PUBLIC_ROW_CEILING,
@@ -113,14 +112,6 @@ def public_search_page(
 _PRIVATE_BREAKDOWN_KEYS: frozenset[str] = frozenset(
     {"original_score", AUTHORITY_BOOST_KEY} | FEEDBACK_PRIOR_KEYS
 )
-#: Multipliers that scale ``relevance_score`` after fusion. An item carrying
-#: one also loses its ``rrf_*`` keys (see :func:`project_for_public`).
-_SCORE_MULTIPLIER_KEYS: frozenset[str] = frozenset(
-    {AUTHORITY_BOOST_KEY, FEEDBACK_PRIOR_KEY}
-)
-#: Prefix of the RRF reranker's per-strategy and total keys
-#: (:class:`~trellis.retrieve.rerankers.rrf.RRFReranker`).
-_RRF_KEY_PREFIX = "rrf_"
 
 
 def project_for_public(item: PackItem) -> PackItem:
@@ -132,23 +123,16 @@ def project_for_public(item: PackItem) -> PackItem:
     raw strategy score (a keyword score is a function of corpus statistics);
     the fused rank-based score stays. ``score_breakdown["authority_boost"]``
     is dropped too: its value names which authority signal an item carries.
-    So are the feedback-prior keys: they count how other callers graded it.
-
-    Dropping a multiplier's key is not enough on its own, because
-    ``relevance_score`` stays scaled: ``relevance_score / rrf_total`` would
-    be the multiplier, and the per-strategy ``rrf_*`` keys sum to
-    ``rrf_total``. So an item that carries an applied multiplier (an
-    authority boost, or a feedback-prior factor under ``on``; a ``shadow``
-    factor scales nothing) also loses every ``rrf_*`` key. An item with no
-    multiplier keeps them, so with both off the projection is unchanged.
+    The five feedback-prior keys are dropped as defence in depth only: the
+    public-only path never runs the feedback prior (its evidence is how
+    non-public callers graded items, and the served order alone would
+    disclose it), so a projected item should never carry them.
     """
     source = item.strategy_source or (item.metadata or {}).get("source_strategy")
-    scaled = not _SCORE_MULTIPLIER_KEYS.isdisjoint(item.score_breakdown)
     breakdown = {
         k: v
         for k, v in item.score_breakdown.items()
         if k not in _PRIVATE_BREAKDOWN_KEYS
-        and not (scaled and k.startswith(_RRF_KEY_PREFIX))
     }
     return item.model_copy(
         update={

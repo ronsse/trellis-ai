@@ -2307,11 +2307,12 @@ class PackBuilder:
         intent: str,
         pool: list[PackItem],
         strategy_failures: list[StrategyFailure],
-    ) -> tuple[list[PackItem], dict[str, Any] | None]:
+    ) -> list[PackItem]:
         """Rerank, apply the content floor, and cut each item to what is served.
 
-        Returns the projected items and the feedback-prior block (``None``
-        when the prior is off), which ``PUBLIC_PACK_SERVED`` records.
+        The feedback prior is deliberately absent here, in every mode: its
+        evidence is how non-public callers graded items, and the served order
+        alone would disclose it (see :mod:`trellis.retrieve.feedback_prior`).
 
         Projection comes last so the allowlist is applied to the item the
         reranker returned (it adds ``original_score`` to the breakdown), and
@@ -2330,9 +2331,8 @@ class PackBuilder:
                 raise PackAssemblyError(msg, strategy_failures) from exc
         # Off returns ``pool`` itself; see the matching seam in :meth:`build`.
         pool = apply_authority_rank(pool, self._effective_authority_rank_config())
-        pool, feedback_prior_block = self._apply_feedback_prior(pool)
         pool = apply_content_floor(pool, self._content_floor).items
-        return [project_for_public(item) for item in pool], feedback_prior_block
+        return [project_for_public(item) for item in pool]
 
     def _emit_public_served(
         self,
@@ -2341,17 +2341,13 @@ class PackBuilder:
         entity_type: str,
         items: Iterable[PackItem],
         principal_id: str | None,
-        feedback_prior: dict[str, Any] | None = None,
     ) -> None:
         """Record what a public-only pack served, in its own event type.
 
         Not ``PACK_ASSEMBLED``: that event drives the holdout, session dedup,
         attribution and promotion, and an ``external`` key is outside all of
         them. This one answers only "what did that key read": the pack id,
-        the item ids served, their count, and the key's id. When the
-        feedback prior is not off its block rides along under
-        ``feedback_prior`` (absent when off), so a reorder, or a pack served
-        unadjusted because the evidence read failed, is on record.
+        the item ids served, their count, and the key's id.
         """
         if self._event_log is None:
             return
@@ -2366,7 +2362,6 @@ class PackBuilder:
                 "served_item_ids": served,
                 "count": len(served),
                 "key_id": principal_id,
-                **({"feedback_prior": feedback_prior} if feedback_prior else {}),
             },
         )
 
@@ -2423,9 +2418,7 @@ class PackBuilder:
             )
         )
         self._record_embedder_resolve_failure(strategy_failures)
-        pool, feedback_prior_block = self._rerank_and_project_public(
-            intent, pool, strategy_failures
-        )
+        pool = self._rerank_and_project_public(intent, pool, strategy_failures)
         pool.sort(key=lambda x: x.relevance_score, reverse=True)
         selected = pool[: budget.max_items]
         selected, _token_rejected, budget_trace = self._apply_token_budget_tracked(
@@ -2469,7 +2462,6 @@ class PackBuilder:
             entity_type="pack",
             items=pack.items,
             principal_id=principal_id,
-            feedback_prior=feedback_prior_block,
         )
         return pack
 
@@ -2515,9 +2507,7 @@ class PackBuilder:
             )
         )
         self._record_embedder_resolve_failure(strategy_failures)
-        pool, feedback_prior_block = self._rerank_and_project_public(
-            intent, pool, strategy_failures
-        )
+        pool = self._rerank_and_project_public(intent, pool, strategy_failures)
         item_best_section: dict[str, tuple[int, float]] = {}
         raw_sections: dict[int, list[PackItem]] = {}
         for section_idx, section_req in enumerate(sections):
@@ -2588,7 +2578,6 @@ class PackBuilder:
             entity_type="sectioned_pack",
             items=[item for section in pack_sections for item in section.items],
             principal_id=principal_id,
-            feedback_prior=feedback_prior_block,
         )
         return sectioned_pack
 
