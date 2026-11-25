@@ -4925,9 +4925,12 @@ warns and resolves to `off`. With the cutoff in `shadow` or `on`, an item the
 floor fails is kept when the feedback prior's evidence ledger (the same reader
 as `feedback_prior_mode`, whatever that mode is: helpful citations plus
 weighted fetches against unhelpful ones, 90 days, held-out packs dropped)
-holds net positive evidence for it: positive evidence above unhelpful and at
-least one helpful citation or fetch (`evidence_exempts` in
-`trellis.retrieve.relevance_cutoff`). The ledger is read at most once per pack
+holds net positive evidence for it: positive evidence above unhelpful (an
+unhelpful grade counts against it), from at least two distinct packs
+(`MIN_POSITIVE_PACKS`; a pack that graded the item helpful and also fetched it
+counts once), so a single fetch never exempts (`evidence_exempts` in
+`trellis.retrieve.relevance_cutoff`). The evidence is global: it is not tied
+to the intent of the pack being built. The ledger is read at most once per pack
 build, shared with the prior, and only when something failed the floor. The
 order is: the floor picks the failing ids, exempted ids are then kept and count
 toward `min_keep` first, and `min_keep` restores the best of the rest. An
@@ -4944,8 +4947,13 @@ prices it: each pack is judged only on evidence recorded before its own
 assembly, within 90 days and excluding its own grades and fetches, and the
 report adds `exempt_restored_servings` (split helpful / unhelpful / unjudged by
 that pack's own verdict, with tokens) and `exempt_newly_cut_servings` (a
-serving the `min_keep` order now cuts). A truncated evidence read is reported
-in `evidence_state` and leaves those counts at zero.
+serving the `min_keep` order now cuts). Like the live provider, it counts a
+grade or fetch only when that pack's own `PACK_ASSEMBLED` also falls inside
+the 90 days, and it reads the evidence under the live scan limit (20,000
+events). A truncated evidence read is reported in `evidence_state` and leaves
+those counts at zero. The replay cannot price the self-feeding effect: it sees
+only the fetches made while the exemption was off, and an exempted item, once
+served, invites more.
 
 *The nearby section.* `nearby_section` (`TRELLIS_NEARBY_SECTION`, settings key
 `nearby_section`) is `off` (default) or `on`; an unrecognised value warns and
@@ -4960,7 +4968,7 @@ is an id containing a backtick or a non-printable character or longer than 128
 characters; the block counts these per reason in `not_listed`
 (`structural_filter`, `meta_activity_filter`, `session_dedup`,
 `unlistable_id`). The cutoff's own `cut_items` and `rejected_items` are
-unchanged. Labels and titles are put on one line, stripped of backticks and of `* _ [ ] < >`, and cut
+unchanged. Labels and titles are put on one line and stripped of backticks; `\ * [ ] < >` are backslash-escaped, as is `_` where it could open or close emphasis (so `pack_builder.py` keeps its spelling), and the text is cut
 to 60 characters. At most 5 groups and 5 ids per group are listed, and the
 whole section stays within 200 estimated tokens: when the first group alone is
 over, its trailing ids (then its titles) are dropped until it fits, keeping at

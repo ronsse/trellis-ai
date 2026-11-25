@@ -119,21 +119,62 @@ def resolve_nearby_mode(settings: dict[str, Any] | None = None) -> NearbyMode:
     return "off"
 
 
-#: Markdown characters removed from a label or title: a backtick would break
-#: the id spans that follow, ``*`` and ``_`` would open emphasis inside the
-#: bold label, ``[``/``]`` would form a link and ``<``/``>`` an HTML tag or
-#: autolink.
-_MARKDOWN_STRIP = str.maketrans("", "", "`*_[]<>")
+#: Markdown characters backslash-escaped in a label or title: a backslash,
+#: ``*`` (emphasis inside the bold label), ``[``/``]`` (a link) and ``<``/``>``
+#: (an HTML tag or autolink). ``_`` is escaped only where it could open or
+#: close emphasis; a backtick, which would end the id spans that follow, is
+#: removed because a code span ignores backslashes.
+_MARKDOWN_ESCAPE: frozenset[str] = frozenset("\\*[]<>")
+
+
+def _escape_underscore(text: str, index: int) -> bool:
+    """Whether the ``_`` at ``index`` sits at a word boundary.
+
+    CommonMark never lets an intraword ``_`` open or close emphasis, so
+    ``pack_builder.py`` and ``TRELLIS_GRAPH_SEEDING`` pass unchanged.
+    """
+    before = text[index - 1] if index > 0 else ""
+    after = text[index + 1] if index + 1 < len(text) else ""
+    return not (before.isalnum() and after.isalnum())
 
 
 def _clean(text: str) -> str:
-    """``text`` on one line of single spaces, markdown specials removed.
+    """``text`` on one line of single spaces, markdown specials escaped.
 
     A label or title is shown inside markdown next to inline code spans; a
-    newline would start a new block (``## heading``), and the characters in
-    :data:`_MARKDOWN_STRIP` would open emphasis, a link, a tag or end a span.
+    newline would start a new block (``## heading``), so whitespace runs
+    collapse to one space and backticks are removed. The characters in
+    :data:`_MARKDOWN_ESCAPE`, and a word-boundary ``_``, are backslash-escaped
+    rather than deleted, so an identifier keeps its spelling.
     """
-    return " ".join(text.translate(_MARKDOWN_STRIP).split())
+    flat = " ".join(text.replace("`", "").split())
+    out: list[str] = []
+    for index, char in enumerate(flat):
+        if char in _MARKDOWN_ESCAPE or (
+            char == "_" and _escape_underscore(flat, index)
+        ):
+            out.append("\\")
+        out.append(char)
+    return "".join(out)
+
+
+def _truncate_escaped(text: str, limit: int) -> str:
+    """:func:`truncate_excerpt`, never leaving a backslash without its char.
+
+    Every backslash in ``text`` came from :func:`_clean` and escapes the next
+    character, so a kept prefix ending in an odd run of backslashes split an
+    escape; the dangling backslash is dropped (the result only shrinks).
+    """
+    out = truncate_excerpt(text, limit)
+    if out == text:
+        return out
+    kept = 0
+    while kept < len(out) and kept < len(text) and out[kept] == text[kept]:
+        kept += 1
+    run = len(out[:kept]) - len(out[:kept].rstrip("\\"))
+    if run % 2:
+        return out[: kept - 1] + out[kept:]
+    return out
 
 
 def _first_str(value: Any) -> str | None:
@@ -160,7 +201,7 @@ def group_label(row: dict[str, Any]) -> str:
             label = f"source: {source}"
         else:
             label = f"type: {_first_str(row.get('item_type')) or 'item'}"
-    return truncate_excerpt(label, LABEL_MAX_CHARS)
+    return _truncate_escaped(label, LABEL_MAX_CHARS)
 
 
 def listable_id(item_id: Any) -> bool:
@@ -196,7 +237,7 @@ def group_cut_items(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for label, members in ordered:
         titles = [
-            truncate_excerpt(_clean(t), TITLE_MAX_CHARS)
+            _truncate_escaped(_clean(t), TITLE_MAX_CHARS)
             for t in (m.get("title") for m in members)
             if isinstance(t, str) and _clean(t)
         ][:MAX_TITLES_PER_GROUP]

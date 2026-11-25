@@ -851,10 +851,14 @@ _SPECS: tuple[SettingSpec, ...] = (
             "With relevance_cutoff_mode 'on' or 'shadow', keeps an item the "
             "cutoff would withhold when the feedback evidence the feedback "
             "prior reads (90 days of helpful grades and fetches against "
-            "unhelpful grades) is net positive, whatever feedback_prior_mode "
-            "is. 'off' (the default) changes nothing. Not measured yet: "
-            "price it with `trellis analyze replay --relevance-cutoff "
-            "--evidence-exempt` first."
+            "unhelpful grades) is net positive and comes from at least two "
+            "distinct packs, whatever feedback_prior_mode is. An unhelpful "
+            "grade counts against it. The evidence is global across intents, "
+            "not tied to the current query. 'off' (the default) changes "
+            "nothing. Not measured yet: price it with `trellis analyze replay "
+            "--relevance-cutoff --evidence-exempt` first; the replay sees only "
+            "fetches made without the exemption, so it cannot price the "
+            "self-feeding effect."
         ),
         # See trellis.retrieve.relevance_cutoff (evidence_exempts) for the rule.
         surfaces=("mcp", "api", "cli"),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -16,14 +17,18 @@ from tests.unit.retrieve.test_relevance_cutoff import (
 from trellis.retrieve.excerpts import ContentFloorConfig
 from trellis.retrieve.feedback_prior import (
     STATE_APPLIED,
+    EvidenceLedger,
     EvidenceResult,
     FeedbackEvidenceProvider,
     FeedbackPriorConfig,
     ItemEvidence,
+    _Signal,
+    factor_for,
 )
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.relevance_cutoff import (
     MIN_KEEP,
+    MIN_POSITIVE_PACKS,
     RELEVANCE_CUTOFF_EVIDENCE_EXEMPT_ENV,
     RELEVANCE_CUTOFF_REJECTION_REASON,
     RelevanceCutoffConfig,
@@ -52,7 +57,7 @@ EXEMPT_ON = RelevanceCutoffConfig(mode="on", semantic_min=0.5, evidence_exempt="
 #: ``b`` (0.4) and ``c`` (0.35) fail the 0.5 floor; ``b`` has net positive
 #: evidence, ``c`` net negative.
 TABLE = {
-    "b": ItemEvidence(helpful=1, unhelpful=0, fetched=0),
+    "b": ItemEvidence(helpful=2, unhelpful=0, fetched=0),
     "c": ItemEvidence(helpful=1, unhelpful=2, fetched=0),
 }
 
@@ -88,17 +93,74 @@ class TestRule:
         [
             (None, False),
             (ItemEvidence(), False),
-            (ItemEvidence(helpful=1), True),
-            (ItemEvidence(fetched=1), True),
+            (ItemEvidence(helpful=1), False),
+            (ItemEvidence(fetched=1), False),
+            (ItemEvidence(helpful=2), True),
+            (ItemEvidence(fetched=2), True),
+            (ItemEvidence(helpful=1, fetched=1), True),
             (ItemEvidence(helpful=1, unhelpful=1), False),
             (ItemEvidence(helpful=2, unhelpful=1), True),
+            (ItemEvidence(helpful=2, unhelpful=2), False),
             (ItemEvidence(unhelpful=1), False),
         ],
     )
-    def test_net_positive_with_one_positive_event(
+    def test_net_positive_from_two_packs(
         self, evidence: ItemEvidence | None, expected: bool
     ) -> None:
+        assert MIN_POSITIVE_PACKS == 2
         assert evidence_exempts(evidence) is expected
+
+
+_T0 = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def _sig(pack: str, kind: str, minute: int = 0) -> _Signal:
+    return _Signal(_T0 + timedelta(minutes=minute), pack, "x", kind, _T0)
+
+
+def _exempts(*signals: _Signal) -> bool:
+    return evidence_exempts(EvidenceLedger(list(signals)).table().get("x"))
+
+
+class TestRuleFromLedger:
+    """The rule over real ledger counts, so "distinct packs" is the ledger's."""
+
+    def test_one_fetch_does_not_exempt(self) -> None:
+        assert not _exempts(_sig("p1", "fetched"))
+
+    def test_repeated_fetches_in_one_pack_do_not_exempt(self) -> None:
+        assert not _exempts(*(_sig("p1", "fetched", m) for m in range(5)))
+
+    def test_helpful_and_fetch_in_one_pack_does_not_exempt(self) -> None:
+        assert not _exempts(_sig("p1", "helpful"), _sig("p1", "fetched", 1))
+
+    def test_fetches_in_two_packs_exempt(self) -> None:
+        assert _exempts(_sig("p1", "fetched"), _sig("p2", "fetched"))
+
+    def test_two_positives_and_two_unhelpful_do_not_exempt(self) -> None:
+        assert not _exempts(
+            _sig("p1", "helpful"),
+            _sig("p2", "fetched"),
+            _sig("p3", "unhelpful"),
+            _sig("p4", "unhelpful"),
+        )
+
+    def test_pack_time_leaves_the_prior_bit_identical(self) -> None:
+        """``pack_at`` is read only by ``pack_since``; serving's table is unchanged."""
+        kinds = ["helpful", "unhelpful", "fetched", "helpful", "fetched"]
+        with_time = [
+            _Signal(_T0, f"p{i}", f"i{i % 3}", k, _T0 - timedelta(days=200))
+            for i, k in enumerate(kinds)
+        ]
+        without = [
+            _Signal(s.occurred_at, s.pack_id, s.item_id, s.kind) for s in with_time
+        ]
+        a = EvidenceLedger(with_time).table()
+        b = EvidenceLedger(without).table()
+        assert a == b
+        config = FeedbackPriorConfig(mode="on")
+        for item_id in a:
+            assert factor_for(a[item_id], config) == factor_for(b[item_id], config)
 
 
 class TestResolve:
@@ -137,7 +199,7 @@ class TestOn:
             "state": STATE_APPLIED,
             "count": 1,
             "item_ids": ["b"],
-            "evidence": {"b": {"helpful": 1, "unhelpful": 0, "fetched": 0}},
+            "evidence": {"b": {"helpful": 2, "unhelpful": 0, "fetched": 0}},
         }
         assert "b" not in {r["item_id"] for r in payload["rejected_items"]}
         assert provider.calls == 1
@@ -182,6 +244,31 @@ class TestOn:
         assert "b" in {i.item_id for i in pack.items}
         assert provider.calls == 1
 
+    def test_failing_provider_read_once_with_feedback_prior_on(
+        self, tmp_path: Path
+    ) -> None:
+        """A raising provider is memoized too: one read, both blocks ``error``."""
+
+        class _Boom(FeedbackEvidenceProvider):
+            calls = 0
+
+            def evidence(self) -> EvidenceResult:
+                type(self).calls += 1
+                msg = "boom"
+                raise RuntimeError(msg)
+
+        log = SQLiteEventLog(tmp_path / "events.db")
+        pack = _exempt_builder(
+            provider=_Boom(),
+            event_log=log,
+            feedback_prior_config=FeedbackPriorConfig(mode="on"),
+        ).build("q", clearance="restricted")
+        assert _Boom.calls == 1
+        assert _cut_rejected(pack) == {"b", "c"}
+        payload = _pack_assembled(log)
+        assert payload["relevance_cutoff"]["evidence_exempt"]["state"] == "error"
+        assert payload["feedback_prior"]["state"] == "error"
+
     def test_ledger_read_once_with_feedback_prior_on(self) -> None:
         provider = _Provider(TABLE)
         pack = _exempt_builder(
@@ -220,7 +307,7 @@ class TestMinKeepOrder:
             price=lambda _i: 1,
         )
         assert {i.item_id for i in plain.kept} == {"s0", "s1", "s2"}
-        table = {"s3": ItemEvidence(helpful=1)}
+        table = {"s3": ItemEvidence(helpful=2)}
         result = apply_relevance_cutoff(
             pool,
             config=RelevanceCutoffConfig(

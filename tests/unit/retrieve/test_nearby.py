@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 from trellis.core.hashing import estimate_tokens
-from trellis.retrieve.excerpts import ContentFloorConfig
+from trellis.retrieve.excerpts import ContentFloorConfig, truncate_excerpt
 from trellis.retrieve.feedback_prior import ItemEvidence, scan_ledger
 from trellis.retrieve.formatters import (
     format_pack_as_index_markdown,
@@ -18,9 +18,11 @@ from trellis.retrieve.formatters import (
     format_sectioned_pack_as_markdown,
 )
 from trellis.retrieve.nearby import (
+    LABEL_MAX_CHARS,
     MAX_GROUPS,
     MAX_IDS_PER_GROUP,
     MAX_SECTION_TOKENS,
+    _clean,
     build_nearby,
     format_nearby_section,
     group_cut_items,
@@ -425,8 +427,10 @@ class TestEmptyPackIsBlind:
         """Only the nearby block is indistinguishable, not the whole response.
 
         On the real surface a gate-emptied pack still shows its Withheld
-        note, which a held-out pack does not; this checks the nearby part
-        alone: no block, no Nearby text, no listed id.
+        note, which a held-out pack does not. The ``_markdown`` helper passes
+        no withholding note, so the equality below holds for the rendered
+        pack minus that note, and the narrower checks pin the nearby part:
+        no block, no Nearby text, no listed id.
         """
         served, served_payload = self._served_empty(tmp_path, monkeypatch)
         monkeypatch.setattr(
@@ -444,6 +448,11 @@ class TestEmptyPackIsBlind:
             text = _markdown(pack, nearby=pack.metadata.get("nearby"))
             assert "Nearby" not in text
             assert not any(i in text for i in WEAK_IDS)
+        served_text = _markdown(served, nearby=served.metadata.get("nearby"))
+        held_text = _markdown(held, nearby=held.metadata.get("nearby"))
+        assert served_text.replace(served.pack_id, "P") == held_text.replace(
+            held.pack_id, "P"
+        )
 
     def test_sectioned_served_empty_has_no_section(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -561,16 +570,44 @@ class TestLabelsAndCap:
         assert sum(1 for line in lines if line.startswith("- ")) == 1
         assert '"ti tle"' in block["markdown"]
 
-    def test_markdown_specials_are_neutralised(self) -> None:
-        row = _row("a", domain=["**bold** _u_ <b>"], title="see [x](http://e)")
-        assert group_label(row) == "domain: bold u b"
+    def test_markdown_specials_are_escaped(self) -> None:
+        row = _row("a", domain=["**bold** _emph_ <tag>"], title="see [x](http://e)")
+        assert group_label(row) == r"domain: \*\*bold\*\* \_emph\_ \<tag\>"
         block = build_nearby([row], mode="on", pack_id="P")
         assert block is not None
         (line,) = [ln for ln in block["markdown"].splitlines() if ln.startswith("- ")]
-        assert line.startswith("- **domain: bold u b**: 1 item")
-        assert '"see x(http://e)"' in line
-        assert not any(ch in line.replace("**domain", "") for ch in "[]<>_")
-        assert block["groups"][0]["titles"] == ["see x(http://e)"]
+        assert line.startswith(r"- **domain: \*\*bold\*\* \_emph\_ \<tag\>**: 1 item")
+        assert r'"see \[x\](http://e)"' in line
+        assert block["groups"][0]["titles"] == [r"see \[x\](http://e)"]
+
+    def test_identifiers_keep_their_spelling(self) -> None:
+        row = _row("a", domain=["TRELLIS_GRAPH_SEEDING"], title="pack_builder.py")
+        assert group_label(row) == "domain: TRELLIS_GRAPH_SEEDING"
+        block = build_nearby([row], mode="on", pack_id="P")
+        assert block is not None
+        assert block["groups"][0]["titles"] == ["pack_builder.py"]
+        assert '"pack_builder.py"' in block["markdown"]
+
+    def test_backslash_is_escaped_and_backtick_removed(self) -> None:
+        row = _row("a", domain=["a\\b `c`"])
+        assert group_label(row) == "domain: a\\\\b c"
+
+    def test_truncation_never_splits_an_escape(self) -> None:
+        def _odd_tail(text: str) -> bool:
+            body = text.split("…", maxsplit=1)[0]
+            return (len(body) - len(body.rstrip("\\"))) % 2 == 1
+
+        raw_split = 0
+        for n in range(40, 70):
+            domain = "x" * n + "*" * 40
+            label = group_label(_row("a", domain=[domain]))
+            assert not _odd_tail(label), label
+            assert len(label) <= LABEL_MAX_CHARS
+            raw = truncate_excerpt(f"domain: {_clean(domain)}", LABEL_MAX_CHARS)
+            raw_split += _odd_tail(raw)
+        # The plain cut does split an escape somewhere in the sweep, so the
+        # guard above is exercised, not vacuous.
+        assert raw_split > 0
 
     def test_backtick_id_is_left_out(self) -> None:
         block = build_nearby(
