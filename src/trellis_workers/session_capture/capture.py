@@ -209,6 +209,59 @@ def _candidate_metadata(candidate: CandidateMemory) -> dict[str, object]:
     return metadata
 
 
+#: :attr:`GateDecision.gate` values, in the order the gates run.
+GATE_SECRET_SCAN = "secret_scan"  # noqa: S105 - a gate name, not a secret
+GATE_INJECTION = "injection"
+GATE_WORTHINESS = "worthiness"
+#: :attr:`GateDecision.gate` for a candidate every gate let through.
+GATE_ACCEPTED = "accepted"
+
+
+@dataclass(frozen=True)
+class GateDecision:
+    """Which candidate gate stopped a candidate, or that none did.
+
+    ``gate`` is the first gate that rejected it (or :data:`GATE_ACCEPTED`).
+    ``matched_classes`` carries the secret scan's class labels, never content;
+    ``worthiness`` is the worthiness outcome when that gate ran.
+    """
+
+    gate: str
+    rendered: str
+    matched_classes: tuple[str, ...] = ()
+    worthiness: gating.WorthinessOutcome | None = None
+
+    @property
+    def accepted(self) -> bool:
+        """Whether every gate let the candidate through."""
+        return self.gate == GATE_ACCEPTED
+
+
+def gate_candidate(candidate: CandidateMemory) -> GateDecision:
+    """Run the secret-scan, injection and worthiness gates on one candidate.
+
+    Pure: no report, no log, no store. :func:`_gate_candidates` is the sweep's
+    caller and does the counting; the offline judge eval calls this directly
+    so it applies exactly the gates the sweep applies.
+    """
+    rendered = render_memory(candidate)
+    # Class *labels* only — the scan never returns matched content, so
+    # nothing downstream of this call can log or store what it caught.
+    matched_classes = scan_for_leak_classes(rendered)
+    if matched_classes:
+        return GateDecision(
+            gate=GATE_SECRET_SCAN,
+            rendered=rendered,
+            matched_classes=tuple(matched_classes),
+        )
+    if gating.looks_like_injection(candidate):
+        return GateDecision(gate=GATE_INJECTION, rendered=rendered)
+    outcome = gating.assess_worthiness(candidate)
+    if outcome is not gating.WorthinessOutcome.ACCEPT:
+        return GateDecision(gate=GATE_WORTHINESS, rendered=rendered, worthiness=outcome)
+    return GateDecision(gate=GATE_ACCEPTED, rendered=rendered, worthiness=outcome)
+
+
 def _gate_candidates(
     candidates: list[CandidateMemory],
     report: CaptureReport,
@@ -226,11 +279,9 @@ def _gate_candidates(
     survivors: list[CandidateMemory] = []
     for candidate in candidates:
         report.candidates_distilled += 1
-        rendered = render_memory(candidate)
-        # Class *labels* only — the scan never returns matched content, so
-        # nothing downstream of this call can log or store what it caught.
-        matched_classes = scan_for_leak_classes(rendered)
-        if matched_classes:
+        decision = gate_candidate(candidate)
+        if decision.gate == GATE_SECRET_SCAN:
+            matched_classes = list(decision.matched_classes)
             for label in matched_classes:
                 report.scan_hits_by_class[label] = (
                     report.scan_hits_by_class.get(label, 0) + 1
@@ -242,21 +293,20 @@ def _gate_candidates(
                 matched_classes=matched_classes,
             )
             continue
-        if gating.looks_like_injection(candidate):
+        if decision.gate == GATE_INJECTION:
             # Counted, never silent — same pattern as the secret gate.
             report.candidates_rejected_injection += 1
             logger.warning("capture_injection_blocked", session_id=candidate.session_id)
             continue
-        outcome = gating.assess_worthiness(candidate)
-        if outcome is not gating.WorthinessOutcome.ACCEPT:
+        if decision.gate == GATE_WORTHINESS:
             report.candidates_rejected_worthiness += 1
-            if outcome is gating.WorthinessOutcome.JUDGED_UNWORTHY:
+            if decision.worthiness is gating.WorthinessOutcome.JUDGED_UNWORTHY:
                 report.candidates_rejected_judged_unworthy += 1
                 discards.append(candidate)
             else:
                 report.candidates_rejected_floor += 1
             continue
-        candidate.content = rendered
+        candidate.content = decision.rendered
         survivors.append(candidate)
     return survivors
 
