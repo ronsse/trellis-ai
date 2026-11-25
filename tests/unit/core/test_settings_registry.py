@@ -120,6 +120,7 @@ class TestCatalogMembership:
                 "filter_legacy_advisories",
                 "class_prior_mode",
                 "relevance_cutoff_mode",
+                "relevance_cutoff_evidence_exempt",
                 "authority_rank_mode",
                 "feedback_prior_mode",
                 "nearby_section",
@@ -138,8 +139,8 @@ class TestCatalogMembership:
             | _PACK_BUDGET_KNOB_NAMES
         )
 
-    def test_fiftytwo_entries_total(self) -> None:
-        assert len(SETTINGS_REGISTRY) == 52
+    def test_fiftythree_entries_total(self) -> None:
+        assert len(SETTINGS_REGISTRY) == 53
 
     def test_class_prior_mode_enum_has_no_demote_option(self) -> None:
         """A dropped mode must not linger in the registry as an allowed
@@ -432,6 +433,7 @@ class TestRiskTiersMatchThePlanPlusOneDocumentedExtension:
             "capture_strict",
             "class_prior_mode",
             "relevance_cutoff_mode",
+            "relevance_cutoff_evidence_exempt",
             "authority_rank_mode",
             "feedback_prior_mode",
             "get_context_max_tokens",

@@ -251,6 +251,10 @@ class _Signal:
     pack_id: str
     item_id: str
     kind: str
+    #: When the named pack's ``PACK_ASSEMBLED`` was recorded, so a replay can
+    #: bound pack time as the live window does. ``None`` for a hand-built
+    #: signal; only :meth:`EvidenceLedger.table`'s ``pack_since`` reads it.
+    pack_at: datetime | None = None
 
 
 @dataclass
@@ -270,12 +274,24 @@ class EvidenceLedger:
         before: datetime | None = None,
         since: datetime | None = None,
         exclude_pack: str | None = None,
+        pack_since: datetime | None = None,
     ) -> dict[str, ItemEvidence]:
+        """Per-item evidence from the signals inside the bounds.
+
+        ``before`` and ``since`` bound the signal's own time; ``pack_since``
+        also drops a signal whose pack was assembled before it (or whose
+        pack time is unknown), which is what the live window does by reading
+        only ``PACK_ASSEMBLED`` rows inside it. Serving passes none.
+        """
         kinds: dict[tuple[str, str], set[str]] = {}
         for signal in self.signals:
             if before is not None and not signal.occurred_at < before:
                 continue
             if since is not None and signal.occurred_at < since:
+                continue
+            if pack_since is not None and (
+                signal.pack_at is None or signal.pack_at < pack_since
+            ):
                 continue
             if exclude_pack is not None and signal.pack_id == exclude_pack:
                 continue
@@ -326,7 +342,9 @@ def build_ledger(
     # Ids a pack's "nearby" section listed (trellis.retrieve.nearby): a fetch
     # of one joins to the pack as fetch evidence; a verdict does not.
     listed: dict[str, set[str]] = {}
+    assembled: dict[str, datetime] = {}
     for pack_id, event in pack_events.items():
+        assembled[pack_id] = _as_utc(event.occurred_at)
         served[pack_id] = {
             row.item_id
             for row in served_rows_from_payload(
@@ -353,7 +371,10 @@ def build_ledger(
         ):
             for item_id in ids:
                 if item_id in items:
-                    ledger.signals.append(_Signal(at, row.pack_id or "", item_id, kind))
+                    pack_id = row.pack_id or ""
+                    ledger.signals.append(
+                        _Signal(at, pack_id, item_id, kind, assembled.get(pack_id))
+                    )
     for event in fetch_events:
         fetch = fetch_row(event)
         items = served.get(fetch.pack_id or "", set()) | listed.get(
@@ -364,8 +385,9 @@ def build_ledger(
         at = _as_utc(event.occurred_at)
         for item_id in fetch.served_item_ids:
             if item_id in items:
+                pack_id = fetch.pack_id or ""
                 ledger.signals.append(
-                    _Signal(at, fetch.pack_id or "", item_id, _FETCHED)
+                    _Signal(at, pack_id, item_id, _FETCHED, assembled.get(pack_id))
                 )
     return ledger
 
@@ -462,6 +484,44 @@ class EventLogFeedbackEvidence(FeedbackEvidenceProvider):
             logger.warning("feedback_prior_evidence_truncated", limit=self._limit)
             return EvidenceResult(state=STATE_TRUNCATED)
         return EvidenceResult(state=STATE_APPLIED, table=ledger.table())
+
+
+class MemoizedEvidence(FeedbackEvidenceProvider):
+    """``provider``'s :meth:`evidence`, read at most once.
+
+    One per pack build, so the feedback prior and the relevance cutoff's
+    evidence exemption share a single read of the ledger. Never constructed
+    reading anything: the first :meth:`evidence` call does the read, so a
+    build that needs no evidence reads none. A ``None`` provider reports
+    ``evidence_unavailable``.
+    """
+
+    def __init__(self, provider: FeedbackEvidenceProvider | None) -> None:
+        self._provider = provider
+        self._result: EvidenceResult | None = None
+        self.reads = 0
+
+    def evidence(self) -> EvidenceResult:
+        """The one read's result; a raising provider is memoized as ``error``.
+
+        The failure is logged once, here, and both consumers then see the
+        same ``error`` state rather than re-reading a failing provider.
+        """
+        if self._result is None:
+            self.reads += 1
+            self._result = self._read()
+        return self._result
+
+    def _read(self) -> EvidenceResult:
+        if self._provider is None:
+            return EvidenceResult(state=STATE_UNAVAILABLE)
+        try:
+            return self._provider.evidence()
+        except Exception:
+            # GRACEFUL-DEGRADATION: the evidence is advisory to both
+            # consumers; each serves unadjusted and its block says ``error``.
+            logger.exception("feedback_evidence_read_failed")
+            return EvidenceResult(state=STATE_ERROR)
 
 
 _SHARED: dict[int, EventLogFeedbackEvidence] = {}
@@ -598,6 +658,7 @@ __all__ = [
     "FeedbackPriorConfig",
     "FeedbackPriorMode",
     "ItemEvidence",
+    "MemoizedEvidence",
     "apply_feedback_prior",
     "build_ledger",
     "demotion_allowed",

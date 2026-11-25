@@ -39,14 +39,21 @@ listed ids are each length-capped and the first group is trimmed to fit.
 section. A held-out pack's metadata and telemetry are replaced wholesale, so
 it carries neither the section nor any listed id, and a served pack with no
 items drops the block while the holdout is live
-(``PackBuilder._blind_advisories_for_empty_pack``) so it cannot be told apart
-from a held-out one.
+(``PackBuilder._blind_advisories_for_empty_pack``), so its nearby block
+cannot be told apart from a held-out pack's. Only the nearby block: the rest
+of a gate-emptied response can still differ (its Withheld note, for one).
+An item the cutoff kept on feedback evidence
+(``relevance_cutoff_evidence_exempt``) is not cut, so it is never listed.
 
 **Joining a later fetch.** ``listed_item_ids`` names every id the section
 showed. A ``PACK_ITEMS_FETCHED`` naming the pack and one of those ids joins
 to the pack as a nearby fetch: the feedback prior counts it as fetch evidence
 (:func:`trellis.retrieve.feedback_prior.build_ledger`) and ``analyze value``
 reports it apart from served fetches (``fetch_joined_nearby``).
+``PACK_ASSEMBLED.nearby`` lists the ids whenever the block was built, even
+for a pack whose caller's surface does not render the section (the REST pack
+responses carry no ``metadata``), so a joined fetch does not prove the agent
+saw the section.
 """
 
 from __future__ import annotations
@@ -112,14 +119,62 @@ def resolve_nearby_mode(settings: dict[str, Any] | None = None) -> NearbyMode:
     return "off"
 
 
+#: Markdown characters backslash-escaped in a label or title: a backslash,
+#: ``*`` (emphasis inside the bold label), ``[``/``]`` (a link) and ``<``/``>``
+#: (an HTML tag or autolink). ``_`` is escaped only where it could open or
+#: close emphasis; a backtick, which would end the id spans that follow, is
+#: removed because a code span ignores backslashes.
+_MARKDOWN_ESCAPE: frozenset[str] = frozenset("\\*[]<>")
+
+
+def _escape_underscore(text: str, index: int) -> bool:
+    """Whether the ``_`` at ``index`` sits at a word boundary.
+
+    CommonMark never lets an intraword ``_`` open or close emphasis, so
+    ``pack_builder.py`` and ``TRELLIS_GRAPH_SEEDING`` pass unchanged.
+    """
+    before = text[index - 1] if index > 0 else ""
+    after = text[index + 1] if index + 1 < len(text) else ""
+    return not (before.isalnum() and after.isalnum())
+
+
 def _clean(text: str) -> str:
-    """``text`` on one line of single spaces, with every backtick removed.
+    """``text`` on one line of single spaces, markdown specials escaped.
 
     A label or title is shown inside markdown next to inline code spans; a
-    newline would start a new block (``## heading``) and a backtick would
-    break the id spans that follow.
+    newline would start a new block (``## heading``), so whitespace runs
+    collapse to one space and backticks are removed. The characters in
+    :data:`_MARKDOWN_ESCAPE`, and a word-boundary ``_``, are backslash-escaped
+    rather than deleted, so an identifier keeps its spelling.
     """
-    return " ".join(text.replace("`", "").split())
+    flat = " ".join(text.replace("`", "").split())
+    out: list[str] = []
+    for index, char in enumerate(flat):
+        if char in _MARKDOWN_ESCAPE or (
+            char == "_" and _escape_underscore(flat, index)
+        ):
+            out.append("\\")
+        out.append(char)
+    return "".join(out)
+
+
+def _truncate_escaped(text: str, limit: int) -> str:
+    """:func:`truncate_excerpt`, never leaving a backslash without its char.
+
+    Every backslash in ``text`` came from :func:`_clean` and escapes the next
+    character, so a kept prefix ending in an odd run of backslashes split an
+    escape; the dangling backslash is dropped (the result only shrinks).
+    """
+    out = truncate_excerpt(text, limit)
+    if out == text:
+        return out
+    kept = 0
+    while kept < len(out) and kept < len(text) and out[kept] == text[kept]:
+        kept += 1
+    run = len(out[:kept]) - len(out[:kept].rstrip("\\"))
+    if run % 2:
+        return out[: kept - 1] + out[kept:]
+    return out
 
 
 def _first_str(value: Any) -> str | None:
@@ -146,7 +201,7 @@ def group_label(row: dict[str, Any]) -> str:
             label = f"source: {source}"
         else:
             label = f"type: {_first_str(row.get('item_type')) or 'item'}"
-    return truncate_excerpt(label, LABEL_MAX_CHARS)
+    return _truncate_escaped(label, LABEL_MAX_CHARS)
 
 
 def listable_id(item_id: Any) -> bool:
@@ -182,7 +237,7 @@ def group_cut_items(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for label, members in ordered:
         titles = [
-            truncate_excerpt(_clean(t), TITLE_MAX_CHARS)
+            _truncate_escaped(_clean(t), TITLE_MAX_CHARS)
             for t in (m.get("title") for m in members)
             if isinstance(t, str) and _clean(t)
         ][:MAX_TITLES_PER_GROUP]

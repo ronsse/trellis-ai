@@ -1367,6 +1367,16 @@ def replay(  # noqa: PLR0911, PLR0912, PLR0915 - one flag per arm, dispatched he
             "pack's best native semantic score."
         ),
     ),
+    evidence_exempt: bool = typer.Option(
+        False,
+        "--evidence-exempt",
+        help=(
+            "With --relevance-cutoff: also price the evidence exemption "
+            "(relevance_cutoff_evidence_exempt=on): how many cut servings "
+            "net positive feedback evidence, as recorded before each pack, "
+            "would restore."
+        ),
+    ),
     feedback_prior: bool = typer.Option(
         False,
         "--feedback-prior",
@@ -1451,7 +1461,12 @@ def replay(  # noqa: PLR0911, PLR0912, PLR0915 - one flag per arm, dispatched he
         trellis analyze replay --entity-requires-description
         trellis analyze replay --min-distinct-words 5 --class-prior
     """
-    if relevance_cutoff or semantic_min is not None or semantic_ratio is not None:
+    if (
+        relevance_cutoff
+        or semantic_min is not None
+        or semantic_ratio is not None
+        or evidence_exempt
+    ):
         cutoff_conflicts = [
             flag
             for flag, given in (
@@ -1493,7 +1508,10 @@ def replay(  # noqa: PLR0911, PLR0912, PLR0915 - one flag per arm, dispatched he
         )
 
         cutoff_report = replay_relevance_cutoff(
-            get_event_log(), config=cutoff_config, days=days
+            get_event_log(),
+            config=cutoff_config,
+            days=days,
+            evidence_exempt=evidence_exempt,
         )
         if output_format == "json":
             print(json.dumps(cutoff_report.model_dump()))
@@ -2153,7 +2171,10 @@ def _relevance_cutoff_refusal(
 ) -> str | None:
     """Why ``--relevance-cutoff`` cannot run as invoked, or ``None``."""
     if not relevance_cutoff:
-        return "--semantic-min and --semantic-ratio need --relevance-cutoff"
+        return (
+            "--semantic-min, --semantic-ratio and --evidence-exempt need "
+            "--relevance-cutoff"
+        )
     if conflicts:
         return (
             f"--relevance-cutoff cannot be combined with {escape(', '.join(conflicts))}"
@@ -2212,6 +2233,18 @@ def _render_relevance_cutoff_replay(report: Any) -> None:
     )
     console.print(f"  tokens removed:     {report.tokens_removed:,}")
     console.print(f"  kept by min_keep:   {report.kept_by_min_keep}")
+    if report.evidence_exempt:
+        console.print(f"  evidence state:     {escape(report.evidence_state)}")
+        console.print(
+            f"  exempt restored:    {report.exempt_restored_servings} "
+            f"(helpful {report.exempt_restored_helpful}, "
+            f"unhelpful {report.exempt_restored_unhelpful}, "
+            f"unjudged {report.exempt_restored_unjudged}; "
+            f"{report.exempt_restored_tokens:,} tokens)"
+        )
+        console.print(
+            f"  newly cut by min_keep order: {report.exempt_newly_cut_servings}"
+        )
     if report.notes:
         console.print()
         for note in report.notes:

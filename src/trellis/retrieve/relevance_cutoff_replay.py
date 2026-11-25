@@ -27,6 +27,24 @@ What the arm cannot see:
   scores were recorded carries none and cannot join the pool, so
   ``best_semantic`` (and a ratio floor) can be lower than the live gate's,
   and the candidate count (which ``min_keep`` reads) smaller.
+* With ``--evidence-exempt``: each pack's evidence is the feedback prior's
+  ledger (:func:`~trellis.retrieve.feedback_prior.build_ledger`, held-out
+  packs dropped by the same join) cut to what was recorded before that
+  pack's own ``PACK_ASSEMBLED`` and within the prior's window, excluding the
+  pack itself, so a pack's replay never sees its own grades or anything
+  later. As live, a signal counts only when the pack it names was also
+  assembled inside that window. The evidence is a second read, over the
+  replay window plus the prior's window, under the live provider's
+  :data:`~trellis.retrieve.feedback_prior.DEFAULT_SCAN_LIMIT`; the replay's
+  own read (and every number it yields) is the same as without the flag. A
+  truncated evidence read is reported in ``evidence_state`` and the
+  exemption counts are then left at zero. Remaining difference: the live
+  provider caches its table for
+  :data:`~trellis.retrieve.feedback_prior.DEFAULT_TTL_SECONDS`, so live
+  serving can lag the evidence by up to that long; the replay has no lag.
+* The exemption feeds itself (an exempted item is served, so fetched and
+  graded more), and the replay sees only fetches made without it, so it
+  cannot price that effect.
 * No refill is modelled. Like the class-prior arm, this does not re-run the
   token-budget walk, so ``tokens_removed`` is the gross cost of the cut
   servings and the arm cannot say what the freed budget would have admitted.
@@ -45,9 +63,18 @@ from pydantic import Field
 from trellis.core.base import TrellisModel
 from trellis.feedback.attribution import is_sectioned_payload
 from trellis.feedback.pack_rows import has_served_rows, served_rows_from_payload
-from trellis.learning.pack_observations import join_pack_feedback
+from trellis.learning.pack_observations import join_pack_events_with_coverage
 from trellis.retrieve.class_prior import CLASS_PRIOR_REJECTION_REASON
 from trellis.retrieve.excerpts import CONTENT_FLOOR_REJECTION_REASON
+from trellis.retrieve.feedback_prior import (
+    DEFAULT_SCAN_LIMIT,
+    DEFAULT_WINDOW_DAYS,
+    STATE_APPLIED,
+    STATE_TRUNCATED,
+    EvidenceLedger,
+    EvidenceResult,
+    scan_ledger,
+)
 from trellis.retrieve.lifecycle import (
     ARCHIVED_REJECTION_REASON,
     DEMOTED_REJECTION_REASON,
@@ -147,6 +174,21 @@ class RelevanceCutoffReplayReport(TrellisModel):
     #: reason is neither in :data:`POOL_REJECTION_REASONS` nor a known
     #: pre-cutoff reason.
     excluded_unknown_reason: int = 0
+    #: Whether the evidence exemption was priced (``--evidence-exempt``).
+    evidence_exempt: bool = False
+    #: ``applied``, ``evidence_truncated`` or ``not_requested``.
+    evidence_state: str = "not_requested"
+    #: Look-back of each pack's evidence, ending at that pack's assembly.
+    evidence_window_days: int = 0
+    #: Cut servings (above) the exemption keeps, by the pack's own verdict.
+    exempt_restored_servings: int = 0
+    exempt_restored_helpful: int = 0
+    exempt_restored_unhelpful: int = 0
+    exempt_restored_unjudged: int = 0
+    exempt_restored_tokens: int = 0
+    #: Servings kept without the exemption but cut with it: an exempted id
+    #: counts toward ``min_keep`` first, so it can displace a restored one.
+    exempt_newly_cut_servings: int = 0
     notes: list[str] = Field(default_factory=list)
 
 
@@ -232,6 +274,20 @@ def _notes(report: RelevanceCutoffReplayReport) -> list[str]:
             f"{report.excluded_unknown_reason} rejected row(s) carried a reason "
             "this arm does not know the stage of and were left out of the pool."
         )
+    if report.evidence_exempt:
+        if report.evidence_state == STATE_APPLIED:
+            notes.append(
+                "Evidence exemption priced with each pack's evidence as of its "
+                f"own assembly ({report.evidence_window_days}-day look-back, "
+                "the pack's own grades and fetches excluded). cut_servings and "
+                "the removed counts are WITHOUT the exemption; "
+                "exempt_restored_* is what it would keep of those."
+            )
+        else:
+            notes.append(
+                f"Evidence read was {report.evidence_state}: the exemption is "
+                "not priced and its counts are zero."
+            )
     if report.unpriced_servings:
         notes.append(
             f"{report.unpriced_servings} serving(s) come from packs with no "
@@ -241,31 +297,139 @@ def _notes(report: RelevanceCutoffReplayReport) -> list[str]:
     return notes
 
 
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+
+
+def _price_exemption(
+    report: RelevanceCutoffReplayReport,
+    *,
+    pool: list[PackItem],
+    served: list[PackItem],
+    cut_ids: set[str],
+    gate: RelevanceCutoffConfig,
+    ledger: EvidenceLedger,
+    assembled: datetime,
+    pack_id: str,
+    helpful: set[str],
+    unhelpful: set[str],
+) -> None:
+    """Re-run the gate with the exemption on, evidence as of ``assembled``."""
+    window_start = assembled - timedelta(days=DEFAULT_WINDOW_DAYS)
+    table = ledger.table(
+        before=assembled,
+        since=window_start,
+        pack_since=window_start,
+        exclude_pack=pack_id,
+    )
+    exempt_gate = RelevanceCutoffConfig(
+        mode="on",
+        semantic_min=gate.semantic_min,
+        semantic_ratio=gate.semantic_ratio,
+        evidence_exempt="on",
+    )
+    result = apply_relevance_cutoff(
+        pool,
+        config=exempt_gate,
+        price=lambda item: item.estimated_tokens or 0,
+        evidence=lambda: EvidenceResult(state=STATE_APPLIED, table=table),
+    )
+    served_ids = {item.item_id for item in served}
+    cut_with = {r.item_id for r in result.rejected} & served_ids
+    report.exempt_newly_cut_servings += len(cut_with - cut_ids)
+    for item in served:
+        if item.item_id not in cut_ids or item.item_id in cut_with:
+            continue
+        report.exempt_restored_servings += 1
+        report.exempt_restored_tokens += item.estimated_tokens or 0
+        if item.item_id in helpful:
+            report.exempt_restored_helpful += 1
+        elif item.item_id in unhelpful:
+            report.exempt_restored_unhelpful += 1
+        else:
+            report.exempt_restored_unjudged += 1
+
+
+def _read_evidence(
+    report: RelevanceCutoffReplayReport, event_log: EventLog, since: datetime
+) -> EvidenceLedger | None:
+    """The exemption's ledger, read as the live provider reads it.
+
+    It reaches back one prior window before the first replayed pack, under
+    the live :data:`DEFAULT_SCAN_LIMIT`. ``None`` when the read truncated.
+    """
+    report.evidence_exempt = True
+    report.evidence_window_days = DEFAULT_WINDOW_DAYS
+    ledger, truncated = scan_ledger(
+        event_log,
+        since=since - timedelta(days=DEFAULT_WINDOW_DAYS),
+        limit=DEFAULT_SCAN_LIMIT,
+    )
+    if truncated:
+        report.evidence_state = STATE_TRUNCATED
+        return None
+    report.evidence_state = STATE_APPLIED
+    return ledger
+
+
+def _count_cut(
+    report: RelevanceCutoffReplayReport,
+    served_pool: list[PackItem],
+    cut_ids: set[str],
+    helpful: set[str],
+    unhelpful: set[str],
+) -> None:
+    for item in served_pool:
+        if item.item_id not in cut_ids:
+            continue
+        tokens = item.estimated_tokens or 0
+        report.cut_servings += 1
+        report.tokens_removed += tokens
+        if item.item_id in helpful:
+            report.helpful_removed += 1
+            report.helpful_tokens_removed += tokens
+        elif item.item_id in unhelpful:
+            report.unhelpful_removed += 1
+            report.unhelpful_tokens_removed += tokens
+        else:
+            report.unjudged_removed += 1
+            report.unjudged_tokens_removed += tokens
+
+
 def replay_relevance_cutoff(
     event_log: EventLog,
     *,
     config: RelevanceCutoffConfig,
     days: int = 30,
     limit: int = _DEFAULT_EVENT_LIMIT,
+    evidence_exempt: bool = False,
 ) -> RelevanceCutoffReplayReport:
     """Price ``config``'s cut over the attributed flat packs in the window.
 
     The mode in ``config`` is ignored beyond the label: the arm prices the
-    cut ``on`` would make, which is also what ``shadow`` records.
+    cut ``on`` would make, which is also what ``shadow`` records. With
+    ``evidence_exempt`` the arm also reports how many cut servings the
+    evidence exemption would restore, each pack judged on the evidence
+    recorded before it.
     """
     applied = (
         f"mode={config.mode} semantic_min={config.semantic_min} "
         f"semantic_ratio={config.semantic_ratio}"
     )
+    if evidence_exempt:
+        applied += " evidence_exempt=on"
     report = RelevanceCutoffReplayReport(window_days=days, applied_config=applied)
     since = datetime.now(tz=UTC) - timedelta(days=days)
-    feedback_events, pack_payloads, _ = join_pack_feedback(
+    feedback_events, pack_events, _, _coverage = join_pack_events_with_coverage(
         event_log, since=since, limit=limit
     )
+    ledger = _read_evidence(report, event_log, since) if evidence_exempt else None
     flat_packs = {
-        pack_id: payload
-        for pack_id, payload in pack_payloads.items()
-        if has_served_rows(payload) and not is_sectioned_payload(payload)
+        pack_id: event.payload or {}
+        for pack_id, event in pack_events.items()
+        if _as_utc(event.occurred_at) >= since
+        and has_served_rows(event.payload or {})
+        and not is_sectioned_payload(event.payload or {})
     }
     verdicts = collect_pack_verdicts(feedback_events, flat_packs)
     helpful_by_pack = verdicts["helpful"]
@@ -283,16 +447,14 @@ def replay_relevance_cutoff(
     )
     for pack_id in attributed:
         payload = flat_packs[pack_id]
-        served = [
-            s.row
+        served_pool = [
+            _pool_item(
+                s.row["item_id"], _native(s.row.get("score_breakdown")), _tokens(s.row)
+            )
             for s in served_rows_from_payload(
                 pack_id, payload, include_sectioned=False, include_holdout=True
             )
             if s.item_id is not None
-        ]
-        served_pool = [
-            _pool_item(r["item_id"], _native(r.get("score_breakdown")), _tokens(r))
-            for r in served
         ]
         rejected_pool, unknown = _rejected_pool(payload.get("rejected_items"))
         report.excluded_unknown_reason += unknown
@@ -311,21 +473,20 @@ def replay_relevance_cutoff(
         cut_ids = {r.item_id for r in result.rejected} & served_ids
         helpful = helpful_by_pack.get(pack_id, set())
         unhelpful = unhelpful_by_pack.get(pack_id, set())
-        for item in served_pool:
-            if item.item_id not in cut_ids:
-                continue
-            tokens = item.estimated_tokens or 0
-            report.cut_servings += 1
-            report.tokens_removed += tokens
-            if item.item_id in helpful:
-                report.helpful_removed += 1
-                report.helpful_tokens_removed += tokens
-            elif item.item_id in unhelpful:
-                report.unhelpful_removed += 1
-                report.unhelpful_tokens_removed += tokens
-            else:
-                report.unjudged_removed += 1
-                report.unjudged_tokens_removed += tokens
+        if ledger is not None:
+            _price_exemption(
+                report,
+                pool=served_pool + rejected_pool,
+                served=served_pool,
+                cut_ids=cut_ids,
+                gate=gate,
+                ledger=ledger,
+                assembled=_as_utc(pack_events[pack_id].occurred_at),
+                pack_id=pack_id,
+                helpful=helpful,
+                unhelpful=unhelpful,
+            )
+        _count_cut(report, served_pool, cut_ids, helpful, unhelpful)
     report.notes = _notes(report)
     logger.debug(
         "pack_value_relevance_cutoff_replayed",

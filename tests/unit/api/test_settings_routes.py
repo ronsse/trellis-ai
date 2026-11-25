@@ -403,6 +403,28 @@ class TestListSettings:
         assert row["effective_value"] == "off"
         assert row["parse_error"] == "stored value is not one of the allowed options"
 
+    def test_relevance_cutoff_evidence_exempt_effective_value(
+        self,
+        client: TestClient,
+        registry: StoreRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Default ``off``; a stored ``on`` shows ``on``; the env wins."""
+        name = "relevance_cutoff_evidence_exempt"
+        monkeypatch.delenv("TRELLIS_RELEVANCE_CUTOFF_EVIDENCE_EXEMPT", raising=False)
+        row = _entry(client.get("/api/v1/settings").json(), name)
+        assert row["effective_value"] == "off"
+
+        settings_path = resolve_settings_path(registry.stores_dir)
+        assert settings_path is not None
+        SettingsStore(settings_path).set(name, "on")
+        row = _entry(client.get("/api/v1/settings").json(), name)
+        assert row["effective_value"] == "on"
+
+        monkeypatch.setenv("TRELLIS_RELEVANCE_CUTOFF_EVIDENCE_EXEMPT", "off")
+        row = _entry(client.get("/api/v1/settings").json(), name)
+        assert row["effective_value"] == "off"
+
     def test_pack_provenance_line_effective_value_follows_the_store(
         self,
         client: TestClient,

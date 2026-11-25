@@ -205,6 +205,7 @@ def build_pack_builder(
     settings = load_settings_values(registry.stores_dir)
     excerpt_max_chars = resolve_excerpt_max_chars(settings)
     feedback_prior_config = resolve_feedback_prior_config(settings=settings)
+    relevance_cutoff_config = resolve_relevance_cutoff_config(settings=settings)
     strategies_result = build_strategies(
         registry,
         parameter_registry=param_registry,
@@ -257,17 +258,22 @@ def build_pack_builder(
         authority_rank_config=resolve_authority_rank_config(settings=settings),
         # Default-off collect-seam relevance cutoff (see
         # trellis.retrieve.relevance_cutoff), resolved once with settings.
-        relevance_cutoff_config=resolve_relevance_cutoff_config(settings=settings),
+        relevance_cutoff_config=relevance_cutoff_config,
         # Default-off "nearby" section over the cutoff's cut items (see
         # trellis.retrieve.nearby); renders only when the cutoff is on too.
         nearby_mode=resolve_nearby_mode(settings=settings),
         # Default-off feedback prior (trellis.retrieve.feedback_prior), same
         # resolution; its EventLog-backed evidence provider is built only
-        # when the mode is not off, so an off build reads nothing.
+        # when the prior is not off or the cutoff's evidence exemption is
+        # on (they share one read per build), so an off build reads nothing.
         feedback_prior_config=feedback_prior_config,
         feedback_evidence=(
             shared_evidence_provider(registry.operational.event_log)
             if feedback_prior_config.mode != "off"
+            or (
+                relevance_cutoff_config.mode != "off"
+                and relevance_cutoff_config.evidence_exempt == "on"
+            )
             else None
         ),
         # Lets the collect seam resolve a chunk's parent so an

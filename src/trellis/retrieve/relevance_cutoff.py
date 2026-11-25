@@ -96,6 +96,33 @@ The cut items are kept for the "nearby" section: ``on`` mode leaves
 ``Pack.metadata["relevance_cutoff"]["cut_items"]`` (id, title, tokens, native
 semantic score, item type, domain, source system) on the pack it serves,
 which :mod:`trellis.retrieve.nearby` renders when its own flag is on.
+
+**Evidence exemption (default off).** The cutoff runs before ranking and the
+feedback prior (:mod:`trellis.retrieve.feedback_prior`) adjusts rank after
+it, so without this an item agents fetched or graded helpful is cut every
+time and the evidence can never bring it back.
+``relevance_cutoff_evidence_exempt`` (``TRELLIS_RELEVANCE_CUTOFF_EVIDENCE_EXEMPT``
+> settings > ``off``) set to ``on``, with the cutoff ``on`` or ``shadow``,
+keeps an item the floor failed when :func:`evidence_exempts` holds for its
+row (net positive, from at least :data:`MIN_POSITIVE_PACKS` distinct packs;
+global across intents) in the feedback prior's own ledger (the same table,
+the same held-out exclusion, read whatever ``TRELLIS_FEEDBACK_PRIOR_MODE``
+is). The ledger is
+read only when some item failed the floor. Order, stated because it matters:
+
+1. the floor picks the failing ids;
+2. failing ids with positive evidence are exempted and count as kept;
+3. :data:`MIN_KEEP` then restores the best-scoring of the *remaining*
+   failing ids until enough survive, exempted ids included in the count.
+
+An exempted id is not in ``cut_items``, not rejected, and so never listed by
+the nearby section. The block gains ``evidence_exempt`` (``state``,
+``count``, ``item_ids`` and per-id ``evidence`` counts); under ``shadow``
+it is what ``on`` would have exempted, and ``cut_items`` is what ``on``
+would then have cut. An unreadable or truncated ledger exempts nothing and
+says so in ``state``. A held-out pack's row keeps :func:`holdout_telemetry`'s
+shape, configuration only, gaining ``evidence_exempt_mode`` when the flag is
+on. The public-only path never runs the cutoff, so never the exemption.
 """
 
 from __future__ import annotations
@@ -108,6 +135,13 @@ from typing import Any, Literal
 
 import structlog
 
+from trellis.retrieve.feedback_prior import (
+    DEFAULT_FETCH_WEIGHT,
+    STATE_APPLIED,
+    STATE_ERROR,
+    EvidenceResult,
+    ItemEvidence,
+)
 from trellis.schemas.pack import NATIVE_SCORE_KEY_PREFIX, PackItem, RejectedItem
 
 logger = structlog.get_logger(__name__)
@@ -122,11 +156,22 @@ RELEVANCE_CUTOFF_MODE_ENV = "TRELLIS_RELEVANCE_CUTOFF_MODE"
 RELEVANCE_CUTOFF_SEMANTIC_MIN_ENV = "TRELLIS_RELEVANCE_CUTOFF_SEMANTIC_MIN"
 RELEVANCE_CUTOFF_SEMANTIC_RATIO_ENV = "TRELLIS_RELEVANCE_CUTOFF_SEMANTIC_RATIO"
 RELEVANCE_CUTOFF_MODE_SETTING = "relevance_cutoff_mode"
+RELEVANCE_CUTOFF_EVIDENCE_EXEMPT_ENV = "TRELLIS_RELEVANCE_CUTOFF_EVIDENCE_EXEMPT"
+RELEVANCE_CUTOFF_EVIDENCE_EXEMPT_SETTING = "relevance_cutoff_evidence_exempt"
+
+#: Fewest distinct packs with positive evidence (a helpful grade or a fetch)
+#: an exemption needs. Two, so one ``get_items`` call cannot pin an item: the
+#: ledger is global across intents and a served item invites more fetches.
+#: A pack that both graded the item helpful and fetched it counts once.
+MIN_POSITIVE_PACKS = 2
+
+EvidenceExemptMode = Literal["off", "on"]
 
 #: Never cut below this many distinct surviving candidates.
 MIN_KEEP = 3
 
 _VALID_MODES: frozenset[str] = frozenset({"off", "shadow", "on"})
+_VALID_EXEMPT_MODES: frozenset[str] = frozenset({"off", "on"})
 
 
 def native_score_key(strategy_name: str) -> str:
@@ -201,10 +246,18 @@ class RelevanceCutoffConfig:
     mode: RelevanceCutoffMode = "off"
     semantic_min: float | None = None
     semantic_ratio: float | None = None
+    #: Keep a failing item the feedback ledger holds positive evidence for.
+    evidence_exempt: EvidenceExemptMode = "off"
 
     def __post_init__(self) -> None:
         if self.mode not in _VALID_MODES:
             msg = f"mode must be one of {sorted(_VALID_MODES)}; got {self.mode!r}"
+            raise ValueError(msg)
+        if self.evidence_exempt not in _VALID_EXEMPT_MODES:
+            msg = (
+                f"evidence_exempt must be one of {sorted(_VALID_EXEMPT_MODES)}; "
+                f"got {self.evidence_exempt!r}"
+            )
             raise ValueError(msg)
         for name in ("semantic_min", "semantic_ratio"):
             value = getattr(self, name)
@@ -247,6 +300,55 @@ def _resolve_mode(settings: dict[str, Any] | None) -> RelevanceCutoffMode:
     return "off"
 
 
+def resolve_evidence_exempt(settings: dict[str, Any] | None) -> EvidenceExemptMode:
+    """Env > settings > ``off``; an unrecognised value degrades to ``off``."""
+    raw = os.environ.get(RELEVANCE_CUTOFF_EVIDENCE_EXEMPT_ENV, "").strip().lower()
+    if raw:
+        if raw in _VALID_EXEMPT_MODES:
+            return raw  # type: ignore[return-value]
+        logger.warning(
+            "relevance_cutoff_evidence_exempt_env_unrecognised",
+            var=RELEVANCE_CUTOFF_EVIDENCE_EXEMPT_ENV,
+            effective="off",
+        )
+        return "off"
+    stored = (settings or {}).get(RELEVANCE_CUTOFF_EVIDENCE_EXEMPT_SETTING)
+    value = stored.strip().lower() if isinstance(stored, str) else ""
+    if value in _VALID_EXEMPT_MODES:
+        return value  # type: ignore[return-value]
+    if value:
+        logger.warning(
+            "relevance_cutoff_evidence_exempt_settings_unrecognised",
+            setting=RELEVANCE_CUTOFF_EVIDENCE_EXEMPT_SETTING,
+        )
+    return "off"
+
+
+def evidence_exempts(evidence: ItemEvidence | None) -> bool:
+    """Whether ``evidence`` exempts an item from the cutoff.
+
+    Two conditions, both required:
+
+    * net positive: helpful grades plus fetches weighted as the feedback
+      prior weighs them
+      (:data:`~trellis.retrieve.feedback_prior.DEFAULT_FETCH_WEIGHT`) exceed
+      unhelpful grades, so an unhelpful grading counts against it;
+    * at least :data:`MIN_POSITIVE_PACKS` distinct packs carried positive
+      evidence. :class:`~trellis.retrieve.feedback_prior.ItemEvidence`
+      counts per pack with helpful winning over unhelpful winning over
+      fetched, so ``helpful + fetched`` is that pack count: a pack that
+      graded the item helpful and fetched it is one pack.
+
+    The evidence is global, not tied to the intent of the pack being built.
+    No evidence never exempts.
+    """
+    if evidence is None:
+        return False
+    positive_packs = evidence.helpful + evidence.fetched
+    pos = evidence.helpful + DEFAULT_FETCH_WEIGHT * evidence.fetched
+    return positive_packs >= MIN_POSITIVE_PACKS and pos > evidence.unhelpful
+
+
 def _resolve_float(
     var: str, *, low: float | None = None, high: float | None = None
 ) -> float | None:
@@ -271,7 +373,9 @@ def _resolve_float(
 def resolve_relevance_cutoff_config(
     settings: dict[str, Any] | None = None,
 ) -> RelevanceCutoffConfig:
-    """Resolve env > settings > default for ``mode``; thresholds are env-only.
+    """Resolve env > settings > default for ``mode`` and ``evidence_exempt``.
+
+    Thresholds are env-only.
 
     An unrecognised mode degrades to ``off`` and an unparseable or
     out-of-range threshold to unset, each with a warning naming the variable.
@@ -282,6 +386,7 @@ def resolve_relevance_cutoff_config(
         semantic_ratio=_resolve_float(
             RELEVANCE_CUTOFF_SEMANTIC_RATIO_ENV, low=0.0, high=1.0
         ),
+        evidence_exempt=resolve_evidence_exempt(settings),
     )
 
 
@@ -294,7 +399,8 @@ class RelevanceCutoffResult:
     only); ``cut`` is one item per cut id, served (shadow) or not (on);
     ``telemetry`` is the ``PACK_ASSEMBLED.relevance_cutoff`` block, ``None``
     when off; ``restored`` is the ids the floor failed that ``min_keep``
-    kept.
+    kept; ``exempted`` is the ids the floor failed that feedback evidence
+    kept (would have kept, under ``shadow``).
     """
 
     kept: list[PackItem]
@@ -302,6 +408,7 @@ class RelevanceCutoffResult:
     cut: list[PackItem] = field(default_factory=list)
     telemetry: dict[str, Any] | None = None
     restored: list[str] = field(default_factory=list)
+    exempted: list[str] = field(default_factory=list)
 
 
 def _floor(
@@ -334,7 +441,10 @@ def holdout_telemetry(block: dict[str, Any] | None) -> dict[str, Any] | None:
     """
     if block is None:
         return None
-    return {k: block[k] for k in ("mode", "semantic_min", "semantic_ratio")}
+    out = {k: block[k] for k in ("mode", "semantic_min", "semantic_ratio")}
+    if "evidence_exempt_mode" in block:
+        out["evidence_exempt_mode"] = block["evidence_exempt_mode"]
+    return out
 
 
 def cut_item_row(
@@ -403,17 +513,101 @@ def _returned_by(
     return natives, axes, order
 
 
+def _read_evidence(
+    evidence: Callable[[], EvidenceResult] | None,
+) -> EvidenceResult:
+    """Call ``evidence`` once; never raises."""
+    if evidence is None:
+        return EvidenceResult(state="evidence_unavailable")
+    try:
+        return evidence()
+    except Exception:
+        # GRACEFUL-DEGRADATION: the exemption is advisory; nothing is
+        # exempted and the block's state says so.
+        logger.exception("relevance_cutoff_evidence_read_failed")
+        return EvidenceResult(state=STATE_ERROR)
+
+
+def _exempt(
+    failing: list[str], evidence: Callable[[], EvidenceResult] | None
+) -> tuple[list[str], dict[str, Any]]:
+    """The failing ids evidence exempts, and the ``evidence_exempt`` block."""
+    result = _read_evidence(evidence)
+    exempted: list[str] = []
+    counts: dict[str, dict[str, int]] = {}
+    if result.state == STATE_APPLIED:
+        for item_id in failing:
+            row = result.table.get(item_id)
+            if row is not None and evidence_exempts(row):
+                exempted.append(item_id)
+                counts[item_id] = {
+                    "helpful": row.helpful,
+                    "unhelpful": row.unhelpful,
+                    "fetched": row.fetched,
+                }
+    return exempted, {
+        "state": result.state,
+        "count": len(exempted),
+        "item_ids": list(exempted),
+        "evidence": counts,
+    }
+
+
+def _failing_ids(
+    order: list[str],
+    natives: dict[str, dict[str, float]],
+    axes: dict[str, set[str]],
+    threshold: float | None,
+) -> list[str]:
+    """The ids the floor fails, in pool order."""
+    if threshold is None:
+        return []
+    sem_key = native_score_key(SEMANTIC_AXIS)
+    failing: list[str] = []
+    for item_id in order:
+        keys = natives[item_id]
+        # Cut only when the semantic axis alone returned it: any other
+        # axis has no floor, so an item it also returned is kept.
+        if (
+            sem_key in keys
+            and axes[item_id] == {SEMANTIC_AXIS}
+            and keys[sem_key] < threshold
+        ):
+            failing.append(item_id)
+    return failing
+
+
+def _exempt_step(
+    failing: list[str], evidence: Callable[[], EvidenceResult] | None
+) -> tuple[list[str], list[str], dict[str, Any]]:
+    """``(still failing, exempted, evidence_exempt block)``; reads only if needed."""
+    if not failing:
+        return (
+            [],
+            [],
+            {"state": "nothing_failed", "count": 0, "item_ids": [], "evidence": {}},
+        )
+    exempted, block = _exempt(failing, evidence)
+    exempted_set = set(exempted)
+    return [i for i in failing if i not in exempted_set], exempted, block
+
+
 def apply_relevance_cutoff(  # noqa: PLR0912
     items: list[PackItem],
     *,
     config: RelevanceCutoffConfig,
     price: Callable[[PackItem], int],
     title_of: Callable[[PackItem], str | None] = _default_title,
+    evidence: Callable[[], EvidenceResult] | None = None,
 ) -> RelevanceCutoffResult:
     """Apply ``config`` to the merged pool ``items`` (one copy per strategy).
 
     Off returns ``items`` itself and no telemetry. ``items`` is never
     mutated. ``price`` gives an item's token estimate for the record.
+    ``evidence`` supplies the feedback ledger's table; it is called at most
+    once, and only when ``config.evidence_exempt`` is on and some item
+    failed the floor. Exempted ids count toward :data:`MIN_KEEP` before
+    ``min_keep`` restores any cut id (see the module docstring).
     """
     if config.mode == "off":
         return RelevanceCutoffResult(kept=items)
@@ -424,6 +618,9 @@ def apply_relevance_cutoff(  # noqa: PLR0912
         "semantic_min": config.semantic_min,
         "semantic_ratio": config.semantic_ratio,
     }
+    exempt_on = config.evidence_exempt == "on"
+    if exempt_on:
+        block["evidence_exempt_mode"] = "on"
     if not config.configured:
         block["status"] = "unconfigured"
         return RelevanceCutoffResult(kept=items, telemetry=block)
@@ -436,18 +633,14 @@ def apply_relevance_cutoff(  # noqa: PLR0912
     best = max(sem_scores) if sem_scores else None
     threshold, ratio_skipped = _floor(config, best)
 
-    failing: list[str] = []
-    if threshold is not None:
-        for item_id in order:
-            keys = natives[item_id]
-            # Cut only when the semantic axis alone returned it: any other
-            # axis has no floor, so an item it also returned is kept.
-            if (
-                sem_key in keys
-                and axes[item_id] == {SEMANTIC_AXIS}
-                and keys[sem_key] < threshold
-            ):
-                failing.append(item_id)
+    failing = _failing_ids(order, natives, axes, threshold)
+
+    # Evidence exemption first: an exempted id counts as a survivor before
+    # min_keep restores anything.
+    exempted: list[str] = []
+    exempt_block: dict[str, Any] | None = None
+    if exempt_on:
+        failing, exempted, exempt_block = _exempt_step(failing, evidence)
 
     # min_keep: restore the best-scoring cut ids until MIN_KEEP survive.
     survivors = len(order) - len(failing)
@@ -480,9 +673,11 @@ def apply_relevance_cutoff(  # noqa: PLR0912
             "cut_items": [cut_item_row(it, tokens[it.item_id], title_of) for it in cut],
         }
     )
+    if exempt_block is not None:
+        block["evidence_exempt"] = exempt_block
     if config.mode == "shadow" or not cut_ids:
         return RelevanceCutoffResult(
-            kept=items, cut=cut, telemetry=block, restored=restored
+            kept=items, cut=cut, telemetry=block, restored=restored, exempted=exempted
         )
 
     kept: list[PackItem] = []
@@ -500,7 +695,12 @@ def apply_relevance_cutoff(  # noqa: PLR0912
         else:
             kept.append(item)
     return RelevanceCutoffResult(
-        kept=kept, rejected=rejected, cut=cut, telemetry=block, restored=restored
+        kept=kept,
+        rejected=rejected,
+        cut=cut,
+        telemetry=block,
+        restored=restored,
+        exempted=exempted,
     )
 
 
@@ -517,25 +717,31 @@ def pack_metadata_for(result: RelevanceCutoffResult) -> dict[str, Any]:
 
 __all__ = [
     "MIN_KEEP",
+    "MIN_POSITIVE_PACKS",
     "NATIVE_SCORE_PREFIX",
     "OFF",
+    "RELEVANCE_CUTOFF_EVIDENCE_EXEMPT_ENV",
+    "RELEVANCE_CUTOFF_EVIDENCE_EXEMPT_SETTING",
     "RELEVANCE_CUTOFF_MODE_ENV",
     "RELEVANCE_CUTOFF_MODE_SETTING",
     "RELEVANCE_CUTOFF_REJECTION_REASON",
     "RELEVANCE_CUTOFF_SEMANTIC_MIN_ENV",
     "RELEVANCE_CUTOFF_SEMANTIC_RATIO_ENV",
     "SEMANTIC_AXIS",
+    "EvidenceExemptMode",
     "RelevanceCutoffConfig",
     "RelevanceCutoffMode",
     "RelevanceCutoffResult",
     "apply_relevance_cutoff",
     "cut_item_row",
+    "evidence_exempts",
     "holdout_telemetry",
     "merge_native_scores",
     "native_breakdown",
     "native_score_key",
     "native_scores_of",
     "pack_metadata_for",
+    "resolve_evidence_exempt",
     "resolve_relevance_cutoff_config",
     "stamp_native_scores",
 ]
