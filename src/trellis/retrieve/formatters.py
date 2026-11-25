@@ -9,11 +9,11 @@ import structlog
 from trellis.core.hashing import estimate_tokens as _estimate_tokens
 from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.retrieve.file_context import MATCH_FILES_TOUCHED
-from trellis.retrieve.nearby import format_nearby_section
 from trellis.retrieve.reference import summary_link_line
 from trellis.retrieve.withholding import WithholdingSummary, format_withholding_note
 from trellis.schemas.advisory import Advisory
 from trellis_wire.loop_text import feedback_call, is_pack_id
+from trellis_wire.nearby import nearby_markdown
 from trellis_wire.provenance import format_provenance_line
 
 logger = structlog.get_logger(__name__)
@@ -66,7 +66,6 @@ def _advisories_block(advisories: list[Advisory] | None) -> str:
 
 def _tail_blocks(
     nearby: dict[str, Any] | None,
-    pack_id: str | None,
     advisories: list[Advisory] | None,
 ) -> list[str]:
     """The nearby section, then the advisories, each led by a blank line.
@@ -74,7 +73,7 @@ def _tail_blocks(
     Both ride outside the item budget; with no ``nearby`` block this is the
     advisories block alone, exactly as before the section existed.
     """
-    nearby_text = format_nearby_section(nearby, pack_id)
+    nearby_text = nearby_markdown(nearby)
     blocks = [f"\n{nearby_text}"] if nearby_text else []
     adv_block = _advisories_block(advisories)
     return [*blocks, adv_block] if adv_block else blocks
@@ -265,7 +264,7 @@ def format_pack_as_markdown(
         if remaining > 0:
             lines.append(f"\n*[{remaining} more items omitted]*")
 
-    lines.extend(_tail_blocks(nearby, pack_id, advisories))
+    lines.extend(_tail_blocks(nearby, advisories))
 
     if pack_id:
         lines.append(
@@ -420,7 +419,7 @@ def format_pack_as_index_markdown(
     if omitted > 0:
         lines.append(f"\n*[{omitted} more items omitted]*")
 
-    lines.extend(_tail_blocks(nearby, pack_id, advisories))
+    lines.extend(_tail_blocks(nearby, advisories))
 
     if pack_id:
         lines.append(
@@ -929,7 +928,7 @@ def format_sectioned_pack_as_markdown(
 
         lines.append("")
 
-    nearby_text = format_nearby_section(nearby, pack_id)
+    nearby_text = nearby_markdown(nearby)
     if nearby_text:
         lines.append(nearby_text)
         lines.append("")

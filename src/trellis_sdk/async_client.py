@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, cast
 import httpx
 import structlog
 
-from trellis_sdk._format import format_sectioned_pack_as_markdown
+from trellis_sdk._format import format_sectioned_pack_as_markdown, nearby_of
 from trellis_sdk._http import (
     SDK_API_MAJOR,
     SDK_API_MINOR,
@@ -342,6 +342,7 @@ class AsyncTrellisClient:
             max_tokens=max_tokens,
             withholding=withholding_from_payload(pack.get("withholding")),
             axis_note=axis_note_from_payload(pack.get("axes")),
+            nearby=nearby_of(pack),
         )
 
     async def get_task_context(
@@ -381,6 +382,7 @@ class AsyncTrellisClient:
             max_tokens=max_tokens,
             withholding=withholding_from_payload(pack.get("withholding")),
             axis_note=axis_note_from_payload(pack.get("axes")),
+            nearby=nearby_of(pack),
         )
 
     async def get_entity(self, entity_id: str) -> dict[str, Any] | None:

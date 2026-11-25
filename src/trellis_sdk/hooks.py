@@ -69,7 +69,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from trellis_sdk._format import format_pack_as_markdown
+from trellis_sdk._format import format_pack_as_markdown, nearby_of
 from trellis_sdk.exceptions import TrellisError
 from trellis_wire.withholding import (
     format_withholding_note,
@@ -177,6 +177,7 @@ class ContextInjector:
             max_tokens=budget,
             pack_id=pack.get("pack_id"),
             withholding=withholding,
+            nearby=nearby_of(pack),
         )
 
     def for_entities(
@@ -225,6 +226,7 @@ class ContextInjector:
                     max_tokens=budget,
                     pack_id=pack.get("pack_id"),
                     withholding=withholding,
+                    nearby=nearby_of(pack),
                 )
             fallback = self._entity_fallback(entity_ids, effective_intent, budget)
             return fallback or format_withholding_note(withholding)

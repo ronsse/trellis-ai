@@ -25,10 +25,11 @@ from trellis.retrieve.nearby import (
     format_nearby_section,
     group_cut_items,
     group_label,
+    nearby_event_block,
     nearby_listed_ids,
     resolve_nearby_mode,
 )
-from trellis.retrieve.pack_builder import PackBuilder
+from trellis.retrieve.pack_builder import PackBuilder, _ServedSet
 from trellis.retrieve.pack_value import _fetch_join
 from trellis.retrieve.relevance_cutoff import (
     RelevanceCutoffConfig,
@@ -39,6 +40,10 @@ from trellis.schemas.pack import Pack, PackItem, SectionRequest
 from trellis.stores.base.event_log import EventType
 from trellis.stores.sqlite.document import SQLiteDocumentStore
 from trellis.stores.sqlite.event_log import SQLiteEventLog
+from trellis_sdk._format import format_pack_as_markdown as sdk_format_pack
+from trellis_sdk._format import (
+    format_sectioned_pack_as_markdown as sdk_format_sectioned,
+)
 
 if TYPE_CHECKING:
     import pytest
@@ -202,7 +207,8 @@ class TestFlatPack:
             f'get_items(item_ids=[<a group\'s ids>], pack_id="{pack.pack_id}")' in text
         )
         assert text.index("## Nearby") < text.index("Cite feedback")
-        assert _payload(log)["nearby"] == block
+        assert _payload(log)["nearby"] == nearby_event_block(block)
+        assert "markdown" not in _payload(log)["nearby"]
         assert nearby_listed_ids(_payload(log)) == WEAK_IDS
 
     def test_index_formatter_renders_it_too(self) -> None:
@@ -281,7 +287,8 @@ class TestSectionedPack:
         )
         block = pack.metadata["nearby"]
         assert set(block["listed_item_ids"]) == WEAK_IDS
-        assert _payload(log)["nearby"] == block
+        assert _payload(log)["nearby"] == nearby_event_block(block)
+        assert "markdown" not in _payload(log)["nearby"]
         text = format_sectioned_pack_as_markdown(
             [], "q", pack_id=pack.pack_id, nearby=block
         )
@@ -378,3 +385,235 @@ class TestCutoffLeftovers:
         assert rows["weak-alpha-01"]["domain"] == ["billing"]
         assert rows["weak-beta-02"]["source_system"] == "wiki"
         assert rows["weak-beta-02"]["item_type"] == "document"
+
+
+def _section(text: str) -> str:
+    """The nearby section's lines inside a rendered pack."""
+    start = text.index("## Nearby")
+    end = text.find("\n\n", start)
+    return text[start:] if end == -1 else text[start:end]
+
+
+def _pack_payload(log: SQLiteEventLog, pack_id: str) -> dict[str, Any]:
+    (payload,) = [
+        e.payload
+        for e in log.get_events(event_type=EventType.PACK_ASSEMBLED, limit=50)
+        if e.entity_id == pack_id
+    ]
+    return payload
+
+
+class TestEmptyPackIsBlind:
+    """A served pack emptied by session dedup reads like a held-out pack."""
+
+    def _served_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+        monkeypatch.setattr(
+            "trellis.retrieve.pack_builder.is_held_out", lambda *_a, **_k: False
+        )
+        log = SQLiteEventLog(tmp_path / "served.db")
+        builder = _builder(nearby="on", event_log=log, holdout_rate=0.5)
+        first = builder.build("q", clearance="restricted", session_id="S")
+        assert first.items
+        assert "nearby" in first.metadata
+        second = builder.build("q", clearance="restricted", session_id="S")
+        assert not second.items
+        return second, _pack_payload(log, second.pack_id)
+
+    def test_flat_served_empty_matches_held_out(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        served, served_payload = self._served_empty(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "trellis.retrieve.pack_builder.is_held_out", lambda *_a, **_k: True
+        )
+        log = SQLiteEventLog(tmp_path / "held.db")
+        held = _builder(nearby="on", event_log=log, holdout_rate=0.5).build(
+            "q", clearance="restricted"
+        )
+        held_payload = _payload(log)
+        for pack, payload in ((served, served_payload), (held, held_payload)):
+            assert "nearby" not in pack.metadata
+            assert "nearby" not in payload
+            assert "listed_item_ids" not in json.dumps(payload)
+        served_text = _markdown(served, nearby=served.metadata.get("nearby"))
+        held_text = _markdown(held, nearby=held.metadata.get("nearby"))
+        assert served_text.replace(served.pack_id, "P") == held_text.replace(
+            held.pack_id, "P"
+        )
+        assert "Nearby" not in served_text
+
+    def test_sectioned_served_empty_has_no_section(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "trellis.retrieve.pack_builder.is_held_out", lambda *_a, **_k: False
+        )
+        log = SQLiteEventLog(tmp_path / "events.db")
+        builder = _builder(nearby="on", event_log=log, holdout_rate=0.5)
+        sections = [SectionRequest(name="all")]
+        first = builder.build_sectioned(
+            intent="q", sections=sections, clearance="restricted", session_id="S"
+        )
+        assert "nearby" in first.metadata
+        second = builder.build_sectioned(
+            intent="q", sections=sections, clearance="restricted", session_id="S"
+        )
+        assert not any(sec.items for sec in second.sections)
+        assert "nearby" not in second.metadata
+        assert "nearby" not in _pack_payload(log, second.pack_id)
+        text = format_sectioned_pack_as_markdown(
+            [], "q", pack_id=second.pack_id, nearby=second.metadata.get("nearby")
+        )
+        assert "Nearby" not in text
+
+    def test_holdout_off_keeps_the_rule_inert(self, tmp_path: Path) -> None:
+        """At ``holdout_rate`` 0 there is nothing to hide, as for advisories."""
+        log = SQLiteEventLog(tmp_path / "events.db")
+        builder = _builder(nearby="on", event_log=log)
+        builder.build("q", clearance="restricted", session_id="S")
+        second = builder.build("q", clearance="restricted", session_id="S")
+        assert not second.items
+        assert "nearby" in second.metadata
+
+
+class TestOnlyServable:
+    def test_unservable_rows_are_counted_not_listed(self) -> None:
+        rows = [_row("a", domain=["d"]), _row("b", domain=["d"]), _row("c")]
+        block = build_nearby(
+            rows,
+            mode="on",
+            pack_id="P",
+            unservable={"a": "structural_filter", "c": "session_dedup"},
+        )
+        assert block is not None
+        assert block["listed_item_ids"] == ["b"]
+        assert block["item_count"] == 1
+        assert block["not_listed"] == {"structural_filter": 1, "session_dedup": 1}
+        assert "`a`" not in block["markdown"]
+
+    def test_all_unservable_renders_nothing(self) -> None:
+        block = build_nearby(
+            [_row("a")], mode="on", pack_id="P", unservable={"a": "session_dedup"}
+        )
+        assert block is None
+
+    def test_structural_and_meta_cut_items_are_not_listed(self) -> None:
+        from trellis.schemas.well_known import ACTIVITY
+
+        strategies = [
+            _strategy(
+                "semantic",
+                [
+                    _item("strong-01", 0.9),
+                    _item("strong-02", 0.85),
+                    _item("strong-03", 0.8),
+                    _item("struct-04", 0.4, node_role="structural"),
+                    _item(
+                        "meta-05", 0.3, node_type=ACTIVITY, agent_id="trellis_meta_x"
+                    ),
+                    _item("plain-06", 0.2),
+                ],
+            )
+        ]
+        pack = PackBuilder(
+            strategies=strategies,
+            content_floor=ContentFloorConfig(mode="off"),
+            relevance_cutoff_config=CUTOFF_ON,
+            nearby_mode="on",
+        ).build("q", clearance="restricted")
+        cut_ids = {r["item_id"] for r in pack.metadata["relevance_cutoff"]["cut_items"]}
+        assert cut_ids == {"struct-04", "meta-05", "plain-06"}
+        block = pack.metadata["nearby"]
+        assert block["listed_item_ids"] == ["plain-06"]
+        assert block["not_listed"] == {
+            "structural_filter": 1,
+            "meta_activity_filter": 1,
+        }
+        reasons = {r.item_id: r.reason for r in pack.retrieval_report.rejected_items}
+        assert reasons["struct-04"] == "below_relevance_cutoff"
+
+    def test_session_served_cut_item_is_not_listed(self) -> None:
+        builder = PackBuilder(strategies=[])
+        items = [_item("seen", 0.1), _item("fresh", 0.1)]
+        served = _ServedSet(ids=frozenset({"seen"}), hashes={})
+        assert builder._nearby_unservable(
+            items, include_structural=False, include_meta=False, served=served
+        ) == {"seen": "session_dedup"}
+        assert (
+            builder._nearby_unservable(
+                items, include_structural=False, include_meta=False, served=None
+            )
+            == {}
+        )
+
+
+class TestLabelsAndCap:
+    def test_label_with_newline_and_heading_stays_on_one_line(self) -> None:
+        row = _row("a", domain=["x\n## heading"], title="t`i\ntle")
+        assert group_label(row) == "domain: x ## heading"
+        block = build_nearby([row], mode="on", pack_id="P")
+        assert block is not None
+        lines = block["markdown"].splitlines()
+        assert not any(line.startswith("## heading") for line in lines)
+        assert sum(1 for line in lines if line.startswith("- ")) == 1
+        assert '"ti tle"' in block["markdown"]
+
+    def test_backtick_id_is_left_out(self) -> None:
+        block = build_nearby(
+            [_row("ok", domain=["d"]), _row("bad`id", domain=["d`x"])],
+            mode="on",
+            pack_id="P",
+        )
+        assert block is not None
+        assert block["listed_item_ids"] == ["ok"]
+        assert block["not_listed"] == {"unlistable_id": 1}
+        assert "d`x" not in block["markdown"]
+
+    def test_long_domain_stays_under_the_cap(self) -> None:
+        block = build_nearby(
+            [_row("a", domain=["d" * 400], title="T" * 400)], mode="on", pack_id="P"
+        )
+        assert block is not None
+        assert len(block["groups"][0]["label"]) <= 60
+        assert estimate_tokens(block["markdown"]) <= MAX_SECTION_TOKENS
+
+    def test_oversized_first_group_is_trimmed_to_fit(self) -> None:
+        rows = [
+            _row(f"{n}" + "x" * 127, domain=["d" * 400], title="T" * 400)
+            for n in range(MAX_IDS_PER_GROUP + 2)
+        ]
+        block = build_nearby(rows, mode="on", pack_id="01PACKIDPACKIDPACKIDPACKID")
+        assert block is not None
+        (group,) = block["groups"]
+        assert 1 <= len(group["item_ids"]) < MAX_IDS_PER_GROUP
+        assert len(group["item_ids"]) + group["ids_left_out"] == len(rows)
+        assert estimate_tokens(block["markdown"]) <= MAX_SECTION_TOKENS
+        assert block["section_tokens"] == estimate_tokens(block["markdown"])
+
+
+class TestFormatterParity:
+    def test_core_and_sdk_print_the_same_section(self) -> None:
+        pack = _builder(nearby="on").build("q", clearance="restricted")
+        items = [
+            {"item_id": i.item_id, "item_type": i.item_type, "excerpt": i.excerpt}
+            for i in pack.items
+        ]
+        wire = json.loads(json.dumps({"metadata": pack.metadata}))
+        block = wire["metadata"]["nearby"]
+        core = format_pack_as_markdown(items, "q", pack_id=pack.pack_id, nearby=block)
+        sdk = sdk_format_pack(items, "q", pack_id=pack.pack_id, nearby=block)
+        assert _section(core) == _section(sdk) == block["markdown"]
+        core_sec = format_sectioned_pack_as_markdown(
+            [], "q", pack_id=pack.pack_id, nearby=block
+        )
+        sdk_sec = sdk_format_sectioned([], "q", nearby=block)
+        assert _section(core_sec) == _section(sdk_sec) == block["markdown"]
+
+    def test_sdk_reads_the_block_off_pack_json(self) -> None:
+        from trellis_sdk._format import nearby_of
+
+        assert nearby_of({"metadata": {"nearby": {"markdown": "x"}}}) == {
+            "markdown": "x"
+        }
+        assert nearby_of({}) is None
+        assert sdk_format_pack([], "q", nearby=None) == sdk_format_pack([], "q")

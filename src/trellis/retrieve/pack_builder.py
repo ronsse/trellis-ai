@@ -98,6 +98,7 @@ from trellis.retrieve.nearby import (
     NEARBY_KEY,
     NearbyMode,
     build_nearby,
+    nearby_event_block,
     resolve_nearby_mode,
 )
 from trellis.retrieve.noise import (
@@ -1017,11 +1018,16 @@ class PackBuilder:
             return self._relevance_cutoff_config
         return resolve_relevance_cutoff_config()
 
-    def _attach_nearby(self, pack: Pack | SectionedPack) -> dict[str, Any] | None:
-        """Add the ``nearby`` block to ``pack.metadata``; return it, or ``None``.
+    def _attach_nearby(
+        self, pack: Pack | SectionedPack, *, unservable: dict[str, str]
+    ) -> dict[str, Any] | None:
+        """Add the ``nearby`` block to ``pack.metadata``; return its event copy.
 
         Renders only when the flag is on and the cutoff (mode ``on``) left
-        cut items on the pack; otherwise the pack is untouched.
+        cut items on the pack that it could have served (``unservable`` from
+        :meth:`_nearby_unservable` names the rest); otherwise the pack is
+        untouched and this returns ``None``. The returned
+        ``PACK_ASSEMBLED`` copy leaves out the rendered ``markdown``.
         """
         mode = (
             self._nearby_mode
@@ -1030,10 +1036,39 @@ class PackBuilder:
         )
         cutoff_meta = pack.metadata.get("relevance_cutoff")
         rows = cutoff_meta.get("cut_items") if isinstance(cutoff_meta, dict) else None
-        block = build_nearby(rows, mode=mode, pack_id=pack.pack_id)
-        if block is not None:
-            pack.metadata[NEARBY_KEY] = block
-        return block
+        block = build_nearby(
+            rows, mode=mode, pack_id=pack.pack_id, unservable=unservable
+        )
+        if block is None:
+            return None
+        pack.metadata[NEARBY_KEY] = block
+        return nearby_event_block(block)
+
+    def _nearby_unservable(
+        self,
+        cut: list[PackItem],
+        *,
+        include_structural: bool,
+        include_meta: bool,
+        served: _ServedSet | None,
+    ) -> dict[str, str]:
+        """Cut ids a later collect-seam gate would have rejected anyway.
+
+        The cutoff runs before the structural filter, the meta-activity
+        filter and session dedup, so a cut item may be one the pack could
+        never have served. Maps each such id to the reason that gate gives,
+        using the gates' own predicates, so the nearby section does not list
+        it. Empty when the cutoff cut nothing.
+        """
+        out: dict[str, str] = {}
+        for item in cut:
+            if not include_structural and self._is_structural(item):
+                out[item.item_id] = "structural_filter"
+            elif not include_meta and self._is_meta_activity(item):
+                out[item.item_id] = "meta_activity_filter"
+            elif served is not None and self._is_suppressed(item, served):
+                out[item.item_id] = "session_dedup"
+        return out
 
     def _apply_relevance_cutoff_pool(
         self, items: list[PackItem]
@@ -1477,6 +1512,7 @@ class PackBuilder:
         # Session dedup: drop items recently served in this session.
         # ``refresh`` bypasses the subtraction entirely (client-compaction
         # signal — the caller lost its window and needs served items back).
+        served: _ServedSet | None = None
         if session_id and not refresh:
             served = self._recently_served(
                 session_id, window_minutes=session_dedup_window_minutes
@@ -1659,7 +1695,15 @@ class PackBuilder:
             telemetry["feedback_prior"] = feedback_prior_block
         # Present only when the section rendered; a held-out pack's metadata
         # and telemetry are replaced below, so it carries neither.
-        nearby_block = self._attach_nearby(pack)
+        nearby_block = self._attach_nearby(
+            pack,
+            unservable=self._nearby_unservable(
+                cutoff.cut,
+                include_structural=include_structural,
+                include_meta=include_meta,
+                served=served,
+            ),
+        )
         if nearby_block is not None:
             telemetry["nearby"] = nearby_block
         # The pack-effect holdout (:mod:`trellis.core.pack_holdout`), drawn
@@ -1683,6 +1727,8 @@ class PackBuilder:
         # naturally empty (never drawn into the holdout) must still look
         # like a withheld one, which ``_withhold_flat`` already empties.
         pack = self._blind_advisories_for_empty_pack(pack, has_items=bool(pack.items))
+        if NEARBY_KEY not in pack.metadata:
+            telemetry.pop(NEARBY_KEY, None)
 
         # Optional assembly-time quality evaluation (fail-soft).
         self._attach_quality_report(pack)
@@ -1952,6 +1998,7 @@ class PackBuilder:
 
         # 3a. Session dedup: drop items recently served in this session.
         # ``refresh`` bypasses it (client-compaction signal) — see build().
+        served: _ServedSet | None = None
         if session_id and not refresh:
             served = self._recently_served(
                 session_id, window_minutes=session_dedup_window_minutes
@@ -2183,7 +2230,15 @@ class PackBuilder:
             telemetry["feedback_prior"] = feedback_prior_block
         # Present only when the section rendered; a held-out pack's metadata
         # and telemetry are replaced below, so it carries neither.
-        nearby_block = self._attach_nearby(sectioned_pack)
+        nearby_block = self._attach_nearby(
+            sectioned_pack,
+            unservable=self._nearby_unservable(
+                cutoff.cut,
+                include_structural=include_structural,
+                include_meta=include_meta,
+                served=served,
+            ),
+        )
         if nearby_block is not None:
             telemetry["nearby"] = nearby_block
         # The pack-effect holdout, drawn as in :meth:`build`: the whole
@@ -2205,6 +2260,8 @@ class PackBuilder:
             sectioned_pack,
             has_items=any(section.items for section in sectioned_pack.sections),
         )
+        if NEARBY_KEY not in sectioned_pack.metadata:
+            telemetry.pop(NEARBY_KEY, None)
 
         # 5. Emit telemetry
         if self._event_log is not None:
@@ -3952,10 +4009,22 @@ class PackBuilder:
         Inert at the default ``holdout_rate`` of 0, and inert whenever the
         pack has items — advisory selection does not depend on item count
         (:meth:`_select_advisories`), and that stays true here too.
+
+        The nearby section (:mod:`trellis.retrieve.nearby`) is the same
+        tell: a held-out pack never carries one, so an item-less served
+        pack (session dedup can empty it) drops ``metadata["nearby"]`` here
+        too, and the caller drops ``PACK_ASSEMBLED.nearby`` with it.
         """
-        if self._holdout_rate > 0 and not has_items and pack.advisories:
-            return pack.model_copy(update={"advisories": []})
-        return pack
+        if self._holdout_rate <= 0 or has_items:
+            return pack
+        update: dict[str, Any] = {}
+        if pack.advisories:
+            update["advisories"] = []
+        if NEARBY_KEY in pack.metadata:
+            update["metadata"] = {
+                k: v for k, v in pack.metadata.items() if k != NEARBY_KEY
+            }
+        return pack.model_copy(update=update) if update else pack
 
     @staticmethod
     def _attach_advisory_provenance(

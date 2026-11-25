@@ -921,8 +921,9 @@ _SPECS: tuple[SettingSpec, ...] = (
         restart_required=False,
         risk="low",
         risk_note=(
-            "Adds at most ~200 tokens to a pack the cutoff trimmed; it names "
-            "withheld ids only to callers who could have been served them."
+            "Adds at most ~200 estimated tokens (a cap the builder enforces, "
+            "outside max_tokens) to a pack the cutoff trimmed; it lists only "
+            "cut ids the pack could have served this caller."
         ),
         group="retrieval",
         settings_live=True,
