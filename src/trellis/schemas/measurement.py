@@ -51,7 +51,7 @@ class Measurement(TrellisModel):
     """The entity the measurement is *about*."""
 
     subject_entity_type: str
-    """Open-string entity type of the subject (per CLAUDE.md
+    """Open-string entity type of the subject (per AGENTS.md
     type-extensibility rule)."""
 
     metric_name: str

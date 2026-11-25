@@ -9,7 +9,7 @@ give is measured first. This module is that measurement, and nothing else.
 **It is shadow-only.** The judge writes one JSONL file the operator names and
 nothing to any Trellis store: no ``event_log.emit``, no ``MutationExecutor``,
 no document or vector write. Nothing here feeds serving, ``content_tags``,
-demotion, promotion or advisories. CLAUDE.md says demotion requires evidence of
+demotion, promotion or advisories. AGENTS.md says demotion requires evidence of
 unhelpfulness; a judge's label is not evidence until a measured agreement floor
 holds, and this module is how that floor gets measured.
 

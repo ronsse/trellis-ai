@@ -380,7 +380,7 @@ class PackFeedback:
 
         Returns ``None`` for a payload this model did not write.  The
         discriminator is ``feedback_id``, which :meth:`to_event_payload`
-        always emits and the governed surface never does — ``CLAUDE.md``
+        always emits and the governed surface never does — ``AGENTS.md``
         § "Feedback path" tabulates the two families, and the governed
         one emits ``{target_id, rating, comment, success}``.  That is a
         fact about **which writer produced the row**, not an inference

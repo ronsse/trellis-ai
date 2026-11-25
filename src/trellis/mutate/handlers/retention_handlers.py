@@ -476,7 +476,7 @@ class RetentionRestoreHandler:
     archival rather than purge *because* "a wrong prune is walked back by
     re-stamping" — and re-stamping needs a governed path, or the claim is
     only rhetorical. Direct store writes are not an option
-    (``CLAUDE.md``: all mutations go through the governed pipeline), so
+    (``AGENTS.md``: all mutations go through the governed pipeline), so
     without this verb an operator who over-pruned had no sanctioned remedy
     at all.
 

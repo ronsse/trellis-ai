@@ -493,7 +493,7 @@ class TestPolicyListSurvivesADamagedFile:
     def test_json_output_is_parseable_with_a_long_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``--format json`` is a machine contract (see CLAUDE.md).
+        """``--format json`` is a machine contract (see AGENTS.md).
 
         Rich soft-wraps at the terminal width, and a wrap inside a long
         string value produces output ``json.loads`` rejects. The policy

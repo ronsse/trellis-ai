@@ -399,7 +399,7 @@ a loop with no visible event reports `last_run_at` / `last_status` /
 `counters` all `null` — "never run (or ran before this build)". A loop
 that ran and found nothing to do reports a real `last_run_at` and a
 `counters` dict whose values are legitimately `0`. The two must never
-render the same; collapsing them is exactly the failure CLAUDE.md's
+render the same; collapsing them is exactly the failure AGENTS.md's
 health-signal rule exists to prevent.
 
 ```json
@@ -424,7 +424,7 @@ The nightly cycle makes this durable by emitting `CURATE_CYCLE_COMPLETED`
 (end of every live `trellis worker curate` run) and `TUNE_CYCLE_COMPLETED`
 (end of every live `trellis worker tune` run) — never on a `--dry-run`
 pass, which must still write nothing to the EventLog. Both emits are
-wrapped whole (CLAUDE.md's advisory-step rule): a broken EventLog write
+wrapped whole (AGENTS.md's advisory-step rule): a broken EventLog write
 logs a warning but never fails the cycle it is reporting on.
 
 The operator UI's **Loops** tab (`src/trellis_api/static/index.html`)
@@ -1500,7 +1500,7 @@ general curate executor — this changes what the classifier does to every
 future document, not one piece of content. Both the CLI and the admin-scoped
 REST route submit the same `Command`, so a denying policy, a degraded
 overlay store, or a malformed candidate is refused identically on either
-surface (Stage 2 always runs, CLAUDE.md).
+surface (Stage 2 always runs, AGENTS.md).
 
 ```bash
 trellis classify apply-rule <kind> <key> <target> --source-event-id <id> \
@@ -4500,7 +4500,7 @@ JSON keys: `window_days`, `since`, `min_unanswered`, `top`, `redacted`,
 
 Offline relevance judge for served pack items, and the report that measures it
 against agent feedback. **Shadow only.** Nothing it writes feeds serving, tags,
-demotion or promotion: CLAUDE.md's rule is that demotion requires evidence of
+demotion or promotion: AGENTS.md's rule is that demotion requires evidence of
 unhelpfulness, so a judge's label is not evidence until a measured agreement floor
 holds, and the calibrate phase is how that floor is measured. It lives under
 `analyze` because both phases read the event log and the document store and write

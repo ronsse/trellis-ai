@@ -7,7 +7,7 @@ given. ``get_event``/``get_events`` reconstruct an ``Event`` straight from
 the stored row -- see ``SQLiteEventLog._row_to_event`` -- and must hand
 that back byte-for-byte, not a newly-scrubbed copy of it. Scrubbing a read
 would silently rewrite history for a store whose defining rule is
-"traces are immutable" (CLAUDE.md), and would make this suite unable to
+"traces are immutable" (AGENTS.md), and would make this suite unable to
 tell "the write path scrubs" from "the read path launders".
 """
 

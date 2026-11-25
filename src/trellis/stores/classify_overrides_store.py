@@ -9,7 +9,7 @@ read degrades and the write refuses.** A whole-file rewrite from a
 partially-read view would silently drop whatever rule did not parse — for
 this store that means a previously-applied ``domain`` promotion quietly
 stops being seen by the ingestion pipeline and the miners, with nothing on
-disk to say so. This is a third such file (CLAUDE.md: "a third such file
+disk to say so. This is a third such file (AGENTS.md: "a third such file
 gets a subclass, never a copy").
 
 Precedence

@@ -9,7 +9,7 @@
 - [`../../src/trellis/schemas/enums.py`](../../src/trellis/schemas/enums.py) — `EntityType`, `EdgeKind` (explicit "well-known defaults, not a closed set")
 - [`../../src/trellis/classify/`](../../src/trellis/classify/) — tagging pipeline + four deterministic classifiers
 - [`../../src/trellis/retrieve/pack_builder.py`](../../src/trellis/retrieve/pack_builder.py) — filters by tags before similarity scoring
-- [`../../CLAUDE.md`](../../CLAUDE.md) — extension-point policy for domain-specific types
+- [`../../AGENTS.md`](../../AGENTS.md) — extension-point policy for domain-specific types
 
 ---
 

@@ -96,7 +96,7 @@ docs/
 
 ## AI-Assisted Development
 
-This project uses Claude Code for development. The `CLAUDE.md` file at the repo root provides context and rules for AI-assisted work. PRs authored or co-authored by AI are welcome — just include the `Co-Authored-By` trailer.
+This project uses Claude Code for development. The `AGENTS.md` file at the repo root provides context and rules for AI-assisted work, whichever coding agent you use; `CLAUDE.md` is a one-line stub that imports it for Claude Code. PRs authored or co-authored by AI are welcome — just include the `Co-Authored-By` trailer.
 
 ## Code Style
 

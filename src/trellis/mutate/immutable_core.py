@@ -186,7 +186,7 @@ def governing_key_refusal(component_id: str) -> str | None:
 #: store, still has it. ``classify_rule.apply`` is here for the identical
 #: reason: ``ClassifyOverridesStore`` keys a row by ``(kind, key)`` and
 #: re-applying that key with a *different* ``target`` silently overwrites
-#: the prior row in place (CLAUDE.md: "a wrong rule hides content").
+#: the prior row in place (AGENTS.md: "a wrong rule hides content").
 #: ``classify_rule.revoke`` removes the row outright with no SCD-2 or
 #: history read either.
 DESTRUCTIVE_OPERATIONS: frozenset[Operation] = frozenset(

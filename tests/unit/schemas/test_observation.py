@@ -67,7 +67,7 @@ class TestObservationRequiredFields:
 
     def test_extra_field_forbidden(self) -> None:
         # TrellisModel inherits ``extra="forbid"``; unknown fields must
-        # raise per CLAUDE.md hard rules.
+        # raise per AGENTS.md hard rules.
         kwargs = _valid_kwargs()
         kwargs["bogus_extra_field"] = "x"
         with pytest.raises(ValidationError):

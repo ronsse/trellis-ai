@@ -8,7 +8,7 @@ internal plan/task id leaking into what an operator reads) can appear in
 any text node or template literal, not just the ones another test already
 names.
 
-Why this does not start from ``tests/ast_rules.py``, per CLAUDE.md's
+Why this does not start from ``tests/ast_rules.py``, per AGENTS.md's
 "Writing a rule that walks the AST of ``src/``": that module's subject is
 *call-site construction* -- how a name reaches a constructor through an
 alias, a rebinding or a subclass -- and its roster of evasions is about

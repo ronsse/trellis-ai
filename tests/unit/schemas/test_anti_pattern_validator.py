@@ -8,7 +8,7 @@ Dataset / Table should hold its columns as a list in
 leaves. The
 :func:`~trellis.schemas.well_known.validate_entity_type_not_anti_pattern`
 helper enforces this *softly*: it logs but never raises, preserving the
-open-string contract documented in CLAUDE.md.
+open-string contract documented in AGENTS.md.
 
 These tests pin the two-signal semantics (ADR §2.5):
 

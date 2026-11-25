@@ -38,7 +38,7 @@ makes review faster and safer.
 - [ ] Added or updated tests for the change.
 - [ ] Updated docs / examples / skills if behavior changed.
 - [ ] Updated `CHANGELOG.md` for user-visible changes.
-- [ ] Honored the hard rules in `CLAUDE.md` (immutable traces, governed mutations, `extra="forbid"`, structlog only, type hints).
+- [ ] Honored the hard rules in `AGENTS.md` (immutable traces, governed mutations, `extra="forbid"`, structlog only, type hints).
 
 ## How to verify
 

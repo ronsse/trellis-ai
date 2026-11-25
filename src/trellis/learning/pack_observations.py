@@ -1,7 +1,7 @@
 """Bridge from the EventLog into the observation shape consumed by
 :func:`trellis.learning.scoring.analyze_learning_observations`.
 
-The Trellis dual-loop has two halves (CLAUDE.md): the EventLog-authoritative
+The Trellis dual-loop has two halves (AGENTS.md): the EventLog-authoritative
 demote path (effectiveness analysis + advisory fitness) and the JSONL-based
 promote path (per-precedent learning scoring). The demote half has full
 end-to-end wiring through ``run_effectiveness_feedback`` /
@@ -374,7 +374,7 @@ def derive_selection_efficiency(pack_payload: Mapping[str, Any]) -> float | None
     A sectioned pack emits ``injected_items`` since #958 and so joins like a
     flat one, but it records no ``rejected_items`` (and no ``budget_trace``),
     so it reaches here only as an absent numerator, which is likewise
-    reported as unobserved (CLAUDE.md, "Feedback path").
+    reported as unobserved (AGENTS.md, "Feedback path").
     """
     rejected = pack_payload.get("rejected_items")
     injected = pack_payload.get("injected_items")

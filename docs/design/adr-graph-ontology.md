@@ -12,7 +12,7 @@
 - [`../../src/trellis/schemas/enums.py`](../../src/trellis/schemas/enums.py) — `EntityType`, `EdgeKind`, `NodeRole` (today: 10 entity types, 11 edge kinds)
 - [`../../src/trellis/schemas/graph.py`](../../src/trellis/schemas/graph.py) — `Edge`, `CompactionReport` (note: `edge_kind` is already documented as an open string)
 - [`../../src/trellis/extract/`](../../src/trellis/extract/) — `JSONRulesExtractor`, dispatcher; produces entity/edge drafts whose names land in the type system
-- [`../../CLAUDE.md`](../../CLAUDE.md) — extension-point policy: domain-specific types live in their own packages
+- [`../../AGENTS.md`](../../AGENTS.md) — extension-point policy: domain-specific types live in their own packages
 
 ---
 

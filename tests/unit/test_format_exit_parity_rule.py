@@ -119,7 +119,7 @@ DEFAULT_FORMAT = "text"
 #: would derive the singleton universe ``{"text"}``, leaving an empty
 #: complement — and the reachability exemption, which exists to skip a
 #: branch no supported format reaches, would skip the whole command
-#: instead. ``json`` is not optional in this CLI: CLAUDE.md promises every
+#: instead. ``json`` is not optional in this CLI: AGENTS.md promises every
 #: command supports it, so it is always in the universe whether or not the
 #: function happens to mention it. Every function in ``trellis_cli`` today
 #: names both, so this seeds nothing that is not already there; it is what

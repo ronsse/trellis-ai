@@ -53,7 +53,7 @@ class Observation(TrellisModel):
     """The entity the observation is *about*."""
 
     subject_entity_type: str
-    """Open-string entity type of the subject (per CLAUDE.md
+    """Open-string entity type of the subject (per AGENTS.md
     type-extensibility rule — well-known canonicals are recommended,
     not required)."""
 

@@ -76,7 +76,7 @@ class Entity(TimestampedModel, VersionedModel):
         ``entity_type.suspicious_input`` when *value* looks like a typo
         of a well-known canonical / alias / legacy enum value. Never
         raises: closing the entity-type set would break domain
-        integrations (CLAUDE.md).
+        integrations (AGENTS.md).
         """
         warn_if_near_miss_entity_type(value)
         return value

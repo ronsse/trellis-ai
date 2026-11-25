@@ -10,7 +10,7 @@ then calls the abstract ``_append`` a backend defines instead.
 ``ABCMeta`` enforces that ``_append`` gets *an* implementation; it does
 nothing to stop a subclass from also re-defining the *concrete*
 ``append`` and skipping the base class's scrub entirely. That is exactly
-the gap this file closes by hand, per CLAUDE.md's instruction to take the
+the gap this file closes by hand, per AGENTS.md's instruction to take the
 population floor from a hand read, never from the scan it guards
 (``tests/ast_rules.py::assert_hand_read_floor``).
 

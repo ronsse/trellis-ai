@@ -1207,7 +1207,7 @@ class ObservationRecordHandler:
         # new observation node. The subject may not be a graph node in
         # all deployments (e.g., raw trace IDs) — when the FK fails we
         # still keep the observation row, but the edge is skipped. This
-        # matches the open-string entity-type rule (CLAUDE.md
+        # matches the open-string entity-type rule (AGENTS.md
         # type-extensibility).
         #
         # Narrow the catch to ``StoreError`` (which ``NotFoundError``

@@ -1,6 +1,6 @@
 """Enforcement for the machine-output rule (#403).
 
-``CLAUDE.md`` states it as a hard rule:
+``AGENTS.md`` states it as a hard rule:
 
     Use ``--format json`` for machine output. All CLI commands support it.
     Parse JSON output, not human-readable text.

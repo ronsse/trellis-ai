@@ -430,7 +430,7 @@ of this plan, not a Phase 0.
 
 When picking up this plan in a new session:
 
-1. Read [`CLAUDE.md`](../../CLAUDE.md) for project conventions and hard rules.
+1. Read [`AGENTS.md`](../../AGENTS.md) for project conventions and hard rules.
 2. Read this doc top to bottom.
 3. Read [`plan-neo4j-hardening.md`](./plan-neo4j-hardening.md) §5 (Phase 3 deferred items) and §1 (premise) — that's the work this plan exists to unblock.
 4. Read [`docs/agent-guide/pack-quality-evaluation.md`](../agent-guide/pack-quality-evaluation.md) — the existing eval surface you'll build on.

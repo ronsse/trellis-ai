@@ -1,6 +1,6 @@
 """``trellis analyze value``: the implicit-signal and tier blocks, both formats.
 
-The two output formats must agree on the exit code (CLAUDE.md, "A command's
+The two output formats must agree on the exit code (AGENTS.md, "A command's
 exit code must not depend on ``--format``"), and the new blocks must reach
 both: ``implicit`` and ``by_tier`` in the JSON, a section each in the text.
 """

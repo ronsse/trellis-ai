@@ -59,7 +59,7 @@ def test_review_nav_entry_has_a_hidden_badge_span() -> None:
 
 
 def test_nav_badge_is_toggled_with_the_hidden_property_not_display() -> None:
-    # CLAUDE.md / the reset: `[hidden]` is `display:none !important`, so
+    # AGENTS.md / the reset: `[hidden]` is `display:none !important`, so
     # visibility is toggled with `el.hidden`, never `el.style.display`.
     page = _page()
     body = _function_body(

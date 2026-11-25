@@ -295,7 +295,7 @@ Total: ~3 days of focused work spread across ~5 PRs. Each item is independent en
 
 When picking up this plan:
 
-1. Read [`CLAUDE.md`](../../CLAUDE.md) for project conventions and hard rules.
+1. Read [`AGENTS.md`](../../AGENTS.md) for project conventions and hard rules.
 2. Read this doc top-to-bottom.
 3. Read the relevant ADR for the phase you're touching (linked above).
 4. Run the existing Neo4j live test before starting: `set -a && source .env && set +a && pytest tests/unit/stores/test_neo4j_*.py tests/unit/stores/contracts/test_neo4j_graph_contract.py tests/integration/test_neo4j_e2e.py -q`. Should report ~116 passed.

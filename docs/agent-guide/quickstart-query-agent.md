@@ -209,7 +209,7 @@ The four cornerstone docs answer the conceptual questions:
 
 The in-memory demo above runs everything in-process. A real deployment splits into:
 
-- **Trellis server**: `trellis admin serve` behind a reverse proxy. SQLite for dev; Postgres + pgvector or Neo4j for production substrates per [CLAUDE.md](../../CLAUDE.md).
+- **Trellis server**: `trellis admin serve` behind a reverse proxy. SQLite for dev; Postgres + pgvector or Neo4j for production substrates per [AGENTS.md](../../AGENTS.md).
 - **Extractors**: per-source scripts run by your scheduler (cron / GHA / Airflow / K8s CronJob) calling `trellis extract refresh --source <name>`.
 - **Agents**: connect via MCP (recommended for Claude Code, Claude Desktop, IDE plugins) or REST (`POST /api/v1/...`) or SDK (`trellis_sdk.TrellisClient`).
 - **Optional event-stream sources**: push events directly at `POST /api/v1/extract/drafts`. No polling.

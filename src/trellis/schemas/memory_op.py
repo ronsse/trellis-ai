@@ -125,7 +125,7 @@ class SubjectRef(TrellisModel):
 
     ref_type: str
     """Open-string kind of the referent (``doc`` / ``entity`` /
-    ``observation`` / ...), per the CLAUDE.md type-extensibility rule. Open,
+    ``observation`` / ...), per the AGENTS.md type-extensibility rule. Open,
     but not free: it is half the join key, so emitters use the shared
     constants (:data:`REF_TYPE_DOCUMENT`) rather than spelling one inline."""
 

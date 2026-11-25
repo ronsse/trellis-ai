@@ -457,7 +457,7 @@ class TestWiredIntoCurateHandlers:
 class TestStage2GateIsInvoked:
     """A policy denying ``settings.update`` must block before the handler
     ever touches the file — the same "Stage 2 always runs" contract every
-    other curate operation gets (CLAUDE.md, ``test_policy_wiring.py``).
+    other curate operation gets (AGENTS.md, ``test_policy_wiring.py``).
     Built through :func:`build_settings_executor`, the narrow factory the
     admin route and CLI call (``Operation.SETTINGS_UPDATE`` is not
     reachable through :func:`build_curate_executor` at all), rather than a

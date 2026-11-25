@@ -438,7 +438,7 @@ class TestExoticExceptionSummarizationNeverBlocksADegrade:
     enough to search (raises cleanly) but whose *summary* blows up
     (``AttributeError``/``KeyError``, both untyped and uncaught) took down
     the whole pack build instead of just that one axis. ``_audit_message``
-    now wraps the summarize call whole — per CLAUDE.md's
+    now wraps the summarize call whole — per AGENTS.md's
     ``resolve_stamp_staleness`` model, not a list of expected exception
     types — and falls back to ``SUPPRESSED_MARKER``.
     """
