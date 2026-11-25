@@ -232,12 +232,49 @@ _SYSTEM_PROMPT = (
 #: Name of the production system prompt among :data:`PROMPT_VARIANTS`.
 DEFAULT_PROMPT_VARIANT = "default"
 
+#: Eval-only variant whose ``evidence`` is an exact quote of the session text,
+#: so the eval's verbatim ``evidence_check`` measures something. The default
+#: prompt asks for "a path, a command, a date", not a quote.
+VERBATIM_EVIDENCE_PROMPT_VARIANT = "verbatim_evidence"
+
+
+def _replace_once(text: str, old: str, new: str) -> str:
+    """Replace the single occurrence of ``old``; raise when it is not exactly one.
+
+    Runs at import, so an edit to the production prompt that removes the
+    replaced text fails loudly instead of leaving a variant equal to default.
+    """
+    count = text.count(old)
+    if count != 1:
+        msg = f"prompt variant anchor found {count} times, expected 1: {old!r}"
+        raise ValueError(msg)
+    return text.replace(old, new)
+
+
+_VERBATIM_EVIDENCE_SYSTEM_PROMPT = _replace_once(
+    _replace_once(
+        _SYSTEM_PROMPT,
+        "- attributed: carries concrete evidence (a path, a command, a date).\n",
+        "- attributed: carries evidence that is an exact, contiguous quote copied "
+        "character-for-character from the session text, 20 to 300 characters "
+        "long: no paraphrase, no ellipsis, no added citation or label. This "
+        "quote is the one thing you copy rather than summarize; never quote a "
+        "secret, token, credential, or environment value. If no such quote "
+        "exists, omit the candidate.\n",
+    ),
+    '"evidence": str, ',
+    '"evidence": str (the exact quote, copied verbatim from the session), ',
+)
+
 #: System prompts an offline judge eval may select by name. The sweep always
 #: uses :data:`DEFAULT_PROMPT_VARIANT`; a candidate prompt is added here, under
 #: a new name, so an eval arm can compare it against production on the same
 #: transcripts before anything changes what the sweep sends.
 PROMPT_VARIANTS: Mapping[str, str] = MappingProxyType(
-    {DEFAULT_PROMPT_VARIANT: _SYSTEM_PROMPT}
+    {
+        DEFAULT_PROMPT_VARIANT: _SYSTEM_PROMPT,
+        VERBATIM_EVIDENCE_PROMPT_VARIANT: _VERBATIM_EVIDENCE_SYSTEM_PROMPT,
+    }
 )
 
 

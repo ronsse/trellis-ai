@@ -105,6 +105,13 @@ JACCARD_THRESHOLD = 0.5
 #: appears in almost any conversation and in almost any gold evidence line.
 MIN_EVIDENCE_CHARS = 20
 
+#: Prompt variants that ask for ``evidence`` as a verbatim quote. Under any
+#: other variant (the production ``default`` asks for "a path, a command, a
+#: date"), ``evidence_check`` and ``grounded_rate`` measure nothing.
+QUOTE_EVIDENCE_VARIANTS: frozenset[str] = frozenset(
+    {distill.VERBATIM_EVIDENCE_PROMPT_VARIANT}
+)
+
 #: Values of a candidate row's ``evidence_check``.
 EVIDENCE_GROUNDED = "grounded"
 EVIDENCE_UNGROUNDED = "ungrounded"
@@ -927,6 +934,7 @@ def _summarise_arm(
         "salient_chars": arm.salient_chars,
         "context_tokens": arm.context_tokens,
         "prompt_variant": arm.prompt_variant,
+        "evidence_check_meaningful": arm.prompt_variant in QUOTE_EVIDENCE_VARIANTS,
         "local": arm.local,
         "transcripts": len(calls),
         "outcomes": dict(sorted(outcomes.items())),

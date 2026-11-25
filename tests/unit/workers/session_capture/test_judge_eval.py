@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from trellis.llm.types import LLMResponse, TokenUsage
-from trellis_workers.session_capture import judge_eval
+from trellis_workers.session_capture import distill, judge_eval
 from trellis_workers.session_capture.__main__ import main as worker_main
 from trellis_workers.session_capture.judge_eval import (
     EvalConfigError,
@@ -192,6 +192,32 @@ def test_a_quote_outside_the_shown_window_is_grounded_but_not_in_window(
     (row,) = _rows(out / judge_eval.CANDIDATES_FILE)
     assert row["evidence_grounded"] is True
     assert row["evidence_in_window"] is False
+
+
+def test_a_verbatim_evidence_arm_sends_that_prompt_and_marks_the_check_meaningful(
+    tmp_path: Path,
+) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "s1.jsonl", _plain("sess-1"))
+    quote_client = UsageClient([candidates_json(good_candidate(evidence=_QUOTE))])
+    default_client = UsageClient([candidates_json(good_candidate(evidence=_QUOTE))])
+    clients = {"quote": quote_client, "plain": default_client}
+    report = run_eval(
+        transcripts,
+        [_arm("quote", prompt_variant="verbatim_evidence"), _arm("plain")],
+        out,
+        client_factory=lambda arm: clients[arm.name],
+        local_of=_remote,
+    )
+    (quote_messages,) = quote_client.calls
+    (default_messages,) = default_client.calls
+    assert quote_messages[0].role == "system"
+    quote_prompt = distill.PROMPT_VARIANTS[distill.VERBATIM_EVIDENCE_PROMPT_VARIANT]
+    assert quote_messages[0].content == quote_prompt
+    assert default_messages[0].content == distill._SYSTEM_PROMPT
+    assert report["arms"]["quote"]["prompt_variant"] == "verbatim_evidence"
+    assert report["arms"]["quote"]["evidence_check_meaningful"] is True
+    assert report["arms"]["plain"]["evidence_check_meaningful"] is False
 
 
 def test_failures_and_timeouts_are_recorded_and_the_run_goes_on(
