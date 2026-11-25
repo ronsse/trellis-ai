@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -194,6 +194,10 @@ class DistillResult:
     #: Token usage the endpoint reported for the call, when it reported any.
     #: Read by the offline judge eval only; the sweep ignores it.
     usage: TokenUsage | None = None
+    #: Whether the reply had no content (empty or whitespace); ``None`` when no
+    #: reply was parsed. Read by the offline judge eval only, and left out of
+    #: equality so the outcome alone decides whether two results match.
+    content_empty: bool | None = field(default=None, compare=False)
 
 
 _SYSTEM_PROMPT = (
@@ -521,7 +525,9 @@ def distill_session(
             unavailable_reason="model_error",
         )
     return replace(
-        parse_candidates(response.content, digest.session_id), usage=response.usage
+        parse_candidates(response.content, digest.session_id),
+        usage=response.usage,
+        content_empty=not response.content.strip(),
     )
 
 

@@ -87,7 +87,6 @@ from trellis_workers.session_capture.transcripts import (
 
 if TYPE_CHECKING:
     from trellis.llm import LLMClient
-    from trellis.llm.types import LLMResponse, Message
     from trellis.schemas.classification import Sensitivity
     from trellis_workers.session_capture.models import SessionDigest
 
@@ -454,35 +453,6 @@ def _labels_withholding_reason(
     return EGRESS_REASON_UNREADABLE
 
 
-class _ContentProbe:
-    """Delegates to the arm's client and notes whether a reply had no content.
-
-    Eval only: production's parse is untouched; this only lets a call row tell
-    an empty reply from a malformed one.
-    """
-
-    def __init__(self, client: LLMClient) -> None:
-        self._client = client
-        self.empty_content: bool | None = None
-
-    async def generate(
-        self,
-        *,
-        messages: list[Message],
-        temperature: float = 0.3,
-        max_tokens: int = 500,
-        model: str | None = None,
-    ) -> LLMResponse:
-        response = await self._client.generate(
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            model=model,
-        )
-        self.empty_content = not response.content.strip()
-        return response
-
-
 def _eval_field_scan(candidate: Any) -> list[str]:
     """Secret classes in the model-authored fields the production scan omits.
 
@@ -528,10 +498,9 @@ def judge_transcript(
         return call, []
 
     system_prompt = distill.PROMPT_VARIANTS[arm.prompt_variant]
-    probe = None if client is None else _ContentProbe(client)
     started = time.perf_counter()
     result = distill.distill_session(
-        probe,
+        client,
         digest,
         timeout=timeout,
         salient_chars=arm.salient_chars,
@@ -543,9 +512,9 @@ def judge_transcript(
     call["outcome"] = result.outcome.value
     call["unavailable_reason"] = result.unavailable_reason
     call["parse_error"] = result.parse_error
-    if probe is not None and probe.empty_content is not None:
-        call["empty_content"] = probe.empty_content
-        if probe.empty_content and result.outcome is distill.DistillOutcome.MALFORMED:
+    if result.content_empty is not None:
+        call["empty_content"] = result.content_empty
+        if result.content_empty and result.outcome is distill.DistillOutcome.MALFORMED:
             call["parse_error"] = PARSE_ERROR_EMPTY_CONTENT
     if result.unavailable_reason != "prompt_too_large":
         call["latency_s"] = round(elapsed, 4)
