@@ -311,15 +311,21 @@ def build_ledger(
     which has already dropped held-out packs and the feedback naming them. A
     verdict or fetch counts only for an item the named pack actually served,
     so a pack the scan holds no served row for (a held-out pack among them)
-    contributes nothing.
+    contributes nothing. One exception, for fetches only: an item the pack
+    listed in its ``nearby`` section (``PACK_ASSEMBLED.nearby``) was shown to
+    the agent by id, so a fetch of it counts.
     """
     from trellis.feedback.pack_rows import (  # noqa: PLC0415 - import cycle
         iter_feedback_rows,
         served_rows_from_payload,
     )
+    from trellis.retrieve.nearby import nearby_listed_ids  # noqa: PLC0415
     from trellis.retrieve.pack_value import fetch_row  # noqa: PLC0415
 
     served: dict[str, set[str]] = {}
+    # Ids a pack's "nearby" section listed (trellis.retrieve.nearby): a fetch
+    # of one joins to the pack as fetch evidence; a verdict does not.
+    listed: dict[str, set[str]] = {}
     for pack_id, event in pack_events.items():
         served[pack_id] = {
             row.item_id
@@ -331,6 +337,7 @@ def build_ledger(
             )
             if row.item_id
         }
+        listed[pack_id] = nearby_listed_ids(event.payload or {})
     ledger = EvidenceLedger()
     feedback_list = list(feedback_events)
     for event, row in zip(
@@ -349,7 +356,9 @@ def build_ledger(
                     ledger.signals.append(_Signal(at, row.pack_id or "", item_id, kind))
     for event in fetch_events:
         fetch = fetch_row(event)
-        items = served.get(fetch.pack_id or "")
+        items = served.get(fetch.pack_id or "", set()) | listed.get(
+            fetch.pack_id or "", set()
+        )
         if not items:
             continue
         at = _as_utc(event.occurred_at)

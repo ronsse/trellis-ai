@@ -13,6 +13,7 @@ from trellis.retrieve.reference import summary_link_line
 from trellis.retrieve.withholding import WithholdingSummary, format_withholding_note
 from trellis.schemas.advisory import Advisory
 from trellis_wire.loop_text import feedback_call, is_pack_id
+from trellis_wire.nearby import nearby_markdown
 from trellis_wire.provenance import format_provenance_line
 
 logger = structlog.get_logger(__name__)
@@ -61,6 +62,21 @@ def _advisories_block(advisories: list[Advisory] | None) -> str:
     """
     rendered = format_advisories_as_markdown(advisories or [])
     return f"\n{rendered.rstrip()}" if rendered else ""
+
+
+def _tail_blocks(
+    nearby: dict[str, Any] | None,
+    advisories: list[Advisory] | None,
+) -> list[str]:
+    """The nearby section, then the advisories, each led by a blank line.
+
+    Both ride outside the item budget; with no ``nearby`` block this is the
+    advisories block alone, exactly as before the section existed.
+    """
+    nearby_text = nearby_markdown(nearby)
+    blocks = [f"\n{nearby_text}"] if nearby_text else []
+    adv_block = _advisories_block(advisories)
+    return [*blocks, adv_block] if adv_block else blocks
 
 
 def _provenance_text(item: dict[str, Any]) -> str | None:
@@ -116,6 +132,7 @@ def format_pack_as_markdown(
     axis_note: str = "",
     advisories: list[Advisory] | None = None,
     provenance_line: bool = False,
+    nearby: dict[str, Any] | None = None,
 ) -> str:
     """Format pack items as concise markdown for LLM consumption.
 
@@ -163,6 +180,10 @@ def format_pack_as_markdown(
         advisories: Advisories to render between the items and the citation
             footer. Not charged against ``max_tokens`` — they ride outside
             the item budget.
+        nearby: ``pack.metadata["nearby"]`` (:mod:`trellis.retrieve.nearby`),
+            rendered after the items and before the advisories; ``None``
+            (the default, and every pack without the flag) renders nothing.
+            Not charged against ``max_tokens``; the block caps its own size.
         provenance_line: Render each item's ``Provenance: ...`` line (see
             :func:`_provenance_text`) under its body, after any summary
             link. Off by default, and off renders exactly what this
@@ -243,9 +264,7 @@ def format_pack_as_markdown(
         if remaining > 0:
             lines.append(f"\n*[{remaining} more items omitted]*")
 
-    adv_block = _advisories_block(advisories)
-    if adv_block:
-        lines.append(adv_block)
+    lines.extend(_tail_blocks(nearby, advisories))
 
     if pack_id:
         lines.append(
@@ -334,6 +353,7 @@ def format_pack_as_index_markdown(
     empty_text: str | None = None,
     axis_note: str = "",
     advisories: list[Advisory] | None = None,
+    nearby: dict[str, Any] | None = None,
 ) -> str:
     """Format pack items as an id index — one line per item, no bodies.
 
@@ -399,9 +419,7 @@ def format_pack_as_index_markdown(
     if omitted > 0:
         lines.append(f"\n*[{omitted} more items omitted]*")
 
-    adv_block = _advisories_block(advisories)
-    if adv_block:
-        lines.append(adv_block)
+    lines.extend(_tail_blocks(nearby, advisories))
 
     if pack_id:
         lines.append(
@@ -826,6 +844,7 @@ def format_sectioned_pack_as_markdown(
     axis_note: str = "",
     advisories: list[Advisory] | None = None,
     provenance_line: bool = False,
+    nearby: dict[str, Any] | None = None,
 ) -> str:
     """Format a sectioned pack as markdown with section headings.
 
@@ -907,6 +926,11 @@ def format_sectioned_pack_as_markdown(
             lines.append(block)
             used += block_tokens
 
+        lines.append("")
+
+    nearby_text = nearby_markdown(nearby)
+    if nearby_text:
+        lines.append(nearby_text)
         lines.append("")
 
     adv_block = _advisories_block(advisories)

@@ -295,6 +295,10 @@ def _effective_values(
         settings=settings_values
     ).mode
 
+    from trellis.retrieve.nearby import resolve_nearby_mode  # noqa: PLC0415
+
+    effective["nearby_section"] = resolve_nearby_mode(settings=settings_values)
+
     from trellis.retrieve.builder_factory import (  # noqa: PLC0415
         resolve_pack_provenance_line,
     )

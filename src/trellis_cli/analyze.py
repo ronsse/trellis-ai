@@ -1234,6 +1234,10 @@ def _print_implicit_block(implicit: Any) -> None:
         f"pack not in window {implicit.fetch_unjoined_pack_not_in_window}, "
         f"item not served {implicit.fetch_unjoined_item_not_served})"
     )
+    if implicit.fetch_joined_nearby:
+        console.print(
+            f"    fetched from a nearby section: {implicit.fetch_joined_nearby}"
+        )
     counts = (
         f"{implicit.fetched_graded_helpful_servings}/"
         f"{implicit.fetched_graded_servings} fetched-and-graded helpful vs "

@@ -387,6 +387,7 @@ def _flat_context(
             empty_text=empty,
             axis_note=axis_note,
             advisories=pack.advisories,
+            nearby=pack.metadata.get("nearby"),
         )
         result = f"{banner}\n\n{result}" if banner else result
         return with_grading_trailer(registry, result, pack.pack_id)
@@ -417,6 +418,7 @@ def _flat_context(
             # the footer stays the last thing read (see
             # ``_advisories_block``).
             advisories=pack.advisories,
+            nearby=pack.metadata.get("nearby"),
         )
     else:
         # Index mode never renders the provenance line; off, no item dict
@@ -434,6 +436,7 @@ def _flat_context(
             axis_note=axis_note,
             advisories=pack.advisories,
             provenance_line=provenance_line,
+            nearby=pack.metadata.get("nearby"),
         )
     # The pack's own ids, kept only if the formatter printed them: it stops
     # listing items when the token budget runs out.
@@ -547,6 +550,7 @@ def _sectioned_context(
             axis_note=axis_note,
             advisories=sectioned_pack.advisories,
             provenance_line=provenance_line,
+            nearby=sectioned_pack.metadata.get("nearby"),
         )
         note_printed_items(
             result,

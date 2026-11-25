@@ -11,6 +11,7 @@ from typing import Any
 from trellis_sdk._format import (
     format_pack_as_markdown,
     format_traces_as_markdown,
+    nearby_of,
 )
 from trellis_sdk.client import TrellisClient
 from trellis_wire.withholding import (
@@ -60,6 +61,7 @@ def get_context_for_task(
                 pack_id=pack_id,
                 withholding=withholding,
                 empty_text=message,
+                nearby=nearby_of(pack),
             )
         note = format_withholding_note(withholding)
         return f"{message}\n\n{note}" if note else message
@@ -69,6 +71,7 @@ def get_context_for_task(
         max_tokens=max_tokens,
         pack_id=pack_id,
         withholding=withholding,
+        nearby=nearby_of(pack),
     )
 
 

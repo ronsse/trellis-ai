@@ -4912,7 +4912,60 @@ them as nearby. `shadow` cuts nothing. Both add a `relevance_cutoff` block to
 `PACK_ASSEMBLED` (`cut_count`, `cut_tokens`, `threshold`, `best_semantic`,
 `kept_by_min_keep`); `off` adds no key. A held-out pack stays blind, as with the
 class prior; its event keeps only the configuration (`mode`, `semantic_min`,
-`semantic_ratio`), never the outcome or an item id.
+`semantic_ratio`), never the outcome or an item id. The ratio floor is
+discontinuous at a best of exactly `0`: skipped there, applied in full for any
+positive best. An item another strategy returned counts as returned by it even
+when that strategy's score was non-finite (no native key), by its declared
+`source_strategy` / `strategy_source`.
+
+*The nearby section.* `nearby_section` (`TRELLIS_NEARBY_SECTION`, settings key
+`nearby_section`) is `off` (default) or `on`; an unrecognised value warns and
+resolves to `off`. It renders only when the cutoff ran in `on` and cut
+something; otherwise no key is added to the pack, its markdown or
+`PACK_ASSEMBLED`, so `off` (or `on` without a cut) is byte-identical to a build
+without it. The cut items are grouped by `content_tags.domain`, else
+`source_system`, else item type; largest group first, ties by label. Only what
+the pack could have served is listed: a cut item that the structural filter,
+the meta-activity filter or session dedup would have rejected is left out, as
+is an id containing a backtick or a non-printable character or longer than 128
+characters; the block counts these per reason in `not_listed`
+(`structural_filter`, `meta_activity_filter`, `session_dedup`,
+`unlistable_id`). The cutoff's own `cut_items` and `rejected_items` are
+unchanged. Labels and titles are put on one line, stripped of backticks and cut
+to 60 characters. At most 5 groups and 5 ids per group are listed, and the
+whole section stays within 200 estimated tokens: when the first group alone is
+over, its trailing ids (then its titles) are dropped until it fits, keeping at
+least one id. What a cap left out is counted. After the items and before the
+advisories, the pack formatters render:
+
+```
+## Nearby (below the relevance cutoff, not shown)
+- **domain: billing**: 3 items, ~240 tok: "Invoice retry"; "Dunning rules". `id1` `id2` `id3`
+- **source: wiki**: 1 item, ~80 tok. `id4`
+*Open a group with one call: `get_items(item_ids=[<a group's ids>], pack_id="<pack id>")`.*
+```
+
+The block (`groups[]` with `label`, `count`, `estimated_tokens`, `titles`,
+`item_ids`, `ids_left_out`; plus `item_count`, `estimated_tokens`,
+`listed_item_ids`, `groups_left_out`, `items_left_out`, `not_listed`,
+`section_tokens`, and the rendered text at `markdown`) is at
+`pack.metadata["nearby"]` on flat and sectioned packs. `PACK_ASSEMBLED.nearby`
+records the same block without `markdown`. The server renders the text once;
+the core formatters (MCP, CLI) and the SDK formatters (`trellis_sdk._format`,
+used by `TrellisClient`, `AsyncTrellisClient`, the hooks and the skills) all
+print that `markdown` string, reading it from a pack JSON's
+`metadata["nearby"]`. The REST pack responses (`POST /packs`,
+`POST /packs/sectioned`) carry no `metadata`, so an SDK caller over REST does
+not see the section yet, although the event records the ids as listed. The
+section is not charged to `max_tokens`, like the advisories. A
+`PACK_ITEMS_FETCHED` naming the pack and a listed id joins as fetch evidence for
+`feedback_prior_mode` (verdicts still join only to served items), and
+`analyze value` counts it as `fetch_joined_nearby` rather than
+`item_not_served`. Exclusions: a public-only pack is never cut, so it never
+carries the section; a held-out pack's metadata and event are replaced, so
+neither carries the section or a listed id; and while the holdout is live a
+served pack with no items (session dedup can empty one) drops the block from
+its metadata, markdown and event, so it reads like a held-out pack.
 
 *The replay.* Floors come from the flags, else the env vars. Per served
 `(pack_id, item_id)` the report counts `helpful_removed`, `unhelpful_removed`

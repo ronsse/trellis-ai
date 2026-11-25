@@ -16,9 +16,11 @@ is easy to test against fixtures.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from trellis_wire.loop_text import sdk_feedback_call
+from trellis_wire.nearby import nearby_markdown
 from trellis_wire.withholding import (
     WithholdingSummary,
     format_withholding_note,
@@ -40,6 +42,7 @@ def format_pack_as_markdown(
     pack_id: str | None = None,
     withholding: WithholdingSummary | None = None,
     empty_text: str = "",
+    nearby: Mapping[str, Any] | None = None,
 ) -> str:
     """Format pack items as concise markdown for LLM consumption.
 
@@ -47,6 +50,9 @@ def format_pack_as_markdown(
     exceeded and appends a ``[N more items omitted]`` marker. A pack with
     a ``pack_id`` always ends with the feedback footer, as core's does;
     ``empty_text`` is the line shown in place of items when there are none.
+    ``nearby`` is the pack JSON's ``metadata["nearby"]`` block: its
+    server-rendered ``markdown`` is printed after the items, outside the
+    budget, exactly as the core formatter prints it.
     """
     lines = [f"# Context for: {intent}"]
     if pack_id:
@@ -82,6 +88,9 @@ def format_pack_as_markdown(
         used += block_tokens
         included += 1  # noqa: SIM113
 
+    nearby_text = nearby_markdown(nearby)
+    if nearby_text:
+        lines.append(f"\n{nearby_text}")
     if pack_id:
         lines.append("\n---\n*Cite feedback via `" + sdk_feedback_call(pack_id) + "`.*")
     return "\n".join(lines)
@@ -123,6 +132,7 @@ def format_sectioned_pack_as_markdown(
     *,
     withholding: WithholdingSummary | None = None,
     axis_note: str = "",
+    nearby: Mapping[str, Any] | None = None,
 ) -> str:
     """Format a list of pack sections (as dicts) as markdown.
 
@@ -137,6 +147,8 @@ def format_sectioned_pack_as_markdown(
     ``axes`` block — or ``""`` when none applies. Same header placement
     as ``trellis.retrieve.formatters.format_sectioned_pack_as_markdown``:
     above the withholding note, not charged against the token budget.
+    ``nearby`` (``metadata["nearby"]``) prints its server-rendered text
+    after the sections.
     """
     lines = [f"# Context for: {intent}"]
     if axis_note:
@@ -145,8 +157,11 @@ def format_sectioned_pack_as_markdown(
     if note:
         lines.append(note)
     lines.append("")
+    nearby_text = nearby_markdown(nearby)
     if not sections:
         lines.append("*No sections available.*")
+        if nearby_text:
+            lines.extend(["", nearby_text])
         return "\n".join(lines)
 
     per_section = max(200, max_tokens // max(1, len(sections)))
@@ -163,11 +178,21 @@ def format_sectioned_pack_as_markdown(
             line for line in rendered.splitlines() if not line.startswith("# ")
         )
         lines.append(rendered)
+    if nearby_text:
+        lines.extend(["", nearby_text])
     return "\n".join(lines)
+
+
+def nearby_of(pack: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """A pack JSON's ``metadata["nearby"]`` block, or ``None``."""
+    metadata = pack.get("metadata")
+    block = metadata.get("nearby") if isinstance(metadata, Mapping) else None
+    return block if isinstance(block, Mapping) else None
 
 
 __all__ = [
     "format_pack_as_markdown",
     "format_sectioned_pack_as_markdown",
     "format_traces_as_markdown",
+    "nearby_of",
 ]

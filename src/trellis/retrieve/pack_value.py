@@ -440,6 +440,11 @@ class ImplicitSignals(TrellisModel):
     fetch_unjoined_no_pack: int = 0
     fetch_unjoined_pack_not_in_window: int = 0
     fetch_unjoined_item_not_served: int = 0
+    #: Distinct ``(pack, item)`` fetches of an item the pack did not serve
+    #: but listed in its ``nearby`` section (:mod:`trellis.retrieve.nearby`).
+    #: Joined, so not in :attr:`fetch_unjoined`, and not in
+    #: :attr:`fetched_items` either: no served row, so no tokens to charge.
+    fetch_joined_nearby: int = 0
     fetch_suppressed: bool = False
     fetch_suppressed_reason: str = ""
     #: Coverage of the ``PACK_ITEMS_FETCHED`` read. Its own field: merging it
@@ -1288,6 +1293,28 @@ def _count_re_retrieved(pack_events: Iterable[Event]) -> tuple[int, int, int]:
     return re_retrieved, sum(len(v) for v in by_session.values()), without
 
 
+def _fetch_join(
+    key: tuple[str, str],
+    *,
+    has_pack: bool,
+    pack_ids: Mapping[str, Any],
+    servings: Mapping[tuple[str, str], Any],
+    listed: set[tuple[str, str]],
+) -> str:
+    """How one fetched ``(pack, item)`` joins: ``joined``, ``nearby`` or why not.
+
+    ``nearby``: the pack did not serve the item but listed it in its nearby
+    section (:mod:`trellis.retrieve.nearby`).
+    """
+    if not has_pack:
+        return "no_pack"
+    if key[0] not in pack_ids:
+        return "pack_not_in_window"
+    if key in servings:
+        return "joined"
+    return "nearby" if key in listed else "item_not_served"
+
+
 def _implicit_signals(
     event_log: EventLog,
     *,
@@ -1324,8 +1351,16 @@ def _implicit_signals(
     graded = [key for key, (_, verdict) in servings.items() if verdict != "unjudged"]
     graded_helpful = sum(1 for key in graded if servings[key][1] == "helpful")
 
+    from trellis.retrieve.nearby import nearby_listed_ids  # noqa: PLC0415
+
+    listed = {
+        (pack_id, item_id)
+        for pack_id, payload in pack_payloads.items()
+        for item_id in nearby_listed_ids(payload)
+    }
     fetch_events = 0
     joined: set[tuple[str, str]] = set()
+    joined_nearby: set[tuple[str, str]] = set()
     unjoined: dict[str, set[tuple[str, str]]] = {
         "no_pack": set(),
         "pack_not_in_window": set(),
@@ -1345,14 +1380,20 @@ def _implicit_signals(
             fetch_events += 1
             fetch = _fetch_row(event)
             for item_id in fetch.served_item_ids:
-                if fetch.pack_id is None:
-                    unjoined["no_pack"].add(("", item_id))
-                elif fetch.pack_id not in pack_payloads:
-                    unjoined["pack_not_in_window"].add((fetch.pack_id, item_id))
-                elif (fetch.pack_id, item_id) not in servings:
-                    unjoined["item_not_served"].add((fetch.pack_id, item_id))
+                key = (fetch.pack_id or "", item_id)
+                outcome = _fetch_join(
+                    key,
+                    has_pack=fetch.pack_id is not None,
+                    pack_ids=pack_payloads,
+                    servings=servings,
+                    listed=listed,
+                )
+                if outcome == "joined":
+                    joined.add(key)
+                elif outcome == "nearby":
+                    joined_nearby.add(key)
                 else:
-                    joined.add((fetch.pack_id, item_id))
+                    unjoined[outcome].add(key)
     except Exception:
         # GRACEFUL-DEGRADATION: the fetch half is an additive hint beside a
         # report that stands without it; a read failure degrades to no fetch
@@ -1387,6 +1428,7 @@ def _implicit_signals(
         fetch_unjoined_no_pack=len(unjoined["no_pack"]),
         fetch_unjoined_pack_not_in_window=len(unjoined["pack_not_in_window"]),
         fetch_unjoined_item_not_served=len(unjoined["item_not_served"]),
+        fetch_joined_nearby=len(joined_nearby),
         fetch_suppressed=thin,
         fetch_suppressed_reason=SUPPRESSED_THIN_PACK_SAMPLE if thin else "",
         fetch_scan=fetch_scan,
