@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -387,8 +387,92 @@ def _lexical_pairs(
     return {(a, b) for a, b in pairs if b in matches[a] or a in matches[b]}
 
 
-def _components(pairs: Sequence[tuple[str, str]]) -> list[int]:
-    """Sizes of the connected components of an undirected edge list."""
+class ClosePairCounts(TrellisModel):
+    """What :func:`embedding_close_pairs` read, so a caller can report it."""
+
+    requested: int = 0
+    embedded: int = 0
+    no_embedding: int = 0
+    embedding_unusable: int = 0
+    neighbor_queries_failed: int = 0
+    dimension_mismatches: int = 0
+    probes_saturated: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ClosePairs:
+    """The result of :func:`embedding_close_pairs`."""
+
+    pairs: dict[tuple[str, str], float]
+    embedded: frozenset[str]
+    counts: ClosePairCounts
+
+
+def embedding_close_pairs(
+    doc_ids: Sequence[str],
+    vector_store: VectorStore,
+    *,
+    threshold: float,
+    neighbors: int = DEFAULT_NEIGHBORS,
+) -> ClosePairs:
+    """Pairs within *doc_ids* whose stored embeddings reach *threshold*.
+
+    The predicate :func:`summarize_near_duplicates` uses, over a caller's
+    population: each id's vector row is read with ``get`` and probed with one
+    ``query(top_k=neighbors)``; neighbours outside *doc_ids* are discarded and
+    the cosine is recomputed from the two fetched vectors. Pairs are unordered
+    ``(min, max)`` keys; ``embedded`` names the ids that had a usable vector
+    and so could be paired. Every count is a lower bound, as in the full
+    report. Reads only.
+    """
+    counts = ClosePairCounts(requested=len(doc_ids))
+    scratch = NearDuplicatesReport(
+        basis=NearDuplicatesBasis(
+            minhash_threshold=0.0,
+            minhash_shingle_size=0,
+            minhash_num_perm=0,
+            neighbors=neighbors,
+        ),
+        max_docs=len(doc_ids),
+    )
+    docs: list[_Doc] = []
+    for doc_id in dict.fromkeys(doc_ids):
+        try:
+            vector_row = vector_store.get(doc_id)
+        except Exception:
+            # GRACEFUL-DEGRADATION: one unreadable vector row must not abort a
+            # measurement; it is counted as unusable instead.
+            logger.warning("near_duplicates_vector_read_failed")
+            counts.embedding_unusable += 1
+            continue
+        if vector_row is None:
+            counts.no_embedding += 1
+            continue
+        unit = _unit_vector(vector_row)
+        if unit is None:
+            counts.embedding_unusable += 1
+            continue
+        docs.append(_Doc(doc_id, "", "", unit))
+    counts.embedded = len(docs)
+    pairs = (
+        _candidate_pairs(
+            docs, vector_store, floor=threshold, neighbors=neighbors, report=scratch
+        )
+        if len(docs) >= 2  # noqa: PLR2004
+        else {}
+    )
+    counts.neighbor_queries_failed = scratch.neighbor_queries_failed
+    counts.dimension_mismatches = scratch.dimension_mismatches
+    counts.probes_saturated = scratch.probes_saturated
+    return ClosePairs(
+        pairs=pairs,
+        embedded=frozenset(doc.doc_id for doc in docs),
+        counts=counts,
+    )
+
+
+def connected_components(pairs: Iterable[tuple[str, str]]) -> list[set[str]]:
+    """Members of each connected component of an undirected edge list."""
     parent: dict[str, str] = {}
 
     def find(node: str) -> str:
@@ -402,10 +486,15 @@ def _components(pairs: Sequence[tuple[str, str]]) -> list[int]:
         root_a, root_b = find(a), find(b)
         if root_a != root_b:
             parent[root_a] = root_b
-    sizes: dict[str, int] = defaultdict(int)
+    members: dict[str, set[str]] = defaultdict(set)
     for node in list(parent):
-        sizes[find(node)] += 1
-    return sorted(sizes.values(), reverse=True)
+        members[find(node)].add(node)
+    return list(members.values())
+
+
+def _components(pairs: Sequence[tuple[str, str]]) -> list[int]:
+    """Sizes of the connected components of an undirected edge list."""
+    return sorted((len(c) for c in connected_components(pairs)), reverse=True)
 
 
 def _sample(pairs: list[tuple[tuple[str, str], float]]) -> list[PairSample]:
@@ -565,12 +654,16 @@ __all__ = [
     "SAMPLE_PAIRS",
     "STATUS_EMPTY",
     "STATUS_OK",
+    "ClosePairCounts",
+    "ClosePairs",
     "GroupCount",
     "NearDuplicatesBasis",
     "NearDuplicatesReport",
     "PairSample",
     "SkippedCounts",
     "ThresholdResult",
+    "connected_components",
+    "embedding_close_pairs",
     "group_of",
     "summarize_near_duplicates",
 ]

@@ -23,6 +23,10 @@ from trellis.analyze.graph_shape import (
     ReferentCoverage,
     analyze_graph_shape,
 )
+from trellis.analyze.memory_yield import (
+    DEFAULT_CAPTURE_MAX_DOCS,
+    DEFAULT_CAPTURE_THRESHOLD,
+)
 from trellis.core.vector_metadata import resolve_vector_store
 from trellis.errors import HoldoutReadoutSealedError, StoreWriteRefusedError
 from trellis.extract.telemetry import analyze_extractor_fallbacks
@@ -122,7 +126,7 @@ if TYPE_CHECKING:
         HoldoutSecondaryInference,
         HoldoutSettledWindow,
     )
-    from trellis.analyze.memory_yield import TraceYield
+    from trellis.analyze.memory_yield import CaptureBreakdown, TraceYield
     from trellis.analyze.trend import TrendReport
     from trellis.ops.write_health import RecoveryReport, ToolWriteStats
 
@@ -2547,6 +2551,24 @@ def memory_yield(
         "--no-meta-trace",
         help="Skip recording this run as a meta-Activity (Item 6 Phase 2).",
     ),
+    capture_breakdown: bool = typer.Option(
+        False,
+        "--capture-breakdown",
+        help=(
+            "Add a block splitting worker:session-capture documents by session "
+            "kind (subagent / top-level) and near-duplication, with the cross."
+        ),
+    ),
+    capture_threshold: float = typer.Option(
+        DEFAULT_CAPTURE_THRESHOLD,
+        "--capture-threshold",
+        help="Cosine floor of the breakdown's near-duplicate predicate.",
+    ),
+    capture_max_docs: int = typer.Option(
+        DEFAULT_CAPTURE_MAX_DOCS,
+        "--capture-max-docs",
+        help="Most capture documents probed for duplication, newest first.",
+    ),
 ) -> None:
     """Per creation path: documents created, served, graded, never served.
 
@@ -2558,13 +2580,19 @@ def memory_yield(
     A separate trace block counts traces recorded in the window, credited
     through the two forms whose id names the trace (its trace-summary:
     document and its trace: Activity node), broken down by outcome.status.
-    Held-out packs are dropped and counted. Read-only.
+    Held-out packs are dropped and counted. With --capture-breakdown, a
+    further block splits the worker:session-capture documents by session kind
+    (metadata.subagent, else an agent- session id) and by whether the
+    near-duplicates embedding predicate pairs them with another capture
+    document in the window (vector store read only), plus the cross.
+    Read-only.
     """
     from trellis.analyze.memory_yield import summarize_memory_yield  # noqa: PLC0415
 
     document_store = get_document_store()
     event_log = get_event_log()
     trace_store = get_trace_store()
+    vector_store = _get_registry().knowledge.vector_store if capture_breakdown else None
     with wrap_cli_meta_analysis(
         agent_suffix="analyze",
         analyzer_name="cli.analyze.memory_yield",
@@ -2576,6 +2604,10 @@ def memory_yield(
             trace_store=trace_store,
             days=days,
             limit=limit,
+            capture_breakdown=capture_breakdown,
+            vector_store=vector_store,
+            capture_threshold=capture_threshold,
+            capture_max_docs=capture_max_docs,
         )
         if _meta_record.enabled and report.totals.created > 0:
             _meta_record.produced_finding(
@@ -2584,7 +2616,7 @@ def memory_yield(
             )
 
     if output_format == "json":
-        emit_json(report.model_dump())
+        emit_json(report.dump())
         return
 
     console.print(f"[bold]Memory Yield by Creation Path[/bold] (last {days} days)")
@@ -2617,6 +2649,61 @@ def memory_yield(
         console.print(f"  [dim]note: {escape(statement)}[/dim]")
     if report.traces is not None:
         _print_trace_yield(report.traces)
+    if report.capture_breakdown is not None:
+        _print_capture_breakdown(report.capture_breakdown)
+
+
+def _print_capture_breakdown(block: CaptureBreakdown) -> None:
+    """The memory-yield capture block: counts and fixed labels only."""
+    console.print()
+    console.print(
+        f"[bold]Session-capture breakdown[/bold] ({escape(block.path)}; a second view)"
+    )
+    basis = ", ".join(
+        f"{escape(name)} {count}" for name, count in block.session_kind_basis.items()
+    )
+    for title, rows in (
+        ("by session kind", block.by_session_kind),
+        ("by duplication", block.by_duplication),
+    ):
+        console.print(f"  [bold]{title}[/bold]")
+        for row in [*rows, block.totals]:
+            console.print(
+                f"    {escape(row.group)}: created {row.created}, served "
+                f"{row.served} ({row.servings} servings), helpful "
+                f"{row.graded_helpful} ({row.helpful_servings} servings), "
+                f"unhelpful {row.graded_unhelpful} ({row.unhelpful_servings} "
+                f"servings), mixed {row.mixed}, never served {row.never_served}; "
+                f"tokens served {row.tokens_served:g}"
+            )
+    console.print("  [bold]cross[/bold]")
+    for cell in block.cross:
+        console.print(
+            f"    {escape(cell.session_kind)} x {escape(cell.duplication)}: "
+            f"created {cell.created}, served {cell.served}, helpful servings "
+            f"{cell.helpful_servings}, unhelpful servings {cell.unhelpful_servings}"
+        )
+    dup = block.duplication
+    console.print(
+        f"  [dim]session kind read from: {basis or 'none'}. Duplication: cosine "
+        f">= {dup.threshold:g}, top-{dup.neighbors} probes; {dup.probed} of "
+        f"{dup.population} probed ({dup.over_bound} over --capture-max-docs "
+        f"{dup.max_docs}), {dup.embedded} embedded, {dup.no_embedding} without "
+        f"an embedding, {dup.probes_saturated} saturated probe(s); {dup.pairs} "
+        f"pair(s) ({dup.pairs_same_session} same session, "
+        f"{dup.pairs_cross_session} cross session, {dup.pairs_unknown_session} "
+        f"unknown); {dup.clusters} cluster(s), largest {dup.largest_cluster}: "
+        f"{dup.clusters_same_session} same session "
+        f"({dup.members_in_same_session_clusters} members), "
+        f"{dup.clusters_cross_session} cross session "
+        f"({dup.members_in_cross_session_clusters} members), "
+        f"{dup.clusters_unknown_session} unknown "
+        f"({dup.members_in_unknown_session_clusters} members).[/dim]"
+    )
+    if dup.no_vector_store:
+        console.print("  [yellow]no vector store[/yellow]: every document unchecked")
+    for statement in block.limits:
+        console.print(f"  [dim]note: {escape(statement)}[/dim]")
 
 
 def _print_trace_yield(traces: TraceYield) -> None:
