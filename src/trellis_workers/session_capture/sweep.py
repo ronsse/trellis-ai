@@ -39,7 +39,11 @@ from trellis_workers.session_capture.capture import (
     rejoin_sessions,
     run_capture,
 )
-from trellis_workers.session_capture.distill import DEFAULT_DISTILL_MODEL
+from trellis_workers.session_capture.distill import (
+    DEFAULT_DISTILL_MODEL,
+    capture_system_prompt,
+    completion_tokens,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -200,13 +204,20 @@ def run_sweep(
         dry_run: Plan the sweep without writing memories or advancing the
             watermark.
 
+    ``TRELLIS_CAPTURE_PROMPT_VARIANT`` and ``TRELLIS_CAPTURE_COMPLETION_TOKENS``
+    are resolved here, before the judge is built, so an unknown prompt
+    variant fails the run before any session is judged.
+
     Raises:
         CaptureJudgeUnavailableError: no distillation judge could be built.
+        ConfigError: ``TRELLIS_CAPTURE_PROMPT_VARIANT`` names no known prompt.
     """
     root = Path(os.environ.get(ENV_ROOT, str(_default_root())))
     watermark = Path(os.environ.get(ENV_WATERMARK, str(_default_watermark())))
     source_system = os.environ.get(ENV_SOURCE_SYSTEM, DEFAULT_SOURCE_SYSTEM)
     model_id = os.environ.get(ENV_MODEL, DEFAULT_DISTILL_MODEL)
+    judge_system_prompt = capture_system_prompt()
+    judge_completion_tokens = completion_tokens()
 
     store_registry = registry
     if store_registry is None:
@@ -222,6 +233,8 @@ def run_sweep(
         sample_denominator=_sample_denominator(),
         distill_model_id=model_id,
         dry_run=dry_run,
+        judge_system_prompt=judge_system_prompt,
+        judge_completion_tokens=judge_completion_tokens,
     )
 
 

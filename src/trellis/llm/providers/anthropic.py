@@ -25,6 +25,8 @@ import structlog
 from trellis.llm.types import LLMResponse, Message, TokenUsage
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from anthropic import AsyncAnthropic
 
 logger = structlog.get_logger(__name__)
@@ -56,6 +58,7 @@ def _build_async_client(
     *,
     api_key: str | None,
     base_url: str | None,
+    default_headers: Mapping[str, str] | None = None,
 ) -> AsyncAnthropic:
     """Construct an ``AsyncAnthropic`` client, deferring the SDK import."""
     try:
@@ -72,6 +75,8 @@ def _build_async_client(
         kwargs["api_key"] = api_key
     if base_url:
         kwargs["base_url"] = base_url
+    if default_headers:
+        kwargs["default_headers"] = dict(default_headers)
     return AsyncAnthropic(**kwargs)
 
 
@@ -104,6 +109,10 @@ class AnthropicClient:
     :func:`_extract_text`; ``content`` is only the text answer.  When
     ``None`` neither key is sent and the request is exactly what it was
     before the setting existed.
+
+    **``default_headers``** is sent on every request; the registry uses it
+    for ``anthropic-workspace-id`` when a route sets ``workspace_id_env``.
+    ``None`` or empty sends no extra header.
     """
 
     def __init__(
@@ -113,11 +122,14 @@ class AnthropicClient:
         base_url: str | None = None,
         default_model: str = DEFAULT_MODEL,
         reasoning_effort: str | None = None,
+        default_headers: Mapping[str, str] | None = None,
         client: AsyncAnthropic | None = None,
     ) -> None:
         self._default_model = default_model
         self._reasoning_effort = reasoning_effort
-        self._client = client or _build_async_client(api_key=api_key, base_url=base_url)
+        self._client = client or _build_async_client(
+            api_key=api_key, base_url=base_url, default_headers=default_headers
+        )
 
     async def generate(
         self,

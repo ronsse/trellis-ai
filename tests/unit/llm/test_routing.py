@@ -285,6 +285,8 @@ class TestValidation:
 
     def test_a_tier_may_set_every_block_key(self):
         body = dict.fromkeys(LLM_BLOCK_KEYS, "x")
+        # ``workspace_id_env`` is accepted only on an Anthropic route.
+        body["provider"] = "anthropic"
         validate_llm_routing(_config(tiers={"t": body}))
 
 
@@ -350,6 +352,8 @@ class TestDescribe:
             "model": "deep",
             "base_url": "http://localhost:4000/v1",
             "local": False,
+            "reasoning_effort": None,
+            "workspace_id_env": None,
             "api_key_env": "LITELLM_API_KEY",
             "credential_source": None,
         }

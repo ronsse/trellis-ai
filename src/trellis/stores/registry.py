@@ -751,6 +751,40 @@ def _mask_api_key(api_key: str | None) -> str:
     return f"***{api_key[-4:]}"
 
 
+def _resolve_workspace_headers(
+    cfg: Mapping[str, Any], *, provider: Any, setting_prefix: str
+) -> dict[str, Any]:
+    """``{"default_headers": {...}}`` for a route naming a workspace, else ``{}``.
+
+    ``workspace_id_env`` names an environment variable holding an Anthropic
+    workspace id. Unlike an unresolved API key (a "not configured" state that
+    returns no client), a named variable that is unset or empty raises: the
+    operator pinned this route to one workspace, and building without the
+    header would bill and govern the calls under another. The value is never
+    logged.
+    """
+    import os  # noqa: PLC0415
+
+    env_name = cfg.get("workspace_id_env")
+    if env_name is None:
+        return {}
+    setting = f"{setting_prefix}.workspace_id_env"
+    if provider != "anthropic":
+        msg = (
+            "workspace_id_env is an Anthropic header and is only sent on a"
+            f" provider: anthropic route, not {provider!r}"
+        )
+        raise ConfigError(msg, setting=setting)
+    value = os.environ.get(str(env_name), "").strip()
+    if not value:
+        msg = (
+            f"workspace_id_env names {str(env_name)!r}, which is unset or empty;"
+            " set it, or drop workspace_id_env to send no workspace header"
+        )
+        raise ConfigError(msg, setting=setting)
+    return {"default_headers": {"anthropic-workspace-id": value}}
+
+
 def _resolve_api_key(cfg: Mapping[str, Any]) -> str | None:
     """Resolve an API key from a config block.
 
@@ -2571,7 +2605,8 @@ class StoreRegistry:
               # api_key: sk-...             # OR literal (discouraged)
               model: gpt-4o-mini
               base_url: https://...       # optional
-              reasoning_effort: high      # optional; parent block only
+              reasoning_effort: high      # optional; a tier may set its own
+              # workspace_id_env: ANTHROPIC_WORKSPACE_ID  # anthropic only
               tiers:                      # optional named variants
                 deep: {model: gpt-5}
               routes:                     # optional consumer -> tier
@@ -2622,13 +2657,17 @@ class StoreRegistry:
 
         base_url = cfg.get("base_url")
         model = cfg.get("model")
+        setting_prefix = "llm" if route.tier is None else f"llm.tiers.{route.tier}"
         reasoning_effort = cfg.get("reasoning_effort")
         if reasoning_effort is not None and not isinstance(reasoning_effort, str):
             msg = "llm.reasoning_effort must be a string such as 'high'"
-            raise ConfigError(msg, setting="llm.reasoning_effort")
+            raise ConfigError(msg, setting=f"{setting_prefix}.reasoning_effort")
         # Passed only when set, so an unset block builds exactly as before.
         effort: dict[str, Any] = (
             {} if reasoning_effort is None else {"reasoning_effort": reasoning_effort}
+        )
+        workspace_headers = _resolve_workspace_headers(
+            cfg, provider=provider, setting_prefix=setting_prefix
         )
         masked = _mask_api_key(api_key)
 
@@ -2681,6 +2720,7 @@ class StoreRegistry:
                     base_url=base_url,
                     default_model=chosen_model,
                     **effort,
+                    **workspace_headers,
                 )
             except ModuleNotFoundError as exc:
                 # Constructor itself imports the anthropic SDK lazily.

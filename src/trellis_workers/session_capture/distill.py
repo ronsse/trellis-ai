@@ -37,6 +37,7 @@ import structlog
 
 from trellis.core.elision import elide_text
 from trellis.core.memory_op_judged import emit_memory_op_judged
+from trellis.errors import ConfigError
 from trellis.llm import Message
 from trellis.llm.json_response import (
     JSONParseOutcome,
@@ -170,6 +171,47 @@ def judge_context_tokens(env: Mapping[str, str] | None = None) -> int:
     )
 
 
+#: Operator choice of the sweep's judge system prompt, by name among
+#: :data:`PROMPT_VARIANTS`. Unset means the production default prompt.
+ENV_PROMPT_VARIANT = "TRELLIS_CAPTURE_PROMPT_VARIANT"
+
+#: Operator override for the sweep's completion budget (``max_tokens``, and
+#: the completion reserve of the window pre-flight). Unset means
+#: :data:`DEFAULT_COMPLETION_TOKENS`.
+ENV_COMPLETION_TOKENS = "TRELLIS_CAPTURE_COMPLETION_TOKENS"
+
+
+def completion_tokens(env: Mapping[str, str] | None = None) -> int:
+    """Resolve the sweep's completion budget, honouring the operator override."""
+    return _positive_int_env(ENV_COMPLETION_TOKENS, DEFAULT_COMPLETION_TOKENS, env)
+
+
+def capture_system_prompt(env: Mapping[str, str] | None = None) -> str | None:
+    """Resolve the sweep's judge system prompt from :data:`ENV_PROMPT_VARIANT`.
+
+    ``None`` when the variable is unset, which :func:`distill_session` reads
+    as the production prompt, so an unset deployment sends exactly what it
+    always sent. Unlike the numeric knobs, an unknown name raises rather than
+    falling back: an operator who asked for a specific prompt and silently got
+    another would read the sweep's output as that prompt's.
+
+    Raises:
+        ConfigError: the variable names no member of :data:`PROMPT_VARIANTS`.
+    """
+    source = os.environ if env is None else env
+    name = source.get(ENV_PROMPT_VARIANT, "").strip()
+    if not name:
+        return None
+    if name not in PROMPT_VARIANTS:
+        known = ", ".join(sorted(PROMPT_VARIANTS))
+        msg = (
+            f"{ENV_PROMPT_VARIANT}={name!r} is not a known prompt variant;"
+            f" known: {known}"
+        )
+        raise ConfigError(msg, setting=ENV_PROMPT_VARIANT)
+    return PROMPT_VARIANTS[name]
+
+
 #: Per-session distillation timeout (seconds).
 DEFAULT_TIMEOUT_S = 60.0
 
@@ -266,10 +308,11 @@ _VERBATIM_EVIDENCE_SYSTEM_PROMPT = _replace_once(
     '"evidence": str (the exact quote, copied verbatim from the session), ',
 )
 
-#: System prompts an offline judge eval may select by name. The sweep always
-#: uses :data:`DEFAULT_PROMPT_VARIANT`; a candidate prompt is added here, under
-#: a new name, so an eval arm can compare it against production on the same
-#: transcripts before anything changes what the sweep sends.
+#: System prompts an offline judge eval may select by name. The sweep uses
+#: :data:`DEFAULT_PROMPT_VARIANT` unless the operator names another in
+#: :data:`ENV_PROMPT_VARIANT`; a candidate prompt is added here, under a new
+#: name, so an eval arm can compare it against production on the same
+#: transcripts before an operator points the sweep at it.
 PROMPT_VARIANTS: Mapping[str, str] = MappingProxyType(
     {
         DEFAULT_PROMPT_VARIANT: _SYSTEM_PROMPT,
@@ -508,12 +551,14 @@ def distill_session(
     The autonomous sweep never writes raw or guessed content when the judge is
     down — the opposite of #263's reconcile fail-open.
 
-    The sweep passes none of ``salient_chars``, ``context_tokens``,
-    ``system_prompt`` or ``max_tokens``; each ``None`` resolves exactly as
-    before they existed (env-honouring cap, env-declared window, production
-    prompt, a :data:`DEFAULT_COMPLETION_TOKENS` completion cap). The offline
-    judge eval sets them per arm. ``max_tokens`` is both the call's completion
-    cap and the completion reserve of the window pre-flight.
+    The sweep passes neither ``salient_chars`` nor ``context_tokens``, and
+    passes ``system_prompt`` / ``max_tokens`` as resolved from
+    :data:`ENV_PROMPT_VARIANT` / :data:`ENV_COMPLETION_TOKENS` (``None`` and
+    ``1200`` when those are unset). Each ``None`` resolves exactly as before
+    these parameters existed (env-honouring cap, env-declared window,
+    production prompt, a :data:`DEFAULT_COMPLETION_TOKENS` completion cap).
+    The offline judge eval sets them per arm. ``max_tokens`` is both the
+    call's completion cap and the completion reserve of the window pre-flight.
     """
     completion_tokens = DEFAULT_COMPLETION_TOKENS if max_tokens is None else max_tokens
     if client is None:
