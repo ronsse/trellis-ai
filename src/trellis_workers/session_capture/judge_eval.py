@@ -59,7 +59,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 import yaml
@@ -160,7 +160,11 @@ _FINGERPRINT_FIELDS = (
 
 #: Arm fields fingerprinted only when they differ from their default, so an
 #: output directory recorded before the field existed still resumes.
-_FINGERPRINT_FIELDS_IF_SET = {"max_tokens": distill.DEFAULT_COMPLETION_TOKENS}
+_FINGERPRINT_FIELDS_IF_SET: dict[str, object] = {
+    "max_tokens": distill.DEFAULT_COMPLETION_TOKENS,
+    "provider": "openai",
+    "reasoning_effort": None,
+}
 
 #: ``parse_error`` of a call whose reply had no content (empty or whitespace).
 #: Production parses such a reply as ``malformed`` like any other; the eval
@@ -200,6 +204,17 @@ class JudgeArm(TrellisModel):
     #: The operator's declaration that this endpoint keeps data on the host,
     #: exactly as ``llm.local`` in ``config.yaml``; never inferred.
     local: bool = False
+    #: The registry's ``llm.provider`` for this arm. ``anthropic`` needs the
+    #: ``[llm-anthropic]`` extra and a ``base_url`` of the Messages endpoint.
+    provider: Literal["openai", "anthropic"] = "openai"
+    #: The registry's ``llm.reasoning_effort``: sent as ``reasoning_effort``
+    #: on OpenAI, as adaptive thinking plus ``output_config.effort`` on
+    #: Anthropic (see each provider's client docstring). Unset sends neither.
+    reasoning_effort: str | None = Field(default=None, min_length=1)
+    #: Optional prices in USD per million prompt / completion tokens. Never
+    #: fingerprinted: they change only the summary's ``estimated_cost_usd``.
+    input_usd_per_mtok: float | None = Field(default=None, ge=0)
+    output_usd_per_mtok: float | None = Field(default=None, ge=0)
 
     @field_validator("name")
     @classmethod
@@ -356,15 +371,16 @@ def arm_fingerprint(arm: JudgeArm) -> str:
 
 def _arm_registry(arm: JudgeArm) -> StoreRegistry:
     """A store-less registry whose ``llm:`` block is this arm."""
-    return StoreRegistry(
-        llm_config={
-            "provider": "openai",
-            "model": arm.model,
-            "base_url": arm.base_url,
-            "api_key_env": arm.api_key_env,
-            "local": arm.local,
-        }
-    )
+    llm_config: dict[str, Any] = {
+        "provider": arm.provider,
+        "model": arm.model,
+        "base_url": arm.base_url,
+        "api_key_env": arm.api_key_env,
+        "local": arm.local,
+    }
+    if arm.reasoning_effort is not None:
+        llm_config["reasoning_effort"] = arm.reasoning_effort
+    return StoreRegistry(llm_config=llm_config)
 
 
 def build_arm_client(arm: JudgeArm) -> LLMClient | None:
@@ -528,6 +544,7 @@ def judge_transcript(
     if result.usage is not None:
         call["prompt_tokens"] = result.usage.prompt_tokens
         call["completion_tokens"] = result.usage.completion_tokens
+        call["reasoning_tokens"] = result.usage.reasoning_tokens
 
     # The window the judge was shown: the user message of the same prompt.
     shown = distill.build_distill_messages(
@@ -601,6 +618,7 @@ def _call_row(transcript_id: str, arm: JudgeArm) -> dict[str, Any]:
         "latency_s": None,
         "prompt_tokens": None,
         "completion_tokens": None,
+        "reasoning_tokens": None,
         "candidates": 0,
     }
 
@@ -704,7 +722,8 @@ def _refuse_changed_arms(
         msg = (
             f"arm {names} was recorded in this output directory with a different "
             "config (model, base_url, local, salient_chars, context_tokens, "
-            "prompt_variant or max_tokens); use a new arm name or a new output "
+            "prompt_variant, max_tokens, provider or reasoning_effort); use a "
+            "new arm name or a new output "
             "directory"
         )
         raise EvalConfigError(msg)
@@ -918,6 +937,9 @@ def _summarise_arm(
     latencies = [float(c["latency_s"]) for c in asked if _completed(c)]
     failed_latencies = [float(c["latency_s"]) for c in asked if not _completed(c)]
     usage = [c for c in calls if c.get("prompt_tokens") is not None]
+    prompt_tokens = sum(int(c["prompt_tokens"]) for c in usage)
+    completion_tokens = sum(int(c.get("completion_tokens") or 0) for c in usage)
+    reasoning = [c for c in calls if c.get("reasoning_tokens") is not None]
     accepted = [c for c in candidates if c.get("accepted")]
     rejected: dict[str, int] = {}
     for row in candidates:
@@ -931,6 +953,8 @@ def _summarise_arm(
     return {
         "arm": arm.name,
         "model": arm.model,
+        "provider": arm.provider,
+        "reasoning_effort": arm.reasoning_effort,
         "salient_chars": arm.salient_chars,
         "context_tokens": arm.context_tokens,
         "prompt_variant": arm.prompt_variant,
@@ -968,9 +992,32 @@ def _summarise_arm(
         "mean_latency_s": _mean(latencies),
         "failed_calls_mean_latency_s": _mean(failed_latencies),
         "calls_reporting_usage": len(usage),
-        "prompt_tokens": sum(int(c["prompt_tokens"]) for c in usage),
-        "completion_tokens": sum(int(c.get("completion_tokens") or 0) for c in usage),
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        # An inclusive share of completion_tokens; null when no call reported it.
+        "reasoning_tokens": (
+            sum(int(c["reasoning_tokens"]) for c in reasoning) if reasoning else None
+        ),
+        "calls_reporting_reasoning_tokens": len(reasoning),
+        "estimated_cost_usd": _estimated_cost(arm, prompt_tokens, completion_tokens),
     }
+
+
+def _estimated_cost(
+    arm: JudgeArm, prompt_tokens: int, completion_tokens: int
+) -> float | None:
+    """The arm's token totals at its stated prices; ``None`` unless both are set.
+
+    Prompt and completion tokens only: a provider's cache discounts are not
+    modelled, and reasoning tokens are already inside ``completion_tokens``.
+    """
+    if arm.input_usd_per_mtok is None or arm.output_usd_per_mtok is None:
+        return None
+    cost = (
+        prompt_tokens * arm.input_usd_per_mtok
+        + completion_tokens * arm.output_usd_per_mtok
+    ) / 1_000_000
+    return round(cost, 6)
 
 
 def _gold_match(

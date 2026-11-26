@@ -144,6 +144,56 @@ def test_build_llm_client_anthropic_literal_key(
     assert isinstance(client, AnthropicClient)
 
 
+@pytest.mark.parametrize(
+    ("provider", "sdk"), [("openai", "openai"), ("anthropic", "anthropic")]
+)
+def test_build_llm_client_threads_reasoning_effort(
+    tmp_path: Path, provider: str, sdk: str
+) -> None:
+    """``llm.reasoning_effort`` reaches the client's constructor setting."""
+    pytest.importorskip(sdk)
+    config_dir = _write_config(
+        tmp_path,
+        {
+            "provider": provider,
+            "api_key": "sk-literal-XYZ9",
+            "model": "some-model",
+            "reasoning_effort": "high",
+        },
+    )
+    registry = StoreRegistry.from_config_dir(
+        config_dir=config_dir, data_dir=tmp_path / "data"
+    )
+    client = registry.build_llm_client()
+    assert client is not None
+    assert client._reasoning_effort == "high"  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+def test_build_llm_client_reasoning_effort_defaults_to_none(provider: str) -> None:
+    pytest.importorskip(provider)
+    registry = StoreRegistry(
+        llm_config={"provider": provider, "api_key": "sk-literal-XYZ9"}
+    )
+    client = registry.build_llm_client()
+    assert client is not None
+    assert client._reasoning_effort is None  # type: ignore[attr-defined]
+
+
+def test_build_llm_client_rejects_a_non_string_reasoning_effort() -> None:
+    from trellis.errors import ConfigError
+
+    registry = StoreRegistry(
+        llm_config={
+            "provider": "openai",
+            "api_key": "sk-literal-XYZ9",
+            "reasoning_effort": 3,
+        }
+    )
+    with pytest.raises(ConfigError, match="reasoning_effort"):
+        registry.build_llm_client()
+
+
 def test_build_llm_client_no_config_file(tmp_path: Path) -> None:
     """Registry with no config file at all returns None."""
     registry = StoreRegistry.from_config_dir(

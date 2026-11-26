@@ -1069,3 +1069,133 @@ def test_an_empty_reply_is_named_not_just_malformed(tmp_path: Path) -> None:
     assert calls["garbled"]["parse_error"] != judge_eval.PARSE_ERROR_EMPTY_CONTENT
     assert report["arms"]["blank"]["empty_content_replies"] == 1
     assert report["arms"]["garbled"]["empty_content_replies"] == 0
+
+
+# -- provider, reasoning effort, reasoning tokens and cost -----------------
+
+
+class ReasoningUsageClient(UsageClient):
+    """A judge that reports *reasoning* tokens (``None``: not reported)."""
+
+    def __init__(self, responses: list[str], *, reasoning: int | None) -> None:
+        super().__init__(responses)
+        self._reasoning = reasoning
+
+    async def generate(self, *, messages: list[Any], **kwargs: Any) -> LLMResponse:
+        response = await super().generate(messages=messages, **kwargs)
+        assert response.usage is not None
+        usage = response.usage.model_copy(update={"reasoning_tokens": self._reasoning})
+        return response.model_copy(update={"usage": usage})
+
+
+def test_new_arm_fields_at_their_defaults_keep_the_old_fingerprint() -> None:
+    import hashlib
+
+    old_fields = {
+        "model": "fake-model",
+        "base_url": "http://127.0.0.1:9/v1",
+        "local": False,
+        "salient_chars": judge_eval.distill.DEFAULT_MAX_SALIENT_CHARS,
+        "context_tokens": judge_eval.distill.DEFAULT_JUDGE_CONTEXT_TOKENS,
+        "prompt_variant": "default",
+    }
+    old = hashlib.sha256(json.dumps(old_fields, sort_keys=True).encode()).hexdigest()
+    assert judge_eval.arm_fingerprint(_arm()) == old[:16]
+    assert judge_eval.arm_fingerprint(_arm(provider="openai")) == old[:16]
+    # Prices never change what a call asks, so they never move the fingerprint.
+    priced = _arm(input_usd_per_mtok=1.0, output_usd_per_mtok=5.0)
+    assert judge_eval.arm_fingerprint(priced) == old[:16]
+    assert judge_eval.arm_fingerprint(_arm(provider="anthropic")) != old[:16]
+    assert judge_eval.arm_fingerprint(_arm(reasoning_effort="high")) != old[:16]
+    assert judge_eval.arm_fingerprint(
+        _arm(reasoning_effort="high")
+    ) != judge_eval.arm_fingerprint(_arm(reasoning_effort="low"))
+
+
+def test_arm_fields_are_validated() -> None:
+    with pytest.raises(ValueError, match="provider"):
+        _arm(provider="gemini")
+    with pytest.raises(ValueError, match="reasoning_effort"):
+        _arm(reasoning_effort="")
+    with pytest.raises(ValueError, match="input_usd_per_mtok"):
+        _arm(input_usd_per_mtok=-1)
+
+
+def test_the_arm_registry_carries_provider_and_effort_only_when_set() -> None:
+    plain = judge_eval._arm_registry(_arm())._llm_config
+    assert plain["provider"] == "openai"
+    assert "reasoning_effort" not in plain
+    tuned = judge_eval._arm_registry(
+        _arm(provider="anthropic", reasoning_effort="max")
+    )._llm_config
+    assert tuned["provider"] == "anthropic"
+    assert tuned["reasoning_effort"] == "max"
+
+
+def test_an_anthropic_arm_builds_an_anthropic_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("anthropic")
+    from trellis.llm.providers.anthropic import AnthropicClient
+
+    monkeypatch.setenv("FAKE_JUDGE_KEY", "fake-sentinel-key-value-7f3a")
+    client = judge_eval.build_arm_client(
+        _arm(provider="anthropic", reasoning_effort="high")
+    )
+    assert isinstance(client, AnthropicClient)
+    assert client._reasoning_effort == "high"
+
+
+def test_reasoning_tokens_reach_the_call_row_and_the_summary(tmp_path: Path) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "s1.jsonl", _plain("sess-1"))
+    write_transcript(transcripts / "s2.jsonl", _plain("sess-2"))
+    reply = candidates_json(good_candidate(evidence=_QUOTE))
+    clients = {
+        "thinks": ReasoningUsageClient([reply], reasoning=15),
+        "silent": ReasoningUsageClient([reply], reasoning=None),
+    }
+    report = run_eval(
+        transcripts,
+        [_arm("thinks", reasoning_effort="high"), _arm("silent")],
+        out,
+        client_factory=lambda arm: clients[arm.name],
+        local_of=_remote,
+    )
+    calls = _rows(out / judge_eval.CALLS_FILE)
+    by_arm: dict[str, list[Any]] = {}
+    for call in calls:
+        by_arm.setdefault(call["arm"], []).append(call["reasoning_tokens"])
+    assert by_arm == {"thinks": [15, 15], "silent": [None, None]}
+    thinks = report["arms"]["thinks"]
+    assert thinks["reasoning_tokens"] == 30
+    assert thinks["calls_reporting_reasoning_tokens"] == 2
+    assert thinks["reasoning_effort"] == "high"
+    assert thinks["provider"] == "openai"
+    silent = report["arms"]["silent"]
+    assert silent["reasoning_tokens"] is None
+    assert silent["calls_reporting_reasoning_tokens"] == 0
+    assert silent["reasoning_effort"] is None
+
+
+def test_estimated_cost_needs_both_prices(tmp_path: Path) -> None:
+    transcripts, out = _dirs(tmp_path)
+    write_transcript(transcripts / "s1.jsonl", _plain("sess-1"))
+    client = UsageClient([candidates_json(good_candidate(evidence=_QUOTE))])
+    report = run_eval(
+        transcripts,
+        [
+            _arm("priced", input_usd_per_mtok=2.0, output_usd_per_mtok=10.0),
+            _arm("half", input_usd_per_mtok=2.0),
+            _arm("free"),
+        ],
+        out,
+        client_factory=_factory(client),
+        local_of=_remote,
+    )
+    # UsageClient reports 100 prompt and 20 completion tokens per call.
+    assert report["arms"]["priced"]["estimated_cost_usd"] == pytest.approx(
+        (100 * 2.0 + 20 * 10.0) / 1_000_000
+    )
+    assert report["arms"]["half"]["estimated_cost_usd"] is None
+    assert report["arms"]["free"]["estimated_cost_usd"] is None

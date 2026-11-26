@@ -81,6 +81,29 @@ class AnthropicClient:
     System messages are collapsed into the ``system`` parameter per the
     Messages API convention.  All other ``Message`` entries become
     conversation turns.
+
+    **``reasoning_effort``** (``llm.reasoning_effort`` in config) is a
+    per-client setting, not a ``generate`` argument, so the ``LLMClient``
+    protocol is unchanged.  When set, every request carries adaptive
+    thinking plus an effort level::
+
+        thinking={"type": "adaptive"}
+        output_config={"effort": <reasoning_effort>}
+
+    The value is forwarded verbatim (the API documents ``low``, ``medium``,
+    ``high``, ``xhigh`` and ``max``; the endpoint rejects anything else).  No
+    ``budget_tokens`` is ever sent: the fixed-budget form
+    ``{"type": "enabled", "budget_tokens": N}`` is deprecated on the 4.6
+    models and rejected with a 400 on 4.7 and later, and it would need
+    ``1024 <= N < max_tokens`` checking here.  Adaptive thinking instead
+    draws from ``max_tokens``, so the budget-below-``max_tokens`` rule is
+    satisfied by construction and ``max_tokens`` must cover thinking *and*
+    answer.  Adaptive thinking and ``effort`` need a 4.6 or later model;
+    the pre-4.6 line, including :data:`DEFAULT_MODEL`, refuses them, so set
+    ``model:`` with it.  Thinking blocks in the reply are dropped by
+    :func:`_extract_text`; ``content`` is only the text answer.  When
+    ``None`` neither key is sent and the request is exactly what it was
+    before the setting existed.
     """
 
     def __init__(
@@ -89,9 +112,11 @@ class AnthropicClient:
         api_key: str | None = None,
         base_url: str | None = None,
         default_model: str = DEFAULT_MODEL,
+        reasoning_effort: str | None = None,
         client: AsyncAnthropic | None = None,
     ) -> None:
         self._default_model = default_model
+        self._reasoning_effort = reasoning_effort
         self._client = client or _build_async_client(api_key=api_key, base_url=base_url)
 
     async def generate(
@@ -145,6 +170,10 @@ class AnthropicClient:
         }
         if system_text:
             kwargs["system"] = system_text
+        if self._reasoning_effort is not None:
+            # See the class docstring for the mapping and why no budget.
+            kwargs["thinking"] = {"type": "adaptive"}
+            kwargs["output_config"] = {"effort": self._reasoning_effort}
 
         resp = await self._client.messages.create(**kwargs)
         content = _extract_text(resp)
@@ -203,6 +232,9 @@ def _extract_usage(usage: Any) -> TokenUsage | None:
         return None
     input_tokens = getattr(usage, "input_tokens", 0) or 0
     output_tokens = getattr(usage, "output_tokens", 0) or 0
+    # ``output_tokens_details.thinking_tokens`` is included in
+    # ``output_tokens``; absent (older SDK, no thinking) reads as None.
+    details = getattr(usage, "output_tokens_details", None)
     return TokenUsage(
         prompt_tokens=int(input_tokens),
         completion_tokens=int(output_tokens),
@@ -213,4 +245,5 @@ def _extract_usage(usage: Any) -> TokenUsage | None:
         total_tokens=int(input_tokens) + int(output_tokens),
         cache_creation_input_tokens=_cache_count(usage, "cache_creation_input_tokens"),
         cache_read_input_tokens=_cache_count(usage, "cache_read_input_tokens"),
+        reasoning_tokens=_cache_count(details, "thinking_tokens"),
     )

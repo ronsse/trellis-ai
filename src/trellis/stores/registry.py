@@ -2571,6 +2571,7 @@ class StoreRegistry:
               # api_key: sk-...             # OR literal (discouraged)
               model: gpt-4o-mini
               base_url: https://...       # optional
+              reasoning_effort: high      # optional; parent block only
               tiers:                      # optional named variants
                 deep: {model: gpt-5}
               routes:                     # optional consumer -> tier
@@ -2621,6 +2622,14 @@ class StoreRegistry:
 
         base_url = cfg.get("base_url")
         model = cfg.get("model")
+        reasoning_effort = cfg.get("reasoning_effort")
+        if reasoning_effort is not None and not isinstance(reasoning_effort, str):
+            msg = "llm.reasoning_effort must be a string such as 'high'"
+            raise ConfigError(msg, setting="llm.reasoning_effort")
+        # Passed only when set, so an unset block builds exactly as before.
+        effort: dict[str, Any] = (
+            {} if reasoning_effort is None else {"reasoning_effort": reasoning_effort}
+        )
         masked = _mask_api_key(api_key)
 
         built: LLMClient | None = None
@@ -2644,6 +2653,7 @@ class StoreRegistry:
                     api_key=api_key,
                     base_url=base_url,
                     default_model=chosen_model,
+                    **effort,
                 )
             except ModuleNotFoundError as exc:
                 # Constructor itself imports the openai SDK lazily.
@@ -2670,6 +2680,7 @@ class StoreRegistry:
                     api_key=api_key,
                     base_url=base_url,
                     default_model=chosen_model,
+                    **effort,
                 )
             except ModuleNotFoundError as exc:
                 # Constructor itself imports the anthropic SDK lazily.
