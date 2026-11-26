@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -15,6 +14,7 @@ from trellis.core.knobs import resolve_rest_pack_max_items, resolve_rest_pack_ma
 from trellis.core.precedent_document import is_promoted_precedent_document
 from trellis.retrieve.builder_factory import build_pack_builder, describe_axes
 from trellis.retrieve.nearby import NEARBY_KEY
+from trellis.retrieve.node_search import readable_matches, search_readable_nodes
 from trellis.retrieve.pack_builder import PackBuilder
 from trellis.retrieve.precedents import (
     PrecedentClearance,
@@ -28,7 +28,6 @@ from trellis.retrieve.sensitivity import (
     DocumentClearance,
     conceal_document_rows,
     conceal_graph_pointers,
-    conceal_node_pointers,
     conceal_withheld_ids,
     is_public_only,
 )
@@ -58,7 +57,6 @@ from trellis_wire.dtos import (
 
 if TYPE_CHECKING:
     from trellis.schemas.classification import Sensitivity
-    from trellis.stores.base.graph import GraphStore
 
 logger = structlog.get_logger(__name__)
 
@@ -420,49 +418,6 @@ def assemble_sectioned_pack(
     )
 
 
-# Rows per store call when walking the matches for a caller below restricted.
-_PRECEDENT_SCAN_PAGE = 500
-
-
-def _readable_matches(
-    store: GraphStore,
-    precedents: PrecedentClearance,
-    q: str | None,
-    node_type: str | None = None,
-    *,
-    sort: str = "created_at",
-    descending: bool = True,
-) -> Iterator[dict[str, Any]]:
-    """Every match of ``q`` (and ``node_type``) the caller may read, in sort order.
-
-    The one predicate ``/graph/search``'s page, its ``total`` and its facets
-    share, so they cannot disagree: ``precedents.verdict_of`` is ``None``. That
-    withholds a node labelled above the caller (#1029, #1264) and any node in
-    the promoted-precedent namespace the caller may not read (#1080), whatever
-    type it is stored under. Walks every match once, in store pages of
-    ``_PRECEDENT_SCAN_PAGE``; ``search_nodes`` ends each sort key with
-    ``node_id``, so the pages neither repeat nor skip a row while the graph
-    does not change. A label is read from the row in hand, and only a node in
-    the precedent namespace costs a document read.
-    """
-    offset = 0
-    while True:
-        rows, total = store.search_nodes(
-            search=q,
-            node_type=node_type,
-            sort=sort,
-            descending=descending,
-            limit=_PRECEDENT_SCAN_PAGE,
-            offset=offset,
-        )
-        for r in rows:
-            if precedents.verdict_of(r["node_id"], r) is None:
-                yield r
-        offset += len(rows)
-        if not rows or offset >= total:
-            return
-
-
 @router.get(
     "/graph/search",
     summary="Search graph entities",
@@ -508,25 +463,17 @@ def search_entities(
     descending = order.lower() != "asc"
     clearance = request_clearance(ctx)
     precedents = PrecedentClearance(registry.knowledge.document_store, clearance, store)
-    if clearance == "restricted":
-        rows, total = store.search_nodes(
-            search=q,
-            node_type=node_type,
-            sort=sort_key,
-            descending=descending,
-            limit=limit,
-            offset=offset,
-        )
-    else:
-        rows, total = [], 0
-        for row in _readable_matches(
-            store, precedents, q, node_type, sort=sort_key, descending=descending
-        ):
-            if offset <= total < offset + limit:
-                rows.append(row)
-            total += 1
-    rows = conceal_node_pointers(
-        rows, registry.knowledge.document_store, clearance, precedents=precedents
+    rows, total = search_readable_nodes(
+        store,
+        registry.knowledge.document_store,
+        precedents,
+        clearance,
+        q=q,
+        node_type=node_type,
+        sort=sort_key,
+        descending=descending,
+        limit=limit,
+        offset=offset,
     )
     results = [
         {
@@ -582,7 +529,7 @@ def search_entity_facets(
             registry.knowledge.document_store, clearance, store
         )
         counts = {}
-        for row in _readable_matches(store, precedents, q or None):
+        for row in readable_matches(store, precedents, q or None):
             counts[row["node_type"]] = counts.get(row["node_type"], 0) + 1
     node_types = [
         {"node_type": node_type, "count": count}

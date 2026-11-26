@@ -15,7 +15,7 @@ from trellis.mcp.tools import experience_knowledge  # save_experience, save_know
 from trellis.mcp.tools import memory  # save_memory
 from trellis.mcp.tools import (
     lookup,
-)  # get_lessons, get_graph, get_items, get_file_context
+)  # get_lessons, get_graph, find_entity, get_items, get_file_context
 from trellis.mcp.tools import feedback  # record_feedback
 from trellis.mcp.tools import (
     legacy_context,

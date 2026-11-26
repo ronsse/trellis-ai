@@ -36,6 +36,7 @@ get_task_context = unwrap_tool(server_mod.get_task_context)
 search = unwrap_tool(server_mod.search)
 get_items = unwrap_tool(server_mod.get_items)
 get_graph = unwrap_tool(server_mod.get_graph)
+find_entity = unwrap_tool(server_mod.find_entity)
 get_lessons = unwrap_tool(server_mod.get_lessons)
 get_file_context = unwrap_tool(server_mod.get_file_context)
 query_observations = unwrap_tool(server_mod.query_observations)
@@ -206,6 +207,7 @@ class TestRefusedTools:
         ("name", "call"),
         [
             ("get_graph", lambda: get_graph("node-1")),
+            ("find_entity", lambda: find_entity("node")),
             ("get_lessons", get_lessons),
             ("get_file_context", lambda: get_file_context(["svc/plain.py"])),
             ("query_observations", query_observations),

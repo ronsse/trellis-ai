@@ -33,6 +33,7 @@ EXPECTED_TOOL_NAMES = [
     "save_memory",
     "get_lessons",
     "get_graph",
+    "find_entity",
     "get_items",
     "get_file_context",
     "record_feedback",

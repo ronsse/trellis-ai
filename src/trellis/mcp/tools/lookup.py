@@ -1,6 +1,7 @@
 """Read-by-id tools.
 
-``get_lessons``, ``get_graph``, ``get_items`` and ``get_file_context``.
+``get_lessons``, ``get_graph``, ``find_entity``, ``get_items`` and
+``get_file_context``.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from trellis.mcp.grading_trailer import with_grading_trailer
 from trellis.mcp.tools.context import _track_tokens
 from trellis.mcp.wiring import _get_registry
 from trellis.retrieve.builder_factory import _get_lessons_pack_event_enabled
+from trellis.retrieve.excerpts import truncate_excerpt
 from trellis.retrieve.file_context import build_file_context
 from trellis.retrieve.formatters import (
     format_entity_as_markdown,
@@ -34,6 +36,7 @@ from trellis.retrieve.formatters import (
     format_subgraph_as_markdown,
 )
 from trellis.retrieve.lessons_pack import record_lessons_pack
+from trellis.retrieve.node_search import search_readable_nodes
 from trellis.retrieve.precedents import PrecedentClearance
 from trellis.retrieve.reference import fetched_body
 from trellis.retrieve.sensitivity import (
@@ -128,6 +131,9 @@ def get_graph(
 ) -> str:
     """Get an entity and its neighborhood from the knowledge graph.
 
+    The id comes from a pack item, an index line, or ``find_entity``, which
+    looks an entity up by name.
+
     Args:
         entity_id: The entity ID to explore.
         depth: How many relationship hops to traverse (default 1).
@@ -186,6 +192,131 @@ def get_graph(
     except Exception:
         # GRACEFUL-DEGRADATION: token tracking is post-success telemetry.
         logger.exception("token_tracking_failed", operation="get_graph")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Macro Tool: find_entity — look an entity up by name
+# ---------------------------------------------------------------------------
+
+#: Most entities one ``find_entity`` call lists; a larger sweep is the REST
+#: ``/graph/search`` surface's job.
+_FIND_ENTITY_MAX_LIMIT = 100
+
+#: Characters of a node's ``description`` / ``summary`` shown on its line.
+_FIND_ENTITY_DESCRIPTOR_CHARS = 120
+
+_FIND_ENTITY_HINT = "Walk from an id with `get_graph(entity_id)`."
+
+
+def _entity_line(row: dict[str, Any]) -> str:
+    """One ``find_entity`` line: id, type, name and a short descriptor."""
+    props = row.get("properties") or {}
+    name = props.get("name", row["node_id"])
+    line = f"- `{row['node_id']}` ({row.get('node_type', '?')}) **{name}**"
+    for key in ("description", "summary"):
+        value = props.get(key)
+        if isinstance(value, str) and value.strip():
+            text = " ".join(value.split())
+            return f"{line} — {truncate_excerpt(text, _FIND_ENTITY_DESCRIPTOR_CHARS)}"
+    return line
+
+
+def _render_entity_matches(
+    rows: list[dict[str, Any]],
+    total: int,
+    query: str,
+    node_type: str | None,
+    max_tokens: int,
+) -> str:
+    """Whole lines up to ``max_tokens``; what did not fit is counted, never cut."""
+    scope = f' of type "{node_type}"' if node_type else ""
+    if not rows:
+        return f'No entities{scope} match "{query}".'
+    header = f'# Entities{scope} matching "{query}" ({len(rows)} of {total})'
+    lines = [header, ""]
+    # Reserve room for the closing lines so the budget is never overshot.
+    budget = max_tokens * 4 - len(header) - len(_FIND_ENTITY_HINT) - 80
+    used = 0
+    shown = 0
+    for row in rows:
+        line = _entity_line(row)
+        if shown and used + len(line) + 1 > budget:
+            break
+        lines.append(line)
+        used += len(line) + 1
+        shown += 1
+    if shown < len(rows):
+        lines.append(
+            f"*[{len(rows) - shown} more not shown: raise max_tokens or narrow "
+            "the query]*"
+        )
+    lines.extend(["", _FIND_ENTITY_HINT])
+    return "\n".join(lines)
+
+
+@mcp.tool(auth=trellis_scope(SCOPE_READ))
+def find_entity(
+    query: str,
+    node_type: str | None = None,
+    limit: int = 10,
+    max_tokens: int = 1500,
+) -> str:
+    """Find knowledge-graph entities by name, to get an id for ``get_graph``.
+
+    A case-insensitive substring match on the entity's name, id or type, with
+    the same matching and withholding as REST ``GET /graph/search``: an entity
+    the caller may not read is neither listed nor counted. One line per
+    entity: id in backticks, type, name and a short description when it has
+    one. No match is an answer, not an error.
+
+    Args:
+        query: The name, or part of it, to look for.
+        node_type: Optional entity type to keep (as stored, e.g. "concept").
+        limit: Maximum entities to list (default 10, at most 100).
+        max_tokens: Maximum response size in tokens (default 1500).
+    """
+    _refuse_public_caller("find_entity")
+    if not query or not query.strip():
+        _raise_invalid_params(
+            "query must not be empty",
+            data={"field": "query"},
+        )
+    if not 1 <= limit <= _FIND_ENTITY_MAX_LIMIT:
+        _raise_invalid_params(
+            f"limit must be between 1 and {_FIND_ENTITY_MAX_LIMIT}",
+            data={"field": "limit"},
+        )
+
+    registry = _get_registry()
+    store = registry.knowledge.graph_store
+    clearance = current_clearance()
+    precedents = PrecedentClearance(registry.knowledge.document_store, clearance, store)
+    rows, total = search_readable_nodes(
+        store,
+        registry.knowledge.document_store,
+        precedents,
+        clearance,
+        q=query.strip(),
+        node_type=node_type or None,
+        sort="name",
+        descending=False,
+        limit=limit,
+    )
+    result = _render_entity_matches(
+        rows, total, query.strip(), node_type or None, max_tokens
+    )
+    try:
+        track_token_usage(
+            registry.operational.event_log,
+            layer="mcp",
+            operation="find_entity",
+            response_tokens=estimate_tokens(result),
+            budget_tokens=max_tokens,
+        )
+    except Exception:
+        # GRACEFUL-DEGRADATION: token tracking is post-success telemetry.
+        logger.exception("token_tracking_failed", operation="find_entity")
     return result
 
 

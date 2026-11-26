@@ -15,7 +15,8 @@ untouched; known ids are looked up in it, and no id is read out of it.
   opens nothing and the tool's ``note_printed_items`` or ``note_served_items``
   call finds no holder.
 * **A tool that does not fill the holder** (``get_file_context``, ``get_lessons``,
-  ``get_graph``, ``query_observations``) records ``item_count: null`` and no ids.
+  ``get_graph``, ``find_entity``, ``query_observations``) records
+  ``item_count: null`` and no ids.
 * **A tool that raises** records nothing.
 * **A worker thread is fine.** A sync tool runs on a thread that holds a copy
   of the context, and the copy points at the same holder object.
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
 #: (``tests/unit/mcp/test_access_log.py`` pins this against the server modules).
 READ_TOOLS = frozenset(
     {
+        "find_entity",
         "get_context",
         "get_file_context",
         "get_graph",

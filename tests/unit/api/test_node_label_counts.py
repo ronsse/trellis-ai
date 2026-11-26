@@ -24,8 +24,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import trellis_api.app as app_module
-import trellis_api.routes.retrieve as retrieve_routes
 from trellis.auth import generate_api_key
+from trellis.retrieve import node_search
 from trellis.schemas.classification import DATA_CLASSIFICATION_KEY
 from trellis.stores.registry import StoreRegistry
 from trellis_api.app import create_app
@@ -231,7 +231,7 @@ def test_stepping_offset_serves_each_readable_row_once_in_order(
     client, registry, monkeypatch, order, limit
 ) -> None:
     """The walk spans several store pages and keeps the requested sort."""
-    monkeypatch.setattr(retrieve_routes, "_PRECEDENT_SCAN_PAGE", 2)
+    monkeypatch.setattr(node_search, "PRECEDENT_SCAN_PAGE", 2)
     readable = _seed_wide(registry)
     expected = readable if order == "asc" else list(reversed(readable))
 
@@ -255,7 +255,7 @@ def test_every_sort_pages_the_stored_order_less_the_withheld_rows(
     decides the order inside a type, and the walk's store pages of two split
     those ties.
     """
-    monkeypatch.setattr(retrieve_routes, "_PRECEDENT_SCAN_PAGE", 2)
+    monkeypatch.setattr(node_search, "PRECEDENT_SCAN_PAGE", 2)
     readable = set(_seed_wide(registry, _SHUFFLED))
     stored = _get(
         client,
@@ -285,7 +285,7 @@ def test_every_sort_pages_the_stored_order_less_the_withheld_rows(
 def test_a_full_page_is_never_short_while_rows_remain(
     client, registry, monkeypatch
 ) -> None:
-    monkeypatch.setattr(retrieve_routes, "_PRECEDENT_SCAN_PAGE", 2)
+    monkeypatch.setattr(node_search, "PRECEDENT_SCAN_PAGE", 2)
     readable = _seed_wide(registry)
 
     for offset in range(0, len(readable), 4):
@@ -294,7 +294,7 @@ def test_a_full_page_is_never_short_while_rows_remain(
 
 
 def test_wide_facets_sum_to_total(client, registry, monkeypatch) -> None:
-    monkeypatch.setattr(retrieve_routes, "_PRECEDENT_SCAN_PAGE", 2)
+    monkeypatch.setattr(node_search, "PRECEDENT_SCAN_PAGE", 2)
     readable = _seed_wide(registry)
 
     facets = _facets(client, registry, BELOW)
@@ -308,7 +308,7 @@ def test_a_restricted_caller_makes_one_store_call(
     client, registry, monkeypatch
 ) -> None:
     """A cleared key reads the stored page as it did before the walk."""
-    monkeypatch.setattr(retrieve_routes, "_PRECEDENT_SCAN_PAGE", 2)
+    monkeypatch.setattr(node_search, "PRECEDENT_SCAN_PAGE", 2)
     _seed_wide(registry)
     graph = registry.knowledge.graph_store
     stored, stored_total = graph.search_nodes(

@@ -349,6 +349,44 @@
   }
  },
  {
+  "name": "find_entity",
+  "inputSchema": {
+   "type": "object",
+   "additionalProperties": false,
+   "properties": {
+    "query": {
+     "type": "string",
+     "description": "The name, or part of it, to look for."
+    },
+    "node_type": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional entity type to keep (as stored, e.g. \"concept\")."
+    },
+    "limit": {
+     "default": 10,
+     "type": "integer",
+     "description": "Maximum entities to list (default 10, at most 100)."
+    },
+    "max_tokens": {
+     "default": 1500,
+     "type": "integer",
+     "description": "Maximum response size in tokens (default 1500)."
+    }
+   },
+   "required": [
+    "query"
+   ]
+  }
+ },
+ {
   "name": "get_items",
   "inputSchema": {
    "additionalProperties": false,
