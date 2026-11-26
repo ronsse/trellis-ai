@@ -85,7 +85,8 @@ def test_other_consumers_keep_the_parent_client(
     assert client._reasoning_effort is None  # type: ignore[attr-defined]
 
 
-def test_tier_effort_reaches_a_routed_client_that_keeps_the_endpoint() -> None:
+def test_parent_effort_is_not_sent_to_a_model_only_tier() -> None:
+    """Effort is bound to the model: a tier keeping the endpoint gets none."""
     pytest.importorskip("openai")
     config = {
         **_LOCAL_PARENT,
@@ -95,7 +96,9 @@ def test_tier_effort_reaches_a_routed_client_that_keeps_the_endpoint() -> None:
     }
     client = _build(config)
     assert client is not None
-    assert client._reasoning_effort == "medium"  # type: ignore[attr-defined]
+    assert client._reasoning_effort is None  # type: ignore[attr-defined]
+    parent_client = _build(config, "reconcile")
+    assert parent_client._reasoning_effort == "medium"  # type: ignore[attr-defined]
 
 
 def test_tier_effort_is_not_sent_to_a_moved_endpoint(

@@ -77,11 +77,25 @@ class TestResolution:
         assert exc_info.value.setting == distill.ENV_PROMPT_VARIANT
         assert "verbatim_evidence" in exc_info.value.message
 
-    def test_completion_tokens_override_and_fallback(self) -> None:
+    def test_completion_tokens_override(self) -> None:
         key = distill.ENV_COMPLETION_TOKENS
         assert distill.completion_tokens({key: "8000"}) == 8000
-        assert distill.completion_tokens({key: "lots"}) == 1200
-        assert distill.completion_tokens({key: "0"}) == 1200
+        assert distill.completion_tokens({key: "  "}) == 1200
+
+    @pytest.mark.parametrize("value", ["lots", "0", "-5", "12.5"])
+    def test_a_set_but_invalid_completion_budget_raises(self, value: str) -> None:
+        with pytest.raises(ConfigError) as exc_info:
+            distill.completion_tokens({distill.ENV_COMPLETION_TOKENS: value})
+        assert exc_info.value.setting == distill.ENV_COMPLETION_TOKENS
+        assert distill.ENV_COMPLETION_TOKENS in exc_info.value.message
+
+    def test_the_sibling_knobs_still_fall_back(self) -> None:
+        assert distill.max_salient_chars({distill.ENV_MAX_SALIENT_CHARS: "x"}) == (
+            distill._MAX_SALIENT_CHARS
+        )
+        assert distill.judge_context_tokens(
+            {distill.ENV_JUDGE_CONTEXT_TOKENS: "0"}
+        ) == (distill.DEFAULT_JUDGE_CONTEXT_TOKENS)
 
 
 class TestDistillCall:
@@ -204,5 +218,17 @@ class TestRunSweep:
         monkeypatch.setattr(capture_sweep, "run_capture", spy)
         with pytest.raises(ConfigError):
             capture_sweep.run_sweep(registry=registry)
+        spy.assert_not_called()
+        registry.build_llm_client.assert_not_called()
+
+    def test_invalid_completion_budget_fails_before_any_session_is_judged(
+        self, monkeypatch, registry
+    ) -> None:
+        monkeypatch.setenv(distill.ENV_COMPLETION_TOKENS, "lots")
+        spy = MagicMock()
+        monkeypatch.setattr(capture_sweep, "run_capture", spy)
+        with pytest.raises(ConfigError) as exc_info:
+            capture_sweep.run_sweep(registry=registry)
+        assert exc_info.value.setting == distill.ENV_COMPLETION_TOKENS
         spy.assert_not_called()
         registry.build_llm_client.assert_not_called()

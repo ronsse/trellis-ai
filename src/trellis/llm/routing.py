@@ -42,11 +42,12 @@ Three rules carry the design.
   new service. The declaration is read by :mod:`trellis.llm.egress`, which
   keeps content labelled above ``internal`` off a route that is not local; it
   does not change which client is built.
-* **Endpoint-bound settings follow the endpoint.** ``reasoning_effort`` is
-  inherited, like ``local``, only while the tier keeps the parent's
-  endpoint: an effort level chosen for one service means nothing to
-  another, and some services reject the thinking parameters it sends. An
-  explicit ``null`` is an override. ``workspace_id_env`` (the environment
+* **Model-bound settings stay with the model.** ``reasoning_effort`` is
+  never inherited by a tier, not even one that keeps the parent's endpoint:
+  an effort level is chosen for one model, a tier usually names another,
+  and some models reject the thinking parameters it sends. A tier sends
+  only the effort it sets itself; an unrouted consumer keeps the parent's,
+  as it always did. ``workspace_id_env`` (the environment
   variable holding an Anthropic workspace id, sent as the
   ``anthropic-workspace-id`` header) travels with the credential unit
   instead, because a workspace id belongs to the organisation key it was
@@ -128,7 +129,7 @@ ENDPOINT_KEYS: tuple[str, str] = ("provider", "base_url")
 #: The one boolean a parent block or a tier may set: "this endpoint is local".
 LOCAL_KEY = "local"
 
-#: Inherited from the parent only while the tier keeps the parent's endpoint.
+#: Bound to the model: a tier sends only its own, never the parent's.
 REASONING_EFFORT_KEY = "reasoning_effort"
 
 #: Name of the environment variable holding an Anthropic workspace id. It
@@ -528,8 +529,6 @@ def resolve_llm_route(
     local = body[LOCAL_KEY] is True if LOCAL_KEY in body else parent_local and not moved
     if REASONING_EFFORT_KEY in body:
         effective[REASONING_EFFORT_KEY] = body[REASONING_EFFORT_KEY]
-    elif not moved:
-        effective[REASONING_EFFORT_KEY] = parent.get(REASONING_EFFORT_KEY)
     return LLMRoute(
         consumer=member,
         tier=tier,

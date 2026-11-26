@@ -138,7 +138,7 @@ always emit the JSON `CaptureReport` on stdout.
 | `TRELLIS_CAPTURE_STRICT` | `1` | When truthy (the default), a sweep that left any session unjudged, in which a session raised, or that kept a session off the route because a store could not be asked whether it may leave the host (`sessions_skipped_egress_unreadable`), exits non-zero. Set `0`/`false`/`no`/`off` to report the counts and exit `0` instead — those sessions stay un-watermarked and are retried next sweep. A sweep with *no* judge at all always fails, strict or not. |
 | `TRELLIS_CAPTURE_MAX_SALIENT_CHARS` | `8000` | Cap on conversation text sent to the judge. **Coupled to the judge endpoint's context window — read the warning below before raising it.** |
 | `TRELLIS_CAPTURE_PROMPT_VARIANT` | *(unset)* | Judge system prompt, by name (`default`, `verbatim_evidence`). Unset sends the production prompt. An unknown name fails the sweep before any session is judged. |
-| `TRELLIS_CAPTURE_COMPLETION_TOKENS` | `1200` | Judge completion budget (`max_tokens`), also reserved out of the declared window by the pre-flight check. |
+| `TRELLIS_CAPTURE_COMPLETION_TOKENS` | `1200` | Judge completion budget (`max_tokens`), also reserved out of the declared window by the pre-flight check. A set value that is not a positive integer fails the sweep before any session is judged. |
 | `TRELLIS_ENABLE_RECONCILE_ON_WRITE` | *(unset)* | When truthy, near-duplicate captures are adjudicated (ADD/UPDATE/SUPERSEDE/NOOP) instead of piling up. Off by default. |
 
 The reconcile step also honours the #263 knobs (`TRELLIS_RECONCILE_MODEL`,
@@ -216,9 +216,10 @@ spends its thinking out of that same budget, so it usually needs more than
 the default `1200`. The pre-flight window check reserves the configured value,
 not the default, so raising it against a small declared window
 (`TRELLIS_CAPTURE_JUDGE_CONTEXT_TOKENS`) refuses sessions as `prompt_too_large`
-instead of letting the server drop prompt tokens. A non-integer or
-non-positive value logs `capture_env_unparseable` / `capture_env_out_of_range`
-and keeps `1200`, like the other numeric capture knobs.
+instead of letting the server drop prompt tokens. Unlike the other numeric
+capture knobs, a set value that is not a positive integer raises a
+`ConfigError` naming the variable before any session is judged, rather than
+quietly keeping `1200` under a judge that needs more.
 
 To point only the capture judge at a hosted model, route it to a tier:
 
@@ -240,8 +241,10 @@ llm:
     session_capture: capture_judge
 ```
 
-A tier's `reasoning_effort` is inherited from the parent only while the tier
-keeps the parent's endpoint. `workspace_id_env` names the variable holding an
+A tier's `reasoning_effort` is its own: it is bound to the model, not the
+endpoint, so a tier never inherits the parent's, even one that keeps the
+parent's endpoint and changes only `model`. A consumer with no route keeps the
+parent's. `workspace_id_env` names the variable holding an
 Anthropic workspace id, sent as the `anthropic-workspace-id` header; it travels
 with the tier's credential, is refused on a non-`anthropic` route, and a named
 variable that is unset or empty fails the build rather than sending no header.

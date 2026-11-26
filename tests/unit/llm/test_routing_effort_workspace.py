@@ -32,12 +32,18 @@ def _raises(parent: dict[str, Any], tier: dict[str, Any]) -> LLMRoutingError:
 
 
 class TestTierReasoningEffort:
-    def test_a_tier_that_keeps_the_endpoint_inherits_the_parents_effort(self):
-        route = _route(_PARENT, {"model": "other"})
-        assert route.reasoning_effort == "high"
-        assert route.block["reasoning_effort"] == "high"
+    """Effort is bound to the model, so a tier never inherits the parent's."""
 
-    def test_a_tier_that_moves_the_endpoint_does_not_inherit_it(self):
+    def test_a_model_only_tier_gets_no_effort_from_the_parent(self):
+        route = _route(_PARENT, {"model": "other"})
+        assert route.reasoning_effort is None
+        assert "reasoning_effort" not in route.block
+
+    def test_a_tier_that_keeps_the_whole_block_still_gets_none(self):
+        route = _route(_PARENT, {})
+        assert route.reasoning_effort is None
+
+    def test_a_tier_that_moves_the_endpoint_gets_none(self):
         route = _route(
             _PARENT,
             {"provider": "openai", "base_url": None, "api_key_env": "OTHER_KEY"},
@@ -45,11 +51,9 @@ class TestTierReasoningEffort:
         assert route.reasoning_effort is None
         assert "reasoning_effort" not in route.block
 
-    def test_a_moved_base_url_alone_also_stops_inheritance(self):
-        route = _route(
-            _PARENT, {"base_url": "http://gateway.invalid/v1", "api_key_env": "K"}
-        )
-        assert route.reasoning_effort is None
+    def test_a_model_only_tier_with_the_key_gets_its_own(self):
+        route = _route(_PARENT, {"model": "other", "reasoning_effort": "low"})
+        assert route.reasoning_effort == "low"
 
     def test_a_tier_sets_its_own_effort(self):
         route = _route(
@@ -73,7 +77,10 @@ class TestTierReasoningEffort:
         assert route.reasoning_effort == "high"
 
     def test_describe_shows_effort(self):
-        assert _route(_PARENT, {}).describe(environ={})["reasoning_effort"] == "high"
+        route = resolve_llm_route(_PARENT, LLMConsumer.SESSION_CAPTURE)
+        assert route.describe(environ={})["reasoning_effort"] == "high"
+        tier = _route(_PARENT, {"reasoning_effort": "low"})
+        assert tier.describe(environ={})["reasoning_effort"] == "low"
 
 
 class TestWorkspaceIdEnv:

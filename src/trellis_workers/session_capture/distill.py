@@ -182,8 +182,28 @@ ENV_COMPLETION_TOKENS = "TRELLIS_CAPTURE_COMPLETION_TOKENS"
 
 
 def completion_tokens(env: Mapping[str, str] | None = None) -> int:
-    """Resolve the sweep's completion budget, honouring the operator override."""
-    return _positive_int_env(ENV_COMPLETION_TOKENS, DEFAULT_COMPLETION_TOKENS, env)
+    """Resolve the sweep's completion budget, honouring the operator override.
+
+    Unset (or blank) is :data:`DEFAULT_COMPLETION_TOKENS`. Unlike the sibling
+    numeric knobs, a set value that is not a positive integer raises rather
+    than falling back: an operator who raised the budget for a reasoning judge
+    and silently got 1200 would read truncated replies as the judge's.
+
+    Raises:
+        ConfigError: the variable is set and is not a positive integer.
+    """
+    source = os.environ if env is None else env
+    raw = source.get(ENV_COMPLETION_TOKENS, "").strip()
+    if not raw:
+        return DEFAULT_COMPLETION_TOKENS
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        msg = f"{ENV_COMPLETION_TOKENS}={raw!r} must be a positive integer"
+        raise ConfigError(msg, setting=ENV_COMPLETION_TOKENS)
+    return value
 
 
 def capture_system_prompt(env: Mapping[str, str] | None = None) -> str | None:

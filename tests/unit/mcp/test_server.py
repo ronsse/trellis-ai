@@ -8,7 +8,7 @@ import json
 import logging
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 import pytest
@@ -1929,6 +1929,44 @@ class TestBuildLlmClientRouting:
         client = wiring_mod._build_llm_client(registry, consumer)
         assert env_clients == ([client] if reaches_env else [])
         assert (client is None) is not reaches_env
+
+    _WORKSPACE_ENV = "TRELLIS_TEST_WORKSPACE_ID"
+    _WORKSPACE_LLM: ClassVar[dict[str, Any]] = {
+        "provider": "anthropic",
+        "api_key_env": _PARENT_KEY_ENV,
+        "workspace_id_env": _WORKSPACE_ENV,
+        "model": "fake-model",
+    }
+
+    def test_an_unset_workspace_env_never_reaches_env(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        env_clients: list[object],
+    ) -> None:
+        """The registry raises ConfigError; the env client has no workspace header."""
+        monkeypatch.delenv(self._WORKSPACE_ENV, raising=False)
+        registry = self._registry(tmp_path, self._WORKSPACE_LLM)
+        with pytest.raises(ConfigError):
+            registry.build_llm_client(consumer=LLMConsumer.MEMORY_EXTRACTION)
+        client = wiring_mod._build_llm_client(registry, LLMConsumer.MEMORY_EXTRACTION)
+        assert client is None
+        assert env_clients == []
+
+    def test_an_unresolved_key_on_a_workspace_route_never_reaches_env(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        env_clients: list[object],
+    ) -> None:
+        """``api_key_env`` unset: the registry returns None, the env path is skipped."""
+        monkeypatch.setenv(self._WORKSPACE_ENV, "wrkspc_fake_0001")
+        monkeypatch.delenv(_PARENT_KEY_ENV)
+        registry = self._registry(tmp_path, self._WORKSPACE_LLM)
+        assert registry.build_llm_client(consumer=LLMConsumer.MEMORY_EXTRACTION) is None
+        client = wiring_mod._build_llm_client(registry, LLMConsumer.MEMORY_EXTRACTION)
+        assert client is None
+        assert env_clients == []
 
 
 # ---------------------------------------------------------------------------

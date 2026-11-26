@@ -206,11 +206,14 @@ def run_sweep(
 
     ``TRELLIS_CAPTURE_PROMPT_VARIANT`` and ``TRELLIS_CAPTURE_COMPLETION_TOKENS``
     are resolved here, before the judge is built, so an unknown prompt
-    variant fails the run before any session is judged.
+    variant or an invalid completion budget fails the run before any session
+    is judged.
 
     Raises:
         CaptureJudgeUnavailableError: no distillation judge could be built.
-        ConfigError: ``TRELLIS_CAPTURE_PROMPT_VARIANT`` names no known prompt.
+        ConfigError: ``TRELLIS_CAPTURE_PROMPT_VARIANT`` names no known prompt,
+            or ``TRELLIS_CAPTURE_COMPLETION_TOKENS`` is set and is not a
+            positive integer.
     """
     root = Path(os.environ.get(ENV_ROOT, str(_default_root())))
     watermark = Path(os.environ.get(ENV_WATERMARK, str(_default_watermark())))

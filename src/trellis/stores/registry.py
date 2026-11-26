@@ -2605,7 +2605,7 @@ class StoreRegistry:
               # api_key: sk-...             # OR literal (discouraged)
               model: gpt-4o-mini
               base_url: https://...       # optional
-              reasoning_effort: high      # optional; a tier may set its own
+              reasoning_effort: high      # optional; never inherited by a tier
               # workspace_id_env: ANTHROPIC_WORKSPACE_ID  # anthropic only
               tiers:                      # optional named variants
                 deep: {model: gpt-5}
@@ -2616,7 +2616,9 @@ class StoreRegistry:
         no route (and ``consumer=None``) builds from the parent block exactly
         as before tiers existed. A routed consumer builds from its tier and
         never falls back to the parent: if the tier cannot build, the answer
-        is ``None``. ``consumer`` is keyword-only so the rule in
+        is ``None``. ``reasoning_effort`` is bound to the model, not the
+        endpoint, so a tier sends only the effort it sets itself, even when
+        it keeps the parent's endpoint. ``consumer`` is keyword-only so the rule in
         ``tests/unit/test_llm_consumer_rule.py`` reads it off every call
         exactly; a positional consumer would be a spelling it cannot see.
 
