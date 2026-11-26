@@ -476,6 +476,8 @@ class _StrictSdkMessages:
         messages: list[dict[str, str]],
         max_tokens: int,
         system: str | None = None,
+        thinking: dict[str, object] | None = None,
+        output_config: dict[str, object] | None = None,
     ) -> SimpleNamespace:
         recorded: dict[str, object] = {
             "model": model,
@@ -484,6 +486,11 @@ class _StrictSdkMessages:
         }
         if system is not None:
             recorded["system"] = system
+        # Sent only when reasoning_effort is configured (adaptive thinking).
+        if thinking is not None:
+            recorded["thinking"] = thinking
+        if output_config is not None:
+            recorded["output_config"] = output_config
         self.calls.append(recorded)
         return self._response
 
@@ -661,7 +668,7 @@ class TestStrictFakeMatchesTheRealSdk:
         assert real.isdisjoint(UNSUPPORTED_SAMPLING_PARAMS)
 
     def test_every_kwarg_the_adapter_sends_exists_on_the_real_signature(self) -> None:
-        """The fake accepts four keywords; all four must be real ones, or the
+        """The fake accepts six keywords; all six must be real ones, or the
         fake proves the adapter works against a signature nobody ships."""
         real = self._real_create_params()
         fake = {
@@ -692,7 +699,7 @@ class TestStrictFakeMatchesTheRealSdk:
 #: scan below, not the rosters the assertions run on — a roster that is merely
 #: declared rots, and this repo has shipped that failure more than once.
 HAND_READ_RESPONSE_READS = {
-    "usage": 4,  # input/output tokens + the two cache counters
+    "usage": 5,  # input/output tokens, the two cache counters, output details
     "resp": 3,  # content, model, usage
     "block": 2,  # type, text
 }
@@ -809,3 +816,81 @@ class TestResponseShapeMatchesTheRealSdk:
         subject would satisfy every assertion above."""
         assert _adapter_reads("usage") != _adapter_reads("block")
         assert not _adapter_reads("a_name_the_adapter_never_binds")
+
+    def test_thinking_tokens_is_a_named_field_on_the_real_details(self) -> None:
+        """``_adapter_reads("details")`` pins the nested read the same way."""
+        anthropic = pytest.importorskip(
+            "anthropic", reason="[llm-anthropic] extra not installed"
+        )
+        reads = _adapter_reads("details")
+        assert reads == {"thinking_tokens"}
+        assert reads <= set(anthropic.types.OutputTokensDetails.model_fields)
+
+
+# -- Tests: reasoning effort maps to adaptive thinking ---------------------
+
+
+class TestReasoningEffort:
+    async def test_unset_request_is_exactly_the_pre_setting_request(self) -> None:
+        client_obj, msgs = _strict_client()
+        await AnthropicClient(default_model="m", client=client_obj).generate(
+            messages=[
+                Message(role="system", content="sys"),
+                Message(role="user", content="hi"),
+            ],
+            max_tokens=77,
+        )
+        assert msgs.calls == [
+            {
+                "model": "m",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 77,
+                "system": "sys",
+            }
+        ]
+
+    async def test_set_effort_sends_adaptive_thinking_and_no_budget(self) -> None:
+        client_obj, msgs = _strict_client()
+        await AnthropicClient(
+            default_model="m", reasoning_effort="high", client=client_obj
+        ).generate(messages=[Message(role="user", content="hi")], max_tokens=4000)
+        call = msgs.calls[0]
+        assert call["thinking"] == {"type": "adaptive"}
+        assert call["output_config"] == {"effort": "high"}
+        assert call["max_tokens"] == 4000
+        assert "budget_tokens" not in str(call)
+        assert set(call).isdisjoint(UNSUPPORTED_SAMPLING_PARAMS)
+
+    async def test_content_is_the_text_answer_not_thinking(self) -> None:
+        blocks = [
+            SimpleNamespace(type="thinking", thinking="long hidden reasoning"),
+            _text_block("the answer"),
+        ]
+        client_obj, _ = _strict_client(_make_message_response(blocks=blocks))
+        resp = await AnthropicClient(
+            reasoning_effort="low", client=client_obj
+        ).generate(messages=[Message(role="user", content="hi")])
+        assert resp.content == "the answer"
+
+    def test_thinking_tokens_are_read_as_reasoning_tokens(self) -> None:
+        usage = SimpleNamespace(
+            input_tokens=10,
+            output_tokens=50,
+            output_tokens_details=SimpleNamespace(thinking_tokens=40),
+        )
+        result = _extract_usage(usage)
+        assert result is not None
+        assert result.reasoning_tokens == 40
+        assert result.completion_tokens == 50
+        assert result.total_tokens == 60
+
+    @pytest.mark.parametrize(
+        "details", [None, SimpleNamespace(thinking_tokens=None), SimpleNamespace()]
+    )
+    def test_unreported_thinking_tokens_are_none(self, details: object) -> None:
+        usage = SimpleNamespace(
+            input_tokens=1, output_tokens=2, output_tokens_details=details
+        )
+        result = _extract_usage(usage)
+        assert result is not None
+        assert result.reasoning_tokens is None

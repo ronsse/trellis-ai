@@ -548,3 +548,95 @@ class TestTemperatureStillReachesTheOpenAiApi:
             messages=[Message(role="user", content="hi")],
         )
         assert create.call_args.kwargs["temperature"] == 0.3
+
+
+# -- Tests: reasoning effort is a constructor setting ----------------------
+
+
+class TestReasoningEffort:
+    async def test_unset_request_is_exactly_the_pre_setting_request(self) -> None:
+        """The full kwargs, not a membership check: unset adds nothing."""
+        client_obj, create = _chat_mock(_make_chat_response())
+        await OpenAIClient(default_model="m", client=client_obj).generate(
+            messages=[Message(role="user", content="hi")],
+            temperature=0.0,
+            max_tokens=77,
+        )
+        assert create.call_args.args == ()
+        assert create.call_args.kwargs == {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "temperature": 0.0,
+            "max_tokens": 77,
+        }
+
+    async def test_set_effort_is_sent_verbatim(self) -> None:
+        client_obj, create = _chat_mock(_make_chat_response())
+        await OpenAIClient(
+            default_model="m", reasoning_effort="high", client=client_obj
+        ).generate(messages=[Message(role="user", content="hi")], max_tokens=77)
+        kwargs = create.call_args.kwargs
+        assert kwargs["reasoning_effort"] == "high"
+        assert set(kwargs) == {
+            "model",
+            "messages",
+            "temperature",
+            "max_tokens",
+            "reasoning_effort",
+        }
+
+    def test_real_sdk_accepts_reasoning_effort(self) -> None:
+        import inspect
+
+        openai = pytest.importorskip("openai", reason="[llm-openai] not installed")
+        sig = inspect.signature(
+            openai.resources.chat.completions.AsyncCompletions.create
+        )
+        assert "reasoning_effort" in sig.parameters
+
+
+class TestReasoningTokens:
+    def test_reported_reasoning_tokens_are_read(self) -> None:
+        usage = SimpleNamespace(
+            prompt_tokens=10,
+            completion_tokens=50,
+            total_tokens=60,
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=40),
+        )
+        result = _extract_usage(usage)
+        assert result is not None
+        assert result.reasoning_tokens == 40
+        assert result.completion_tokens == 50
+        assert result.total_tokens == 60
+
+    def test_dict_usage_reasoning_tokens_are_read(self) -> None:
+        usage = {
+            "prompt_tokens": 1,
+            "completion_tokens": 9,
+            "total_tokens": 10,
+            "completion_tokens_details": {"reasoning_tokens": 0},
+        }
+        result = _extract_usage(usage)
+        assert result is not None
+        assert result.reasoning_tokens == 0
+
+    @pytest.mark.parametrize(
+        "details", [None, SimpleNamespace(reasoning_tokens=None), SimpleNamespace()]
+    )
+    def test_unreported_is_none_not_zero(self, details: object) -> None:
+        usage = SimpleNamespace(
+            prompt_tokens=1,
+            completion_tokens=2,
+            total_tokens=3,
+            completion_tokens_details=details,
+        )
+        result = _extract_usage(usage)
+        assert result is not None
+        assert result.reasoning_tokens is None
+
+    def test_real_sdk_names_the_field(self) -> None:
+        openai = pytest.importorskip("openai", reason="[llm-openai] not installed")
+        types = openai.types
+        assert "completion_tokens_details" in types.CompletionUsage.model_fields
+        details = types.completion_usage.CompletionTokensDetails
+        assert "reasoning_tokens" in details.model_fields

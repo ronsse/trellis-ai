@@ -69,7 +69,15 @@ def _build_async_client(
 
 
 class OpenAIClient:
-    """``LLMClient`` implementation backed by the OpenAI chat completions API."""
+    """``LLMClient`` implementation backed by the OpenAI chat completions API.
+
+    ``reasoning_effort`` (``llm.reasoning_effort`` in config) is a
+    per-client setting, not a ``generate`` argument, so the ``LLMClient``
+    protocol is unchanged. When set it is sent verbatim as
+    ``reasoning_effort`` on every ``chat.completions.create`` call, and the
+    endpoint decides which values it accepts. When ``None`` the request is
+    exactly what it was before the setting existed: the key is absent.
+    """
 
     def __init__(
         self,
@@ -77,9 +85,11 @@ class OpenAIClient:
         api_key: str | None = None,
         base_url: str | None = None,
         default_model: str = DEFAULT_CHAT_MODEL,
+        reasoning_effort: str | None = None,
         client: AsyncOpenAI | None = None,
     ) -> None:
         self._default_model = default_model
+        self._reasoning_effort = reasoning_effort
         self._client = client or _build_async_client(
             api_key=api_key, base_url=base_url, setting="llm.api_key_env"
         )
@@ -100,12 +110,15 @@ class OpenAIClient:
             "list[ChatCompletionMessageParam]",
             [{"role": m.role, "content": m.content} for m in messages],
         )
-        resp = await self._client.chat.completions.create(
-            model=chosen_model,
-            messages=sdk_messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        kwargs: dict[str, Any] = {
+            "model": chosen_model,
+            "messages": sdk_messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if self._reasoning_effort is not None:
+            kwargs["reasoning_effort"] = self._reasoning_effort
+        resp = await self._client.chat.completions.create(**kwargs)
         choice = resp.choices[0]
         content = choice.message.content or ""
         usage = _extract_usage(resp.usage)
@@ -180,12 +193,30 @@ def _extract_usage(usage: Any) -> TokenUsage | None:
     prompt = getattr(usage, "prompt_tokens", None)
     completion = getattr(usage, "completion_tokens", None)
     total = getattr(usage, "total_tokens", None)
+    details = getattr(usage, "completion_tokens_details", None)
     if prompt is None and isinstance(usage, dict):
         prompt = usage.get("prompt_tokens")
         completion = usage.get("completion_tokens")
         total = usage.get("total_tokens")
+        details = usage.get("completion_tokens_details")
     return TokenUsage(
         prompt_tokens=int(prompt or 0),
         completion_tokens=int(completion or 0),
         total_tokens=int(total or 0),
+        reasoning_tokens=_reasoning_count(details),
     )
+
+
+def _reasoning_count(details: Any) -> int | None:
+    """``completion_tokens_details.reasoning_tokens``, ``None`` when absent.
+
+    An inclusive subset of ``completion_tokens`` (see ``TokenUsage``).
+    """
+    if details is None:
+        return None
+    value = (
+        details.get("reasoning_tokens")
+        if isinstance(details, dict)
+        else getattr(details, "reasoning_tokens", None)
+    )
+    return None if value is None else int(value)

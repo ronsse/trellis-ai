@@ -42,6 +42,13 @@ class TokenUsage(TrellisModel):
     OpenAI adapter leaves both fields unset rather than mapping its own
     ``prompt_tokens_details.cached_tokens``, which is an *inclusive subset*
     of ``prompt_tokens`` and would double-count under the same sum.
+
+    ``reasoning_tokens`` is the share of ``completion_tokens`` the model spent
+    reasoning, an **inclusive subset** of it on both providers (OpenAI's
+    ``completion_tokens_details.reasoning_tokens``, Anthropic's
+    ``output_tokens_details.thinking_tokens``), so it is never added to the
+    total. ``None`` means the provider reported nothing, as for the cache
+    counters.
     """
 
     prompt_tokens: int = 0
@@ -49,6 +56,7 @@ class TokenUsage(TrellisModel):
     total_tokens: int = 0
     cache_creation_input_tokens: int | None = None
     cache_read_input_tokens: int | None = None
+    reasoning_tokens: int | None = None
 
 
 class LLMResponse(TrellisModel):
