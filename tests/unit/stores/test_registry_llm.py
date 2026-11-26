@@ -144,14 +144,20 @@ def test_build_llm_client_anthropic_literal_key(
     assert isinstance(client, AnthropicClient)
 
 
-@pytest.mark.parametrize(
-    ("provider", "sdk"), [("openai", "openai"), ("anthropic", "anthropic")]
-)
+def _skip_without_sdk(provider: str) -> None:
+    """Skip with a literal module name, which the importorskip coverage rule reads."""
+    if provider == "openai":
+        pytest.importorskip("openai")
+    else:
+        pytest.importorskip("anthropic")
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
 def test_build_llm_client_threads_reasoning_effort(
-    tmp_path: Path, provider: str, sdk: str
+    tmp_path: Path, provider: str
 ) -> None:
     """``llm.reasoning_effort`` reaches the client's constructor setting."""
-    pytest.importorskip(sdk)
+    _skip_without_sdk(provider)
     config_dir = _write_config(
         tmp_path,
         {
@@ -171,7 +177,7 @@ def test_build_llm_client_threads_reasoning_effort(
 
 @pytest.mark.parametrize("provider", ["openai", "anthropic"])
 def test_build_llm_client_reasoning_effort_defaults_to_none(provider: str) -> None:
-    pytest.importorskip(provider)
+    _skip_without_sdk(provider)
     registry = StoreRegistry(
         llm_config={"provider": provider, "api_key": "sk-literal-XYZ9"}
     )

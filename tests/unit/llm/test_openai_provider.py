@@ -635,7 +635,8 @@ class TestReasoningTokens:
         assert result.reasoning_tokens is None
 
     def test_real_sdk_names_the_field(self) -> None:
-        types = pytest.importorskip("openai.types", reason="[llm-openai] not installed")
+        openai = pytest.importorskip("openai", reason="[llm-openai] not installed")
+        types = openai.types
         assert "completion_tokens_details" in types.CompletionUsage.model_fields
         details = types.completion_usage.CompletionTokensDetails
         assert "reasoning_tokens" in details.model_fields
