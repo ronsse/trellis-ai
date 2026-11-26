@@ -277,10 +277,12 @@ def _build_llm_client(registry: StoreRegistry, consumer: LLMConsumer) -> Any:
     source yields a client.
 
     The env-var fallback is skipped when ``llm.routes`` pins ``consumer`` to
-    a tier, when the route is declared ``local`` and when ``llm.tiers`` /
-    ``llm.routes`` is malformed: in each case the operator chose a model for
+    a tier, when the route is declared ``local``, when the route names a
+    ``workspace_id_env`` and when ``llm.tiers`` / ``llm.routes`` is
+    malformed: in each case the operator chose a model (or a workspace) for
     this consumer, and ``OPENAI_API_KEY`` would silently run it on a
-    different one, a hosted one for content cleared to go only to a local one.
+    different one, a hosted one for content cleared to go only to a local
+    one, or one without the workspace header.
     """
     try:
         route = registry.llm_route(consumer)
@@ -306,7 +308,10 @@ def _build_llm_client(registry: StoreRegistry, consumer: LLMConsumer) -> Any:
             "llm_client_from_registry", consumer=consumer.value, tier=route.tier
         )
         return client
-    if route.routed or route.local:
+    if route.routed or route.local or route.workspace_id_env:
+        # A route naming a workspace is pinned to that workspace: the env
+        # client carries no ``anthropic-workspace-id`` header, so it would
+        # bill and govern the calls under another one.
         logger.warning(
             "llm_client_routed_tier_unbuildable",
             consumer=consumer.value,

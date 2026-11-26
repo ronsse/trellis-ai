@@ -322,11 +322,17 @@ def run_capture(
     distill_model_id: str = distill.DEFAULT_DISTILL_MODEL,
     dry_run: bool = False,
     checkpoint_every: int = DEFAULT_CHECKPOINT_EVERY,
+    judge_system_prompt: str | None = None,
+    judge_completion_tokens: int | None = None,
 ) -> CaptureReport:
     """Run one capture sweep and return its :class:`CaptureReport`.
 
     ``checkpoint_every`` is the number of judged sessions between checkpoints
-    (see the module docstring). A dry run writes nothing durable, so it has one
+    (see the module docstring). ``judge_system_prompt`` and
+    ``judge_completion_tokens`` reach every judge call as
+    :func:`~trellis_workers.session_capture.distill.distill_session`'s
+    ``system_prompt`` / ``max_tokens``; ``None`` is the production prompt and
+    the default completion budget. A dry run writes nothing durable, so it has one
     pass at the end whatever this is.
     """
     if checkpoint_every < 1:
@@ -422,6 +428,8 @@ def run_capture(
                 reconcile_enabled=reconcile_enabled,
                 dry_run=dry_run,
                 hidden_doc_ids=writes.flushed_doc_ids,
+                judge_system_prompt=judge_system_prompt,
+                judge_completion_tokens=judge_completion_tokens,
             )
             if survivors is None:
                 # Judge unavailable — leave un-watermarked so a later run
@@ -973,6 +981,8 @@ def _capture_session(
     reconcile_enabled: bool,
     dry_run: bool,
     hidden_doc_ids: AbstractSet[str] = frozenset(),
+    judge_system_prompt: str | None = None,
+    judge_completion_tokens: int | None = None,
 ) -> list[CandidateMemory] | None:
     """Distil, gate, and reconcile one session; ``None`` if the judge is down.
 
@@ -1001,7 +1011,12 @@ def _capture_session(
             _record_egress_skip(report, digest, serving.verdict)
             return None
         inherited = serving.inherited
-    distill_result = distill.distill_session(llm_client, digest)
+    distill_result = distill.distill_session(
+        llm_client,
+        digest,
+        system_prompt=judge_system_prompt,
+        max_tokens=judge_completion_tokens,
+    )
     if distill_result.outcome is distill.DistillOutcome.UNAVAILABLE:
         report.sessions_judge_unavailable += 1
         report.warnings.append(

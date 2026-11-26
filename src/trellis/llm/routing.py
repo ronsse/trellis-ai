@@ -42,6 +42,19 @@ Three rules carry the design.
   new service. The declaration is read by :mod:`trellis.llm.egress`, which
   keeps content labelled above ``internal`` off a route that is not local; it
   does not change which client is built.
+* **Model-bound settings stay with the model.** ``reasoning_effort`` is
+  never inherited by a tier, not even one that keeps the parent's endpoint:
+  an effort level is chosen for one model, a tier usually names another,
+  and some models reject the thinking parameters it sends. A tier sends
+  only the effort it sets itself; an unrouted consumer keeps the parent's,
+  as it always did. ``workspace_id_env`` (the environment
+  variable holding an Anthropic workspace id, sent as the
+  ``anthropic-workspace-id`` header) travels with the credential unit
+  instead, because a workspace id belongs to the organisation key it was
+  issued with: a tier that names its own credential inherits no workspace
+  id, and a tier that sets ``workspace_id_env`` must name its own
+  credential. It is refused on a route whose provider is not
+  ``anthropic``.
 * **A defect in the block raises** :class:`LLMRoutingError` at build time,
   for every consumer, rather than degrading any of them to the parent block.
   Falling back is how a consumer the operator pinned to one model silently
@@ -66,6 +79,8 @@ __all__ = [
     "ENDPOINT_KEYS",
     "LLM_BLOCK_KEYS",
     "LOCAL_KEY",
+    "REASONING_EFFORT_KEY",
+    "WORKSPACE_ID_ENV_KEY",
     "LLMConsumer",
     "LLMRoute",
     "LLMRoutingError",
@@ -96,7 +111,15 @@ class LLMConsumer(StrEnum):
 
 #: Keys a tier may set; the same fields the parent block's builder reads.
 LLM_BLOCK_KEYS: frozenset[str] = frozenset(
-    {"provider", "api_key", "api_key_env", "base_url", "model"}
+    {
+        "provider",
+        "api_key",
+        "api_key_env",
+        "base_url",
+        "model",
+        "reasoning_effort",
+        "workspace_id_env",
+    }
 )
 #: Inherited as one unit, never field by field.
 CREDENTIAL_KEYS: tuple[str, str] = ("api_key", "api_key_env")
@@ -105,6 +128,16 @@ ENDPOINT_KEYS: tuple[str, str] = ("provider", "base_url")
 
 #: The one boolean a parent block or a tier may set: "this endpoint is local".
 LOCAL_KEY = "local"
+
+#: Bound to the model: a tier sends only its own, never the parent's.
+REASONING_EFFORT_KEY = "reasoning_effort"
+
+#: Name of the environment variable holding an Anthropic workspace id. It
+#: travels with the credential unit (:data:`CREDENTIAL_KEYS`).
+WORKSPACE_ID_ENV_KEY = "workspace_id_env"
+
+#: The only provider that understands a workspace id.
+_WORKSPACE_PROVIDER = "anthropic"
 
 _TIERS_KEY = "tiers"
 _ROUTES_KEY = "routes"
@@ -152,6 +185,15 @@ class LLMRoute:
     def base_url(self) -> str | None:
         return _optional_str(self.block.get("base_url"))
 
+    @property
+    def reasoning_effort(self) -> str | None:
+        return _optional_str(self.block.get(REASONING_EFFORT_KEY))
+
+    @property
+    def workspace_id_env(self) -> str | None:
+        """The *name* of the workspace-id variable, never its value."""
+        return _optional_str(self.block.get(WORKSPACE_ID_ENV_KEY))
+
     def credential_source(
         self, environ: Mapping[str, str] | None = None
     ) -> Literal["env", "literal"] | None:
@@ -183,6 +225,8 @@ class LLMRoute:
             "model": self.model,
             "base_url": _display_url(self.base_url),
             "local": self.local,
+            "reasoning_effort": self.reasoning_effort,
+            "workspace_id_env": self.workspace_id_env,
             "api_key_env": None if not env_name else str(env_name),
             "credential_source": self.credential_source(environ),
         }
@@ -210,6 +254,7 @@ def validate_llm_routing(llm_config: Mapping[str, Any] | None) -> None:
         msg = f"llm: must be a mapping, got {type(parent).__name__}."
         raise LLMRoutingError(msg, setting="llm")
     _validate_local("llm", parent)
+    _validate_workspace("llm", parent.get("provider"), parent)
     if parent.get(LOCAL_KEY) is True:
         _validate_local_endpoint("llm", parent.get("provider"), parent.get("base_url"))
     tiers = _tiers(parent)
@@ -304,6 +349,23 @@ def _validate_tier(name: str, body: Any, parent_endpoint: Mapping[str, Any]) -> 
         for key in ENDPOINT_KEYS
         if key in body and body[key] != parent_endpoint[key]
     ]
+    if WORKSPACE_ID_ENV_KEY in body and not owns_credential:
+        msg = (
+            f"LLM tier {name!r} sets {WORKSPACE_ID_ENV_KEY} but names no"
+            " credential. A workspace id belongs to the key it was issued"
+            " with, so it travels with the credential: set api_key_env"
+            " (preferred) or api_key on the tier as well."
+        )
+        raise LLMRoutingError(msg, setting=f"{setting}.{WORKSPACE_ID_ENV_KEY}")
+    if owns_credential:
+        # A tier that inherits the credential inherits the parent's workspace
+        # id too, already checked against the parent's provider; a tier that
+        # would move that provider without its own credential is refused below.
+        _validate_workspace(
+            setting,
+            body["provider"] if "provider" in body else parent_endpoint["provider"],
+            body,
+        )
     if moved and not owns_credential:
         msg = (
             f"LLM tier {name!r} changes {' and '.join(moved)} but names no"
@@ -325,6 +387,30 @@ def _validate_tier(name: str, body: Any, parent_endpoint: Mapping[str, Any]) -> 
             " (null for the provider's default)."
         )
         raise LLMRoutingError(msg, setting=f"{setting}.base_url")
+
+
+def _validate_workspace(setting: str, provider: Any, owner: Mapping[str, Any]) -> None:
+    """``workspace_id_env`` names a variable, and only on an Anthropic route."""
+    value = owner.get(WORKSPACE_ID_ENV_KEY)
+    if value is None:
+        return
+    key_setting = f"{setting}.{WORKSPACE_ID_ENV_KEY}"
+    if not isinstance(value, str) or not value.strip():
+        shape = type(value).__name__ if not isinstance(value, str) else "empty"
+        msg = (
+            f"{key_setting} must name an environment variable, got a {shape}"
+            " value. Omit the key to send no workspace header."
+        )
+        raise LLMRoutingError(msg, setting=key_setting)
+    if provider != _WORKSPACE_PROVIDER:
+        named = provider if isinstance(provider, str) else None
+        msg = (
+            f"{key_setting} is set but the route's provider is {named!r}; a"
+            " workspace id is an Anthropic header and is sent only on a"
+            f" provider: {_WORKSPACE_PROVIDER} route. Drop the key, or move"
+            " it to an Anthropic tier."
+        )
+        raise LLMRoutingError(msg, setting=key_setting)
 
 
 def _validate_local(setting: str, body: Mapping[str, Any]) -> None:
@@ -437,13 +523,12 @@ def resolve_llm_route(
     credential_owner = body if any(key in body for key in CREDENTIAL_KEYS) else parent
     for key in CREDENTIAL_KEYS:
         effective[key] = credential_owner.get(key)
-    if LOCAL_KEY in body:
-        local = body[LOCAL_KEY] is True
-    else:
-        moved = any(
-            key in body and body[key] != parent.get(key) for key in ENDPOINT_KEYS
-        )
-        local = parent_local and not moved
+    if WORKSPACE_ID_ENV_KEY in credential_owner:
+        effective[WORKSPACE_ID_ENV_KEY] = credential_owner[WORKSPACE_ID_ENV_KEY]
+    moved = any(key in body and body[key] != parent.get(key) for key in ENDPOINT_KEYS)
+    local = body[LOCAL_KEY] is True if LOCAL_KEY in body else parent_local and not moved
+    if REASONING_EFFORT_KEY in body:
+        effective[REASONING_EFFORT_KEY] = body[REASONING_EFFORT_KEY]
     return LLMRoute(
         consumer=member,
         tier=tier,

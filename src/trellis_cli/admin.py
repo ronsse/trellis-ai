@@ -1989,12 +1989,15 @@ def llm_routes(
         )
     else:
         table = Table(title="LLM routes")
-        for column in ("Consumer", "Tier", "Provider", "Model", "Base URL", "Key"):
+        columns = ("Consumer", "Tier", "Provider", "Model", "Effort", "Base URL", "Key")
+        for column in columns:
             table.add_column(column)
         for row in routes:
             key = row["credential_source"] or "none"
             if row["api_key_env"]:
                 key = f"{key} ({row['api_key_env']})"
+            if row["workspace_id_env"]:
+                key = f"{key}, workspace ({row['workspace_id_env']})"
             table.add_row(
                 *(
                     escape(str(value)) if value is not None else "-"
@@ -2003,6 +2006,7 @@ def llm_routes(
                         row["tier"] or "(parent)",
                         row["provider"],
                         row["model"],
+                        row["reasoning_effort"],
                         row["base_url"],
                         key,
                     )
