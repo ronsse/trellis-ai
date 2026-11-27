@@ -17,11 +17,23 @@ from trellis.feedback.corrections import (
     proposal_id_for,
     proposal_payload,
 )
-from trellis.mutate import Command, CommandStatus, Operation, build_correction_executor
+from trellis.mutate import (
+    Command,
+    CommandResult,
+    CommandStatus,
+    Operation,
+    build_correction_executor,
+)
 from trellis.retrieve.lifecycle import declared_successor
+from trellis.schemas.classification import LIFECYCLE_KEY, Lifecycle
 from trellis.stores.base.event_log import EventType
 from trellis.stores.registry import StoreRegistry
-from trellis_cli.exit_codes import EXIT_IDEMPOTENCY, EXIT_OK, EXIT_VALIDATION
+from trellis_cli.exit_codes import (
+    EXIT_IDEMPOTENCY,
+    EXIT_OK,
+    EXIT_STORE,
+    EXIT_VALIDATION,
+)
 from trellis_cli.main import app
 
 runner = CliRunner()
@@ -41,19 +53,19 @@ def registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> StoreRegistry:
     return reg
 
 
-def _propose(reg: StoreRegistry) -> str:
-    pid = proposal_id_for(TARGET, content_hash(X_TEXT))
+def _propose(reg: StoreRegistry, text: str = X_TEXT) -> str:
+    pid = proposal_id_for(TARGET, content_hash(text))
     payload = proposal_payload(
         proposal_id=pid,
         target_id=TARGET,
         target_metadata={},
-        corrected_content=X_TEXT,
+        corrected_content=text,
         reason="rig replaced",
         proposed_by="local",
         pack_id=None,
         evidence_uri=None,
     )
-    result = build_correction_executor(reg).execute(
+    result = build_correction_executor(reg, clearance="restricted").execute(
         Command(
             operation=Operation.CORRECTION_PROPOSE,
             target_id=pid,
@@ -152,3 +164,186 @@ class TestVerdicts:
         listed = json.loads(_run("show", pid, "--format", "json").output)
         assert listed["proposal"]["status"] == "applied"
         assert listed["proposal"]["resolution"]["successor_id"] == successor
+
+
+def _applied_events(reg: StoreRegistry) -> list[Any]:
+    return reg.operational.event_log.get_events(
+        event_type=EventType.CORRECTION_APPLIED, limit=10
+    )
+
+
+def _status(pid: str) -> str:
+    return str(
+        json.loads(_run("show", pid, "--format", "json").output)["proposal"]["status"]
+    )
+
+
+class TestAnExistingDocumentWithTheText:
+    """Only this proposal's own earlier successor is reused; others refuse."""
+
+    def _assert_refused(
+        self, registry: StoreRegistry, pid: str, existing_id: str
+    ) -> None:
+        docs = registry.knowledge.document_store
+        before = {d: docs.get(d) for d in (TARGET, existing_id)}
+        text, js = _both("apply", pid)
+        assert text.exit_code == js.exit_code == EXIT_VALIDATION
+        body = json.loads(js.output)
+        assert body["refusal"] == "content_exists"
+        assert body["existing_id"] == existing_id
+        assert existing_id in body["message"]
+        assert {d: docs.get(d) for d in (TARGET, existing_id)} == before
+        assert declared_successor(docs.get(TARGET)["metadata"]) is None
+        assert _applied_events(registry) == []
+        assert _status(pid) == "pending"
+
+    def test_a_revert_does_not_close_a_cycle(self, registry: StoreRegistry) -> None:
+        stamp = Lifecycle(state="superseded", superseded_by=TARGET)
+        registry.knowledge.document_store.put(
+            "doc-old", X_TEXT, {LIFECYCLE_KEY: stamp.model_dump(mode="json")}
+        )
+        self._assert_refused(registry, _propose(registry), "doc-old")
+
+    def test_an_archived_row_is_not_adopted(self, registry: StoreRegistry) -> None:
+        archived = Lifecycle(state="archived").model_dump(mode="json")
+        registry.knowledge.document_store.put(
+            "doc-arch", X_TEXT, {LIFECYCLE_KEY: archived}
+        )
+        self._assert_refused(registry, _propose(registry), "doc-arch")
+
+    def test_an_unrelated_lower_labelled_row_is_not_adopted(
+        self, registry: StoreRegistry
+    ) -> None:
+        docs = registry.knowledge.document_store
+        docs.put(TARGET, T_TEXT, {"data_classification": {"sensitivity": "restricted"}})
+        docs.put("doc-pub", X_TEXT, {"data_classification": {"sensitivity": "public"}})
+        self._assert_refused(registry, _propose(registry), "doc-pub")
+
+    def test_its_own_earlier_successor_is_reused(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import trellis.mcp.supersession as supersession_mod
+
+        pid = _propose(registry)
+
+        real = supersession_mod.supersede_document
+        monkeypatch.setattr(
+            supersession_mod, "supersede_document", lambda *a, **k: "store down"
+        )
+        first = _run("apply", pid, "--format", "json")
+        assert first.exit_code == EXIT_STORE
+        successor = json.loads(first.output)["successor_id"]
+        docs = registry.knowledge.document_store
+        assert declared_successor(docs.get(TARGET)["metadata"]) is None
+        monkeypatch.setattr(supersession_mod, "supersede_document", real)
+        again = _run("apply", pid, "--format", "json")
+        assert again.exit_code == EXIT_OK, again.output
+        assert json.loads(again.output)["successor_id"] == successor
+        assert docs.count() == 2
+        assert declared_successor(docs.get(TARGET)["metadata"]) == successor
+        assert _status(pid) == "applied"
+
+
+class TestTheSuccessorInheritsTheLabel:
+    def test_a_confidential_target_gives_a_confidential_successor(
+        self, registry: StoreRegistry
+    ) -> None:
+        registry.knowledge.document_store.put(
+            TARGET, T_TEXT, {"data_classification": {"sensitivity": "confidential"}}
+        )
+        pid = _propose(registry)
+        result = _run("apply", pid, "--format", "json")
+        assert result.exit_code == EXIT_OK, result.output
+        successor = registry.knowledge.document_store.get(
+            json.loads(result.output)["successor_id"]
+        )
+        assert successor["metadata"]["data_classification"]["sensitivity"] == (
+            "confidential"
+        )
+
+
+class TestAnInterruptedApplyResumes:
+    def test_a_lost_verdict_is_recorded_on_retry(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pid = _propose(registry)
+        real = corrections_mod._resolve
+
+        def lost(*args: Any, **kwargs: Any) -> CommandResult:
+            return CommandResult(
+                command_id="cmd-lost",
+                status=CommandStatus.FAILED,
+                operation=Operation.CORRECTION_RESOLVE,
+                message="log down",
+            )
+
+        monkeypatch.setattr(corrections_mod, "_resolve", lost)
+        first = _run("apply", pid, "--format", "json")
+        assert first.exit_code == EXIT_STORE
+        body = json.loads(first.output)
+        successor = body["successor_id"]
+        assert "re-running apply completes" in body["message"]
+        docs = registry.knowledge.document_store
+        assert declared_successor(docs.get(TARGET)["metadata"]) == successor
+        assert _status(pid) == "pending"
+        monkeypatch.setattr(corrections_mod, "_resolve", real)
+        again = _run("apply", pid, "--format", "json")
+        assert again.exit_code == EXIT_OK, again.output
+        assert json.loads(again.output)["successor_id"] == successor
+        assert docs.count() == 2
+
+    def test_a_retry_after_the_stamp_records_the_verdict(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pid = _propose(registry)
+
+        def boom(*args: Any, **kwargs: Any) -> Any:
+            msg = "event log down"
+            raise RuntimeError(msg)
+
+        real = corrections_mod._resolve
+        monkeypatch.setattr(corrections_mod, "_resolve", boom)
+        with pytest.raises(RuntimeError):
+            corrections_mod.apply_correction(registry, pid, reason="ok")
+        monkeypatch.setattr(corrections_mod, "_resolve", real)
+        docs = registry.knowledge.document_store
+        successor = declared_successor(docs.get(TARGET)["metadata"])
+        assert successor is not None
+        again = _run("apply", pid, "--format", "json")
+        assert again.exit_code == EXIT_OK, again.output
+        assert json.loads(again.output)["successor_id"] == successor
+        assert docs.count() == 2
+        (event,) = _applied_events(registry)
+        assert event.payload["successor_id"] == successor
+        assert _status(pid) == "applied"
+
+    def test_another_successor_still_refuses(self, registry: StoreRegistry) -> None:
+        pid = _propose(registry)
+        stamp = Lifecycle(state="superseded", superseded_by="doc-other")
+        registry.knowledge.document_store.put(
+            TARGET, T_TEXT, {LIFECYCLE_KEY: stamp.model_dump(mode="json")}
+        )
+        registry.knowledge.document_store.put("doc-other", "something else", {})
+        text, js = _both("apply", pid)
+        assert text.exit_code == js.exit_code == EXIT_VALIDATION
+        assert json.loads(js.output)["refusal"] == "target_superseded"
+
+
+class TestTheGateRunsAtTheCliClearance:
+    def test_every_executor_gets_restricted(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trellis.mutate import policy_source
+
+        pid = _propose(registry)
+        seen: list[str] = []
+        real = policy_source.build_policy_gate
+
+        def spy(reg: StoreRegistry, *, clearance: Any = "unset") -> Any:
+            seen.append(clearance)
+            return real(reg) if clearance == "unset" else real(reg, clearance=clearance)
+
+        monkeypatch.setattr(policy_source, "build_policy_gate", spy)
+        assert _run("apply", pid).exit_code == EXIT_OK
+        assert seen
+        assert set(seen) == {"restricted"}

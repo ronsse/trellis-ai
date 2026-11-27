@@ -186,6 +186,45 @@ class TestEachRefusalIsNamed:
                 },
                 "secret_detected",
             ),
+            (
+                {
+                    "item_id": TARGET,
+                    "corrected_content": X_TEXT,
+                    "reason": REASON,
+                    "evidence_uri": "https://example.test/x?api_key=Zq7rT2mX9vL4pW8n",
+                },
+                "secret_detected",
+            ),
+            (
+                {
+                    "item_id": TARGET,
+                    "corrected_content": X_TEXT,
+                    "reason": REASON,
+                    "pack_id": "p" * 2049,
+                },
+                "pack_id_too_long",
+            ),
+            (
+                {
+                    "item_id": TARGET,
+                    "corrected_content": X_TEXT,
+                    "reason": REASON,
+                    "evidence_uri": "https://example.test/" + "e" * 2048,
+                },
+                "evidence_uri_too_long",
+            ),
+            (
+                {
+                    "item_id": TARGET,
+                    "corrected_content": X_TEXT + "\x00",
+                    "reason": REASON,
+                },
+                "unsafe_character",
+            ),
+            (
+                {"item_id": TARGET, "corrected_content": X_TEXT, "reason": "r\x00"},
+                "unsafe_character",
+            ),
         ],
     )
     def test_refused_with_nothing_written(
@@ -252,7 +291,10 @@ class TestEachRefusalIsNamed:
     def test_every_reason_is_listed(self) -> None:
         assert set(REFUSAL_REASONS) == {
             "blank_field",
+            "unsafe_character",
             "reason_too_long",
+            "pack_id_too_long",
+            "evidence_uri_too_long",
             "target_missing",
             "target_chunk",
             "target_archived",
@@ -288,6 +330,27 @@ class TestClearance:
             absent.value
         ).replace("doc-absent", "ID")
         assert _proposals(temp_registry) == []
+
+    def test_the_gate_runs_at_the_callers_clearance(
+        self, temp_registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from trellis.mcp.auth import current_clearance
+        from trellis.mutate import policy_source
+
+        _seed(temp_registry)
+        seen: list[str] = []
+        real = policy_source.build_policy_gate
+
+        def spy(reg: StoreRegistry, *, clearance: Any = "unset") -> Any:
+            seen.append(clearance)
+            return real(reg) if clearance == "unset" else real(reg, clearance=clearance)
+
+        monkeypatch.setattr(policy_source, "build_policy_gate", spy)
+        with as_http([SCOPE_READ, SCOPE_INGEST]):
+            caller = current_clearance()
+            propose_correction(TARGET, X_TEXT, REASON)
+        assert caller != "restricted"
+        assert seen == [caller]
 
     def test_a_cleared_key_can_propose(self, temp_registry: StoreRegistry) -> None:
         temp_registry.knowledge.document_store.put(

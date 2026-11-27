@@ -51,12 +51,13 @@ def propose_correction(
     until a reviewer applies it, which stores the text as a new memory that
     supersedes the item.
 
-    Refused, with nothing written, when a field is blank, ``reason`` is over
-    2000 characters, the item does not exist or you cannot read it, it is part
-    of a chunked document, it is archived or already superseded, the text is
-    identical or near-identical to the item, or either text matches the secret
-    scan. Proposing the same text for the same item again returns the same
-    proposal id.
+    Refused, with nothing written, when a field is blank or holds a NUL byte,
+    ``reason`` is over 2000 characters or ``pack_id`` / ``evidence_uri`` over
+    2048, the item does not exist or you cannot read it, it is part of a
+    chunked document, it is archived or already superseded, the text is
+    identical or near-identical to the item, or ``corrected_content``,
+    ``reason`` or ``evidence_uri`` matches the secret scan. Proposing the same
+    text for the same item again returns the same proposal id.
 
     Args:
         item_id: Id of the stored document to correct (the backticked id in a
@@ -74,6 +75,8 @@ def propose_correction(
         corrected_content=corrected_content,
         reason=reason,
         clearance=clearance,
+        pack_id=pack_id or None,
+        evidence_uri=evidence_uri or None,
     )
     if refusal is not None:
         _record_boundary_rejection(
@@ -108,7 +111,9 @@ def propose_correction(
         requested_by=PROPOSE_CORRECTION_SURFACE,
     )
     with _propose_lock:
-        result = build_correction_executor(registry).execute(command)
+        result = build_correction_executor(registry, clearance=clearance).execute(
+            command
+        )
     if result.status is CommandStatus.DUPLICATE:
         existing = find_proposal(registry.operational.event_log, proposal_id)
         status = existing.status if existing is not None else "pending"

@@ -34,6 +34,7 @@ from typing import Any, Literal, Protocol
 from trellis.classify.dedup.minhash import MinHashIndex
 from trellis.core.hashing import content_hash
 from trellis.core.reserved_doc_ids import is_trace_summary_doc_id
+from trellis.core.text_safety import contains_nul_or_lone_surrogate
 from trellis.mutate.sensitivity_floor import visible_document
 from trellis.retrieve.lifecycle import declared_successor, is_archived
 from trellis.schemas.classification import Sensitivity, sensitivity_of
@@ -53,6 +54,9 @@ PROPOSAL_ID_PREFIX = "corr-"
 #: ``save_memory``'s ``content`` has none.
 MAX_REASON_CHARS = 2000
 
+#: Upper bound on each of the optional ``pack_id`` and ``evidence_uri``.
+MAX_REFERENCE_CHARS = 2048
+
 CorrectionStatus = Literal["pending", "applied", "rejected"]
 CORRECTION_STATUSES: tuple[CorrectionStatus, ...] = ("pending", "applied", "rejected")
 
@@ -61,7 +65,10 @@ CorrectionDecision = Literal["applied", "rejected"]
 #: Refusal reasons, one per deterministic check, in the order they run.
 REFUSAL_REASONS: tuple[str, ...] = (
     "blank_field",
+    "unsafe_character",
     "reason_too_long",
+    "pack_id_too_long",
+    "evidence_uri_too_long",
     "target_missing",
     "target_chunk",
     "target_archived",
@@ -157,6 +164,8 @@ def correction_refusal(
     corrected_content: str,
     reason: str,
     clearance: Sensitivity,
+    pack_id: str | None = None,
+    evidence_uri: str | None = None,
 ) -> tuple[CorrectionRefusal | None, dict[str, Any] | None]:
     """Run every deterministic check; return the first refusal, else the target.
 
@@ -164,7 +173,9 @@ def correction_refusal(
     trace-summary id is answered the same way too, before any lookup, so the
     answer does not depend on whether such a row exists.
     """
-    refusal = _field_refusal(item_id, corrected_content, reason)
+    refusal = _field_refusal(
+        item_id, corrected_content, reason, pack_id=pack_id, evidence_uri=evidence_uri
+    )
     if refusal is not None:
         return refusal, None
     doc = None
@@ -184,7 +195,7 @@ def correction_refusal(
     refusal = (
         _lifecycle_refusal(item_id, doc.get("metadata") or {})
         or _content_refusal(str(doc.get("content") or ""), corrected_content)
-        or _secret_refusal(corrected_content, reason)
+        or _secret_refusal(corrected_content, reason, evidence_uri)
     )
     if refusal is not None:
         return refusal, None
@@ -192,21 +203,44 @@ def correction_refusal(
 
 
 def _field_refusal(
-    item_id: str, corrected_content: str, reason: str
+    item_id: str,
+    corrected_content: str,
+    reason: str,
+    *,
+    pack_id: str | None,
+    evidence_uri: str | None,
 ) -> CorrectionRefusal | None:
-    for field, value in (
+    required = (
         ("item_id", item_id),
         ("corrected_content", corrected_content),
         ("reason", reason),
-    ):
+    )
+    for field, value in required:
         if not value or not value.strip():
             return _refused("blank_field", field, f"{field} must not be blank")
+    # The event log replaces a NUL or lone surrogate with U+FFFD on append, so
+    # the stored text would no longer match its digest: refuse it here instead.
+    optional = (("pack_id", pack_id or ""), ("evidence_uri", evidence_uri or ""))
+    for field, value in (*required, *optional):
+        if contains_nul_or_lone_surrogate(value):
+            return _refused(
+                "unsafe_character",
+                field,
+                f"{field} contains a NUL byte or an unpaired surrogate",
+            )
     if len(reason) > MAX_REASON_CHARS:
         return _refused(
             "reason_too_long",
             "reason",
             f"reason is {len(reason)} characters, more than {MAX_REASON_CHARS}",
         )
+    for field, value in optional:
+        if len(value) > MAX_REFERENCE_CHARS:
+            return _refused(
+                f"{field}_too_long",
+                field,
+                f"{field} is {len(value)} characters, more than {MAX_REFERENCE_CHARS}",
+            )
     return None
 
 
@@ -258,14 +292,21 @@ def _content_refusal(target_text: str, corrected: str) -> CorrectionRefusal | No
     return None
 
 
-def _secret_refusal(corrected: str, reason: str) -> CorrectionRefusal | None:
+def _secret_refusal(
+    corrected: str, reason: str, evidence_uri: str | None
+) -> CorrectionRefusal | None:
     """Refuse a secret-shaped value, with the scan session capture runs on memories.
 
     Only the class names reach the message, never the matched text.
     """
     from trellis_workers.session_capture.secret_scan import scan  # noqa: PLC0415
 
-    for field, text in (("corrected_content", corrected), ("reason", reason)):
+    fields = (
+        ("corrected_content", corrected),
+        ("reason", reason),
+        ("evidence_uri", evidence_uri or ""),
+    )
+    for field, text in fields:
         classes = scan(text)
         if classes:
             return _refused(

@@ -8,7 +8,10 @@ MCP ``propose_correction`` records a proposal and changes nothing served
   new memory through the governed ``evidence.ingest`` path, stamps the target
   superseded by it with :func:`trellis.mcp.supersession.supersede_document`
   (the path ``save_memory(supersedes=...)`` uses), then emits
-  ``CORRECTION_APPLIED``. The target is then withheld only by the pairwise
+  ``CORRECTION_APPLIED``. A document already holding the corrected text is
+  reused only when this proposal wrote it; any other is a refusal naming it.
+  An ``apply`` that stamped the target but did not record the verdict is
+  resumed by re-running it. The target is then withheld only by the pairwise
   supersession rule: while its successor is a candidate in the same pack.
 * ``reject`` emits ``CORRECTION_REJECTED`` and writes nothing else.
 
@@ -42,6 +45,8 @@ from trellis.mutate import (
     build_curate_executor,
     build_evidence_ingest_command,
 )
+from trellis.mutate.sensitivity_floor import visible_document
+from trellis.retrieve.lifecycle import declared_successor
 from trellis.schemas.classification import DATA_CLASSIFICATION_KEY, Sensitivity
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.exit_codes import (
@@ -142,13 +147,78 @@ def _resolve(
         args=args,
         requested_by=CORRECTIONS_CLI_SURFACE,
     )
-    return build_correction_executor(registry).execute(command)
+    return build_correction_executor(registry, clearance=_CLI_CLEARANCE).execute(
+        command
+    )
 
 
-def _require_success(result: CommandResult, what: str) -> None:
+def _require_success(
+    result: CommandResult, what: str, *, note: str = "", **extra: Any
+) -> None:
     if result.status is not CommandStatus.SUCCESS:
-        msg = f"{what} was not recorded ({result.status.value}): {result.message}"
-        raise _RefusedError(msg, _EXIT_BY_STATUS.get(result.status, EXIT_STORE))
+        msg = f"{what} was not recorded ({result.status.value}): {result.message}{note}"
+        raise _RefusedError(
+            msg, _EXIT_BY_STATUS.get(result.status, EXIT_STORE), **extra
+        )
+
+
+def _is_own_successor(doc: dict[str, Any] | None, proposal_id: str) -> bool:
+    """True if ``doc`` is the successor an earlier ``apply`` of this proposal wrote."""
+    if doc is None:
+        return False
+    return (doc.get("metadata") or {}).get("correction_proposal_id") == proposal_id
+
+
+def _resumable_successor(
+    registry: StoreRegistry, proposal: CorrectionProposal
+) -> str | None:
+    """The successor an earlier ``apply`` wrote and stamped, if it stopped there.
+
+    Such an ``apply`` stored the successor and stamped the target but did not
+    record the verdict, so the target now reads as superseded; this lets a
+    retry finish by recording the verdict instead of refusing forever.
+    """
+    document_store = registry.knowledge.document_store
+    target = visible_document(
+        document_store, proposal.target_id, clearance=_CLI_CLEARANCE
+    )
+    if target is None:
+        return None
+    successor_id = declared_successor(target.get("metadata") or {})
+    if successor_id is None:
+        return None
+    successor = visible_document(document_store, successor_id, clearance=_CLI_CLEARANCE)
+    return successor_id if _is_own_successor(successor, proposal.proposal_id) else None
+
+
+def _record_applied(
+    registry: StoreRegistry,
+    proposal: CorrectionProposal,
+    *,
+    reason: str,
+    successor_id: str,
+) -> dict[str, Any]:
+    _require_success(
+        _resolve(
+            registry,
+            proposal,
+            decision="applied",
+            reason=reason,
+            successor_id=successor_id,
+        ),
+        "the applied verdict",
+        note=(
+            f"; {successor_id} was written and {proposal.target_id} stamped "
+            "superseded by it, and re-running apply completes the correction"
+        ),
+        successor_id=successor_id,
+    )
+    return {
+        "proposal_id": proposal.proposal_id,
+        "target_id": proposal.target_id,
+        "successor_id": successor_id,
+        "proposal_status": "applied",
+    }
 
 
 def apply_correction(
@@ -157,12 +227,17 @@ def apply_correction(
     """Apply a pending proposal; return what was written. Raises ``_RefusedError``."""
     proposal = _require_proposal(registry, proposal_id)
     _require_pending(proposal)
+    resumed = _resumable_successor(registry, proposal)
+    if resumed is not None:
+        return _record_applied(registry, proposal, reason=reason, successor_id=resumed)
     refusal, target = correction_refusal(
         registry,
         item_id=proposal.target_id,
         corrected_content=proposal.corrected_content,
         reason=proposal.reason,
         clearance=_CLI_CLEARANCE,
+        pack_id=proposal.pack_id,
+        evidence_uri=proposal.evidence_uri,
     )
     if refusal is not None or target is None:
         message = refusal.message if refusal is not None else "target missing"
@@ -176,7 +251,24 @@ def apply_correction(
     document_store = registry.knowledge.document_store
     existing = document_store.get_by_hash(proposal.content_digest)
     if existing is not None:
-        successor_id = str(existing["doc_id"])
+        # Only this proposal's own earlier successor is reused. Any other
+        # document with the same text could be one the target superseded (a
+        # revert, closing a cycle), an archived, chunk or trace-summary row, or
+        # an unrelated row under a lower label.
+        existing_id = str(existing["doc_id"])
+        if not _is_own_successor(existing, proposal_id):
+            msg = (
+                f"cannot apply {proposal_id}: document {existing_id} already holds "
+                "the corrected text, and only a successor this proposal wrote is "
+                "reused; reject the proposal or resolve that document by hand"
+            )
+            raise _RefusedError(
+                msg,
+                EXIT_VALIDATION,
+                refusal="content_exists",
+                existing_id=existing_id,
+            )
+        successor_id = existing_id
     else:
         metadata: dict[str, Any] = {
             "correction_of": proposal.target_id,
@@ -215,22 +307,7 @@ def apply_correction(
             f"superseded: {error}; the proposal stays pending"
         )
         raise _RefusedError(msg, EXIT_STORE, successor_id=successor_id)
-    _require_success(
-        _resolve(
-            registry,
-            proposal,
-            decision="applied",
-            reason=reason,
-            successor_id=successor_id,
-        ),
-        "the applied verdict",
-    )
-    return {
-        "proposal_id": proposal_id,
-        "target_id": proposal.target_id,
-        "successor_id": successor_id,
-        "proposal_status": "applied",
-    }
+    return _record_applied(registry, proposal, reason=reason, successor_id=successor_id)
 
 
 def reject_correction(

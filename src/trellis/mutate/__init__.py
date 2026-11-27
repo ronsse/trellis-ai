@@ -207,13 +207,17 @@ def build_classify_rules_executor(registry: StoreRegistry) -> MutationExecutor:
     )
 
 
-def build_correction_executor(registry: StoreRegistry) -> MutationExecutor:
+def build_correction_executor(
+    registry: StoreRegistry, *, clearance: Sensitivity
+) -> MutationExecutor:
     """Build a :class:`MutationExecutor` wired with ONLY the correction handlers.
 
     MCP ``propose_correction`` and ``trellis curate corrections`` are its only
     callers; ``create_correction_handlers`` says why the generic mutation
     surfaces cannot reach these operations. Stage 2 always runs, as in every
-    other executor in this module (``tests/unit/test_policy_gate_rule.py``).
+    other executor in this module (``tests/unit/test_policy_gate_rule.py``),
+    and at the caller's ``clearance``, as :func:`build_curate_executor`'s does:
+    ``current_clearance()`` on MCP, ``restricted`` on the operator CLI.
     """
     from trellis.mutate.handlers.factories import (  # noqa: PLC0415
         create_correction_handlers,
@@ -223,7 +227,7 @@ def build_correction_executor(registry: StoreRegistry) -> MutationExecutor:
     return MutationExecutor(
         event_log=registry.operational.event_log,
         handlers=create_correction_handlers(registry),
-        policy_gate=build_policy_gate(registry),
+        policy_gate=build_policy_gate(registry, clearance=clearance),
     )
 
 
