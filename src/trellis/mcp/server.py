@@ -153,6 +153,7 @@ from trellis.mcp.tools.legacy_context import (
 from trellis.mcp.tools.lookup import (
     _GET_ITEMS_MAX_IDS,
     _render_fetched_item,
+    find_entity,
     get_file_context,
     get_graph,
     get_items,
@@ -317,6 +318,7 @@ __all__ = [
     "_warn_index_holds_nothing",
     "current_clearance",
     "execute_mutation",
+    "find_entity",
     "get_context",
     "get_file_context",
     "get_graph",

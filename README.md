@@ -110,7 +110,7 @@ flowchart TB
 
     subgraph Interfaces["🔌 Interfaces"]
         direction LR
-        CLI("CLI<br/>trellis") ~~~ MCP("MCP Server<br/>19 tools") ~~~ REST("REST API<br/>FastAPI") ~~~ SDK("Python SDK<br/>HTTP client") ~~~ UI("Web UI<br/>Memory Explorer")
+        CLI("CLI<br/>trellis") ~~~ MCP("MCP Server<br/>20 tools") ~~~ REST("REST API<br/>FastAPI") ~~~ SDK("Python SDK<br/>HTTP client") ~~~ UI("Web UI<br/>Memory Explorer")
     end
 
     subgraph Core["⚙️ Core engine"]

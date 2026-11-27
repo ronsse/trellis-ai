@@ -104,6 +104,10 @@ MCP_INSTRUCTION_PARAGRAPHS: tuple[str, ...] = (
         "returns the full text."
     ),
     (
+        "To look up a graph entity by name, call `find_entity(query=...)`; "
+        "`get_graph(entity_id)` walks from the id it returns."
+    ),
+    (
         "The common failure is retrieval that never happens, not retrieval "
         "that returns nothing."
     ),
