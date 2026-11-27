@@ -237,8 +237,18 @@ _REPLAY_REASON = "idempotency_replay"
 #: :data:`~trellis.stores.classify_overrides_store.CLASSIFY_OVERLAY_SURFACE`
 #: for the same import-weight reason as the advisory label; the two
 #: spellings are matched by the same roster test.
+#:
+#: ``mcp:propose_correction`` is here for ``mcp:record_feedback``'s reason: a
+#: refused correction proposal stops no experience from being saved. It
+#: records a reviewer's to-do in the event log and writes no memory, so
+#: "capture is failing" would be false.
 NON_CAPTURE_SURFACES: frozenset[str] = frozenset(
-    {"mcp:record_feedback", "config:advisory_file", "config:classify_overrides"}
+    {
+        "mcp:record_feedback",
+        "mcp:propose_correction",
+        "config:advisory_file",
+        "config:classify_overrides",
+    }
 )
 
 #: Governed operations that are not capture, whichever surface runs them.

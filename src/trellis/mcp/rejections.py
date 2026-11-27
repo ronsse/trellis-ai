@@ -205,7 +205,13 @@ class _SanitizeUncaughtToolErrors(Middleware):
 #: ``revoke_api_key`` are absent for the same reason: admin-scoped, no
 #: boundary rejection recorded. A read tool gets the message and no event.
 _RECORDED_ARGUMENT_TOOLS = frozenset(
-    {"save_experience", "save_knowledge", "save_memory", "record_feedback"}
+    {
+        "save_experience",
+        "save_knowledge",
+        "save_memory",
+        "record_feedback",
+        "propose_correction",
+    }
 )
 
 

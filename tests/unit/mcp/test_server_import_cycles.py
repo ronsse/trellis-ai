@@ -27,8 +27,9 @@ _MCP = _SRC / "trellis" / "mcp"
 
 #: Hand-read off ``src/trellis/mcp`` when the server was split: ``server`` plus
 #: ``app``, ``boundary``, ``rejections``, ``wiring``, the ``tools`` package and
-#: its ten modules, ``trellis_api.app`` and ``trellis_cli.main``.
-_EXPECTED_IMPORT_CASES = 18
+#: its ten modules, ``trellis_api.app`` and ``trellis_cli.main``; plus
+#: ``tools.correction``, added with ``propose_correction``.
+_EXPECTED_IMPORT_CASES = 19
 
 _PROBE = """
 import importlib, sys

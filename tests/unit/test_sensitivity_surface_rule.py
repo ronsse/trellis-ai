@@ -40,6 +40,7 @@ ROSTER: dict[str, str] = {
     "save_memory": GATED,
     "save_knowledge": GATED,
     "record_feedback": GATED,
+    "propose_correction": GATED,
     "get_graph": GATED,
     "get_lessons": GATED,
     "query_observations": GATED,
@@ -120,7 +121,7 @@ def test_every_mcp_tool_is_rostered_and_its_claim_holds() -> None:
     tools, _ = _tools_and_functions(source)
     assert_hand_read_floor(
         len(tools),
-        18,
+        19,
         subject="MCP tools in the server modules",
         hint="the tool list a person read off the file",
     )
@@ -204,6 +205,7 @@ EXTERNAL_STANCE: dict[str, str] = {
     "save_memory": SCOPE_CLOSED,
     "save_knowledge": SCOPE_CLOSED,
     "record_feedback": SCOPE_CLOSED,
+    "propose_correction": SCOPE_CLOSED,
     "record_observation": SCOPE_CLOSED,
     "save_experience": SCOPE_CLOSED,
     "execute_mutation": SCOPE_CLOSED,
@@ -273,7 +275,7 @@ def external_violations(
 
 def test_no_mcp_tool_defaults_open_to_an_external_key() -> None:
     source = server_source()
-    # Hand read: of the 18 tools, 6 answer, 4 are refused and 8 need a scope above read.
+    # Hand read: of the 19 tools, 6 answer, 4 are refused and 9 need a scope above read.
     assert_hand_read_floor(
         sum(1 for v in EXTERNAL_STANCE.values() if v == REFUSED),
         4,
@@ -282,7 +284,7 @@ def test_no_mcp_tool_defaults_open_to_an_external_key() -> None:
     )
     assert_hand_read_floor(
         len(EXTERNAL_STANCE),
-        18,
+        19,
         subject="MCP tools with an external stance",
         hint="the tool list a person read off the file",
     )

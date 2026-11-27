@@ -92,7 +92,10 @@ MCP_INSTRUCTION_PARAGRAPHS: tuple[str, ...] = (
         "(and `followed_advisory_ids` for advisories you acted on). Feedback "
         "without item ids cannot join to the pack and is invisible to the "
         "learning loop, so a reflexive success=true teaches nothing. An honest "
-        "low `rating` is worth more than a polite high one."
+        "low `rating` is worth more than a polite high one. If a served item "
+        "is wrong or outdated, `propose_correction(item_id=..., "
+        "corrected_content=..., reason=...)` records a correction for review "
+        "and changes nothing served."
     ),
     (
         "To save a long reference document, call `save_memory(content=<full "

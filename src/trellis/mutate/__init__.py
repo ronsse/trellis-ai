@@ -207,6 +207,26 @@ def build_classify_rules_executor(registry: StoreRegistry) -> MutationExecutor:
     )
 
 
+def build_correction_executor(registry: StoreRegistry) -> MutationExecutor:
+    """Build a :class:`MutationExecutor` wired with ONLY the correction handlers.
+
+    MCP ``propose_correction`` and ``trellis curate corrections`` are its only
+    callers; ``create_correction_handlers`` says why the generic mutation
+    surfaces cannot reach these operations. Stage 2 always runs, as in every
+    other executor in this module (``tests/unit/test_policy_gate_rule.py``).
+    """
+    from trellis.mutate.handlers.factories import (  # noqa: PLC0415
+        create_correction_handlers,
+    )
+    from trellis.mutate.policy_source import build_policy_gate  # noqa: PLC0415
+
+    return MutationExecutor(
+        event_log=registry.operational.event_log,
+        handlers=create_correction_handlers(registry),
+        policy_gate=build_policy_gate(registry),
+    )
+
+
 def build_api_keys_executor(
     registry: StoreRegistry, *, tolerate_unopenable_event_log: bool = False
 ) -> MutationExecutor:
@@ -342,6 +362,7 @@ __all__ = [
     "ReservedMetadataKeyError",
     "build_api_keys_executor",
     "build_classify_rules_executor",
+    "build_correction_executor",
     "build_curate_executor",
     "build_evidence_ingest_command",
     "build_evidence_ingest_command_from_args",

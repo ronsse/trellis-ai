@@ -118,6 +118,7 @@ from trellis.mcp.tools.context import (
     _track_tokens,
     get_context,
 )
+from trellis.mcp.tools.correction import propose_correction
 from trellis.mcp.tools.experience_knowledge import (
     _apply_knowledge_supersedes,
     _plan_knowledge_supersedes,
@@ -327,6 +328,7 @@ __all__ = [
     "list_api_keys",
     "main",
     "mcp",
+    "propose_correction",
     "query_observations",
     "record_feedback",
     "record_observation",

@@ -416,6 +416,10 @@ def record_feedback(
     * ``followed_advisory_ids`` — advisory_ids (shown in backticks in the
       Advisories section) that you followed.
 
+    An item that is wrong or outdated, not merely unhelpful, can also be
+    corrected: ``propose_correction`` records the right text for a reviewer
+    and changes nothing served until one applies it.
+
     Element-level signals are stored on the feedback event for the fitness
     loops (``trellis analyze apply-noise-tags`` and ``trellis analyze
     advisory-effectiveness``) to attribute outcomes more precisely.

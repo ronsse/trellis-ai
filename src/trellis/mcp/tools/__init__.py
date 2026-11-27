@@ -17,6 +17,7 @@ from trellis.mcp.tools import (
     lookup,
 )  # get_lessons, get_graph, get_items, get_file_context
 from trellis.mcp.tools import feedback  # record_feedback
+from trellis.mcp.tools import correction  # propose_correction
 from trellis.mcp.tools import (
     legacy_context,
 )  # search, get_objective_context, get_task_context, get_sectioned_context
@@ -28,6 +29,7 @@ from trellis.mcp.tools import admin  # list_api_keys, revoke_api_key
 __all__ = [
     "admin",
     "context",
+    "correction",
     "experience_knowledge",
     "feedback",
     "legacy_context",
