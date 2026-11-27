@@ -16,6 +16,7 @@ from trellis.mutate.handlers.classify_rules import (
     ClassifyRuleRevokeHandler,
 )
 from trellis.mutate.handlers.corrections import (
+    CorrectionApplyStartHandler,
     CorrectionProposeHandler,
     CorrectionResolveHandler,
 )
@@ -170,5 +171,6 @@ def create_correction_handlers(registry: StoreRegistry) -> dict[str, Any]:
     """
     return {
         Operation.CORRECTION_PROPOSE: CorrectionProposeHandler(registry),
+        Operation.CORRECTION_APPLY_START: CorrectionApplyStartHandler(registry),
         Operation.CORRECTION_RESOLVE: CorrectionResolveHandler(registry),
     }

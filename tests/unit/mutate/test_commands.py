@@ -107,7 +107,7 @@ class TestOperation:
         # by trellis.mutate.build_api_keys_executor, never
         # create_curate_handlers, so execute_mutation and POST
         # /commands/batch cannot mint or revoke a key)
-        assert len(Operation) == 34
+        assert len(Operation) == 35
 
 
 class TestCommand:

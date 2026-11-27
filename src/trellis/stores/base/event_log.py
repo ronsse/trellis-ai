@@ -82,6 +82,13 @@ class EventType(StrEnum):
     #: Operational Plane, so it is never served; nothing about the target
     #: changes until a reviewer applies it.
     CORRECTION_PROPOSED = "correction.proposed"
+    #: ``trellis curate corrections apply`` chose the id it is about to write
+    #: the corrected text under, before writing it. Payload: ``{proposal_id,
+    #: target_id, successor_id}``. A document is a proposal's own successor
+    #: only if one of these events names its id; no document metadata decides
+    #: that. An event with no document behind it (an apply that stopped before
+    #: the write) is inert.
+    CORRECTION_APPLY_STARTED = "correction.apply_started"
     #: A reviewer applied a proposal: the corrected text was stored as a new
     #: memory superseding the target. Payload: ``{proposal_id, target_id,
     #: decision, reason, successor_id}``.

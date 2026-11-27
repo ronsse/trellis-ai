@@ -8,11 +8,16 @@ MCP ``propose_correction`` records a proposal and changes nothing served
   new memory through the governed ``evidence.ingest`` path, stamps the target
   superseded by it with :func:`trellis.mcp.supersession.supersede_document`
   (the path ``save_memory(supersedes=...)`` uses), then emits
-  ``CORRECTION_APPLIED``. A document already holding the corrected text is
-  reused only when this proposal wrote it; any other is a refusal naming it.
-  An ``apply`` that stamped the target but did not record the verdict is
-  resumed by re-running it. The target is then withheld only by the pairwise
-  supersession rule: while its successor is a candidate in the same pack.
+  ``CORRECTION_APPLIED``. Before the write it records
+  ``CORRECTION_APPLY_STARTED`` naming the fresh id it writes under, and that
+  event alone makes a document this proposal's own successor (with the
+  approved text, under a label not below the target's); document metadata
+  never decides it. A document already holding the corrected text is reused
+  only when it is the own successor; any other is a refusal naming it. An
+  ``apply`` that stamped the target but did not record the verdict is resumed
+  by re-running it, unless that successor was archived since. The target is
+  then withheld only by the pairwise supersession rule: while its successor is
+  a candidate in the same pack.
 * ``reject`` emits ``CORRECTION_REJECTED`` and writes nothing else.
 
 The operator CLI reads at ``restricted`` clearance. Exit codes do not depend on
@@ -27,11 +32,14 @@ import structlog
 import typer
 from rich.markup import escape
 
+from trellis.core.hashing import content_hash
+from trellis.core.ids import generate_ulid
 from trellis.feedback.corrections import (
     CORRECTION_STATUSES,
     CORRECTIONS_CLI_SURFACE,
     CorrectionProposal,
     CorrectionStatus,
+    apply_started_successor_ids,
     correction_refusal,
     find_proposal,
     list_proposals,
@@ -46,8 +54,13 @@ from trellis.mutate import (
     build_evidence_ingest_command,
 )
 from trellis.mutate.sensitivity_floor import visible_document
-from trellis.retrieve.lifecycle import declared_successor
-from trellis.schemas.classification import DATA_CLASSIFICATION_KEY, Sensitivity
+from trellis.retrieve.lifecycle import declared_successor, is_archived
+from trellis.schemas.classification import (
+    DATA_CLASSIFICATION_KEY,
+    Sensitivity,
+    sensitivity_of,
+    sensitivity_rank,
+)
 from trellis.stores.registry import StoreRegistry
 from trellis_cli.exit_codes import (
     EXIT_IDEMPOTENCY,
@@ -162,33 +175,89 @@ def _require_success(
         )
 
 
-def _is_own_successor(doc: dict[str, Any] | None, proposal_id: str) -> bool:
-    """True if ``doc`` is the successor an earlier ``apply`` of this proposal wrote."""
+def _owns(
+    doc: dict[str, Any] | None,
+    proposal: CorrectionProposal,
+    *,
+    target: dict[str, Any],
+) -> bool:
+    """Whether ``doc``, read at an id an ``apply`` declared, is the reviewed text.
+
+    The caller has already established the id half of the rule: ``doc`` sits at
+    an id a ``CORRECTION_APPLY_STARTED`` event for this proposal names. This
+    adds the rest: its content is the text the reviewer approved (the
+    proposal's ``content_digest``), and its label is not below the target's, so
+    a correction never publishes the target's subject under a lower label.
+    Document metadata is not consulted.
+    """
     if doc is None:
         return False
-    return (doc.get("metadata") or {}).get("correction_proposal_id") == proposal_id
+    if content_hash(str(doc.get("content") or "")) != proposal.content_digest:
+        return False
+    return sensitivity_rank(sensitivity_of(doc.get("metadata"))) >= sensitivity_rank(
+        sensitivity_of(target.get("metadata"))
+    )
 
 
-def _resumable_successor(
-    registry: StoreRegistry, proposal: CorrectionProposal
-) -> str | None:
-    """The successor an earlier ``apply`` wrote and stamped, if it stopped there.
+def _own_successor(
+    registry: StoreRegistry,
+    proposal: CorrectionProposal,
+    *,
+    target: dict[str, Any],
+    started_ids: list[str],
+    successor_id: str | None = None,
+) -> tuple[str, dict[str, Any]] | None:
+    """This proposal's own successor: ``successor_id`` if given, else the newest.
 
-    Such an ``apply`` stored the successor and stamped the target but did not
-    record the verdict, so the target now reads as superseded; this lets a
-    retry finish by recording the verdict instead of refusing forever.
+    A candidate is own only if a ``CORRECTION_APPLY_STARTED`` event for this
+    proposal names its id and :func:`_owns` holds. ``started_ids`` comes from
+    the event log, which no agent-facing door writes for corrections.
     """
     document_store = registry.knowledge.document_store
-    target = visible_document(
-        document_store, proposal.target_id, clearance=_CLI_CLEARANCE
+    candidates = (
+        [successor_id] if successor_id is not None else list(reversed(started_ids))
     )
-    if target is None:
-        return None
-    successor_id = declared_successor(target.get("metadata") or {})
-    if successor_id is None:
-        return None
-    successor = visible_document(document_store, successor_id, clearance=_CLI_CLEARANCE)
-    return successor_id if _is_own_successor(successor, proposal.proposal_id) else None
+    for candidate in candidates:
+        if candidate not in started_ids:
+            continue
+        doc = visible_document(document_store, candidate, clearance=_CLI_CLEARANCE)
+        if doc is not None and _owns(doc, proposal, target=target):
+            return candidate, doc
+    return None
+
+
+def _refuse_archived(
+    proposal: CorrectionProposal, successor_id: str, doc: dict[str, Any]
+) -> None:
+    if is_archived(doc.get("metadata")):
+        msg = (
+            f"cannot apply {proposal.proposal_id}: its successor {successor_id} "
+            "has been archived since an earlier apply wrote it; restore it or "
+            "reject the proposal. The proposal stays pending"
+        )
+        raise _RefusedError(
+            msg,
+            EXIT_VALIDATION,
+            refusal="successor_archived",
+            successor_id=successor_id,
+        )
+
+
+def _record_apply_started(
+    registry: StoreRegistry, proposal: CorrectionProposal, successor_id: str
+) -> None:
+    """Record, before the write, the id the corrected text will be stored under."""
+    command = Command(
+        operation=Operation.CORRECTION_APPLY_START,
+        target_id=proposal.proposal_id,
+        target_type="correction",
+        args={"successor_id": successor_id},
+        requested_by=CORRECTIONS_CLI_SURFACE,
+    )
+    _require_success(
+        build_correction_executor(registry, clearance=_CLI_CLEARANCE).execute(command),
+        "the apply intent",
+    )
 
 
 def _record_applied(
@@ -227,9 +296,34 @@ def apply_correction(
     """Apply a pending proposal; return what was written. Raises ``_RefusedError``."""
     proposal = _require_proposal(registry, proposal_id)
     _require_pending(proposal)
-    resumed = _resumable_successor(registry, proposal)
-    if resumed is not None:
-        return _record_applied(registry, proposal, reason=reason, successor_id=resumed)
+    document_store = registry.knowledge.document_store
+    started_ids = apply_started_successor_ids(
+        registry.operational.event_log, proposal_id
+    )
+    stored_target = visible_document(
+        document_store, proposal.target_id, clearance=_CLI_CLEARANCE
+    )
+    if stored_target is not None:
+        # An earlier apply wrote and stamped but did not record the verdict:
+        # the target now reads as superseded, and only its own successor lets
+        # a retry finish instead of refusing forever.
+        declared = declared_successor(stored_target.get("metadata") or {})
+        resumed = (
+            _own_successor(
+                registry,
+                proposal,
+                target=stored_target,
+                started_ids=started_ids,
+                successor_id=declared,
+            )
+            if declared is not None
+            else None
+        )
+        if resumed is not None:
+            _refuse_archived(proposal, *resumed)
+            return _record_applied(
+                registry, proposal, reason=reason, successor_id=resumed[0]
+            )
     refusal, target = correction_refusal(
         registry,
         item_id=proposal.target_id,
@@ -248,15 +342,19 @@ def apply_correction(
             refusal=refusal.reason if refusal is not None else "target_missing",
         )
 
-    document_store = registry.knowledge.document_store
-    existing = document_store.get_by_hash(proposal.content_digest)
-    if existing is not None:
-        # Only this proposal's own earlier successor is reused. Any other
-        # document with the same text could be one the target superseded (a
-        # revert, closing a cycle), an archived, chunk or trace-summary row, or
-        # an unrelated row under a lower label.
-        existing_id = str(existing["doc_id"])
-        if not _is_own_successor(existing, proposal_id):
+    own = _own_successor(registry, proposal, target=target, started_ids=started_ids)
+    if own is not None:
+        # An earlier apply wrote it but did not stamp the target.
+        _refuse_archived(proposal, *own)
+        successor_id = own[0]
+    else:
+        existing = document_store.get_by_hash(proposal.content_digest)
+        if existing is not None:
+            # Any other document with the same text could be one the target
+            # superseded (a revert, closing a cycle), an archived, chunk or
+            # trace-summary row, or a row under a lower label, whatever its
+            # metadata claims.
+            existing_id = str(existing["doc_id"])
             msg = (
                 f"cannot apply {proposal_id}: document {existing_id} already holds "
                 "the corrected text, and only a successor this proposal wrote is "
@@ -268,8 +366,10 @@ def apply_correction(
                 refusal="content_exists",
                 existing_id=existing_id,
             )
-        successor_id = existing_id
-    else:
+        successor_id = generate_ulid()
+        _record_apply_started(registry, proposal, successor_id)
+        # The metadata keys are a note for people; ownership is the event
+        # just recorded, never these keys.
         metadata: dict[str, Any] = {
             "correction_of": proposal.target_id,
             "correction_proposal_id": proposal_id,
@@ -280,6 +380,7 @@ def apply_correction(
         command = build_evidence_ingest_command(
             content=proposal.corrected_content,
             metadata=metadata,
+            doc_id=successor_id,
             requested_by=CORRECTIONS_CLI_SURFACE,
             derive_idempotency=False,
         )
@@ -287,10 +388,12 @@ def apply_correction(
             command
         )
         _require_success(result, "the corrected memory")
-        if result.created_id is None:
-            msg = "the corrected memory was stored without an id"
+        if result.created_id != successor_id:
+            msg = (
+                f"the corrected memory was stored as {result.created_id}, not the "
+                f"declared {successor_id}"
+            )
             raise _RefusedError(msg, EXIT_STORE)
-        successor_id = result.created_id
 
     from trellis.mcp.supersession import supersede_document  # noqa: PLC0415
 
@@ -373,12 +476,20 @@ def show_command(
     output_format: str = typer.Option("text", "--format", help="Output format"),
 ) -> None:
     """Show one proposal, its proposed text and any verdict."""
+    registry = _get_registry()
     try:
-        proposal = _require_proposal(_get_registry(), proposal_id)
+        proposal = _require_proposal(registry, proposal_id)
     except _RefusedError as exc:
         _refused_output(output_format, exc)
         return
-    detail = proposal.detail()
+    detail = {
+        **proposal.detail(),
+        # Ids an apply declared before writing; the status still reads
+        # pending until a verdict is recorded.
+        "apply_started_successor_ids": apply_started_successor_ids(
+            registry.operational.event_log, proposal_id
+        ),
+    }
     text = [
         f"{key}: {escape(str(value))}"
         for key, value in detail.items()

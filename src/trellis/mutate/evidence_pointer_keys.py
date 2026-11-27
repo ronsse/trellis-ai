@@ -8,6 +8,12 @@ carries ``metadata.evidence_ref`` becomes the successor another item's
 reach an item other than the document, so a caller does not get to set them.
 Each has a governed writer, named in its refusal message.
 
+``correction_proposal_id`` and ``correction_of`` are refused the same way, as
+defence in depth: ``trellis curate corrections apply`` writes them on the
+successor it stores, as a note for people. Its ownership rule reads only the
+``CORRECTION_APPLY_STARTED`` events, never these keys, and its write goes
+through the executor directly, not through any door below.
+
 The handler cannot hold this rule for every door:
 ``save_memory(supersedes=)`` stamps a document's ``lifecycle`` through
 ``evidence.ingest`` on purpose, so ``EvidenceIngestHandler`` accepts both
@@ -66,6 +72,18 @@ DOCUMENT_POINTER_REFUSALS: Final[dict[str, str]] = {
         "metadata.evidence_ref may not be set on a document write: it names the "
         "document another item is superseded by. MCP "
         "save_knowledge(evidence_ref=...) sets it on a graph node. "
+        "Nothing was written"
+    ),
+    "correction_proposal_id": (
+        "metadata.correction_proposal_id may not be set on a document write: "
+        "only trellis curate corrections apply writes it, on the successor it "
+        "stores. Propose a correction with MCP propose_correction. "
+        "Nothing was written"
+    ),
+    "correction_of": (
+        "metadata.correction_of may not be set on a document write: only "
+        "trellis curate corrections apply writes it, on the successor it "
+        "stores. Propose a correction with MCP propose_correction. "
         "Nothing was written"
     ),
 }

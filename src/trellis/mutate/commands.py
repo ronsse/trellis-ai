@@ -31,6 +31,7 @@ class Operation(StrEnum):
     PRECEDENT_CANDIDATE = "precedent.candidate"
     CORRECTION_PROPOSE = "correction.propose"
     CORRECTION_RESOLVE = "correction.resolve"
+    CORRECTION_APPLY_START = "correction.apply_start"
     ENTITY_CREATE = "entity.create"
     ENTITY_UPDATE = "entity.update"
     ENTITY_MERGE = "entity.merge"
@@ -372,8 +373,11 @@ class OperationRegistry:
         # A correction proposal is one ``CORRECTION_PROPOSED`` event and no
         # content-store write; resolving it is one ``CORRECTION_APPLIED`` or
         # ``CORRECTION_REJECTED`` event (``trellis.feedback.corrections``).
+        # Starting an apply is one ``CORRECTION_APPLY_STARTED`` event naming
+        # the id the corrected text is about to be written under.
         self._schemas[Operation.CORRECTION_PROPOSE] = {"proposal"}
         self._schemas[Operation.CORRECTION_RESOLVE] = {"decision", "reason"}
+        self._schemas[Operation.CORRECTION_APPLY_START] = {"successor_id"}
         self._schemas[Operation.ENTITY_CREATE] = {"entity_type", "name"}
         self._schemas[Operation.ENTITY_UPDATE] = {"entity_id"}
         self._schemas[Operation.ENTITY_MERGE] = {"source_id", "target_id"}

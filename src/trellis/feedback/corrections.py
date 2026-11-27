@@ -394,6 +394,36 @@ def find_proposal(event_log: EventLog, proposal_id: str) -> CorrectionProposal |
     return _from_event(event_log, rows[0]) if rows else None
 
 
+#: Most ``CORRECTION_APPLY_STARTED`` events read for one proposal.
+MAX_APPLY_STARTS = 1000
+
+
+def apply_started_successor_ids(event_log: EventLog, proposal_id: str) -> list[str]:
+    """Ids every ``apply`` of ``proposal_id`` declared before writing, oldest first.
+
+    These events are the only record of which document is the proposal's own
+    successor: the correction executor writes them, and no agent-facing door
+    reaches it. Document metadata such as ``correction_proposal_id`` is a note
+    for people and decides nothing.
+    """
+    rows = event_log.get_events(
+        event_type=EventType.CORRECTION_APPLY_STARTED,
+        entity_id=proposal_id,
+        limit=MAX_APPLY_STARTS,
+    )
+    ids: list[str] = []
+    for event in rows:
+        successor_id = event.payload.get("successor_id")
+        if (
+            event.payload.get("proposal_id") == proposal_id
+            and isinstance(successor_id, str)
+            and successor_id
+            and successor_id not in ids
+        ):
+            ids.append(successor_id)
+    return ids
+
+
 def list_proposals(
     event_log: EventLog,
     *,

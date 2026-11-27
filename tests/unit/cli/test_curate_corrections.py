@@ -347,3 +347,176 @@ class TestTheGateRunsAtTheCliClearance:
         assert _run("apply", pid).exit_code == EXIT_OK
         assert seen
         assert set(seen) == {"restricted"}
+
+
+def _apply_started_events(reg: StoreRegistry) -> list[Any]:
+    return reg.operational.event_log.get_events(
+        event_type=EventType.CORRECTION_APPLY_STARTED, limit=10
+    )
+
+
+def _stamp(reg: StoreRegistry, successor: str) -> None:
+    """Stamp the target superseded by ``successor`` straight in the store."""
+    stamp = Lifecycle(state="superseded", superseded_by=successor)
+    reg.knowledge.document_store.put(
+        TARGET, T_TEXT, {LIFECYCLE_KEY: stamp.model_dump(mode="json")}
+    )
+
+
+def _lose_the_verdict(monkeypatch: pytest.MonkeyPatch, reg: StoreRegistry) -> str:
+    """Run an ``apply`` that writes and stamps but records no verdict."""
+    pid = _propose(reg)
+    real = corrections_mod._resolve
+
+    def lost(*args: Any, **kwargs: Any) -> CommandResult:
+        return CommandResult(
+            command_id="cmd-lost",
+            status=CommandStatus.FAILED,
+            operation=Operation.CORRECTION_RESOLVE,
+            message="log down",
+        )
+
+    monkeypatch.setattr(corrections_mod, "_resolve", lost)
+    assert _run("apply", pid).exit_code == EXIT_STORE
+    monkeypatch.setattr(corrections_mod, "_resolve", real)
+    return pid
+
+
+class TestOwnershipComesFromTheEventLog:
+    """Document metadata never decides that a document is this proposal's own.
+
+    The forged rows are written straight to the store, past every agent-facing
+    door, so the rule tested is the event-log one and not the door's refusal.
+    """
+
+    def test_apply_records_its_intent_before_the_write(
+        self, registry: StoreRegistry
+    ) -> None:
+        pid = _propose(registry)
+        result = _run("apply", pid, "--format", "json")
+        assert result.exit_code == EXIT_OK, result.output
+        successor = json.loads(result.output)["successor_id"]
+        (started,) = _apply_started_events(registry)
+        assert started.entity_id == pid
+        assert started.payload == {
+            "proposal_id": pid,
+            "target_id": TARGET,
+            "successor_id": successor,
+        }
+        (applied,) = _applied_events(registry)
+        assert started.occurred_at <= applied.occurred_at
+
+    def test_a_forged_successor_is_not_resumed(self, registry: StoreRegistry) -> None:
+        pid = _propose(registry)
+        docs = registry.knowledge.document_store
+        docs.put("doc-evil", "nine hundred seconds", {"correction_proposal_id": pid})
+        _stamp(registry, "doc-evil")
+        text, js = _both("apply", pid)
+        assert text.exit_code == js.exit_code == EXIT_VALIDATION
+        assert json.loads(js.output)["refusal"] == "target_superseded"
+        assert _applied_events(registry) == []
+        assert _status(pid) == "pending"
+
+    def test_a_forged_same_text_row_is_not_adopted(
+        self, registry: StoreRegistry
+    ) -> None:
+        docs = registry.knowledge.document_store
+        docs.put(
+            TARGET, T_TEXT, {"data_classification": {"sensitivity": "confidential"}}
+        )
+        pid = _propose(registry)
+        docs.put(
+            "doc-forged",
+            X_TEXT,
+            {
+                "correction_proposal_id": pid,
+                "correction_of": TARGET,
+                "data_classification": {"sensitivity": "public"},
+            },
+        )
+        text, js = _both("apply", pid)
+        assert text.exit_code == js.exit_code == EXIT_VALIDATION
+        body = json.loads(js.output)
+        assert body["refusal"] == "content_exists"
+        assert body["existing_id"] == "doc-forged"
+        assert declared_successor(docs.get(TARGET)["metadata"]) is None
+        assert _applied_events(registry) == []
+        assert _apply_started_events(registry) == []
+
+    def test_the_declared_id_with_other_content_is_not_resumed(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pid = _lose_the_verdict(monkeypatch, registry)
+        docs = registry.knowledge.document_store
+        successor = declared_successor(docs.get(TARGET)["metadata"])
+        assert successor is not None
+        row = docs.get(successor)
+        docs.put(successor, "nine hundred seconds", row["metadata"])
+        text, js = _both("apply", pid)
+        assert text.exit_code == js.exit_code == EXIT_VALIDATION
+        assert json.loads(js.output)["refusal"] == "target_superseded"
+        assert _applied_events(registry) == []
+
+    def test_the_declared_id_under_a_lower_label_is_not_resumed(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        docs = registry.knowledge.document_store
+        docs.put(
+            TARGET, T_TEXT, {"data_classification": {"sensitivity": "confidential"}}
+        )
+        pid = _lose_the_verdict(monkeypatch, registry)
+        successor = declared_successor(docs.get(TARGET)["metadata"])
+        assert successor is not None
+        row = docs.get(successor)
+        meta = {**row["metadata"], "data_classification": {"sensitivity": "public"}}
+        docs.put(successor, X_TEXT, meta)
+        js = _run("apply", pid, "--format", "json")
+        assert js.exit_code == EXIT_VALIDATION
+        assert json.loads(js.output)["refusal"] == "target_superseded"
+        assert _applied_events(registry) == []
+
+    def test_an_archived_own_successor_refuses_resume(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pid = _lose_the_verdict(monkeypatch, registry)
+        docs = registry.knowledge.document_store
+        successor = declared_successor(docs.get(TARGET)["metadata"])
+        assert successor is not None
+        archived = Lifecycle(state="archived").model_dump(mode="json")
+        docs.put(
+            successor,
+            X_TEXT,
+            {**docs.get(successor)["metadata"], LIFECYCLE_KEY: archived},
+        )
+        text, js = _both("apply", pid)
+        assert text.exit_code == js.exit_code == EXIT_VALIDATION
+        body = json.loads(js.output)
+        assert body["refusal"] == "successor_archived"
+        assert body["successor_id"] == successor
+        assert _applied_events(registry) == []
+        assert _status(pid) == "pending"
+
+    def test_an_intent_with_no_document_starts_afresh(
+        self, registry: StoreRegistry
+    ) -> None:
+        pid = _propose(registry)
+        proposal = corrections_mod._require_proposal(registry, pid)
+        corrections_mod._record_apply_started(registry, proposal, "doc-never-written")
+        result = _run("apply", pid, "--format", "json")
+        assert result.exit_code == EXIT_OK, result.output
+        successor = json.loads(result.output)["successor_id"]
+        assert successor != "doc-never-written"
+        assert registry.knowledge.document_store.get(successor)["content"] == X_TEXT
+        assert len(_apply_started_events(registry)) == 2
+        assert _status(pid) == "applied"
+
+    def test_show_names_the_in_flight_successor(
+        self, registry: StoreRegistry, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pid = _lose_the_verdict(monkeypatch, registry)
+        body = json.loads(_run("show", pid, "--format", "json").output)
+        successor = declared_successor(
+            registry.knowledge.document_store.get(TARGET)["metadata"]
+        )
+        assert body["proposal"]["status"] == "pending"
+        assert body["proposal"]["apply_started_successor_ids"] == [successor]

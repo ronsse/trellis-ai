@@ -1,7 +1,7 @@
-"""The ``correction.propose`` and ``correction.resolve`` handlers.
+"""The ``correction.propose``, ``.apply_start`` and ``.resolve`` handlers.
 
-Both are event-only, like ``precedent.candidate``: neither writes a document,
-graph or vector row, so neither can change what a pack serves. Applying a
+All three are event-only, like ``precedent.candidate``: none writes a document,
+graph or vector row, so none can change what a pack serves. Applying a
 correction's text is a separate ``evidence.ingest`` plus the supersede stamp,
 run by ``trellis curate corrections apply`` before it resolves the proposal.
 """
@@ -66,6 +66,47 @@ class CorrectionProposeHandler:
             entity_id=proposal_id,
             entity_type="correction",
             payload=proposal,
+        )
+        return proposal_id, "correction"
+
+
+class CorrectionApplyStartHandler:
+    """Record the id an ``apply`` is about to write, as ``CORRECTION_APPLY_STARTED``.
+
+    ``target_id`` is the proposal id and ``args["successor_id"]`` the fresh
+    document id the corrected text will be stored under. The event is what
+    makes that document the proposal's own successor
+    (``trellis curate corrections``); only a pending proposal can start one.
+    Starting again is allowed: an ``apply`` that stopped before its write left
+    an event naming no document, and the next ``apply`` records a new one.
+    """
+
+    def __init__(self, registry: StoreRegistry) -> None:
+        self._registry = registry
+
+    def handle(self, command: Command) -> tuple[str | None, str]:
+        proposal_id = command.target_id or ""
+        successor_id = command.args["successor_id"]
+        if not isinstance(successor_id, str) or not successor_id:
+            msg = "correction.apply_start successor_id must be a non-empty string"
+            raise _invalid(msg, "invalid")
+        event_log = self._registry.operational.event_log
+        proposal = find_proposal(event_log, proposal_id)
+        if proposal is None:
+            msg = f"no correction proposal {proposal_id}"
+            raise _invalid(msg, "proposal_missing")
+        if proposal.status != "pending":
+            raise IdempotencyError(idempotency_key=f"{proposal_id}:resolved")
+        event_log.emit(
+            EventType.CORRECTION_APPLY_STARTED,
+            source=CORRECTION_EVENT_SOURCE,
+            entity_id=proposal_id,
+            entity_type="correction",
+            payload={
+                "proposal_id": proposal_id,
+                "target_id": proposal.target_id,
+                "successor_id": successor_id,
+            },
         )
         return proposal_id, "correction"
 
