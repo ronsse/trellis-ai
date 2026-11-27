@@ -241,7 +241,7 @@ no secret.
   document involved. `item_count` and `item_ids` can therefore name ids the answer never
   listed; they never name an id outside the pack. `get_items` names the ids
   its formatter reports it served (`note_served_items`). `get_file_context`,
-  `get_lessons`, `get_graph` and `query_observations` do not name ids and record `item_count: null`.
+  `get_lessons`, `get_graph`, `find_entity` and `query_observations` do not name ids and record `item_count: null`.
 
 A call with no key id records nothing: auth mode `off`, an anonymous call, the legacy shared
 secret, and stdio.
@@ -3560,6 +3560,7 @@ hold the excerpt and carry no label (#1080):
 | `GET /graph/history` (a node's versions) | 404, as a missing entity; every version is judged, and one barred version bars the history |
 | MCP `get_items` | reported `not found`, as a missing id |
 | MCP `get_graph` | `entity not found` for the root; a withheld neighbour is left out with the edges that touch it, and so is a node it alone joined to the root within `depth` (#1264) |
+| MCP `find_entity` | left out of the list and not counted, by the same predicate as `GET /graph/search` |
 | MCP `get_file_context` | left out of the path's documents and entities |
 | MCP `search` | left out; counted on the pack's `Withheld` line |
 | `POST /packs`, `POST /packs/sectioned` | withheld at the collect seam, so every strategy is covered, and recorded in `rejected_items` and the pack's withheld line under reason `sensitivity`; a builder wired with no document store withholds it as `sensitivity_unreadable` |
@@ -7376,6 +7377,7 @@ Start with `trellis-mcp`. The server is a package: `mcp/server.py` is the entry 
 | `save_memory` | `content`, `metadata?`, `doc_id?`, `supersedes?` | Confirmation with doc_id. `supersedes` names a document this memory replaces. Tags the document inline when `TRELLIS_ENABLE_CLASSIFY_ON_INGEST=1` (see "Document → content tags"), embeds it when `TRELLIS_ENABLE_EMBED_ON_INGEST=1`. A `doc_id` that names a redacted document is refused (`redaction_tombstone_overwrite`) with nothing written: an agent's save is not the owner's decision to bring a redacted id back, and `save_memory` has no parameter for it. The error names the ways that can: `trellis ingest evidence --reingest-redacted`, `execute_mutation` with `evidence.reingest_redacted=true`, or `reingest_redacted: true` in the body of `POST /api/v1/evidence` or `POST /api/v1/documents`. |
 | `get_lessons` | `domain?`, `limit?`, `max_tokens?` | Markdown list of precedents, excluding demoted/archived ones |
 | `get_graph` | `entity_id`, `depth?`, `max_tokens?` | Markdown subgraph. Renders each node's `document_ids` as copy-pastable evidence pointers — an `Evidence documents` section for the root entity, an inline `docs:` suffix per neighbor — so entity → evidence is followable with `get_items`. |
+| `find_entity` | `query`, `node_type?`, `limit?` (1-100, default 10), `max_tokens?` (default 1500) | Markdown list, one line per entity: id in backticks, type, name and a short `description`/`summary`, then a hint that `get_graph(entity_id)` walks from an id. A case-insensitive substring of the name, id or type, matched and withheld as `GET /graph/search` does (the shared code is `trellis.retrieve.node_search`): a withheld entity is neither listed nor counted. No match is a stated answer; a blank query is an invalid-params error. Refused to an external key, as `get_graph` is. Lines that do not fit `max_tokens` are dropped whole and counted. |
 | `get_items` | `item_ids`, `pack_id?`, `max_tokens?` | Markdown bodies for known ids (max 50), resolved against the document store, the graph, then the trace store. Items over budget are omitted whole with their ids listed for a follow-up call — never truncated; unknown ids are listed as not found. Emits `PACK_ITEMS_FETCHED` with the served ids; pass the `pack_id` that surfaced them to keep the fetch attributable. |
 | `record_feedback` | `trace_id?`, `pack_id?`, `success?`, `rating?`, `notes?`, `helpful_item_ids?`, `unhelpful_item_ids?`, `followed_advisory_ids?` | Confirmation |
 | `search` | `query`, `limit?`, `max_tokens?`, `index?`, `retrieval_phase?` | Markdown search results |
@@ -7408,7 +7410,7 @@ All read tools track token usage in the event log for observability.
 Reading a full pack to decide which items were worth reading is the expensive way round. Three layers let the model filter ids before paying for bodies:
 
 1. **Index** — `get_context(intent, index=True)` (or `search(query, index=True)`) renders one line per item: `- `item_id` (type, ~N tok) Title`. No excerpt bodies, so the same `max_tokens` surveys far more items. The label is the item's `title` metadata when it has one, otherwise the head of its excerpt; `~N tok` is what serving that item in a full pack *would* have cost.
-2. **Traverse** — `get_graph(entity_id)` renders each node's `document_ids` as evidence pointers, so an interesting entity leads to the documents that attest it.
+2. **Traverse** — `get_graph(entity_id)` renders each node's `document_ids` as evidence pointers, so an interesting entity leads to the documents that attest it. With a name but no id, `find_entity(query)` looks the id up.
 3. **Fetch** — `get_items(item_ids=[...], pack_id=...)` returns the bodies actually wanted.
 
 The index is a **real pack**, not a preview: same `pack_id`, same `PACK_ASSEMBLED` telemetry (per-item hashes, `injected_items`, session dedup), so `record_feedback(pack_id=..., helpful_item_ids=[...])` attributes exactly as it does for a full pack. Only the budget charge and the rendering differ — the payload carries `index_mode: true` so analysis can tell the two serve shapes apart, and an index serve counts as a serve for session dedup (`refresh=True` is still the re-injection escape hatch).

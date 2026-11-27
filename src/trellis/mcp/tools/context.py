@@ -614,8 +614,8 @@ def get_context(
     single retrieval entry point — pass ``sections`` for the sectioned
     layout that ``get_sectioned_context`` used to provide, or ``index=True``
     for a survey-first workflow: scan the index, walk ``get_graph`` from an
-    interesting item to its evidence pointers, then batch-fetch chosen ids
-    with ``get_items``.
+    interesting item (or from an id ``find_entity`` looked up by name) to its
+    evidence pointers, then batch-fetch chosen ids with ``get_items``.
 
     Args:
         intent: What you're trying to do or learn about.
