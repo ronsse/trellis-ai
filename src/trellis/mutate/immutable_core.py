@@ -248,6 +248,13 @@ NON_DESTRUCTIVE_OPERATIONS: frozenset[Operation] = frozenset(
         # graph or vector store: a record character, like
         # observation.record, and nothing serves it.
         Operation.PRECEDENT_CANDIDATE,
+        # correction.propose, correction.apply_start and correction.resolve
+        # each append one event and write to no content store; a proposal's
+        # text lives only in its event, and applying one writes through
+        # evidence.ingest separately.
+        Operation.CORRECTION_PROPOSE,
+        Operation.CORRECTION_APPLY_START,
+        Operation.CORRECTION_RESOLVE,
         # classification.set rewrites one metadata key in place, but the
         # authority over it is the caller's clearance, not the admin scope:
         # the handler and Stage 2 refuse a caller whose clearance does not

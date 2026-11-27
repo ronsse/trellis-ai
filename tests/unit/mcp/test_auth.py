@@ -317,6 +317,7 @@ EXPECTED_TOOL_SCOPES = {
     "save_memory": SCOPE_INGEST,
     "record_observation": SCOPE_MUTATE,
     "record_feedback": SCOPE_MUTATE,
+    "propose_correction": SCOPE_INGEST,
     "execute_mutation": SCOPE_MUTATE,
     "list_api_keys": SCOPE_ADMIN,
     "revoke_api_key": SCOPE_ADMIN,

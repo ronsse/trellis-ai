@@ -139,6 +139,7 @@ FACADE_SURFACE: dict[str, str] = {
     "list_api_keys": "trellis.mcp.tools.admin",
     "main": "trellis.mcp.server",
     "mcp": "trellis.mcp.app",
+    "propose_correction": "trellis.mcp.tools.correction",
     "query_observations": "trellis.mcp.tools.observation",
     "record_feedback": "trellis.mcp.tools.feedback",
     "record_observation": "trellis.mcp.tools.observation",
@@ -182,7 +183,7 @@ def test_all_names_nothing_the_surface_does_not() -> None:
 
 
 def test_facade_surface_has_the_expected_size() -> None:
-    assert len(FACADE_SURFACE) == 120
+    assert len(FACADE_SURFACE) == 121
 
 
 @pytest.mark.parametrize("name", NOT_REEXPORTED)

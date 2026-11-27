@@ -73,6 +73,30 @@ class EventType(StrEnum):
     #: (a ``PrecedentRecord``). Candidates live only here and are never served.
     PRECEDENT_CANDIDATE_MINED = "precedent.candidate_mined"
 
+    # Corrections (``trellis.feedback.corrections``)
+    #: An agent proposed corrected text for a stored item through MCP
+    #: ``propose_correction``. ``entity_id`` is the proposal id. Payload:
+    #: ``{proposal_id, target_id, reason, proposed_by, content_digest,
+    #: content_length, sensitivity, corrected_content}`` plus ``pack_id`` and
+    #: ``evidence_uri`` when given. The proposed text lives only here, in the
+    #: Operational Plane, so it is never served; nothing about the target
+    #: changes until a reviewer applies it.
+    CORRECTION_PROPOSED = "correction.proposed"
+    #: ``trellis curate corrections apply`` chose the id it is about to write
+    #: the corrected text under, before writing it. Payload: ``{proposal_id,
+    #: target_id, successor_id}``. A document is a proposal's own successor
+    #: only if one of these events names its id; no document metadata decides
+    #: that. An event with no document behind it (an apply that stopped before
+    #: the write) is inert.
+    CORRECTION_APPLY_STARTED = "correction.apply_started"
+    #: A reviewer applied a proposal: the corrected text was stored as a new
+    #: memory superseding the target. Payload: ``{proposal_id, target_id,
+    #: decision, reason, successor_id}``.
+    CORRECTION_APPLIED = "correction.applied"
+    #: A reviewer rejected a proposal; nothing served changed. Payload:
+    #: ``{proposal_id, target_id, decision, reason}``.
+    CORRECTION_REJECTED = "correction.rejected"
+
     # Policy
     POLICY_CREATED = "policy.created"
     POLICY_VIOLATED = "policy.violated"

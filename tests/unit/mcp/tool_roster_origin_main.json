@@ -560,6 +560,49 @@
   }
  },
  {
+  "name": "propose_correction",
+  "inputSchema": {
+   "type": "object",
+   "additionalProperties": false,
+   "properties": {
+    "item_id": {
+     "type": "string",
+     "description": "Id of the stored document to correct (the backticked id in a\npack)."
+    },
+    "corrected_content": {
+     "type": "string",
+     "description": "The full text the item should say instead."
+    },
+    "reason": {
+     "type": "string",
+     "description": "Why the item is wrong or outdated."
+    },
+    "pack_id": {
+     "default": "",
+     "type": "string",
+     "description": "Optional id of the pack that served the item."
+    },
+    "evidence_uri": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional link to what shows the correction is right."
+    }
+   },
+   "required": [
+    "item_id",
+    "corrected_content",
+    "reason"
+   ]
+  }
+ },
+ {
   "name": "search",
   "inputSchema": {
    "additionalProperties": false,

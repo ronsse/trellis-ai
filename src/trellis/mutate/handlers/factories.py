@@ -15,6 +15,11 @@ from trellis.mutate.handlers.classify_rules import (
     ClassifyRuleApplyHandler,
     ClassifyRuleRevokeHandler,
 )
+from trellis.mutate.handlers.corrections import (
+    CorrectionApplyStartHandler,
+    CorrectionProposeHandler,
+    CorrectionResolveHandler,
+)
 from trellis.mutate.handlers.evidence_handler import EvidenceIngestHandler
 from trellis.mutate.handlers.feedback import FeedbackRecordHandler
 from trellis.mutate.handlers.graph import (
@@ -151,4 +156,21 @@ def create_classify_handlers(registry: StoreRegistry) -> dict[str, Any]:
     return {
         Operation.CLASSIFY_RULE_APPLY: ClassifyRuleApplyHandler(registry),
         Operation.CLASSIFY_RULE_REVOKE: ClassifyRuleRevokeHandler(registry),
+    }
+
+
+def create_correction_handlers(registry: StoreRegistry) -> dict[str, Any]:
+    """Handlers for the correction-proposal write path.
+
+    Not folded into :func:`create_curate_handlers`, for the reason
+    ``create_classify_handlers`` gives: that dict backs MCP
+    ``execute_mutation`` and REST ``POST /commands/batch``, and through them a
+    caller could file a proposal past ``propose_correction``'s target checks
+    and secret scan, or forge an applied or rejected verdict. Only
+    :func:`trellis.mutate.build_correction_executor` builds from this dict.
+    """
+    return {
+        Operation.CORRECTION_PROPOSE: CorrectionProposeHandler(registry),
+        Operation.CORRECTION_APPLY_START: CorrectionApplyStartHandler(registry),
+        Operation.CORRECTION_RESOLVE: CorrectionResolveHandler(registry),
     }

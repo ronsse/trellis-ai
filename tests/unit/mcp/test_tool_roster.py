@@ -37,6 +37,7 @@ EXPECTED_TOOL_NAMES = [
     "get_items",
     "get_file_context",
     "record_feedback",
+    "propose_correction",
     "search",
     "get_objective_context",
     "get_task_context",
