@@ -206,19 +206,33 @@ _FIND_ENTITY_MAX_LIMIT = 100
 #: Characters of a node's ``description`` / ``summary`` shown on its line.
 _FIND_ENTITY_DESCRIPTOR_CHARS = 120
 
+#: Characters of the caller's query echoed back in the reply.
+_FIND_ENTITY_QUERY_ECHO_CHARS = 200
+
 _FIND_ENTITY_HINT = "Walk from an id with `get_graph(entity_id)`."
+
+
+def _one_line(value: object, limit: int) -> str:
+    """``value`` on one line and at most ``limit`` characters; ``""`` if unusable.
+
+    A stored name is another writer's text. Left raw, a newline in it starts
+    a line that reads as a second entity.
+    """
+    if not isinstance(value, str):
+        return ""
+    return truncate_excerpt(" ".join(value.split()), limit)
 
 
 def _entity_line(row: dict[str, Any]) -> str:
     """One ``find_entity`` line: id, type, name and a short descriptor."""
     props = row.get("properties") or {}
-    name = props.get("name", row["node_id"])
+    name = _one_line(props.get("name"), _FIND_ENTITY_DESCRIPTOR_CHARS)
+    name = name or row["node_id"]
     line = f"- `{row['node_id']}` ({row.get('node_type', '?')}) **{name}**"
     for key in ("description", "summary"):
-        value = props.get(key)
-        if isinstance(value, str) and value.strip():
-            text = " ".join(value.split())
-            return f"{line} — {truncate_excerpt(text, _FIND_ENTITY_DESCRIPTOR_CHARS)}"
+        text = _one_line(props.get(key), _FIND_ENTITY_DESCRIPTOR_CHARS)
+        if text:
+            return f"{line} — {text}"
     return line
 
 
@@ -229,13 +243,18 @@ def _render_entity_matches(
     node_type: str | None,
     max_tokens: int,
 ) -> str:
-    """Whole lines up to ``max_tokens``; what did not fit is counted, never cut."""
+    """Whole lines up to ``max_tokens``; what did not fit is counted, never cut.
+
+    The first match is always listed, so a budget smaller than one line is
+    exceeded by that line rather than answered with nothing.
+    """
+    query = _one_line(query, _FIND_ENTITY_QUERY_ECHO_CHARS)
     scope = f' of type "{node_type}"' if node_type else ""
     if not rows:
         return f'No entities{scope} match "{query}".'
     header = f'# Entities{scope} matching "{query}" ({len(rows)} of {total})'
     lines = [header, ""]
-    # Reserve room for the closing lines so the budget is never overshot.
+    # Reserve room for the closing lines.
     budget = max_tokens * 4 - len(header) - len(_FIND_ENTITY_HINT) - 80
     used = 0
     shown = 0
@@ -286,6 +305,11 @@ def find_entity(
         _raise_invalid_params(
             f"limit must be between 1 and {_FIND_ENTITY_MAX_LIMIT}",
             data={"field": "limit"},
+        )
+    if max_tokens < 1:
+        _raise_invalid_params(
+            "max_tokens must be at least 1",
+            data={"field": "max_tokens"},
         )
 
     registry = _get_registry()
