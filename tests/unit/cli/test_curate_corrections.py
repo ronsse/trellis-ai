@@ -417,6 +417,20 @@ class TestOwnershipComesFromTheEventLog:
         assert _applied_events(registry) == []
         assert _status(pid) == "pending"
 
+    def test_the_reviewed_text_under_an_undeclared_id_is_not_resumed(
+        self, registry: StoreRegistry
+    ) -> None:
+        """Same text and same label: only the missing intent event refuses it."""
+        pid = _propose(registry)
+        docs = registry.knowledge.document_store
+        docs.put("doc-evil", X_TEXT, {"summary": "never reviewed"})
+        _stamp(registry, "doc-evil")
+        text, js = _both("apply", pid)
+        assert text.exit_code == js.exit_code == EXIT_VALIDATION
+        assert json.loads(js.output)["refusal"] == "target_superseded"
+        assert _applied_events(registry) == []
+        assert _status(pid) == "pending"
+
     def test_a_forged_same_text_row_is_not_adopted(
         self, registry: StoreRegistry
     ) -> None:
