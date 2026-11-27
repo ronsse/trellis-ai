@@ -340,7 +340,7 @@ trellis admin migrate-graph \
 | POST | `/api/v1/packs/{pack_id}/feedback` | Record a pack's outcome and which of its items helped |
 | GET | `/api/v1/effectiveness` | Pack effectiveness report |
 
-**MCP server** — `trellis-mcp`. Local agents use the default stdio transport; remote clients use the opt-in HTTP transport (`TRELLIS_MCP_TRANSPORT=http`, bearer-token auth), documented in [adr-mcp-http-transport.md](docs/design/adr-mcp-http-transport.md). Nineteen macro tools. Fourteen return **markdown**, not raw JSON, so context lands clean in the agent's window; the five structured tools (`record_observation`, `query_observations`, `execute_mutation`, and the admin-only `list_api_keys` and `revoke_api_key`) return JSON. There is no tool that mints an API key.
+**MCP server** — `trellis-mcp`. Local agents use the default stdio transport; remote clients use the opt-in HTTP transport (`TRELLIS_MCP_TRANSPORT=http`, bearer-token auth), documented in [adr-mcp-http-transport.md](docs/design/adr-mcp-http-transport.md). Twenty macro tools. Fifteen return **markdown**, not raw JSON, so context lands clean in the agent's window; the five structured tools (`record_observation`, `query_observations`, `execute_mutation`, and the admin-only `list_api_keys` and `revoke_api_key`) return JSON. There is no tool that mints an API key.
 
 | Tool | Purpose |
 |------|---------|
